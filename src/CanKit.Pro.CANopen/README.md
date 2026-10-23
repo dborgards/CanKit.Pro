@@ -183,7 +183,10 @@ Deliberate omissions, each checked against the norm text:
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
-with such an entry instead of ignoring it.
+with such an entry instead of ignoring it. The same holds for the pre-defined error field
+(`1003h`), the EMCY inhibit time (`1015h`) and the error behaviour object (`1029h`): the node
+neither maintains nor reads them, and a description that declares one gets it created as data
+and reported `NotImplemented`.
 
 ## The object dictionary is the configuration
 
@@ -626,8 +629,9 @@ may be written in any order, so a slot not yet overwritten does not count agains
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
 other. `1017h` ≠ 0 runs the producer. Each sub-index of `1016h` with a node-id in 1..127 and a
 non-zero time is a consumer whose timeout is armed immediately, so a producer that never
-appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
-`0x700 + id`.
+appears is reported too. `HeartbeatReceived` reports a heartbeat or boot-up on `0x700 + id`
+whose state byte names an NMT state; a frame with a reserved state byte or with bit 7 set is
+not reported (#255, #266), and still counts as a sign of life for the consumer.
 
 For every node, periodic producer ticks are coalesced while a heartbeat send is outstanding;
 transmission recovery sends no catch-up burst, including when LSS is disabled.
@@ -643,6 +647,11 @@ three events), and a producer with `EventQueueCapacity` distinct emergencies wai
 discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundExceptionOccurred`
 is not queued.
 
+**Emergency.** An EMCY frame shorter than eight bytes is dropped without a report: it is
+neither padded, as an SDO frame is, nor surfaced anywhere. `EmcyMessage.ProducerNodeId` is the
+COB-ID minus `080h`, the pre-defined connection set: for a peer whose `1014h` was moved off that
+set it is not the peer's node-id, and the per-producer backlog above is keyed on it too.
+
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after
 `guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A boot-up from the
@@ -650,12 +659,14 @@ producer resets the toggle baseline rather than counting as a reply.
 
 **Life guarding (producer side).** With `100Ch` (guard time) and `100Dh` (life time factor)
 both non-zero, the node supervises the master that guards it: guarding starts with the first
-RTR received, and when the next RTR stays away longer than guard time × life time factor,
+RTR it answers, and when the next RTR stays away longer than guard time × life time factor,
 `LifeGuardingEvent` reports `Occurred` — once per lapse — and the next RTR reports `Resolved`.
+An RTR the node does not answer (see below) does not start or feed life guarding either.
 
 **Precedence.** CiA 301 §7.2.8.3.2.2 forbids running both protocols on one NMT slave: while
 `1017h` ≠ 0 the heartbeat protocol is in use, guarding RTRs are not answered and no life
-guarding runs (`RespondToNodeGuardingRtr` additionally gates the reply). The same rule decides
+guarding runs. `RespondToNodeGuardingRtr = false` has the same effect with the heartbeat
+producer off: no reply, and no life guarding, whatever `100Ch` and `100Dh` hold. The same rule decides
 the **state-change heartbeat**: a heartbeat announcing a new NMT state goes out only while the
 producer is on, because with it off an unsolicited data frame on `0x700 + id` is
 indistinguishable from a toggle-0 guarding reply (#43).
@@ -667,7 +678,7 @@ Table 37 of CiA 301, as the node applies it:
 | | Pre-operational | Operational | Stopped |
 | --- | --- | --- | --- |
 | PDO | — | transmitted and received | — |
-| SDO | served | served | requests ignored; an open server session is aborted with `0800 0022h` |
+| SDO | served | served | requests ignored; an open server session is aborted with `0800 0022h`. This row is the server's: the node's own SDO client is not gated by the NMT state, and `SdoUploadAsync` and `SdoDownloadAsync` run in Stopped too, as `SendSyncAsync` does (#254) |
 | SYNC | consumed and produced | consumed and produced | neither; the producer keeps its cycle and resumes afterwards (`SendSyncAsync` is a raw send and transmits regardless of the state and of bit 30 of `1005h`) |
 | EMCY | transmitted | transmitted | held; the most recent one is transmitted when the node leaves Stopped |
 | Heartbeat, guarding | active | active | active |
@@ -1607,9 +1618,14 @@ requirement over the `CanKit.Adapter.Virtual` loopback bus.
 CanKit.Pro.CANopen/
   CanOpen.cs                          // factory
   ICanOpenNode.cs                     // public contract
-  CanOpenNode.cs                      // node core: subscription, dispatch, SDO client + server, NMT, heartbeat
+  CanOpenNodeExtensions.cs            // DisposeAsync for ICanOpenNode
+  CanOpenNodeProfile.cs               // the role a node is opened as (device or tool)
+  CanOpenNode.cs                      // node core: subscription, dispatch, SDO client + server, NMT, heartbeat, EMCY
   CanOpenNode.CommunicationProfile.cs // partial: the CiA 301 objects, their validation, power-on values, resets
+  CanOpenNode.DeviceDescription.cs    // partial: applying an EDS/DCF to the dictionary, with its findings
   CanOpenNode.Pdo.cs                  // partial: PDO engine — transmission types, inhibit time, event timer, RTR, mapping
+  CanOpenNode.PdoTiming.cs            // partial: SYNC counter, cycle period, synchronous window, PDO deadline indications
+  CanOpenNode.Mpdo.cs                 // partial: multiplexed PDOs, SAM/DAM, scanner and dispatcher lists
   CanOpenNode.SdoBlock.cs             // partial: SDO block transfer (client + server)
   CanOpenNode.NodeGuarding.cs         // partial: node-guarding consumer + producer, life guarding
   CanOpenNode.FlyingMaster.cs         // partial: NMT flying-master election
@@ -1619,15 +1635,24 @@ CanKit.Pro.CANopen/
   CanOpenNode.Safety.cs               // partial: CiA 304 objects, their validation, ICanOpenSafety, the SRDO send chain
   CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2, as the CiA 319 configuration entity) and verifying (step D) a peer's safety parameters
   CanOpenNode.ForeignSrdo.cs          // partial: splitting a peer's SRDO pair
+  CanOpenNode.Lss.cs                  // partial: the CiA 305 LSS slave and the transmit gate it holds
+  CanOpenDeviceDescription.cs         // a CiA 306 EDS/DCF, read with EdsDcfNet
   CanOpenDiscovery.cs                 // listen-only discovery and the scan on request
+  ForeignPdo.cs                       // a peer's decoded PDO and its direction
   CanOpenNodeOptions.cs
   CanOpenCobId.cs                     // pre-defined connection set, COB-ID control bits, restricted CAN-IDs
   CanOpenEvents.cs                    // event argument types
+  CanOpenTransportException.cs        // a frame could not be handed to the bus
+  PeerSdoAccessException.cs           // an SDO client transfer refused locally by the peer gate
   ObjectDictionary.cs, OdEntry.cs
   Nmt/NmtState.cs                     // NMT enum + command specifier
   Nmt/FlyingMaster.cs                 // flying-master role and signal
+  Heartbeat/                          // HeartbeatProducer and HeartbeatConsumer, independent of each other
   Sdo/                                // codec, abort codes, exception, block-transfer codec + mode enum
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
+  Pdo/PdoBits.cs                      // bit packing of mapped objects, least significant bit first
+  Pdo/ICanOpenPdo.cs                  // MPDO configuration and PDO monitoring contracts
+  Pdo/ICanOpenPdoMonitoring.cs
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
   Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
   Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan;
@@ -1745,7 +1770,7 @@ dotnet add package CanKit.Pro.CANopen
 dotnet add package CanKit.Adapter.Virtual   # loopback, no hardware
 ```
 
-Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
+Dependencies: `CanKit.Abstractions`, `EdsDcfNet`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 
 Part of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro) — higher CAN protocol layers
 built **on top of** [CanKit](https://github.com/pkuyo/CanKit), which is consumed as a NuGet
