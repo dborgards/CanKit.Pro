@@ -633,6 +633,9 @@ three events), and a producer with `EventQueueCapacity` distinct emergencies wai
 discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundExceptionOccurred`
 is not queued.
 
+**Emergency.** An EMCY frame shorter than eight bytes is dropped without a report: it is
+neither padded, as an SDO frame is, nor surfaced anywhere.
+
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after
 `guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A boot-up from the
