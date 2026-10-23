@@ -124,6 +124,41 @@ public class ProtocolActorLoopCountTests
             "the loop faulted after Dispose had returned, and that fault is reported all the same");
     }
 
+    // The same fault while the actor is still running, before anyone disposes it: the loop reads
+    // the clock for its next wait and throws. Its finally then disposes _stopCts, so the first
+    // Dispose's Cancel was refused with ObjectDisposedException -- which escaped Dispose, and the
+    // fault behind it was never reported. The loop task is awaited first (a hang guard, not a
+    // timing assertion), so Dispose is reached only once the loop is gone.
+    [Theory]
+    [InlineData(ActorExecutionMode.ThreadPool)]
+    [InlineData(ActorExecutionMode.SynchronizationContext)]
+    public async Task A_Loop_That_Faults_Before_Dispose_Is_Reported_By_It_Instead_Of_Making_It_Throw(ActorExecutionMode mode)
+    {
+        var loopsBefore = ProtocolActor.RunningLoopCount;
+        var context = mode == ActorExecutionMode.SynchronizationContext ? new SynchronizationContext() : null;
+        var clock = new FailingTimeSource();
+        using var actor = new ProtocolActor(mode, context, clock, shutdownTimeout: null);
+        var reported = new List<Exception>();
+        actor.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        // The later timer keeps the loop reading the clock once the first one has broken it.
+        var failure = new InvalidOperationException("the clock failed");
+        actor.Schedule(TimeSpan.FromSeconds(1), () => { });
+        actor.Schedule(TimeSpan.Zero, () => clock.Failure = failure);
+        var loop = (Task)Field(actor, "_loopTask");
+        await loop.ContinueWith(static _ => { }, TaskScheduler.Default).WaitAsync(TimeSpan.FromSeconds(10));
+        loop.IsFaulted.Should().BeTrue("the clock threw on the live loop, outside every callback");
+
+        actor.Invoking(a => a.Dispose()).Should().NotThrow("a faulted loop is reported, not thrown out of Dispose");
+
+        lock (reported)
+        {
+            reported.Should().ContainSingle("the join reports the fault once")
+                .Which.Should().BeSameAs(failure);
+        }
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore, "the faulted loop still ended its count");
+    }
+
     private sealed class FailingTimeSource : ITimeSource
     {
         public Exception? Failure { get; set; }

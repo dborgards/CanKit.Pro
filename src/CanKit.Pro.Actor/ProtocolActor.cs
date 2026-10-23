@@ -557,6 +557,13 @@ namespace CanKit.Pro.Actor
                 {
                     _stopCts.Cancel();
                 }
+                catch (ObjectDisposedException)
+                {
+                    // Only the loop disposes _stopCts, as its last act: a loop that is already
+                    // gone without being asked to stop has faulted outside every callback. There
+                    // is nothing left to stop, and the join below reports that fault (see
+                    // WaitForLoopTask) instead of this Dispose throwing about a token.
+                }
                 finally
                 {
                     Volatile.Write(ref _stopRequestFinished, 1);
@@ -592,7 +599,7 @@ namespace CanKit.Pro.Actor
             // through a few instructions of its own, never for user code; it reads a flag and
             // stays valid after the loop has disposed _stopCts. _stopRequestFinished covers the
             // one case where that flag never turns: a loop that ended without being cancelled
-            // has already disposed _stopCts, and the first caller's Cancel throws instead.
+            // has already disposed _stopCts, and the first caller's Cancel was refused instead.
             if (!_stopCts.IsCancellationRequested)
             {
                 var spin = new SpinWait();
