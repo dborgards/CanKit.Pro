@@ -82,7 +82,7 @@ and is reported as *not run* below it.
 | `--tier` | What it may do |
 | --- | --- |
 | `read` (default) | Reads and passive observation. Nothing the device holds is changed. |
-| `write` | Adds SDO downloads — each restored to the value read first — NMT state commands, SYNC produced by this tool, and the LSS state switch. Volatile: nothing reaches the device's non-volatile memory. The NMT state is put back where it was found, including after Ctrl+C. |
+| `write` | Adds SDO downloads — each restored to the value read first, `1017h` included — NMT state commands, SYNC produced by this tool, and the LSS state switch. Volatile: nothing reaches the device's non-volatile memory. The NMT state and `1017h` are put back from a `finally` on an uncancellable token, so a Ctrl+C mid-check does not leave the device stopped or with its heartbeat switched off. |
 | `commission` | Adds what outlives a power cycle or changes the device's identity on the bus: LSS Fastscan selection and `1010h` store. **Do not point this at a working machine.** |
 
 ## What it checks
@@ -94,10 +94,10 @@ and is reported as *not run* below it.
 | `identity` | `1000h` device type, `1001h` error register with its bits named, the whole `1018h` identity object, and `1008h`/`1009h`/`100Ah` — the last of which forces segmented SDO on the device's own data. |
 | `sdo` | Expedited upload round-trip latency, the abort code for a non-existent object (CiA 301 asks for `0x06020000`), and the refusal of a write to a read-only object. |
 | `eds` | The file parses; its `1018h` matches the device's; every readable object it declares exists on the device at the declared length. |
-| `heartbeat` | `1017h`, the heartbeat actually observed on `700h`+node-id with its period and spread, and whether the stack's consumer reports the beats without spurious timeouts. |
+| `heartbeat` | `1017h`, the heartbeat actually observed on `700h`+node-id with its period and spread, whether the stack's consumer reports the beats without spurious timeouts, and — at the write tier — whether it raises a timeout when the producer really stops, which is done by writing `1017h` = 0 and putting the original interval back. A check named after an event has to provoke that event; passing because nothing went wrong is not the same thing. |
 | `guarding` | `100Ch`/`100Dh` node guarding parameters. |
 | `nmt` | Pre-operational → operational → stopped → pre-operational, each step verified against the heartbeat's state byte, then the device returned to the state it was found in. |
-| `sync` | `1005h`/`1006h`, and whether synchronous TPDOs follow a SYNC this tool produces. |
+| `sync` | `1005h`/`1006h`, and whether cyclic synchronous TPDOs follow the SYNCs this tool produces — enough of them for the slowest transmission type on the device, since type *N* means every *N*th SYNC. Synchronous **acyclic** TPDOs (type 0) are listed and not concluded on: they transmit after a SYNC only when the application has data pending, so their silence is not the device's fault. |
 | `pdo` | TPDO and RPDO communication and mapping parameters read from the device (not assumed from the defaults, because a remapped device is the case a default gets wrong), TPDOs observed in Operational, and — the one that matters when a machine is switched off — that none are transmitted in Stopped. |
 | `emcy` | Emergency objects on `80h`+node-id, decoded. Passive: nothing can make a conforming device raise one on request, and the report says so rather than reporting silence as a pass. |
 | `lss` | Unconfigured slaves, selective addressing by the device's own `1018h` address with the inquired address and node-id compared back, and Fastscan. |

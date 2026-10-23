@@ -179,21 +179,45 @@ internal static class PdoSyncEmcyChecks
             }
         }).ConfigureAwait(false);
 
-        await book.RunAsync("SYN-02", "sync", "Synchronous TPDOs answer a SYNC produced by this tool", Tier.Write, "FR-CO-010", async () =>
+        await book.RunAsync("SYN-02", "sync", "Synchronous TPDOs answer the SYNCs this tool produces", Tier.Write, "FR-CO-010", async () =>
         {
-            var synchronous = tpdos.Where(p => p.Valid && CanOpenTransmissionType.IsSynchronous(p.TransmissionType)).ToList();
-            if (synchronous.Count == 0)
+            // Transmission type 1..240 means "on every Nth SYNC", so the number of SYNCs to send
+            // is the device's, not a constant. An earlier version sent five regardless and failed
+            // any device with a type above 5 — a false FAIL from a conformance tool, which is the
+            // worst outcome it has. Type 0 is separated out for the same reason: a synchronous
+            // *acyclic* TPDO transmits after a SYNC only when the application has data pending, so
+            // its silence is not the device's fault and cannot be concluded on.
+            var cyclic = tpdos
+                .Where(p => p.Valid && p.TransmissionType >= CanOpenTransmissionType.SynchronousEverySync
+                            && p.TransmissionType <= CanOpenTransmissionType.SynchronousCyclicMax)
+                .ToList();
+            var acyclic = tpdos
+                .Where(p => p.Valid && p.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic)
+                .ToList();
+
+            if (cyclic.Count == 0)
             {
-                return tpdos.Count == 0
-                    ? Outcome.NeedsSetup("PDO-01 read no TPDO parameters.")
-                    : Outcome.NotApplicable("No TPDO has a synchronous transmission type (1800h:02 in 0..240), so a SYNC changes nothing observable.");
+                if (tpdos.Count == 0) return Outcome.NeedsSetup("PDO-01 read no TPDO parameters.");
+                return acyclic.Count > 0
+                    ? Outcome.Inconclusive(
+                        $"{acyclic.Count} TPDO(s) are synchronous acyclic (1800h:02 = 0): they transmit after a SYNC "
+                        + "only when the application has data pending, so nothing can be concluded from producing SYNCs. "
+                        + "No cyclic synchronous TPDO (type 1..240) exists to measure.",
+                        Attribution.None)
+                    : Outcome.NotApplicable(
+                        "No TPDO has a cyclic synchronous transmission type (1800h:02 in 1..240), so a SYNC changes "
+                        + "nothing observable.");
             }
 
-            var watched = synchronous.Select(p => p.CobId).ToHashSet();
+            // Enough SYNCs for the slowest of them to have had two opportunities, plus a margin,
+            // and bounded so that a type-240 TPDO does not turn this into a minutes-long check.
+            var slowest = cyclic.Max(p => (int)p.TransmissionType);
+            var syncs = Math.Min(600, slowest * 2 + 2);
+            const int SyncPeriodMs = 20;
+
+            var watched = cyclic.Select(p => p.CobId).ToHashSet();
             using var tap = new BusTap(session.Service, id => watched.Contains(id));
-            const int Syncs = 5;
             int quiet;
-            int afterSync;
             string leftInState;
             try
             {
@@ -201,36 +225,73 @@ internal static class PdoSyncEmcyChecks
                 await Task.Delay(300, cancellationToken).ConfigureAwait(false);
 
                 quiet = tap.Frames.Count;
-                for (var i = 0; i < Syncs; i++)
+                for (var i = 0; i < syncs; i++)
                 {
                     await session.Client.SendSyncAsync(cancellationToken).ConfigureAwait(false);
-                    await Task.Delay(150, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(SyncPeriodMs, cancellationToken).ConfigureAwait(false);
                 }
 
-                afterSync = tap.Frames.Count - quiet;
+                // The last SYNC's answer is still in flight when the loop ends.
+                await Task.Delay(200, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 leftInState = await RestorePreOperationalAsync(session, book, "SYN-02").ConfigureAwait(false);
             }
 
+            var after = tap.Frames.Skip(quiet).ToArray();
             var measurements = new Dictionary<string, string>
             {
-                ["synchronous TPDOs"] = string.Join(", ", synchronous.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3} type {p.TransmissionType}")),
-                ["SYNCs sent"] = Syncs.ToString(CultureInfo.InvariantCulture),
+                ["SYNCs sent"] = $"{syncs} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})",
                 ["frames before the SYNCs"] = quiet.ToString(CultureInfo.InvariantCulture),
-                ["frames after the SYNCs"] = afterSync.ToString(CultureInfo.InvariantCulture),
                 ["left in state"] = leftInState,
             };
-
-            if (afterSync == 0)
+            if (acyclic.Count > 0)
             {
-                return Outcome.Fail(
-                    $"{Syncs} SYNC objects were sent and no synchronous TPDO followed. A device with a synchronous "
-                    + "transmission type must transmit on SYNC.", measurements);
+                measurements["acyclic TPDOs not concluded on"] = string.Join(", ",
+                    acyclic.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3} type 0"));
             }
 
-            return Outcome.Pass($"{afterSync} synchronous TPDO frame(s) followed {Syncs} SYNC object(s).", measurements);
+            var silent = new List<string>();
+            var unmeasured = new List<string>();
+            foreach (var pdo in cyclic)
+            {
+                var mine = after.Where(f => f.CanId == pdo.CobId).ToArray();
+                var opportunities = syncs / pdo.TransmissionType;
+                measurements[$"TPDO{pdo.Number} (0x{pdo.CobId:X3}) type {pdo.TransmissionType}"] =
+                    $"{mine.Length} frame(s) for {opportunities} SYNC opportunity/opportunities";
+                if (mine.Length > 0) continue;
+
+                // Silence only counts against the device once it has had an opportunity. The SYNC
+                // count is capped, and a transmission type above that cap would otherwise be
+                // failed for not transmitting on a SYNC that was never sent — the same false FAIL
+                // the fixed five-SYNC constant produced, re-entered through the bound.
+                if (opportunities >= 1) silent.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType})");
+                else unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {syncs} SYNCs sent)");
+            }
+
+            if (unmeasured.Count > 0) measurements["not measured (fewer SYNCs sent than the type asks for)"] = string.Join(", ", unmeasured);
+
+            if (silent.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{string.Join(", ", silent)} transmitted nothing although {syncs} SYNC object(s) were sent, which is "
+                    + "more than the transmission type asks for. A cyclic synchronous TPDO must transmit on its Nth SYNC.",
+                    measurements);
+            }
+
+            var measured = cyclic.Count - unmeasured.Count;
+            if (measured == 0)
+            {
+                return Outcome.Inconclusive(
+                    $"Every cyclic synchronous TPDO has a transmission type above the {syncs} SYNCs this check sends, "
+                    + "so none of them was given an opportunity.", Attribution.Setup, measurements);
+            }
+
+            return Outcome.Pass(
+                $"{measured} of {cyclic.Count} cyclic synchronous TPDO(s) answered: {after.Length} frame(s) for {syncs} SYNC(s)."
+                + (unmeasured.Count > 0 ? $" {unmeasured.Count} was/were not measured." : string.Empty),
+                measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("EMC-01", "emcy", "Emergency objects on 80h+node-id", Tier.Read, "FR-CO-011", async () =>

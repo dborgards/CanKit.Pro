@@ -107,16 +107,18 @@ internal static class NmtAndHeartbeatChecks
             return Outcome.Pass($"{frames.Count} heartbeat(s) observed.", measurements);
         }).ConfigureAwait(false);
 
-        await book.RunAsync("HBT-03", "heartbeat", "Heartbeat consumer raises a timeout when the device stops", Tier.Read, "FR-CO-008", async () =>
+        await book.RunAsync("HBT-03", "heartbeat", "Heartbeat consumer reports the producer's beats", Tier.Read, "FR-CO-008", async () =>
         {
-            // This one measures the stack, not the device: it is the consumer side of FR-CO-008,
-            // and the device is only the source of the frames it consumes. A failure here is
-            // attributed to the tool for that reason.
-            var cobId = CanOpenCobId.Heartbeat(session.Target);
-            using var probe = new BusTap(session.Service, id => id == cobId);
-            await probe.ListenAsync(Math.Min(session.Options.HeartbeatWindowMs, 2000), cancellationToken).ConfigureAwait(false);
-            var summary = BusTap.Summarise(probe.Frames);
-            if (summary is not { } period)
+            // This measures the stack's consumer, not the device: the device only supplies the
+            // frames. A failure is therefore attributed to the tool.
+            //
+            // It deliberately claims no more than its title. An earlier version was called "raises
+            // a timeout when the device stops" and passed whenever no timeout was raised, without
+            // ever stopping the producer — so a consumer that never raises HeartbeatTimeout would
+            // have passed a check named after that event. HBT-04 provokes the loss instead; this
+            // one is the half that needs no write. Found in review of #388.
+            var period = await ObservedPeriodAsync(session, cancellationToken).ConfigureAwait(false);
+            if (period is not { } beat)
                 return Outcome.NeedsSetup("The device produces no heartbeat to consume (see HBT-02).");
 
             var received = 0;
@@ -135,17 +137,17 @@ internal static class NmtAndHeartbeatChecks
             session.Client.HeartbeatTimeout += OnTimeout;
             try
             {
-                // Generous: 3 periods plus a margin, so a late frame is not a timeout. What is
-                // being checked is that beats arrive and are not reported as missing, not how
-                // tightly the stack tracks the clock.
-                var timeout = TimeSpan.FromMilliseconds(Math.Max(100, period.MedianMs * 3 + 200));
-                session.Client.AddHeartbeatConsumer(session.Target, timeout);
-                await Task.Delay((int)Math.Min(10_000, Math.Max(500, period.MedianMs * 4)), cancellationToken).ConfigureAwait(false);
+                // Generous: three periods plus a margin, so a late frame is not a timeout. What is
+                // checked is that beats arrive and are not reported as missing, not how tightly
+                // the stack tracks the clock.
+                var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 3 + 200));
+                session.Client.AddHeartbeatConsumer(session.Target, budget);
+                await Task.Delay((int)Math.Min(10_000, Math.Max(500, beat.MedianMs * 4)), cancellationToken).ConfigureAwait(false);
 
                 var measurements = new Dictionary<string, string>
                 {
-                    ["observed period (median)"] = IdentityAndSdoChecks.Ms(period.MedianMs),
-                    ["consumer timeout used"] = IdentityAndSdoChecks.Ms(timeout.TotalMilliseconds),
+                    ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
+                    ["consumer budget used"] = IdentityAndSdoChecks.Ms(budget.TotalMilliseconds),
                     ["HeartbeatReceived events"] = received.ToString(CultureInfo.InvariantCulture),
                     ["HeartbeatTimeout events"] = timedOut.ToString(CultureInfo.InvariantCulture),
                 };
@@ -160,8 +162,9 @@ internal static class NmtAndHeartbeatChecks
                 return timedOut == 0
                     ? Outcome.Pass($"{received} beat(s) consumed, no spurious timeout.", measurements)
                     : Outcome.Inconclusive(
-                        $"{received} beat(s) consumed and {timedOut} timeout(s) raised with a {timeout.TotalMilliseconds:F0} ms "
-                        + "budget against a period of " + IdentityAndSdoChecks.Ms(period.MedianMs)
+                        $"{received} beat(s) consumed and {timedOut} timeout(s) raised against a budget of "
+                        + IdentityAndSdoChecks.Ms(budget.TotalMilliseconds) + " for a period of "
+                        + IdentityAndSdoChecks.Ms(beat.MedianMs)
                         + ". Either the device's heartbeat is irregular or this host descheduled the consumer.",
                         Attribution.Unknown, measurements);
             }
@@ -178,6 +181,107 @@ internal static class NmtAndHeartbeatChecks
                     book.Note("HBT-03 cleanup", ex);
                 }
             }
+        }).ConfigureAwait(false);
+
+        await book.RunAsync("HBT-04", "heartbeat", "Heartbeat consumer raises a timeout when the producer stops", Tier.Write, "FR-CO-008", async () =>
+        {
+            // The half that needs a write, and the only way to see the timeout at all: the
+            // producer is stopped by writing 1017h = 0, and the original interval is put back in a
+            // finally on an uncancellable token — a device left with its heartbeat switched off is
+            // a change this run has no business leaving behind.
+            if (!session.MayTransfer(0x1017, 0x00))
+                return Outcome.NeedsSetup(session.GateReason(0x1017, 0x00));
+
+            var period = await ObservedPeriodAsync(session, cancellationToken).ConfigureAwait(false);
+            if (period is not { } beat)
+                return Outcome.NeedsSetup("The device produces no heartbeat, so there is none to interrupt (see HBT-02).");
+
+            byte[] original;
+            try
+            {
+                original = await session.Client.SdoUploadAsync(session.Target, 0x1017, 0x00, cancellationToken).ConfigureAwait(false);
+            }
+            catch (SdoAbortException abort)
+            {
+                return Outcome.NeedsSetup($"1017h:00 could not be read ({IdentityAndSdoChecks.Describe(abort)}), so it cannot be put back afterwards.");
+            }
+
+            if (original.Length != 2)
+                return Outcome.NeedsSetup("1017h:00 did not read back as UNSIGNED16; see HBT-01.");
+
+            var timedOut = 0;
+            void OnTimeout(object? sender, HeartbeatTimeoutEventArgs e)
+            {
+                if (e.ProducerNodeId == session.Target) Interlocked.Increment(ref timedOut);
+            }
+
+            var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 2 + 100));
+            var restored = "yes";
+            var stopped = false;
+            session.Client.HeartbeatTimeout += OnTimeout;
+            try
+            {
+                session.Client.AddHeartbeatConsumer(session.Target, budget);
+                try
+                {
+                    await session.Client.SdoDownloadAsync(session.Target, 0x1017, 0x00, new byte[] { 0, 0 }, cancellationToken)
+                        .ConfigureAwait(false);
+                    stopped = true;
+                }
+                catch (SdoAbortException abort)
+                {
+                    return Outcome.NotApplicable(
+                        $"The device refuses a write of 0 to 1017h:00 ({IdentityAndSdoChecks.Describe(abort)}), so its "
+                        + "heartbeat cannot be stopped from the bus and the timeout cannot be provoked without pulling "
+                        + "the device. Nothing is wrong with that: 1017h may be read-only.");
+                }
+
+                // Two budgets, so a beat already in flight when the write landed cannot be
+                // mistaken for the producer still running.
+                await Task.Delay((int)Math.Min(15_000, budget.TotalMilliseconds * 2 + 300), cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                session.Client.HeartbeatTimeout -= OnTimeout;
+                if (stopped)
+                {
+                    try
+                    {
+                        await session.Client.SdoDownloadAsync(session.Target, 0x1017, 0x00, original, CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        book.Note("HBT-04 restore of 1017h", ex);
+                        restored = $"FAILED ({ex.GetType().Name}) — the device's heartbeat may still be switched off";
+                    }
+                }
+
+                try
+                {
+                    session.Client.RemoveHeartbeatConsumer(session.Target);
+                }
+                catch (Exception ex)
+                {
+                    book.Note("HBT-04 cleanup", ex);
+                }
+            }
+
+            var measurements = new Dictionary<string, string>
+            {
+                ["1017h before"] = $"{BitConverter.ToUInt16(original, 0)} ms",
+                ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
+                ["consumer budget used"] = IdentityAndSdoChecks.Ms(budget.TotalMilliseconds),
+                ["HeartbeatTimeout events after the stop"] = timedOut.ToString(CultureInfo.InvariantCulture),
+                ["1017h restored"] = restored,
+            };
+
+            return timedOut > 0
+                ? Outcome.Pass($"The producer was stopped and the consumer raised {timedOut} timeout(s).", measurements)
+                : Outcome.ToolFault(
+                    "The producer was stopped by writing 1017h = 0 and the consumer raised no HeartbeatTimeout within "
+                    + "two budgets. The missed heartbeat is not being detected — a defect in the stack, not in the device.",
+                    measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("GRD-01", "guarding", "100Ch/100Dh node guarding parameters", Tier.Read, "FR-CO-009", async () =>
@@ -278,6 +382,19 @@ internal static class NmtAndHeartbeatChecks
                 ? Outcome.Pass("The device reached every commanded state, and was returned to the state it was found in.", measurements)
                 : Outcome.Fail(string.Join("; ", problems) + ".", measurements);
         }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The heartbeat period as this host saw it, or null when the device produced too few frames
+    /// to measure one. Both heartbeat-consumer checks start here, so neither can pick a consumer
+    /// budget from a different observation than the other.
+    /// </summary>
+    private static async Task<IntervalSummary?> ObservedPeriodAsync(Session session, CancellationToken cancellationToken)
+    {
+        var cobId = CanOpenCobId.Heartbeat(session.Target);
+        using var probe = new BusTap(session.Service, id => id == cobId);
+        await probe.ListenAsync(Math.Min(session.Options.HeartbeatWindowMs, 2000), cancellationToken).ConfigureAwait(false);
+        return BusTap.Summarise(probe.Frames);
     }
 
     private static byte? LatestState(BusTap tap)

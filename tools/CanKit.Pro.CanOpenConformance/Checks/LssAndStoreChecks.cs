@@ -18,35 +18,33 @@ namespace CanKit.Pro.CanOpenConformance.Checks;
 /// </summary>
 internal static class LssAndStoreChecks
 {
+    /// <summary>
+    /// Puts every slave into LSS Waiting, the resting state. Waiting is the precondition of the
+    /// selective switch and of Fastscan — both answer from no other state — so each LSS check
+    /// normalises rather than inheriting whatever the previous one left behind.
+    /// </summary>
+    private static Task NormaliseToWaitingAsync(Session session, CancellationToken cancellationToken)
+        => session.Lss.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken);
+
     public static async Task RunAsync(Session session, Checkbook book, CancellationToken cancellationToken)
     {
         await book.RunAsync("LSS-01", "lss", "Unconfigured slaves on the bus", Tier.Write, "FR-CO-047", async () =>
         {
             // This is the one LSS service that is safe on a working bus: it addresses only slaves
             // whose node-id is FFh, i.e. devices that are not participating yet. It still needs
-            // the write tier, because switching the global LSS state is a command to every slave.
-            await session.Lss.SwitchStateGlobalAsync(LssState.Configuration, cancellationToken).ConfigureAwait(false);
-            try
-            {
-                var any = await session.Lss.IdentifyNonConfiguredSlavesAsync(cancellationToken).ConfigureAwait(false);
-                var measurements = new Dictionary<string, string> { ["unconfigured slave present"] = any.ToString() };
-                return Outcome.Pass(any
-                    ? "At least one slave has no node-id yet and answered the identify request. LSS-03 can read its address."
-                    : "No unconfigured slave answered; every device on this bus already has a node-id.", measurements);
-            }
-            finally
-            {
-                // Back to Waiting unconditionally. A bus left in LSS configuration state has every
-                // slave listening on 7E5h instead of working.
-                try
-                {
-                    await session.Lss.SwitchStateGlobalAsync(LssState.Waiting, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    book.Note("LSS-01 cleanup", ex);
-                }
-            }
+            // the write tier, because the global state command it sends reaches every slave.
+            //
+            // Waiting, not Configuration. The identify request needs no particular state — the
+            // node answers IdentifyNonConfiguredRemote whatever its LSS state — but the selective
+            // switch (LSS-02) and Fastscan (LSS-03) both answer only from Waiting, so a check that
+            // left the bus in Configuration would quietly disable the two after it. Normalising to
+            // Waiting also makes each LSS check independent of the order they run in.
+            await NormaliseToWaitingAsync(session, cancellationToken).ConfigureAwait(false);
+            var any = await session.Lss.IdentifyNonConfiguredSlavesAsync(cancellationToken).ConfigureAwait(false);
+            var measurements = new Dictionary<string, string> { ["unconfigured slave present"] = any.ToString() };
+            return Outcome.Pass(any
+                ? "At least one slave has no node-id yet and answered the identify request. LSS-03 can read its address."
+                : "No unconfigured slave answered; every device on this bus already has a node-id.", measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("LSS-02", "lss", "Selective addressing by LSS address, and inquire", Tier.Write, "FR-CO-047", async () =>
@@ -76,6 +74,9 @@ internal static class LssAndStoreChecks
             var measurements = new Dictionary<string, string> { ["LSS address from 1018h"] = expected.ToString() };
             try
             {
+                // The slave answers a selective switch only from Waiting, so the state is
+                // normalised rather than assumed from whatever ran before.
+                await NormaliseToWaitingAsync(session, cancellationToken).ConfigureAwait(false);
                 var selected = await session.Lss.SwitchStateSelectiveAsync(expected, cancellationToken).ConfigureAwait(false);
                 measurements["selective switch answered"] = selected.ToString();
                 if (!selected)
@@ -125,7 +126,13 @@ internal static class LssAndStoreChecks
             // Fastscan leaves the slave it finds selected and in configuration state, which is why
             // this is the commission tier even though it writes nothing: a device left there has
             // stopped doing its job until it is switched back or power-cycled.
-            await session.Lss.SwitchStateGlobalAsync(LssState.Configuration, cancellationToken).ConfigureAwait(false);
+            //
+            // Waiting first, and this is the whole service's precondition rather than tidiness:
+            // the slave answers Fastscan only from Waiting and only while unconfigured. An earlier
+            // version switched to Configuration here, which made the reset probe go unanswered and
+            // the check report "no unconfigured slave" -- a false negative that looked like a clean
+            // bus. Found in review of #388.
+            await NormaliseToWaitingAsync(session, cancellationToken).ConfigureAwait(false);
             try
             {
                 var result = await session.Lss.FastscanAsync(cancellationToken: cancellationToken).ConfigureAwait(false);

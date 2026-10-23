@@ -104,6 +104,17 @@ internal static class Program
             }
 
             using var session = Session.Open(options, out openError);
+
+            // After the open, not inside it: a malformed --eds is the run's own input and must not
+            // be reported as an adapter or driver failure. The run continues without the file,
+            // which is the same position as not passing one, and the eds group says which it was.
+            if (session.BindDescription() is { } descriptionError)
+            {
+                book.Note("--eds", "DeviceDescription", descriptionError, Attribution.Setup);
+                Console.Error.WriteLine($"  --eds could not be used: {descriptionError}");
+                Console.Error.WriteLine("  The run continues without it; the checks it would have unlocked report themselves skipped.");
+            }
+
             await RunGroupsAsync(session, book, options, cancellation.Token).ConfigureAwait(false);
             lock (session.BackgroundExceptions) background.AddRange(session.BackgroundExceptions);
         }

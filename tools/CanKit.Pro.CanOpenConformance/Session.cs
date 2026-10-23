@@ -58,6 +58,10 @@ internal sealed class Session : IDisposable
     /// <summary>The device description bound for the target, when --eds gave one.</summary>
     public CanOpenDeviceDescription? TargetDescription { get; private set; }
 
+    /// <summary>Why the description could not be bound, when one was given and it failed; null
+    /// otherwise. The eds group reports it, so a bad file is a finding about the file.</summary>
+    public string? DescriptionError { get; private set; }
+
     public List<string> BackgroundExceptions { get; }
 
     /// <summary>The node under test. Checks that need it are only reached once <see
@@ -96,7 +100,6 @@ internal sealed class Session : IDisposable
             session._owned.Add(client);
             session._owned.Add(service);
             session._owned.Add(bus);
-            session.BindDescription();
             error = null;
             return session;
         }
@@ -114,11 +117,38 @@ internal sealed class Session : IDisposable
     /// transfers only 1000h:00, 1001h:00 and 1018h:00-04 to a node with no description bound, so
     /// without a file here most of this tool's checks have nothing they are allowed to ask.
     /// </summary>
-    private void BindDescription()
+    /// <returns>
+    /// Null when the file was bound or none was given, else why it was not. Deliberately not an
+    /// exception out of <see cref="Open"/>: the file is read after the bus is open, so a malformed
+    /// one used to surface as "the bus could not be opened" and be attributed to the adapter or its
+    /// driver. The bus is fine in that case and the run's own input is not, which is a different
+    /// finding for a different person. Found in review of #388.
+    /// </returns>
+    public string? BindDescription()
     {
-        if (Options.EdsPath is null || Options.TargetNode is not { } target) return;
-        TargetDescription = CanOpenDeviceDescription.Load(Options.EdsPath);
-        Client.BindPeerDeviceDescription(target, TargetDescription);
+        if (Options.EdsPath is null || Options.TargetNode is not { } target) return null;
+        try
+        {
+            TargetDescription = CanOpenDeviceDescription.Load(Options.EdsPath);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return DescriptionError = $"{System.IO.Path.GetFileName(Options.EdsPath)} could not be read: {ex.GetType().Name}: {ex.Message}";
+        }
+
+        try
+        {
+            Client.BindPeerDeviceDescription(target, TargetDescription);
+        }
+        catch (ArgumentException ex)
+        {
+            // A DCF commissioned for another node-id is the commonest of these, and it is the
+            // operator's to fix by passing the right file or the right --node.
+            TargetDescription = null;
+            return DescriptionError = $"{System.IO.Path.GetFileName(Options.EdsPath)} cannot be bound for node {target}: {ex.Message}";
+        }
+
+        return null;
     }
 
     /// <summary>Whether the bound description declares the pair, i.e. whether an SDO to it will

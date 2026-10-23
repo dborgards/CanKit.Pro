@@ -27,6 +27,8 @@ internal static class EdsChecks
     {
         await book.RunAsync("EDS-01", "eds", "The device description parses", Tier.Read, "FR-CO-025", () =>
         {
+            if (session.DescriptionError is { } problem)
+                return Task.FromResult(Outcome.NeedsSetup(problem));
             if (session.Options.EdsPath is null)
                 return Task.FromResult(Outcome.NeedsSetup("No --eds given."));
             if (session.TargetDescription is not { } description)
@@ -69,7 +71,8 @@ internal static class EdsChecks
 
         await book.RunAsync("EDS-02", "eds", "Identity in the file matches the device", Tier.Read, "CiA 306 / 1018h", async () =>
         {
-            if (session.TargetDescription is not { } description) return Outcome.NeedsSetup("No --eds given.");
+            if (session.TargetDescription is not { } description)
+                return Outcome.NeedsSetup(session.DescriptionError ?? "No --eds given.");
 
             // The check that catches the commonest mistake in a conformance run: the wrong EDS.
             // Everything else in this group is measured against the file, so a file for a
@@ -117,7 +120,8 @@ internal static class EdsChecks
 
         await book.RunAsync("EDS-03", "eds", "Every readable declared object exists on the device", Tier.Read, "CiA 306", async () =>
         {
-            if (session.TargetDescription is not { } description) return Outcome.NeedsSetup("No --eds given.");
+            if (session.TargetDescription is not { } description)
+                return Outcome.NeedsSetup(session.DescriptionError ?? "No --eds given.");
 
             var readable = description.Objects.Objects
                 .SelectMany(Pairs)
@@ -171,11 +175,26 @@ internal static class EdsChecks
             Enumerate(measurements, "length", lengthMismatch);
             Enumerate(measurements, "abort", refused);
 
+            // A pass here must mean the sweep established something, and it cannot while objects
+            // went unanswered. An earlier version counted those aborts and then ignored them in
+            // this condition, so a device that aborted every declared object got a pass reading
+            // "All 0 readable declared object(s) read back" — a sweep that measured nothing,
+            // reported as a clean one. Found in review of #388.
+            if (absent.Count == 0 && lengthMismatch.Count == 0 && refused.Count > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{refused.Count} of {sweep.Count} declared readable object(s) aborted for a reason other than "
+                    + $"\"does not exist\", so the sweep did not establish whether the device matches the file; "
+                    + $"{ok} did read back as declared. An abort such as a protocol timeout or a refused read is the "
+                    + "device's answer, not the file's.", Attribution.Device, measurements);
+            }
+
             if (absent.Count == 0 && lengthMismatch.Count == 0)
             {
-                return Outcome.Pass(
-                    $"All {ok} readable declared object(s) read back at the declared length"
-                    + (refused.Count > 0 ? $"; {refused.Count} aborted for another reason." : "."), measurements);
+                return ok > 0
+                    ? Outcome.Pass($"All {ok} readable declared object(s) read back at the declared length.", measurements)
+                    : Outcome.Inconclusive(
+                        "The sweep read no object at all, so nothing was established.", Attribution.Unknown, measurements);
             }
 
             return Outcome.Failed(Attribution.Unknown,
