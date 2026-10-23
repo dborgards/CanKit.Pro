@@ -11,7 +11,12 @@
     <PackageVersion Include="CanKit.Abstractions" Version="$(CanKitVersion)" />
     <PackageVersion Include="CanKit.Core" Version="$(CanKitVersion)" />
     <PackageVersion Include="CanKit.Adapter.Virtual" Version="$(CanKitVersion)" />
-    <!-- The hardware adapters, referenced only by tools/CanKit.Pro.EchoProbe (a diagnostic tool, not shipped). -->
+    <!--
+      The hardware adapters. Referenced only by the diagnostic tools under tools/, never by a
+      shipped package: those are adapter-agnostic by design. Deliberately not a list of which
+      tools — a list here goes stale the next time one is added, and the tools' own project files
+      are where the references actually are.
+    -->
     <PackageVersion Include="CanKit.Adapter.PCAN" Version="$(CanKitVersion)" />
     <PackageVersion Include="CanKit.Adapter.Kvaser" Version="$(CanKitVersion)" />
     <PackageVersion Include="CanKit.Adapter.Vector" Version="$(CanKitVersion)" />

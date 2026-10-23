@@ -70,6 +70,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanKit.Pro.EchoProbe", "too
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanKit.Pro.Sample.CanOpenLss", "samples\CanKit.Pro.Sample.CanOpenLss\CanKit.Pro.Sample.CanOpenLss.csproj", "{6D05E686-0F97-439F-9CFB-3E199679A764}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CanKit.Pro.CanOpenConformance", "tools\CanKit.Pro.CanOpenConformance\CanKit.Pro.CanOpenConformance.csproj", "{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -296,6 +298,18 @@ Global
 		{6D05E686-0F97-439F-9CFB-3E199679A764}.Release|x64.Build.0 = Release|Any CPU
 		{6D05E686-0F97-439F-9CFB-3E199679A764}.Release|x86.ActiveCfg = Release|Any CPU
 		{6D05E686-0F97-439F-9CFB-3E199679A764}.Release|x86.Build.0 = Release|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Debug|x64.Build.0 = Debug|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Debug|x86.Build.0 = Debug|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Release|Any CPU.Build.0 = Release|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Release|x64.ActiveCfg = Release|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Release|x64.Build.0 = Release|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Release|x86.ActiveCfg = Release|Any CPU
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -319,6 +333,7 @@ Global
 		{D6B28C9B-8DCD-529D-AC33-4EC9CECD5D6C} = {39893626-281F-585E-8992-C978453455F2}
 		{3D7A9AFB-7182-4BB4-B4A5-CD8E328E2D03} = {07C2787E-EAC7-C090-1BA3-A61EC2A24D84}
 		{6D05E686-0F97-439F-9CFB-3E199679A764} = {39893626-281F-585E-8992-C978453455F2}
+		{866E0B4E-A17A-4CDF-BB70-270A4C6FCA70} = {07C2787E-EAC7-C090-1BA3-A61EC2A24D84}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {6E6D2B0C-41DD-50B5-BB14-835313D77048}
