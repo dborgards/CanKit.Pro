@@ -296,7 +296,10 @@ public sealed class UdsFunctionalClient : IDisposable
             // the same frame; the earlier of the two to act moves the window, the later is
             // idle. Only a 0x78 that arrived while the window was open: a collection window
             // longer than P2 may hold one from after it, which revives nothing (Codex on #150).
-            if (IsResponsePending(data, sid) && r.HostArrivalTimestamp >= cutoff)
+            // None of them arrived before the handoff: the ISO-TP collection leaves those out
+            // (IsoTpFunctionalClient.SendAndCollectWithTransmitStampAsync), so the cutoff the
+            // listener applies to what it hears has nothing left to drop here (#354, uds-M6).
+            if (IsResponsePending(data, sid))
                 Extend(sid, r.HostArrivalTimestamp, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
