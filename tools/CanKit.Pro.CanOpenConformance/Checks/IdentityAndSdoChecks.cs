@@ -149,19 +149,23 @@ internal static class IdentityAndSdoChecks
                 }
             }
 
-            if (read == 0)
-            {
-                return blocked.Count == wanted.Length
-                    ? Outcome.NeedsSetup($"{string.Join(", ", blocked)} blocked: {session.GateReason(0x1008, 0x00)}")
-                    : Outcome.NotApplicable("The device implements none of 1008h, 1009h, 100Ah; all three are optional.");
-            }
-
+            // Before the zero-read branch, not after it. Behind it, a run where every permitted
+            // string timed out had read == 0 and was reported as "the device implements none of
+            // them" — the optional-absence verdict this list exists to stop standing in for a
+            // non-absence abort, reinstated by the order of two ifs. Found in review of #388.
             if (unresolved.Count > 0)
             {
                 return Outcome.Inconclusive(
                     $"{read} of 3 strings read, and {unresolved.Count} the run was allowed to ask for would not answer "
                     + $"({string.Join(", ", unresolved)}). Those are not absences, so the check is not complete.",
                     Attribution.Device, measurements);
+            }
+
+            if (read == 0)
+            {
+                return blocked.Count == wanted.Length
+                    ? Outcome.NeedsSetup($"{string.Join(", ", blocked)} blocked: {session.GateReason(0x1008, 0x00)}")
+                    : Outcome.NotApplicable("The device implements none of 1008h, 1009h, 100Ah; all three are optional.");
             }
 
             var segmented = measurements.Values.Count(v => v.Contains(", segmented", StringComparison.Ordinal));
@@ -232,11 +236,17 @@ internal static class IdentityAndSdoChecks
                     + "was never asked.");
             }
 
-            await tap.WaitForAsync(frames => frames.Count > 0, session.Options.SdoTimeoutMs, cancellationToken)
+            // Data frames only, in the wait and in everything below it. An RTR another master
+            // puts on 580h+node-id is a request for that id, not the device answering: it ended
+            // the wait early and then, carrying no data, was reported as "the device answered
+            // with 0 byte(s)" — a FAIL charged to a device that may not even have been asked yet.
+            // The same correction EMC-01 needed, found by sweeping for it. Found in review of #388.
+            await tap.WaitForAsync(frames => frames.Any(f => !f.IsRemote), session.Options.SdoTimeoutMs, cancellationToken)
                 .ConfigureAwait(false);
 
-            var answer = tap.Frames.FirstOrDefault(f => f.Data.Length >= 8);
-            if (tap.Frames.Count == 0)
+            var responses = tap.Frames.Where(f => !f.IsRemote).ToList();
+            var answer = responses.FirstOrDefault(f => f.Data.Length >= 8);
+            if (responses.Count == 0)
             {
                 return Outcome.Fail(
                     $"The device neither answered nor aborted an upload of 0x{Absent:X4}:00 within "

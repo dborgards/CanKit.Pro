@@ -326,17 +326,31 @@ internal static class PdoSyncEmcyChecks
                     return Outcome.Fail($"1005h:00 is UNSIGNED32, the device returned {IdentityAndSdoChecks.Hex(raw)}.");
 
                 var cobId = BitConverter.ToUInt32(raw, 0);
+                var generates = (cobId & CanOpenCobId.SyncGenerateBit) != 0;
                 var measurements = new Dictionary<string, string>
                 {
                     ["1005h COB-ID SYNC"] = $"0x{cobId:X8} (id 0x{cobId & CanOpenCobId.CanIdMask:X3})",
-                    ["generates SYNC"] = ((cobId & CanOpenCobId.SyncGenerateBit) != 0).ToString(),
+                    ["generates SYNC"] = generates.ToString(),
                 };
 
                 // Its own try: it sat inside 1005h's catch, so an absent 1006h reported that the
                 // device has no 1005h at all. A SYNC consumer may expose 1005h without being a
                 // producer that needs 1006h. Found in review of #388 — the same shape as STO-01's
                 // 1011h and GRD-01's 100Dh.
-                if (session.MayTransfer(0x1006, 0x00))
+                if (!session.MayTransfer(0x1006, 0x00))
+                {
+                    // Not asked, so not concluded. For a producer the pair is mandatory and its
+                    // absence from the description is the run's own gap, which is setup rather
+                    // than a device finding.
+                    measurements["1006h communication cycle period"] = "not read: " + session.GateReason(0x1006, 0x00);
+                    if (generates)
+                    {
+                        return Outcome.NeedsSetup(
+                            "1005h has the generate bit set, so 1006h is mandatory for this device, and this run may "
+                            + "not ask for it: " + session.GateReason(0x1006, 0x00));
+                    }
+                }
+                else
                 {
                     try
                     {
@@ -357,6 +371,21 @@ internal static class PdoSyncEmcyChecks
                     catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
                                                               or (uint)SdoAbortCode.SubIndexDoesNotExist)
                     {
+                        // Optional for a consumer, mandatory for a producer (CiA 301 §7.5.2.7):
+                        // 1006h is what a SYNC producer transmits on. Treating the absence as
+                        // optional regardless recorded a device that claims to generate SYNC
+                        // without a cycle period as conforming — the round-20 fix for the
+                        // consumer case, applied to the producer case as well. Found in review
+                        // of #388.
+                        if (generates)
+                        {
+                            measurements["1006h communication cycle period"] = "absent";
+                            return Outcome.Fail(
+                                "1005h has the generate bit set, so this device claims to produce SYNC, and 1006h is "
+                                + "mandatory for a producer — the communication cycle period is what it would transmit "
+                                + "on. The device says it does not exist.", measurements);
+                        }
+
                         measurements["1006h communication cycle period"] = "absent; a SYNC consumer need not be a producer";
                     }
                     catch (SdoAbortException abort)
@@ -476,7 +505,13 @@ internal static class PdoSyncEmcyChecks
                     });
             }
 
-            var overflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            var (overflow, overflowProblem) = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            if (overflowProblem is { } reservedOverflow)
+            {
+                return Outcome.Fail(reservedOverflow + " Nothing was sent, because either form of SYNC would be the "
+                    + "wrong one and the device would then be failed for the silence that followed.");
+            }
+
             if (overflow is not { } counterOverflow)
             {
                 return Outcome.Inconclusive(
@@ -740,13 +775,25 @@ internal static class PdoSyncEmcyChecks
                 session.Client.EmcyReceived -= OnEmcy;
             }
 
-            var frames = tap.Frames;
+            // Data frames only. An RTR another participant puts on the target's EMCY COB-ID is a
+            // request for that id, not an emergency object: an empty one was counted as a
+            // malformed emergency and failed the device, and an eight-byte one produced a tool
+            // fault because the stack had correctly decoded nothing. The heartbeat and PDO paths
+            // filtered IsRemote and this one did not. Found in review of #388.
+            var frames = Transmitted(tap);
+            var polls = tap.Frames.Count - frames.Count;
             var measurements = new Dictionary<string, string>
             {
                 ["window"] = $"{session.Options.ListenMs} ms",
                 ["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture),
                 ["decoded by the stack"] = decoded.Count.ToString(CultureInfo.InvariantCulture),
             };
+            if (polls > 0)
+            {
+                measurements["remote frames ignored"] =
+                    $"{polls} RTR frame(s) on this COB-ID, which are requests from another participant";
+            }
+
             foreach (var (text, i) in decoded.Take(10).Select((t, i) => (t, i)))
                 measurements[$"emergency {i + 1}"] = text;
 
@@ -959,30 +1006,41 @@ internal static class PdoSyncEmcyChecks
     }
 
     /// <summary>
-    /// 1019h, the SYNC counter overflow. A value of 2..240 means the device's SYNC carries a
-    /// one-byte counter that rolls 1..value; 0 or 1 (and an absent object) mean no counter.
+    /// 1019h, the SYNC counter overflow. CiA 301 §7.5.2.40 defines 0 as "SYNC without a counter"
+    /// and 2..240 as a one-byte counter that rolls 1..value; 1 and 241..255 are reserved. Returns
+    /// the value, or a problem for a value that is neither — reporting a reserved one rather than
+    /// rounding it into the nearest usable behaviour, which is what hid it.
     /// </summary>
-    private static async Task<byte?> TargetSyncOverflowAsync(Session session, CancellationToken cancellationToken)
+    private static async Task<(byte? Value, string? Problem)> TargetSyncOverflowAsync(Session session, CancellationToken cancellationToken)
     {
         // No 1019h to read means no counter, which is the CiA 301 default.
-        if (!session.MayTransfer(0x1019, 0x00)) return 0;
+        if (!session.MayTransfer(0x1019, 0x00)) return ((byte)0, null);
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1019, 0x00, cancellationToken).ConfigureAwait(false);
             // A wrong length is the device contradicting itself about an UNSIGNED8, not a zero.
-            return raw.Length == 1 ? raw[0] : null;
+            if (raw.Length != 1) return (null, null);
+
+            // Read is not the same as valid, the third instance of that in this file. Treating 1
+            // and 241..255 as "no counter" and "a counter rolling 1..250" let a device with a
+            // reserved 1019h be measured as though it conformed. Found by sweeping for the family
+            // in review of #388.
+            return raw[0] == 1 || raw[0] > CanOpenTransmissionType.SynchronousCyclicMax
+                ? (null, $"1019h:00 is 0x{raw[0]:X2}; CiA 301 §7.5.2.40 defines 0 and 2..240 and reserves the rest, "
+                    + "so what this device's SYNC carries cannot be derived from it.")
+                : (raw[0], null);
         }
         catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
                                                   or (uint)SdoAbortCode.SubIndexDoesNotExist)
         {
-            return 0;
+            return ((byte)0, null);
         }
         catch (SdoAbortException)
         {
             // Anything else leaves it unknown, and guessing "no counter" would send DLC 0 to a
             // device that rejects it and then fail that device for silence. Found in review of
             // #388 — the same mistake as defaulting 1005h, one object along.
-            return null;
+            return (null, null);
         }
     }
 
@@ -1070,6 +1128,23 @@ internal static class PdoSyncEmcyChecks
             // 1800h:06 is the SYNC start value, optional: the counter value at which this TPDO
             // begins its cycle (CiA 301 §7.5.2.37).
             var (syncStart, syncStartOutcome) = await ByteOrDefault(session, comm, 0x06, problems, blocked, mandatory: false, cancellationToken).ConfigureAwait(false);
+
+            // Read is not the same as valid. F1h..FBh is reserved for a TPDO and F1h..FDh for an
+            // RPDO (CiA 301 Table 72), and the stack already names both ranges, so a device
+            // answering with one was recorded as a successfully read transmission type and
+            // PDO-01/PDO-02 passed it. Found in review of #388 — the same shape as the reserved
+            // mapping count of the round before.
+            if (transmission is { } type)
+            {
+                var reserved = commBase == 0x1800
+                    ? CanOpenTransmissionType.IsReservedForTpdo(type)
+                    : CanOpenTransmissionType.IsReservedForRpdo(type);
+                if (reserved)
+                {
+                    problems.Add($"0x{comm:X4}:02 is 0x{type:X2}, which CiA 301 Table 72 reserves for "
+                        + $"{(commBase == 0x1800 ? "a TPDO" : "an RPDO")}; it is not a transmission type.");
+                }
+            }
 
             var (bits, entries, mappingComplete, multiplexed) = await ReadMappingAsync(session, map, problems, blocked, notAddressed, cancellationToken).ConfigureAwait(false);
 
@@ -1188,7 +1263,25 @@ internal static class PdoSyncEmcyChecks
                     continue;
                 }
 
-                bits += entry[0]; // the low byte of a mapping entry is its bit length
+                // The low byte of a mapping entry is its bit length, and 1..64 is the whole of it
+                // (CiA 301 §7.5.2.38). Accumulating it unchecked let two 64-bit entries report a
+                // 16-byte payload as a complete mapping, which PDO-03 would then have compared
+                // real frames against — on a bus whose frames hold at most 8. Found in review of
+                // #388; the width is as much a read-is-not-valid case as the count was.
+                if (entry[0] is 0 or > 64)
+                {
+                    problems.Add($"0x{map:X4}:{sub:X2} declares a field of {entry[0]} bit(s); a mapping entry is 1..64.");
+                    anyEntryBlocked = true;
+                    continue;
+                }
+
+                bits += entry[0];
+                if (bits > 64)
+                {
+                    problems.Add($"0x{map:X4} maps {bits} bits over its first {sub} entry/entries; a PDO holds at most 64.");
+                    anyEntryBlocked = true;
+                    break;
+                }
             }
 
             return (bits, count[0], !anyEntryBlocked, false);

@@ -481,11 +481,17 @@ internal static class NmtAndHeartbeatChecks
             // tier's promise. Found in review of #388.
             if (initial is null)
             {
+                // Data frames, not every frame: a node-guarding RTR from another master on this
+                // COB-ID made the count nonzero, so the reason told the operator the device had
+                // sent unusable frames when it had sent nothing at all. The verdict is the same
+                // either way, but the sentence it carries is what the operator acts on. Found by
+                // sweeping for the unfiltered-RTR family in review of #388.
+                var fromDevice = tap.Frames.Count(f => !f.IsRemote);
                 return Outcome.NeedsSetup(
-                    tap.Frames.Count == 0
+                    fromDevice == 0
                         ? "Without a heartbeat there is no way to observe the device's NMT state from outside, and this "
                           + "check will not command a state it cannot verify. Enable the heartbeat (1017h) and re-run."
-                        : $"{tap.Frames.Count} frame(s) arrived on the heartbeat COB-ID and none carries a one-byte NMT "
+                        : $"{fromDevice} frame(s) arrived on the heartbeat COB-ID and none carries a one-byte NMT "
                           + "state (see HBT-02), so the state before the check cannot be read — and this check will not "
                           + "command a state it would be unable to restore.");
             }
