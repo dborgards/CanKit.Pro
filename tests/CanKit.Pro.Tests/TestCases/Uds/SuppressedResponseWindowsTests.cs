@@ -77,4 +77,22 @@ public class SuppressedResponseWindowsTests
         windows.TryGetDeadline(Sid, out var until).Should().BeTrue();
         until.Should().Be(2600);
     }
+
+    // Bugbot on #395: the functional client undoes a refused send's note by retiring its
+    // listener, which forgets the window, and then restoring it; the count comes back all the same.
+    [Fact]
+    public void A_Window_Forgotten_Before_It_Is_Restored_Keeps_Its_Count()
+    {
+        var windows = new SuppressedResponseWindows(maxExtensions: 1);
+        windows.Note(Sid, 1000, P2, Hz);          // open until 1300
+        windows.ExtendIfOpenAt(Sid, 1100, 2600);  // the one 0x78 allowed
+
+        windows.Note(Sid, 1200, P2, Hz);          // a send noted ...
+        windows.Forget(Sid);                      // ... its listener retired ...
+        windows.Restore(Sid, had: true, until: 2600); // ... and the window put back
+        windows.ExtendIfOpenAt(Sid, 1300, 2800);  // still one too many
+
+        windows.TryGetDeadline(Sid, out var until).Should().BeTrue();
+        until.Should().Be(2600);
+    }
 }

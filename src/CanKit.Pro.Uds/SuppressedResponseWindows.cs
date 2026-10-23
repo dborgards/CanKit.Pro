@@ -190,7 +190,9 @@ internal sealed class SuppressedResponseWindows
             _until.Remove(sid);
             _pendingExtension.Remove(sid);
             _extensions.Remove(sid);
-            _extensionsBeforeNote.Remove(sid);
+            // The snapshot stays: the functional client retires the listener of a refused send
+            // -- which forgets the window -- before it restores the window (Bugbot on #395).
+            // The next note replaces it in any case.
         }
     }
 
