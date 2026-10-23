@@ -640,12 +640,14 @@ producer resets the toggle baseline rather than counting as a reply.
 
 **Life guarding (producer side).** With `100Ch` (guard time) and `100Dh` (life time factor)
 both non-zero, the node supervises the master that guards it: guarding starts with the first
-RTR received, and when the next RTR stays away longer than guard time × life time factor,
+RTR it answers, and when the next RTR stays away longer than guard time × life time factor,
 `LifeGuardingEvent` reports `Occurred` — once per lapse — and the next RTR reports `Resolved`.
+An RTR the node does not answer (see below) does not start or feed life guarding either.
 
 **Precedence.** CiA 301 §7.2.8.3.2.2 forbids running both protocols on one NMT slave: while
 `1017h` ≠ 0 the heartbeat protocol is in use, guarding RTRs are not answered and no life
-guarding runs (`RespondToNodeGuardingRtr` additionally gates the reply). The same rule decides
+guarding runs. `RespondToNodeGuardingRtr = false` has the same effect with the heartbeat
+producer off: no reply, and no life guarding, whatever `100Ch` and `100Dh` hold. The same rule decides
 the **state-change heartbeat**: a heartbeat announcing a new NMT state goes out only while the
 producer is on, because with it off an unsolicited data frame on `0x700 + id` is
 indistinguishable from a toggle-0 guarding reply (#43).

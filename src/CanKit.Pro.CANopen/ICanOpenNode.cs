@@ -161,8 +161,10 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="LifeGuardingState.Occurred"/> when this node, being guarded by a master, was
     /// not polled within its node life time (<c>100Ch</c> guard time × <c>100Dh</c> life time
     /// factor, both from the object dictionary), and with <see cref="LifeGuardingState.Resolved"/>
-    /// when a poll arrives again afterwards. Guarding starts with the first RTR received; both
-    /// objects at 0 (the default) disable it.
+    /// when a poll arrives again afterwards. Guarding starts with the first RTR the node answers;
+    /// both objects at 0 (the default) disable it, and so does an RTR the node does not answer --
+    /// with the heartbeat producer on, or with <see cref="CanOpenNodeOptions.RespondToNodeGuardingRtr"/>
+    /// off.
     /// </summary>
     event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent;
 
