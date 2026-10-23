@@ -52,9 +52,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private void PopulateSafetyObjects() => PopulateSafetyObjects(_od, _nodeId, _srdoCount, _options.WritableCommunicationParameters);
 
     /// <summary>EN 50325-5:2010 Table 5, object 1301h:01 default: node-id 1..32 produces, 33..64
-    /// consumes, above 64 the SRDO does not exist (#289).</summary>
-    private static SrdoDirection DefaultDirectionOfSrdo1(byte nodeId)
-        => nodeId <= 32 ? SrdoDirection.Transmit : SrdoDirection.Receive;
+    /// consumes, any other node-id (65..127, or 255 before LSS assigns one) has no SRDO 1 (#289).</summary>
+    internal static SrdoDirection DefaultDirectionOfSrdo1(byte nodeId)
+        => nodeId is < 1 or > 64 ? SrdoDirection.None
+            : nodeId <= 32 ? SrdoDirection.Transmit : SrdoDirection.Receive;
 
     /// <summary>Static, as every rule of this file down to the mapping entry, so that
     /// <see cref="LoadDescribedSafetyObjects(CanOpenDeviceDescription, byte)"/> runs the same code over a dictionary of its own.</summary>
