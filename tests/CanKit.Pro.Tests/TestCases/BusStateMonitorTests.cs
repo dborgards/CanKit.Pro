@@ -266,6 +266,34 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
             "the follow-up recheck observes the state the in-flight hint was announcing");
     }
 
+    // A-3 (2026-10-21 deep review): the coalescing gate is claimed before the post and released
+    // by the recheck that post queues -- or, when the post is refused, by PostRecheck itself. Only
+    // ObjectDisposedException released it; anything else a foreign actor's Post throws left it
+    // claimed, and every later hint was dropped.
+    [Fact]
+    public void A_Post_Refused_With_Another_Exception_Does_Not_Latch_The_Hint_Gate()
+    {
+        using var bus = OpenBus();
+        using var actor = new MailboxActor();
+        using var monitor = new BusStateMonitor(bus, actor);
+        actor.RunQueuedWork();
+
+        var refusal = new InvalidOperationException("mailbox refused the post");
+        actor.PostFailure = refusal;
+        Action refusedHint = () => bus.RaiseErrorFrame();
+        refusedHint.Should().Throw<InvalidOperationException>().Which.Should().BeSameAs(refusal,
+            "the refusal still reaches whoever raised the hint");
+        actor.PostFailure = null;
+        actor.MailboxDepth.Should().Be(0, "the refused post queued nothing");
+
+        bus.BusState = BusState.BusOff;
+        bus.RaiseErrorFrame();
+
+        actor.MailboxDepth.Should().Be(1, "the next hint must post a recheck: nothing queued by the refused one will ever release the gate");
+        actor.RunQueuedWork();
+        monitor.CurrentState.Should().Be(BusState.BusOff);
+    }
+
     [Fact]
     public void Constructor_Rejects_A_Nonpositive_Poll_Interval()
     {
@@ -304,8 +332,12 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
         /// <summary>Work queued and not yet run.</summary>
         public int MailboxDepth => _mailbox.Count;
 
+        /// <summary>When set, what <see cref="Post"/> throws instead of queuing.</summary>
+        public Exception? PostFailure { get; set; }
+
         public void Post(Action work)
         {
+            if (PostFailure is { } failure) throw failure;
             Interlocked.Increment(ref _posts);
             _mailbox.Enqueue(work);
         }
