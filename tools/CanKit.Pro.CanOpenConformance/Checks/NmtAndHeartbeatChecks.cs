@@ -373,16 +373,26 @@ internal static class NmtAndHeartbeatChecks
             // just observed it. Found in review of #388.
             await tap.WaitForAsync(frames => frames.Any(f => f.Data.Length == 1),
                 Math.Max(500, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
-            if (tap.Frames.Count == 0)
-            {
-                return Outcome.NeedsSetup(
-                    "Without a heartbeat there is no way to observe the device's NMT state from outside, and this "
-                    + "check will not command a state it cannot verify. Enable the heartbeat (1017h) and re-run.");
-            }
 
             // Where it was found, so it can be put back. A device left Stopped by a conformance
             // run is a device the next person finds broken.
             var initial = LatestState(tap);
+
+            // The guard is on a *usable* state, not on frames arriving. A device emitting frames
+            // with malformed payloads on the heartbeat COB-ID passed the old Frames.Count check,
+            // and the run then commanded states with pre-operational as its only fallback — which
+            // can leave a device that began Operational in pre-operational, breaking the write
+            // tier's promise. Found in review of #388.
+            if (initial is null)
+            {
+                return Outcome.NeedsSetup(
+                    tap.Frames.Count == 0
+                        ? "Without a heartbeat there is no way to observe the device's NMT state from outside, and this "
+                          + "check will not command a state it cannot verify. Enable the heartbeat (1017h) and re-run."
+                        : $"{tap.Frames.Count} frame(s) arrived on the heartbeat COB-ID and none carries a one-byte NMT "
+                          + "state (see HBT-02), so the state before the check cannot be read — and this check will not "
+                          + "command a state it would be unable to restore.");
+            }
             var measurements = new Dictionary<string, string>
             {
                 ["state before"] = initial is { } before ? DescribeState(before) : "(unreadable)",

@@ -249,13 +249,25 @@ internal static class PdoSyncEmcyChecks
 
             // A descriptor whose transmission type could not be read cannot be classified, so the
             // prerequisite is unresolved rather than the feature absent.
-            if (prerequisiteProblems.Count > 0 && known.All(p => !p.TransmissionTypeRead))
+            // Any unread transmission type, not only all of them: a descriptor whose 1800h:02 did
+            // not come back is filtered out of the classification below, so SYN-02 would otherwise
+            // pass having tested the readable TPDOs while an omitted one may be cyclic and silent.
+            // Found in review of #388.
+            var unreadTypes = known.Where(p => p.Valid && !p.TransmissionTypeRead).ToList();
+            if (unreadTypes.Count > 0)
             {
                 return Outcome.Inconclusive(
-                    "No TPDO's transmission type could be read, so which of them are synchronous is unknown: "
-                    + string.Join("; ", prerequisiteProblems.Take(5)) + ".",
+                    $"{unreadTypes.Count} of {known.Count(p => p.Valid)} valid TPDO(s) would not return 1800h:02, so "
+                    + "whether they are synchronous is unknown and testing only the rest would report a coverage this "
+                    + "run does not have"
+                    + (prerequisiteProblems.Count > 0 ? ": " + string.Join("; ", prerequisiteProblems.Take(5)) : string.Empty)
+                    + ".",
                     Attribution.Device,
-                    new Dictionary<string, string> { ["prerequisite problems"] = string.Join("; ", prerequisiteProblems) });
+                    new Dictionary<string, string>
+                    {
+                        ["TPDOs with an unread transmission type"] = string.Join(", ", unreadTypes.Select(p => $"TPDO{p.Number}")),
+                        ["prerequisite problems"] = prerequisiteProblems.Count > 0 ? string.Join("; ", prerequisiteProblems) : "(none reported)",
+                    });
             }
 
             // Only PDOs whose transmission type was actually read: a default standing in for a
@@ -286,8 +298,25 @@ internal static class PdoSyncEmcyChecks
 
             // Enough SYNCs for the slowest of them to have had two opportunities, plus a margin,
             // and bounded so that a type-240 TPDO does not turn this into a minutes-long check.
+            var overflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            if (overflow is not { } counterOverflow)
+            {
+                return Outcome.Inconclusive(
+                    "1019h is readable in principle but did not come back usable, so whether this device's SYNC carries "
+                    + "a counter is unknown. Sending the wrong form would fail it for silence, so nothing was sent.",
+                    Attribution.Device);
+            }
+
             var slowest = cyclic.Max(p => (int)p.TransmissionType);
-            var syncs = Math.Min(600, slowest * 2 + 2);
+            var highestStart = cyclic.Max(p => (int)p.SyncStartValue);
+
+            // A TPDO with 1800h:06 set does not begin until the SYNC counter reaches that value,
+            // so the counter has to get there before any of this measures the device rather than
+            // the run. Two full counter cycles plus the slowest type's own two opportunities.
+            // Found in review of #388: a type-1 TPDO with start value 240 received four SYNCs and
+            // legitimately emitted nothing, and was failed for it.
+            var forStart = highestStart > 0 && counterOverflow >= 2 ? counterOverflow * 2 + slowest * 2 : 0;
+            var syncs = Math.Min(600, Math.Max(slowest * 2 + 2, forStart));
             const int SyncPeriodMs = 20;
 
             // The SYNC goes on the COB-ID the *target* listens to, not this tool's own. The client
@@ -300,15 +329,6 @@ internal static class PdoSyncEmcyChecks
                 return Outcome.NeedsSetup(
                     "The target's 1005h could not be read, so there is no way to know which COB-ID its synchronous "
                     + "TPDOs are waiting on. See SYN-01.");
-            }
-
-            var overflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
-            if (overflow is not { } counterOverflow)
-            {
-                return Outcome.Inconclusive(
-                    "1019h is readable in principle but did not come back usable, so whether this device's SYNC carries "
-                    + "a counter is unknown. Sending the wrong form would fail it for silence, so nothing was sent.",
-                    Attribution.Device);
             }
 
             byte counter = 0;
@@ -332,7 +352,7 @@ internal static class PdoSyncEmcyChecks
                     // TryAcceptSync enforces that DLC rule. Sending DLC 0 regardless failed a
                     // conforming device for silence. Found in review of #388.
                     var payload = counterOverflow >= 2
-                        ? new[] { (byte)(counter = (byte)(counter % counterOverflow + 1)) }
+                        ? new[] { counter = (byte)(counter % counterOverflow + 1) }
                         : Array.Empty<byte>();
                     var syncFrame = CanFrame.Classic((int)sync.CobId, payload, isExtendedFrame: sync.Extended);
                     if (session.Bus.Transmit(syncFrame) <= 0) rejected++;
@@ -357,6 +377,11 @@ internal static class PdoSyncEmcyChecks
             var measurements = new Dictionary<string, string>
             {
                 ["SYNC counter (1019h)"] = counterOverflow >= 2 ? $"overflow {counterOverflow}, one-byte counter sent" : "none, DLC 0",
+                ["highest SYNC start value (1800h:06)"] = highestStart == 0
+                    ? "none"
+                    : counterOverflow >= 2
+                        ? $"{highestStart}; {syncs} SYNCs cover it"
+                        : $"{highestStart}, but 1019h reports no counter — a start value without a counter has nothing to start on",
                 ["SYNCs sent"] = $"{syncs} on 0x{sync.CobId:X3}{(sync.Extended ? " (29-bit)" : string.Empty)} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})"
                     + (rejected > 0 ? $"; the driver rejected {rejected}" : string.Empty),
                 ["frames before the SYNCs"] = quiet.ToString(CultureInfo.InvariantCulture),
@@ -391,8 +416,20 @@ internal static class PdoSyncEmcyChecks
                 // count is capped, and a transmission type above that cap would otherwise be
                 // failed for not transmitting on a SYNC that was never sent — the same false FAIL
                 // the fixed five-SYNC constant produced, re-entered through the bound.
-                if (opportunities >= 1) silent.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType})");
-                else unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {syncs} SYNCs sent)");
+                var startUnreached = pdo.SyncStartValue > 0 && (counterOverflow < 2 || syncs < counterOverflow);
+                if (startUnreached)
+                {
+                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, 1800h:06 start value {pdo.SyncStartValue} "
+                        + "was not reached by this run's counter)");
+                }
+                else if (opportunities >= 1)
+                {
+                    silent.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType})");
+                }
+                else
+                {
+                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {syncs} SYNCs sent)");
+                }
             }
 
             if (unmeasured.Count > 0) measurements["not measured (fewer SYNCs sent than the type asks for)"] = string.Join(", ", unmeasured);
@@ -670,7 +707,7 @@ internal static class PdoSyncEmcyChecks
     /// <summary>One PDO as its own parameters describe it.</summary>
     private readonly record struct PdoDescriptor(
         int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, bool TransmissionTypeRead,
-        int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
+        byte SyncStartValue, int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
 
     private readonly record struct PdoSweep(List<PdoDescriptor> Descriptors, List<string> Blocked, List<string> Absent, List<string> Problems);
 
@@ -718,6 +755,9 @@ internal static class PdoSyncEmcyChecks
             var transmission = await ByteOrDefault(session, comm, 0x02, problems, mandatory: true, cancellationToken).ConfigureAwait(false);
             var inhibit = await UShortOrDefault(session, comm, 0x03, problems, cancellationToken).ConfigureAwait(false);
             var eventTimer = await UShortOrDefault(session, comm, 0x05, problems, cancellationToken).ConfigureAwait(false);
+            // 1800h:06 is the SYNC start value, optional: the counter value at which this TPDO
+            // begins its cycle (CiA 301 §7.5.2.37).
+            var syncStart = await ByteOrDefault(session, comm, 0x06, problems, mandatory: false, cancellationToken).ConfigureAwait(false);
 
             var (bits, entries) = await ReadMappingAsync(session, map, problems, cancellationToken).ConfigureAwait(false);
 
@@ -735,6 +775,7 @@ internal static class PdoSyncEmcyChecks
                 Valid: (cobIdWord & CanOpenCobId.InvalidBit) == 0,
                 TransmissionType: transmission ?? 0xFF,
                 TransmissionTypeRead: transmission is not null,
+                SyncStartValue: syncStart ?? 0,
                 InhibitMs: inhibit is { } inh ? inh / 10 : 0, // 1800h:03 counts 100 us units
                 EventTimerMs: eventTimer ?? 0,
                 Bytes: (bits + 7) / 8,
