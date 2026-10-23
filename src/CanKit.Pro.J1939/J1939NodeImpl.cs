@@ -1501,26 +1501,24 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try
         {
             schedule.Start();
+
+            // Registered once started, so every schedule the teardown finds has a tick to
+            // cancel. The teardown stops every schedule it finds registered; one registered after
+            // the teardown took its list -- a Dispose that began after the check at the top -- is
+            // refused here instead: the flag is set before the teardown is queued, so either that
+            // teardown sees this schedule or this read sees the flag (Codex on #397). Whatever
+            // fails on the way, the schedule is disposed before the failure propagates.
+            lock (_schedulesGate) _schedules.Add(schedule);
+            AfterPeriodicScheduleStarted?.Invoke();
+            if (Volatile.Read(ref _disposed) != 0)
+                throw new ObjectDisposedException(nameof(J1939NodeImpl));
+            return schedule;
         }
         catch
         {
             schedule.Dispose();
             throw;
         }
-
-        // Registered once started, so every schedule the teardown finds has a tick to cancel. The
-        // teardown stops every schedule it finds registered; one registered after the teardown
-        // took its list -- a Dispose that began after the check at the top -- is stopped here
-        // instead: the flag is set before the teardown is queued, so either that teardown sees
-        // this schedule or this read sees the flag (Codex on #397).
-        lock (_schedulesGate) _schedules.Add(schedule);
-        AfterPeriodicScheduleStarted?.Invoke();
-        if (Volatile.Read(ref _disposed) != 0)
-        {
-            schedule.Dispose();
-            throw new ObjectDisposedException(nameof(J1939NodeImpl));
-        }
-        return schedule;
     }
 
     // Every schedule StartPeriodicSend handed out and its caller has not disposed. The node's
