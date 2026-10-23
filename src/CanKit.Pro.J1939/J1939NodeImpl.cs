@@ -742,7 +742,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 $"J1939 address claim TX failed for SA 0x{preferredAddress:X2}.", error));
     }
 
-    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload, bool isEcho)
+    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload, bool isEcho, long receivedAt)
     {
         if (payload.Length < 8) return; // malformed
         var peerName = J1939Name.FromBytes(payload); // the wire order, not the host's (#55)
@@ -763,7 +763,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // A frame the adapter flags as an echo is one too in Normal mode: Vector Classic delivers
         // its own TX event flagged there (#249). Such a marker is only spent by a flagged frame,
         // so a peer's identical claim, which is never flagged, is still arbitrated.
-        if (TryTakeClaimEcho(canId, payload, isEcho)) return;
+        if (TryTakeClaimEcho(canId, payload, isEcho, receivedAt)) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
         // are in the middle of claiming — in which case a Cannot-Claim cannot contest us
@@ -1127,10 +1127,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private bool IsExpired(ClaimEcho echo, long now) => echo.ExpiresAt <= now;
 
-    private bool TryTakeClaimEcho(uint canId, byte[] payload, bool isEcho)
+    // Expiry is judged at `receivedAt`, when the reader took the frame off the subscription: an
+    // echo that arrived inside the grace and waited on the actor behind a long handler is still
+    // this node's own, and taking it for a peer with our NAME would lose the address to
+    // ourselves (Codex on #397). Frames are read in order, so a marker expired at this frame's
+    // arrival is expired for every later one too.
+    private bool TryTakeClaimEcho(uint canId, byte[] payload, bool isEcho, long receivedAt)
     {
-        long now = _time.GetTimestamp();
-        _claimEchoes.RemoveAll(echo => IsExpired(echo, now));
+        _claimEchoes.RemoveAll(echo => IsExpired(echo, receivedAt));
 
         // A live send is still waiting for its echo. Prefer that marker over an older one
         // whose confirm already timed out: otherwise the retry's echo is spent on the
@@ -1256,15 +1260,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
         return entry;
     }
 
-    private bool TryTakeOwnFrame(uint canId, byte[] payload)
+    // `receivedAt` is when the reader took the frame off the subscription, not when the actor
+    // got to it: an echo that arrived inside the grace is the node's own even if a long handler
+    // held the actor past it (Codex on #397).
+    private bool TryTakeOwnFrame(uint canId, byte[] payload, long receivedAt)
     {
         lock (_ownFramesGate)
         {
-            long now = _time.GetTimestamp();
             for (int i = 0; i < _ownFrames.Count; i++)
             {
                 var entry = _ownFrames[i];
-                if (entry.ExpiresAt <= now)
+                if (entry.ExpiresAt <= receivedAt)
                 {
                     _ownFrames.RemoveAt(i--);
                     continue;
@@ -1548,6 +1554,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // Reader loops
     // =========================================================================================
 
+    /// <summary>
+    /// A seam for tests, null in production: runs on the reader once it has taken a frame off the
+    /// subscription and stamped it, before the frame is handed to the actor. A test moves the
+    /// clock here to model a frame that arrived in time and waited on the actor (Codex on #397).
+    /// </summary>
+    internal Action<uint>? AfterFrameRead;
+
     private async Task RunReaderAsync()
     {
         try
@@ -1578,7 +1591,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 var isPdu1 = fields.IsPdu1;
                 var canId = (uint)frame.ID;
                 var isEcho = frameEvent.IsEcho;
-                _actor.Post(() => HandleIncomingFrame(canId, pgn, priority, sa, da, isPdu1, payload, isEcho));
+                var receivedAt = _time.GetTimestamp();
+                AfterFrameRead?.Invoke(canId);
+                _actor.Post(() => HandleIncomingFrame(canId, pgn, priority, sa, da, isPdu1, payload, isEcho, receivedAt));
             }
         }
         catch (OperationCanceledException) { /* expected on Dispose */ }
@@ -1723,14 +1738,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     private void HandleIncomingFrame(uint canId, uint pgn, byte priority, byte sa, byte da, bool isPdu1, byte[] payload,
-        bool isEcho)
+        bool isEcho, long receivedAt)
     {
         try
         {
             // Address Claim (PGN 0xEE00): drive the state machine and stop; not an application PGN.
             if (J1939Pgn.IsAddressClaim(pgn))
             {
-                HandleIncomingAddressClaim(canId, sa, payload, isEcho);
+                HandleIncomingAddressClaim(canId, sa, payload, isEcho, receivedAt);
                 return;
             }
 
@@ -1761,7 +1776,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // on #140). And the carve-out needs an address to be directed to — while the node
             // holds none, -1 cast to a byte is the global address, and a broadcast echo would
             // read as directed to us (Bugbot on #140).
-            bool ownFrame = TryTakeOwnFrame(canId, payload);
+            bool ownFrame = TryTakeOwnFrame(canId, payload, receivedAt);
             bool directedToUs = myAddr >= 0 && isPdu1 && da == (byte)myAddr;
             if (myAddr >= 0 && sa == (byte)myAddr && !directedToUs) return;
 

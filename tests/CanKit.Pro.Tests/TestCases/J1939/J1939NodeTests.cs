@@ -465,6 +465,39 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the echo the marker waited for is a grace overdue, so this frame is a CA with our NAME");
     }
 
+    // Codex on #397: the expiry above is judged when the frame arrived, not when the actor got to
+    // it. An echo that arrived inside the grace and then waited on the actor behind a long
+    // handler is the node's own, and taking it for a peer with our NAME would lose the address
+    // to ourselves. The reader seam moves the clock past the grace between the two.
+    [Fact]
+    public async Task A_Claim_Echo_That_Arrived_Inside_The_Grace_Is_Ours_However_Late_The_Actor_Gets_To_It()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.ConfirmFirstClaimWithoutTransmit);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var name = Name(1);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(name) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x11, announce);
+        var lost = false;
+        node.AddressClaimChanged += (_, e) => { if (e.State != J1939ClaimState.Claimed) lost = true; };
+
+        var echo = AddressClaim(sourceAddress: 0x11, name.ToBytes());
+        node.AfterFrameRead = canId => { if (canId == (uint)echo.ID) clock.Advance(J1939NodeImpl.ClaimEchoGrace); };
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        bus.RaiseObserved(echo, isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        await barrier;
+
+        lost.Should().BeFalse("the echo arrived 80 ms after the confirmation, inside the grace");
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
     // #355 (J-4), the other consequence: a timed-out claim's marker lingers and, at the end of its
     // grace, re-arms while an identical marker is still live -- that is a retry whose own echo
     // has not come back yet. A live marker whose echo was lost never stopped being live, so the
@@ -5035,6 +5068,40 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             isExtendedFrame: true), isEcho: false);
         (await heard).Payload.ToArray().Should().Equal(notAvailable,
             "nothing echoes on this bus, so past the grace the frame under the vacated address is the peer's");
+    }
+
+    // Codex on #397, the ledger's half: an echo of an application frame that arrived inside the
+    // grace is the node's own even when the actor gets to it after the grace -- here after the
+    // node moved to another address, where the frame would otherwise be raised as a peer's.
+    [Fact]
+    public async Task A_Ledger_Echo_That_Arrived_Inside_The_Grace_Is_Ours_However_Late_The_Actor_Gets_To_It()
+    {
+        const uint pgn = 0xFEF1u;
+        var data = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+        await node.SendAsync(new J1939Message(pgn, data)).WithTimeout(ShortTimeout);
+        await ClaimOnClockAsync(node, clock, actor, 0x32, announce);
+
+        var raised = new List<J1939Message>();
+        node.MessageReceived += (_, m) => { lock (raised) raised.Add(m); };
+        var echo = CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x31), data, isExtendedFrame: true);
+        node.AfterFrameRead = canId => { if (canId == (uint)echo.ID) clock.Advance(J1939NodeImpl.ClaimEchoGrace); };
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        bus.RaiseObserved(echo, isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        await barrier;
+
+        lock (raised) raised.Should().NotContain(m => m.Pgn == pgn,
+            "the echo arrived 80 ms after the send returned, inside the grace, so it is the node's own");
     }
 
     // The same bus, a send the driver refused: nothing was handed over, so no echo can come and
