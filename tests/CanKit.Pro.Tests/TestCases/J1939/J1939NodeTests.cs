@@ -3612,6 +3612,46 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #375, noted in the #368 review: a reopen that fails leaves the channel it just disposed in
+    // place, still carrying its address. A re-claim of that same address then found the
+    // "channel already on this SA" shortcut true, and the node went Claimed on a disposed
+    // channel -- its multi-frame path dead while Address looked valid. The unbind to 0xFE is the
+    // reopen that fails here; the commit back to the address must reopen, not shortcut.
+    [Fact]
+    public async Task A_Reclaim_After_A_Failed_Reopen_Does_Not_Commit_On_The_Disposed_Channel()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var channels = new List<ScriptedTpChannel>();
+        int failNextOpen = 0;
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false, openTransport: sa =>
+        {
+            if (Interlocked.Exchange(ref failNextOpen, 0) != 0)
+                throw new InvalidOperationException("the channel could not be opened");
+            var channel = new ScriptedTpChannel(sa);
+            lock (channels) channels.Add(channel);
+            return channel;
+        });
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+        Volatile.Write(ref failNextOpen, 1);
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the channel could not be opened");
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        lock (channels)
+        {
+            channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0x31 },
+                "the commit reopens the address rather than keeping the channel the failed unbind disposed");
+            channels.Last().Disposed.Should().BeFalse("the node is Claimed on a live channel");
+        }
+    }
+
     // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
     // is the node's own, so it is disposed in place.
     [Fact]

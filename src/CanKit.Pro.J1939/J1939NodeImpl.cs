@@ -78,6 +78,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // after a successful claim we must re-open the channel on the claimed address (Bugbot
     // 3600377721). Mutation of these two fields only happens on the actor loop.
     private IJ1939TpChannel _transport = null!;
+    // False from the moment RebindTransportOnLoop disposes _transport until a new channel is in
+    // place. A failed reopen leaves the disposed channel in the field, still carrying its address,
+    // and the rebind's shortcut must not take it for a live one (#375). Actor loop only.
+    private bool _transportLive = true;
     // Null in production; see the constructor.
     private readonly Func<byte, IJ1939TpChannel>? _openTransport;
     private Task _transportReaderTask = null!;
@@ -1535,7 +1539,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <summary>
     /// Re-open <see cref="_transport"/> on <paramref name="sourceAddress"/>. Must run on the
     /// actor loop (single-writer discipline for <c>_transport</c> / <c>_transportReaderTask</c>).
-    /// A no-op if the current channel already carries the requested SA.
+    /// A no-op if the current channel already carries the requested SA and is still live: one
+    /// left in place by a failed reopen is disposed, carries its old SA all the same, and is
+    /// reopened rather than reported as bound (#375).
     /// </summary>
     /// <remarks>
     /// The previous channel MUST be disposed synchronously on the actor
@@ -1560,7 +1566,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         if (Volatile.Read(ref _disposed) != 0) return false;
         var current = _transport;
-        if (current is not null && current.SourceAddress == sourceAddress) return true;
+        if (_transportLive && current.SourceAddress == sourceAddress) return true;
         BeforeTransportRebind?.Invoke();
 
         // Tear down the previous transport BEFORE opening the new one so no window exists
@@ -1570,12 +1576,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // stall the single ProtocolActor for up to ~2 s and block address-claim handling
         //. Late datagrams from the old reader are dropped via the
         // ReferenceEquals(transport, _transport) gate in RunTransportReaderAsync.
-        if (current is not null)
-        {
-            current.BackgroundExceptionOccurred -= OnTransportBackgroundException;
-            try { current.Dispose(); }
-            catch (Exception ex) { RaiseBackgroundException(ex); }
-        }
+        _transportLive = false;
+        current.BackgroundExceptionOccurred -= OnTransportBackgroundException;
+        try { current.Dispose(); }
+        catch (Exception ex) { RaiseBackgroundException(ex); }
 
         IJ1939TpChannel newTransport;
         try
@@ -1595,6 +1599,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         newTransport.BackgroundExceptionOccurred += OnTransportBackgroundException;
         _transport = newTransport;
+        _transportLive = true;
         _transportReaderTask = StartTransportReader(newTransport);
         return true;
     }
