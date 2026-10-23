@@ -20,7 +20,7 @@ namespace CanKit.Pro.Tests.TestCases;
 
 /// <summary>
 /// Verifies the L2 multi-protocol demultiplexing / subscription layer
-/// (CanKit.Pro.RawCan, arc42 §5.3 / ADR-5, SRS FR-RAW-010..013) against the Virtual adapter.
+/// (CanKit.Pro.RawCan, arc42 §5.3 / ADR-5, SRS FR-RAW-010..015) against the Virtual adapter.
 /// </summary>
 public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 {
@@ -904,7 +904,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
     // decides what IsEcho and ReceiveTimestamp are on it.
     // =============================================================================================
 
-    // FR-RAW-010: the default subscription is echo-free. Before #23 the demux dropped the bus's
+    // FR-RAW-015: the default subscription is echo-free. Before #23 the demux dropped the bus's
     // echo flag, so every subscriber saw its own transmissions arrive as if a peer had sent them --
     // which is what drove J1939, CANopen and the J1939 transport to each rebuild "is this mine?"
     // out of application data.
@@ -996,7 +996,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         DrainIds(sub).Should().Equal(0x401);
     }
 
-    // FR-RAW-010: the bus's own receive timestamp reaches the subscriber unmodified. The demux
+    // FR-RAW-015: the bus's own receive timestamp reaches the subscriber unmodified. The demux
     // used to discard it, leaving no way to order frames by when the adapter saw them.
     [Fact]
     public void Receive_Timestamp_Reaches_The_Subscriber_Unmodified()
