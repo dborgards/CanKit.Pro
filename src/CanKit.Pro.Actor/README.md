@@ -79,7 +79,10 @@ Not-yet-due `Schedule` callbacks are discarded, not fired. `Dispose` waits up to
 the loop to actually finish; if a callback is still running when that elapses it returns anyway
 (so `Dispose` never becomes the thing that hangs) and reports a `TimeoutException` through
 `BackgroundExceptionOccurred` — a silent give-up would leave the caller unable to tell a clean
-shutdown from a loop still mutating state it believes it now owns. That wait holds for every
+shutdown from a loop still mutating state it believes it now owns. Unlike every other report on
+that event, this one is raised on the thread calling `Dispose`, not on the loop: the loop is still
+inside the callback that would not finish, so a subscriber must not touch loop-owned state from
+it. That wait holds for every
 caller, not only the first: a second `Dispose` — the owner's `using` after a callback disposed
 the actor from the loop, or two owners racing — also returns only once the loop has stopped (or
 the same timeout has elapsed; it is reported once). Two calls do not wait: the reentrant one from
