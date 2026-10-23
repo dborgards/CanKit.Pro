@@ -148,6 +148,8 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 **Not validated:** Address-claim arbitration against third-party ECUs and behaviour on a real J1939 network. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
+**Not supported: PCAN in Echo mode.** Measured on a PCAN USB Pro FD, the adapter delivers the node's own frames in Echo mode without the echo flag ([#249](https://github.com/dborgards/CanKit.Pro/issues/249), filed upstream as [pkuyo/CanKit#71](https://github.com/pkuyo/CanKit/issues/71)). In Echo mode `CanBusService` confirms a send only by a flagged echo, so the confirmation of every Address Claim times out and every `ClaimAddressAsync` faults with `J1939NodeException`. This stays so until RawCan can match an echo that is not flagged.
+
 ## Install
 
 ```bash
