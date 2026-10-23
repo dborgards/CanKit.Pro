@@ -1258,10 +1258,12 @@ pending timing becomes active; the callback can reconfigure the channel. The nod
 until both the second switch delay and the callback complete successfully, including for a zero
 delay. While the node is active, failed or cancelled callbacks are reported on
 `BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
-Repeated activations serialize the callbacks. An LSS command that arrives during the silence is
-performed at once; its reply is held like the other frames that may not go out yet and sent once
-the slave may transmit — every reply, not only the last one, and the replies keep the order of
-the commands, across a further silence too and while the held ones are still going out.
+Repeated activations serialize the callbacks. An activation that arrives during the silence does not
+end it: the node stays silent until that activation's second delay and callback have completed, and
+the earlier activation's end of silence is dropped. An LSS command that arrives during the silence
+is performed at once; its reply is held like the other frames that may not go out yet and sent once
+the slave may transmit — every reply, not only the last one, and the replies keep the order of the
+commands, across a further silence too and while the held ones are still going out.
 
 A new activation requests cancellation of the previous callback as soon as it is received,
 including during the first switch delay. Disposal also requests cancellation. Neither waits for

@@ -1224,6 +1224,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Second_Activate_During_The_Silence_Drops_The_First()
     {
+        // L-8 (#359): the second activate used to go through the same master, which waits out the
+        // first activation's two periods before it sends, so it arrived after the silence. A poke
+        // channel puts it inside: a second master, or one that transmits during the switch delays.
+        // L-3: it must not lift the silence. The node stays quiet through the replacement's first
+        // period and its second, and only then sends what it held; the first activation's end of
+        // silence is dropped.
         int switches = 0;
         using var bench = NewBench();
         var slave = bench.Slave(1, 5, new LssSlaveOptions
@@ -1236,11 +1242,31 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         });
         await EnterConfiguration(bench, slave);
         (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
-        var first = bench.Undriven.ActivateBitTimingAsync(300);
+        using var heard = bench.Listen();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+
+        var first = bench.Undriven.ActivateBitTimingAsync(300);               // silence from 300 to 600 ms
         await bench.WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
-        await bench.Master.ActivateBitTimingAsync(0);
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));       // its reply is held
+        await bench.WaitUntilAsync(() => slave.HeldTransmitCountForTests == 1);
+        int generation = slave.LssActivationGeneration;
+        Transmit(poke, LssFrames.ActivateBitTiming(200));                    // 300 ms into the first activation
+        await bench.WaitUntilAsync(() => slave.LssActivationGeneration == generation + 1);
+        await bench.SettleAsync();
+
+        slave.IsLssSilentForTests.Should().BeTrue("a superseding activate does not end the silence in progress");
+        heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage, "the held reply stays held");
+
+        await bench.AdvanceAsync(TimeSpan.FromMilliseconds(200));            // the replacement's first period ends
+        Volatile.Read(ref switches).Should().Be(2, "the replacement switches after its own first period");
+        await bench.AdvanceAsync(TimeSpan.FromMilliseconds(100));            // where the first silence would have ended
+        slave.IsLssSilentForTests.Should().BeTrue("the first activation's end of silence was dropped with it");
+        heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage);
+
+        await bench.AdvanceAsync(TimeSpan.FromMilliseconds(100));            // the replacement's second period ends
+        slave.IsLssSilentForTests.Should().BeFalse();
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId);
         await bench.RunAsync(first);
-        await bench.AdvanceAsync(TimeSpan.FromMilliseconds(80));
         Volatile.Read(ref switches).Should().Be(2);
         slave.LssState().Should().Be(LssState.Configuration);
     }
