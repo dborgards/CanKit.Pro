@@ -51,6 +51,12 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// records do (Table 6 footnote: "These may be read only"); sub0 and sub4 are const.</summary>
     private void PopulateSafetyObjects() => PopulateSafetyObjects(_od, _nodeId, _srdoCount, _options.WritableCommunicationParameters);
 
+    /// <summary>EN 50325-5:2010 Table 5, object 1301h:01 default: node-id 1..32 produces, 33..64
+    /// consumes, any other node-id (65..127, or 255 before LSS assigns one) has no SRDO 1 (#289).</summary>
+    internal static SrdoDirection DefaultDirectionOfSrdo1(byte nodeId)
+        => (uint)(nodeId - 1) > 63 ? SrdoDirection.None // node-ids are 1..127 or 255: this folds "below 1" into "above 64"
+            : nodeId <= 32 ? SrdoDirection.Transmit : SrdoDirection.Receive;
+
     /// <summary>Static, as every rule of this file down to the mapping entry, so that
     /// <see cref="LoadDescribedSafetyObjects(CanOpenDeviceDescription, byte)"/> runs the same code over a dictionary of its own.</summary>
     private static void PopulateSafetyObjects(ObjectDictionary od, byte nodeId, int srdoCount, bool writable)
@@ -65,7 +71,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             var map = SrdoRecords.MapIndex(n);
             bool predefined = n == 1 && nodeId <= 64;
             od.AddU8(comm, 0x00, 6, ro, nm);
-            od.AddU8(comm, 0x01, (byte)SrdoDirection.None, acc, nm);
+            od.AddU8(comm, 0x01, (byte)(predefined ? DefaultDirectionOfSrdo1(nodeId) : SrdoDirection.None), acc, nm);
             od.AddU16(comm, 0x02, 25, acc, nm);
             od.AddU8(comm, 0x03, SrdoRecords.DefaultValidationTimeMs, acc, nm);
             od.AddU8(comm, 0x04, SrdoRecords.TransmissionType, ro, nm);
@@ -539,7 +545,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             try
             {
                 if (!_srdo.TrySendGfc())
-                    throw new InvalidOperationException("The global failsafe command needs 1300h = 1 and NMT state Operational (CiA DSP 304 §8.2).");
+                    throw new InvalidOperationException("The global failsafe command needs NMT state Operational (CiA DSP 304 §8.2).");
                 return _gfcSend!;
             }
             finally

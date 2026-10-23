@@ -494,24 +494,86 @@ public class SrdoEngineConsumerTests : IDisposable
     }
 
     [Fact]
-    public void Gfc_Is_Received_And_Sent_Only_While_1300h_Is_1_And_Operational()
+    public void Gfc_Is_Received_And_Sent_Only_While_Operational_And_Is_Recorded_In_1300h()
     {
         StartConsumer();
-        Frame(CanOpenCobId.GlobalFailsafeCommand).Should().BeTrue("001h is a safety id even when ignored");
-        _host.Gfcs.Should().Be(0, "1300h = 0: GFC is not valid");
-        bool sent = true;
-        OnActor(() => sent = _engine.TrySendGfc());
-        sent.Should().BeFalse();
-        _od.WriteUnsigned(SrdoRecords.GfcParameter, 0, 1);
-        Frame(CanOpenCobId.GlobalFailsafeCommand);
-        _host.Gfcs.Should().Be(1);
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u);
+        // EN 50325-5:2010 §7.2.1 (OBE-12450): the consumer signals whatever 1300h holds; §6.4.2.1
+        // (OBE-12439) it is the indication that sets 1300h to 01, not 01 that admits the indication.
+        Frame(CanOpenCobId.GlobalFailsafeCommand).Should().BeTrue();
+        _host.Gfcs.Should().Be(1, "1300h = 0 does not gate the reception");
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(1u, "OBE-12439");
+        _od.WriteUnsigned(SrdoRecords.GfcParameter, 0, 0);
         Frame(CanOpenCobId.GlobalFailsafeCommand, 0x00);
         _host.Gfcs.Should().Be(1, "§8.2.3: L = 0");
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "a frame that is no GFC records nothing");
+        bool sent = false;
         OnActor(() => sent = _engine.TrySendGfc());
-        sent.Should().BeTrue();
+        sent.Should().BeTrue("1300h = 0 does not gate the request either");
         _host.Sent.Should().ContainSingle().Which.Should().Be((CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>()));
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(1u, "OBE-12437");
+        _od.WriteUnsigned(SrdoRecords.GfcParameter, 0, 0);
         OnActor(() => _engine.LeaveOperational());
         OnActor(() => sent = _engine.TrySendGfc());
         sent.Should().BeFalse();
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(1, "outside Operational nothing is signalled");
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "and nothing is recorded");
+    }
+
+    /// <summary>A remote frame on 001h is no GFC (§8.1: RTR is not possible): consumed, nothing
+    /// signalled, nothing recorded.</summary>
+    [Fact]
+    public void A_Remote_Frame_On_001h_Is_No_Gfc()
+    {
+        StartConsumer();
+        bool consumed = false;
+        OnActor(() => consumed = _engine.TryHandleFrame(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>(), isRtr: true));
+        consumed.Should().BeTrue();
+        _host.Gfcs.Should().Be(0);
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u);
+    }
+
+    /// <summary>A second GFC finds 1300h at 1 already: it is signalled again and nothing is rewritten.</summary>
+    [Fact]
+    public void A_Second_Gfc_Is_Signalled_With_1300h_Already_1()
+    {
+        StartConsumer();
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(2);
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(1u);
+        _host.Exceptions.Should().BeEmpty();
+    }
+
+    /// <summary>1300h is an optional object (EN 50325-5:2010 §6.4.2.1): a node whose description
+    /// leaves it out has nothing to record, and the GFC still goes both ways.</summary>
+    [Fact]
+    public void A_Gfc_Works_On_A_Node_Without_1300h()
+    {
+        StartConsumer();
+        _od.Remove(SrdoRecords.GfcParameter, 0).Should().BeTrue();
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(1);
+        bool sent = false;
+        OnActor(() => sent = _engine.TrySendGfc());
+        sent.Should().BeTrue();
+        _host.Exceptions.Should().BeEmpty("there was nothing to set");
+    }
+
+    /// <summary>A dictionary that refuses the record write does not stop the command: the
+    /// reception is still signalled and the refusal reported, once per attempt.</summary>
+    [Fact]
+    public void A_Refused_Write_Of_1300h_Is_Reported_And_Does_Not_Stop_The_Gfc()
+    {
+        StartConsumer();
+        RefuseWritesTo(SrdoRecords.GfcParameter);
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(1);
+        bool sent = false;
+        OnActor(() => sent = _engine.TrySendGfc());
+        sent.Should().BeTrue();
+        _host.Exceptions.Should().HaveCount(2).And.OnlyContain(e => e.Message.Contains("1300h"));
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u);
     }
 }
