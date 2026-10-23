@@ -45,6 +45,17 @@ class UnknownCitations(unittest.TestCase):
     def test_an_unknown_decision_is_reported(self):
         self.assertEqual({'ADR-99': ['README.md']}, self.check({'README.md': 'see ADR-99'}))
 
+    def test_project_files_are_scanned(self):
+        self.assertEqual({'FR-RAW-999': ['P.csproj']}, self.check({'P.csproj': '<Description>FR-RAW-999</Description>'}))
+
+    def test_the_later_endpoints_of_a_range_or_a_list_are_checked(self):
+        self.assertEqual({'FR-RAW-009': ['A.cs']}, self.check({'A.cs': '// FR-RAW-001..009'}))
+        self.assertEqual({'NFR-777': ['A.cs']}, self.check({'A.cs': '// NFR-004/777'}))
+
+    def test_shorthand_is_expanded_with_the_prefix(self):
+        self.assertEqual(['FR-CO-002', 'FR-CO-003', 'FR-CO-004', 'NFR-004', 'FR-RAW-030', 'FR-RAW-034'],
+                         traceability.cited_requirements('FR-CO-002/003/004 and NFR-004, FR-RAW-030..034.'))
+
     def test_generated_directories_are_skipped(self):
         self.assertEqual({}, self.check({'obj/Generated.cs': '// FR-RAW-999', 'bin/X.md': 'ADR-99'}))
 

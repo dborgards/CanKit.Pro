@@ -47,7 +47,11 @@ REQ = re.compile(r"\b(?:FR|NFR)-(?:[A-Z0-9]+-)?\d+\b")
 # of the arc42 document. docs/decisions/ numbers its records on its own (0001-...), not as ADR-n.
 ADR = re.compile(r"\bADR-\d+\b")
 ADR_HEADING = re.compile(r"^#{2,4}\s+(ADR-\d+)\b", re.MULTILINE)
-CITATION_SUFFIXES = {".cs", ".md"}
+# .csproj/.props carry citations too (the CANopen package description cites its requirements).
+CITATION_SUFFIXES = {".cs", ".md", ".csproj", ".props", ".targets"}
+# `FR-RAW-030..034` and `FR-CO-002/003/004` write the later endpoints without the prefix; REQ
+# alone sees only the first id, so a typo in a later endpoint would pass.
+REQ_SHORTHAND = re.compile(r"\b((?:FR|NFR)-(?:[A-Z0-9]+-)?)(\d+)((?:(?:\.\.|/)\d+)*)")
 GENERATED_DIRECTORIES = {"bin", "obj"}
 
 # id -> the substring that must appear in the SRS verification column for the
@@ -111,6 +115,16 @@ def parse_srs(path: pathlib.Path) -> dict[str, tuple[str, str]]:
     return out
 
 
+def cited_requirements(text: str) -> list[str]:
+    """Every requirement id cited in `text`, with the endpoints of `A..B` and `A/B/C` shorthand
+    spelled out. A range is checked at its endpoints only: the ids in between are not cited."""
+    cited = []
+    for prefix, first, rest in REQ_SHORTHAND.findall(text):
+        cited.append(f"{prefix}{first}")
+        cited.extend(f"{prefix}{number}" for number in re.findall(r"\d+", rest))
+    return cited
+
+
 def unknown_citations(roots: list[pathlib.Path], known_reqs: set[str],
                       known_adrs: set[str]) -> dict[str, list[str]]:
     """Return {id: [files citing it]} for every cited FR-/NFR-/ADR- id that is not defined."""
@@ -124,7 +138,7 @@ def unknown_citations(roots: list[pathlib.Path], known_reqs: set[str],
             if GENERATED_DIRECTORIES & set(f.relative_to(root).parts):
                 continue
             text = f.read_text(encoding="utf-8", errors="replace")
-            cited = [(i, known_reqs) for i in REQ.findall(text)] + \
+            cited = [(i, known_reqs) for i in cited_requirements(text)] + \
                     [(i, known_adrs) for i in ADR.findall(text)]
             for cited_id, known in cited:
                 if cited_id not in known:
