@@ -848,6 +848,10 @@ internal static class NmtAndHeartbeatChecks
                 (NmtCommand.EnterPreOperational, NmtState.PreOperational),
             };
 
+            // Read before the first command, for the reason the helper's own remarks give: in
+            // Stopped the SDO server is silent and the read would fall back to the short window.
+            var confirmBudgetMs = await PdoSyncEmcyChecks.NmtConfirmationBudgetMsAsync(session, cancellationToken)
+                .ConfigureAwait(false);
             var problems = new List<string>();
             var restoreFailed = false;
             try
@@ -868,8 +872,7 @@ internal static class NmtAndHeartbeatChecks
                         // confirms from a phase, and NMT-01 then records a state change the device
                         // did make as one it did not. The same budget PDO-03's and SYN-02's
                         // confirmations use. Found in review of #388.
-                        await PdoSyncEmcyChecks.NmtConfirmationBudgetMsAsync(session, cancellationToken)
-                            .ConfigureAwait(false),
+                        confirmBudgetMs,
                         cancellationToken).ConfigureAwait(false);
                     var actual = LatestState(tap);
                     measurements[$"after {command}"] = actual is { } s ? DescribeState(s) : "(no heartbeat)";
@@ -891,7 +894,8 @@ internal static class NmtAndHeartbeatChecks
                     // send the command and treat a normally completed Task as proof of delivery —
                     // which it is not, since SendNmtCommandAsync discards the transmit result. One
                     // restore path verified and this one did not. Found in review of #388.
-                    var restoration = await PdoSyncEmcyChecks.RestoreNmtStateAsync(session, book, "NMT-01", restore)
+                    var restoration = await PdoSyncEmcyChecks.RestoreNmtStateAsync(
+                            session, book, "NMT-01", restore, confirmBudgetMs)
                         .ConfigureAwait(false);
                     measurements["restored to"] = restoration.State;
                     restoreFailed = !restoration.Succeeded;

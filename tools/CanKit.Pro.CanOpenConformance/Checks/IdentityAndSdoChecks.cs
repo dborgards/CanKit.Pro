@@ -18,6 +18,11 @@ namespace CanKit.Pro.CanOpenConformance.Checks;
 /// </summary>
 internal static class IdentityAndSdoChecks
 {
+    /// <summary>How long SDO-02 waits after the first response before judging the reply set. A
+    /// conforming server sends exactly one frame, so this costs that long once; what it buys is
+    /// that a second, illegal reply cannot hide behind the delivery pump.</summary>
+    private const int SdoReplySettleMs = 50;
+
     public static async Task RunAsync(Session session, Checkbook book, CancellationToken cancellationToken)
     {
         await book.RunAsync("IDN-01", "identity", "1000h:00 device type", Tier.Read, "FR-CO-002", async () =>
@@ -256,6 +261,12 @@ internal static class IdentityAndSdoChecks
             // The same correction EMC-01 needed, found by sweeping for it. Found in review of #388.
             await tap.WaitForAsync(frames => frames.Any(f => !f.IsRemote), session.Options.SdoTimeoutMs, cancellationToken)
                 .ConfigureAwait(false);
+
+            // WaitForAsync returns on the first data frame, and the oversized-reply rule below
+            // judges the whole set — so without this the rule could only ever see a second reply
+            // that had already been pumped, and a server sending one a few milliseconds behind
+            // the first would be reported as conforming. Found in review of #388.
+            await Task.Delay(SdoReplySettleMs, cancellationToken).ConfigureAwait(false);
 
             var responses = tap.Frames.Where(f => !f.IsRemote).ToList();
 

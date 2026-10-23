@@ -50,10 +50,20 @@ internal static class PdoSyncEmcyChecks
         // of #388.
         var tpdoProblems = new List<string>();
 
+        // And PDO-03's prerequisite, for the same reason one layer along. Reporting PDOs past the
+        // sweep limit in PDO-01 and PDO-02 left the check whose verdict the finding was *about*
+        // untouched: PDO-03 still watched the four slots and could pass with "none in Stopped"
+        // while a declared TPDO5 kept transmitting. Fixing the two reporting checks and not the
+        // observing one left the P1 in place behind a better-worded report. Found in review
+        // of #388.
+        var tpdoBeyondLimit = new List<string>();
+
         await book.RunAsync("PDO-01", "pdo", "TPDO communication and mapping parameters (1800h/1A00h)", Tier.Read, "FR-CO-005", async () =>
         {
             var found = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
             tpdos.AddRange(found.Descriptors);
+            tpdoBeyondLimit.AddRange(found.NotAddressed
+                .Where(n => n.Contains("further communication record", StringComparison.Ordinal)));
             tpdoProblems.AddRange(found.Problems);
             return Summarise("TPDO", found, session);
         }).ConfigureAwait(false);
@@ -73,8 +83,32 @@ internal static class PdoSyncEmcyChecks
             // not addressed — yet this filter took every valid descriptor, so PDO-03 watched them
             // as ordinary TPDOs and could return Pass from their traffic, contradicting the
             // report's own coverage section. Found in review of #388.
+            // Before anything is watched: "no TPDO was transmitted in Stopped" is a claim about
+            // every TPDO, and a declared one this run never discovered cannot be in it. The
+            // report said so in PDO-01 while this check went on passing. Found in review of #388.
+            if (tpdoBeyondLimit.Count > 0)
+            {
+                return Outcome.NeedsSetup(
+                    "Not every TPDO this device declares was discovered, so no verdict can be drawn about what it "
+                    + "transmits: " + tpdoBeyondLimit[0] + ". The ones that were read are in PDO-01.");
+            }
+
             var multiplexed = tpdos.Where(p => p.Valid && p.MultiplexedMode).ToList();
             var valid = tpdos.Where(p => p.Valid && !p.MultiplexedMode).ToList();
+
+            // Two valid TPDO records may share a COB-ID, which this stack's README documents as
+            // supported — and every per-descriptor rule here attributes frames by identifier, so
+            // each of the pair saw the other's payload. With different mapping lengths that failed
+            // a conforming device on the length rule; with equal ones, traffic from either made
+            // both look active. The identifier is not a TPDO's identity, so the shared ones are
+            // set aside from the per-descriptor rules. The Stopped rule still covers them, because
+            // that one really is about the identifier. Found in review of #388.
+            var shared = valid
+                .GroupBy(p => (p.CobId, p.Extended))
+                .Where(g => g.Count() > 1)
+                .SelectMany(g => g)
+                .ToList();
+            var separable = valid.Except(shared).ToList();
             if (valid.Count == 0 && multiplexed.Count == 0)
             {
                 return tpdos.Count == 0
@@ -92,6 +126,12 @@ internal static class PdoSyncEmcyChecks
             // #388, against the fix one commit earlier that excluded them wholesale.
             var ordinaryIds = valid.Select(p => (p.CobId, p.Extended)).ToHashSet();
             var watched = ordinaryIds.Concat(multiplexed.Select(p => (p.CobId, p.Extended))).ToHashSet();
+
+            // Before the state is touched. In Stopped the device's SDO server is silent, so
+            // reading 1017h to size a confirmation times out there and falls back to the short
+            // window the budget exists to replace — and adds that timeout to every confirmation
+            // besides. Found in review of #388, against the budget added one commit earlier.
+            var confirmBudgetMs = await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false);
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             if (initialState is null)
             {
@@ -130,7 +170,7 @@ internal static class PdoSyncEmcyChecks
                 // since 932e2d0 and Start was not, so an undelivered Start left a conforming
                 // device legitimately silent and the per-descriptor overdue rule charged it for
                 // that. Found in review of #388.
-                operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, cancellationToken)
+                operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, confirmBudgetMs, cancellationToken)
                     .ConfigureAwait(false) == (byte)NmtState.Operational;
 
                 // The boundary, recorded. Everything the tap collected before this instant was
@@ -171,7 +211,7 @@ internal static class PdoSyncEmcyChecks
                 // discards the transmit result, so a frame the adapter rejected completes the
                 // await normally — the device then stays Operational and its TPDOs would be read
                 // as a conformance failure instead of a transport one.
-                stoppedConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Stopped, cancellationToken)
+                stoppedConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Stopped, confirmBudgetMs, cancellationToken)
                     .ConfigureAwait(false) == (byte)NmtState.Stopped;
 
                 await Task.Delay(SettleMs, cancellationToken).ConfigureAwait(false);
@@ -192,7 +232,8 @@ internal static class PdoSyncEmcyChecks
                 // In a finally and on CancellationToken.None because a Ctrl+C between the Start
                 // and the Stop above would otherwise walk away from a machine this check had just
                 // stopped.
-                restoration = await RestoreNmtStateAsync(session, book, "PDO-03", initialState).ConfigureAwait(false);
+                restoration = await RestoreNmtStateAsync(session, book, "PDO-03", initialState, confirmBudgetMs)
+                    .ConfigureAwait(false);
             }
 
             var measurements = new Dictionary<string, string>
@@ -264,7 +305,15 @@ internal static class PdoSyncEmcyChecks
             // the device's; an earlier version evaluated them after the Stop branches, so an
             // unconfirmed Stop returned inconclusive first and a real failure sat behind exit
             // 0. Found in review of #388.
-            var mismatched = valid.Any(p => inOperational.Any(
+            if (shared.Count > 0)
+            {
+                measurements["TPDOs sharing a COB-ID"] = string.Join(", ", shared
+                    .GroupBy(p => p.CobId)
+                    .Select(g => $"0x{g.Key:X3}: " + string.Join("/", g.Select(p => "TPDO" + p.Number))))
+                    + " — set aside from the mapped-length and event-timer rules, which cannot tell them apart";
+            }
+
+            var mismatched = separable.Any(p => inOperational.Any(
                 f => f.CanId == p.CobId && f.IsExtended == p.Extended && p.Bytes > 0 && f.Data.Length != p.Bytes));
             if (mismatched)
             {
@@ -278,7 +327,7 @@ internal static class PdoSyncEmcyChecks
             // *synchronous* TPDO with 1800h:05 set still waits for a SYNC, which this check does
             // not send — charging it for silence would be a false FAIL of the kind this whole
             // guard exists to prevent, and only an unread transmission type makes it unknowable.
-            var overdue = valid
+            var overdue = separable
                 .Where(p => p.TransmissionTypeRead && CanOpenTransmissionType.IsEventDriven(p.TransmissionType))
                 // The window has to cover the inhibit budget too: 1800h:03 may legitimately defer
                 // an event-timer expiry, and declaring the TPDO overdue on the timer alone failed
@@ -341,7 +390,7 @@ internal static class PdoSyncEmcyChecks
             {
                 // Event-driven TPDOs only transmit when their data changes, and a synchronous one
                 // waits for a SYNC this check does not send. Silence is therefore not a fault.
-                var synchronous = valid.Where(p => CanOpenTransmissionType.IsSynchronous(p.TransmissionType)).ToArray();
+                var synchronous = separable.Where(p => CanOpenTransmissionType.IsSynchronous(p.TransmissionType)).ToArray();
 
                 // The attribution follows which case it is, instead of Unknown for both. When
                 // *every* watched TPDO is synchronous the silence is not a fault and nothing is
@@ -351,7 +400,7 @@ internal static class PdoSyncEmcyChecks
                 // event-driven TPDO is genuinely unknown: the overdue rule above has already
                 // cleared the ones that owed a frame, and whether the application had data to
                 // send is not observable from the bus.
-                var allSynchronous = synchronous.Length == valid.Count;
+                var allSynchronous = synchronous.Length == separable.Count;
                 return Outcome.Inconclusive(
                     $"No TPDO was transmitted in {session.Options.PdoWindowMs} ms of Operational. "
                     + (synchronous.Length > 0
@@ -661,6 +710,7 @@ internal static class PdoSyncEmcyChecks
 
             byte counter = 0;
             var watched = cyclic.Select(p => (p.CobId, p.Extended)).ToHashSet();
+            var confirmBudgetMs = await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false);
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             if (initialState is null)
             {
@@ -697,7 +747,7 @@ internal static class PdoSyncEmcyChecks
                 // completes the await normally, the target never enters Operational, and its
                 // synchronous TPDOs are then failed for not answering SYNCs they were never due
                 // to answer. Found in review of #388.
-                operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, cancellationToken)
+                operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, confirmBudgetMs, cancellationToken)
                     .ConfigureAwait(false) == (byte)NmtState.Operational;
 
                 // A timestamp, not a count. Skip(quiet) treated "how many frames had been
@@ -731,7 +781,8 @@ internal static class PdoSyncEmcyChecks
             }
             finally
             {
-                restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
+                restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState, confirmBudgetMs)
+                    .ConfigureAwait(false);
             }
 
             // The observations are assembled before any verdict can return, so each early return
@@ -810,7 +861,22 @@ internal static class PdoSyncEmcyChecks
             var silent = new List<string>();
             var short_ = new List<string>();
             var unmeasured = new List<string>();
-            foreach (var pdo in cyclic)
+
+            // The same sharing problem as PDO-03's: a response on a shared identifier cannot be
+            // credited to one record, so a pair could pass on the traffic of one of them. Set
+            // aside and named rather than counted twice. Found in review of #388.
+            var sharedCyclic = cyclic
+                .GroupBy(p => (p.CobId, p.Extended))
+                .Where(g => g.Count() > 1)
+                .SelectMany(g => g)
+                .ToList();
+            foreach (var pdo in sharedCyclic)
+            {
+                unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: shares its COB-ID "
+                    + "with another record, so a response cannot be credited to one of them)");
+            }
+
+            foreach (var pdo in cyclic.Except(sharedCyclic))
             {
                 var mine = after.Where(f => f.CanId == pdo.CobId && f.IsExtended == pdo.Extended).ToArray();
 
@@ -1116,7 +1182,8 @@ internal static class PdoSyncEmcyChecks
     /// the way out of a cancelled check as much as a successful one. A failure here is recorded
     /// rather than thrown — it would otherwise replace the finding the check had just reached.
     /// </summary>
-    internal static async Task<Restoration> RestoreNmtStateAsync(Session session, Checkbook book, string checkId, byte? initial)
+    internal static async Task<Restoration> RestoreNmtStateAsync(
+        Session session, Checkbook book, string checkId, byte? initial, int confirmBudgetMs)
     {
         // The state the device was found in, not a fixed one. An earlier version always left
         // pre-operational, so a --tier write run against a device found Operational stopped it
@@ -1164,7 +1231,8 @@ internal static class PdoSyncEmcyChecks
         // arrive: a beat already on the wire when the command landed still reports the state
         // before it, and taking that as the answer turned a good restore into a failed check.
         // Found in review of #388.
-        var reached = await LatestNmtStateAsync(session, expected, CancellationToken.None).ConfigureAwait(false);
+        var reached = await LatestNmtStateAsync(session, expected, confirmBudgetMs, CancellationToken.None)
+            .ConfigureAwait(false);
         if (reached is null)
         {
             // Not Ok. These checks refuse to start unless the state could be read, so arriving
@@ -1344,7 +1412,8 @@ internal static class PdoSyncEmcyChecks
     /// reading the state *before* a check and wrong for confirming a command, because the frame in
     /// flight when the command arrived still carries the old state.
     /// </summary>
-    private static async Task<byte?> LatestNmtStateAsync(Session session, byte expected, CancellationToken cancellationToken)
+    private static async Task<byte?> LatestNmtStateAsync(
+        Session session, byte expected, int budgetMs, CancellationToken cancellationToken)
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
         using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
@@ -1357,8 +1426,7 @@ internal static class PdoSyncEmcyChecks
         // is fine, about a state the run itself changed. Found in review of #388.
         await probe.WaitForAsync(
             frames => frames.LastOrDefault(f => f.Data.Length == 1) is { Data.Length: 1 } last && last.Data[0] == expected,
-            await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false),
-            cancellationToken).ConfigureAwait(false);
+            budgetMs, cancellationToken).ConfigureAwait(false);
 
         var frames = probe.Frames;
         for (var i = frames.Count - 1; i >= 0; i--)
@@ -1382,6 +1450,12 @@ internal static class PdoSyncEmcyChecks
     /// never less than the operator's window. A confirmation that waits less than one period
     /// concludes from a phase rather than from the device.
     /// </summary>
+    /// <remarks>
+    /// Called before the first NMT command, never after one. In Stopped the device's SDO server is
+    /// silent, so reading 1017h there times out and the helper fell back to --heartbeat-ms — the
+    /// very window this budget exists to replace — and added a full SDO timeout to every
+    /// confirmation besides. Found in review of #388, against the budget added one commit earlier.
+    /// </remarks>
     internal static async Task<int> NmtConfirmationBudgetMsAsync(Session session, CancellationToken cancellationToken)
     {
         var declared = await NmtAndHeartbeatChecks.ProducerHeartbeatTimeForConfirmationAsync(session, cancellationToken)
