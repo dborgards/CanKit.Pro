@@ -5135,6 +5135,32 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #355: a periodic handle the application never disposed, on a node it did. With the node's
+    // own actor the tick goes with that actor; with an injected one (the test seam) it outlived
+    // the node, and the schedule ticked for ever -- each emission throwing on the disposed node,
+    // each tick re-arming the next. A tick after the node is gone arms nothing.
+    [Fact]
+    public async Task A_Periodic_Schedule_Stops_Ticking_Once_Its_Node_Is_Disposed()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        node.Dispose();
+
+        await clock.AdvanceAsync(period); // the tick armed before the disposal fires on the surviving actor
+        (await actor.NextTimerDelayAsync()).Should().BeNull("a tick on a disposed node does not arm the next one");
+        node.PeriodicEmissionsCompleted.Should().Be(0, "and starts no emission");
+    }
+
     // The single-frame periodic path MUST refuse to start before ClaimAddressAsync completes,
     // mirroring SendAsync's pre-flight gate (Bugbot 3600377725) so no periodic traffic leaks
     // out with an invalid SA.

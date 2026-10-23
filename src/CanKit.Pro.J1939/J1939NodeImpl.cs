@@ -2124,6 +2124,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         private void OnTick()
         {
             if (Volatile.Read(ref _disposed) != 0) return;
+            // Nor once the node is gone. An owned actor discards the tick with the node, but an
+            // injected one outlives it, and the schedule then ticked for ever, each emission
+            // failing on the disposed node and the tick re-arming regardless (#355).
+            if (Volatile.Read(ref _owner._disposed) != 0) return;
 
             // Never overlap emissions of the same schedule (a multi-frame PGN occupies one
             // TP session per send): a tick whose previous emission is still running is
