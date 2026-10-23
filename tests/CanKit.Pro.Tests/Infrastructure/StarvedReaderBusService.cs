@@ -49,6 +49,15 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// <summary>When set, a <c>TryRead</c> that took a frame holds it until the gate opens: a caller-side pump caught between taking a frame and posting it.</summary>
     public ManualResetEventSlim? TryReadGate { get; set; }
 
+    private readonly TaskCompletionSource<bool> _heldAtGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// Completes when a <c>TryRead</c> that took a frame has reached <see cref="TryReadGate"/>:
+    /// the pump holds the frame and has not posted it -- the state a test otherwise hoped a
+    /// fixed delay would have reached (#362).
+    /// </summary>
+    public Task FrameHeldAtGate => _heldAtGate.Task;
+
     /// <summary>Lets the reader task's wait complete once; every later wait stays pending.</summary>
     public void WakeReader() => _wake.TrySetResult(true);
 
@@ -145,7 +154,11 @@ internal sealed class StarvedReaderBusService : ICanBusService
         {
             bool ok = _owner._frames.Reader.TryRead(out frameEvent);
             if (!ok) _owner._drained.TrySetResult(true);
-            else _owner.TryReadGate?.Wait();
+            else if (_owner.TryReadGate is { } gate)
+            {
+                _owner._heldAtGate.TrySetResult(true);
+                gate.Wait();
+            }
             return ok;
         }
 

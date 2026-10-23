@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -78,7 +77,11 @@ public class IsoTpBusOffTests : IClassFixture<VirtualAdapterFixture>
         bus.BusState = BusState.BusOff;
         bus.RaiseFault(new InvalidOperationException("simulated bus-off"));
 
-        var sw = Stopwatch.StartNew();
+        // What tells the BusOff abort from the protocol timers is the failure itself, not how
+        // long it took. The timers are 10 s out, past the 5 s hang bound, so a send the sweep
+        // never resolved fails here as a hang, and one that N_As did end carries a timeout, not
+        // "BusOff". A Stopwatch bound (< 5 s) on top said nothing the hang bound did not, and was
+        // the one assertion a stalled host could turn red (#362).
         Func<Task> act = async () =>
         {
             var completed = await Task.WhenAny(send, Task.Delay(ShortTimeout));
@@ -86,11 +89,8 @@ public class IsoTpBusOffTests : IClassFixture<VirtualAdapterFixture>
             await send;
         };
         var ex = (await act.Should().ThrowAsync<IsoTpException>()).Which;
-        sw.Stop();
 
         ex.Message.Should().Contain("BusOff",
             "the failed TX confirmation (BusOff) must surface as an observable ISO-TP error");
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
-            "the abort must be immediate, not via the (10 s) N_As/N_Bs protocol timers");
     }
 }

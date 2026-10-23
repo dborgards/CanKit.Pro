@@ -529,27 +529,43 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         result.IsApproximated.Should().BeTrue();
     }
 
-    // FR-RAW-034 (Should): the timeout is configurable per call, not a single hardcoded value --
-    // a longer configured timeout measurably takes longer to fail than a shorter one. Coarse
-    // comparison since CI timing is noisy; not a tight tolerance.
+    // FR-RAW-034 (Should): the timeout is configurable per call, not a single hardcoded value.
+    // #362: this compared two Stopwatch readings, and a stall of 400 ms during the shorter call
+    // inverted them. The timeouts now run on a clock the test moves: each call is seen to arm
+    // exactly its own timeout, and to time out when -- and only when -- that much has passed,
+    // while the other call is still waiting.
     [Fact]
     public async Task Echo_Bus_Timeout_Is_Configurable_Per_Call()
     {
         using var sender = OpenEcho();
         sender.EchoAcceptedFrames = false;
         using var service = new CanBusService(sender);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        service.ArmConfirmTimeout = (source, timeout) => actor.Schedule(timeout, () =>
+        {
+            try { source.Cancel(); }
+            catch (ObjectDisposedException) { /* the call ended first and released it */ }
+        });
 
-        var shortSw = Stopwatch.StartNew();
-        var shortResult = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(100));
-        shortSw.Stop();
+        var shortTimeout = TimeSpan.FromMilliseconds(100);
+        var longTimeout = TimeSpan.FromMilliseconds(500);
 
-        var longSw = Stopwatch.StartNew();
-        var longResult = await service.SendConfirmedAsync(CanFrame.Classic(0x124, new byte[] { 2 }), TimeSpan.FromMilliseconds(500));
-        longSw.Stop();
+        // The longer one first, so the earliest armed timer is always the one just sent.
+        var longSend = service.SendConfirmedAsync(CanFrame.Classic(0x124, new byte[] { 2 }), longTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, longTimeout, ShortTimeout);
+        var shortSend = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), shortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, shortTimeout, ShortTimeout);
 
-        shortResult.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
-        longResult.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
-        longSw.Elapsed.Should().BeGreaterThan(shortSw.Elapsed);
+        await clock.AdvanceAsync(shortTimeout);
+        (await shortSend.WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        longSend.IsCompleted.Should().BeFalse("its own 500 ms timeout has not run out");
+
+        await clock.AdvanceAsync(longTimeout - shortTimeout - TimeSpan.FromMilliseconds(1));
+        longSend.IsCompleted.Should().BeFalse("its own 500 ms timeout is still 1 ms away");
+
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        (await longSend.WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
     }
 
     // FR-RAW-033: outright rejection (driver never accepted the frame) resolves immediately as
@@ -632,15 +648,15 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.BusState = BusState.BusOff;
         sender.RaiseFault(new InvalidOperationException("simulated bus-off"));
 
-        var sw = Stopwatch.StartNew();
-        var result = await pendingTask;
-        sw.Stop();
+        // "Immediately, not via the 30 s timeout" is in the result, not in a Stopwatch (#362): the
+        // timeout would resolve it as Timeout, and 30 s is past the hang bound, so only the sweep
+        // can produce BusOff here. The Stopwatch bound (< 5 s) duplicated the hang bound and was
+        // the one assertion a stalled host could turn red.
+        var result = await pendingTask.WaitAsync(ShortTimeout);
 
         result.Confirmed.Should().BeFalse();
         result.IsApproximated.Should().BeFalse();
         result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff);
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
-            "the BusOff path must resolve the confirmation immediately, not via the 30 s timeout");
     }
 
     // The other half of the guard the test above exercises only one side of: a fault reported
