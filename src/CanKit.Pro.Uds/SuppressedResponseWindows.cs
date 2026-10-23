@@ -14,13 +14,34 @@ namespace CanKit.Pro.Uds;
 /// same service waits such a window out rather than taking the late answer as its own.
 /// One entry per service, since a send for another service in between must not
 /// shorten the first's window; a later window for the same service replaces an earlier one
-/// only if it ends later.
+/// only if it ends later. An NRC 0x78 heard inside a window moves it out, but only so many
+/// times from the window's last note: a peer answering 0x78 for ever would otherwise hold the
+/// next request for the service for as long as its caller's token allowed (#354, U-5).
 /// </summary>
 internal sealed class SuppressedResponseWindows
 {
     private readonly Dictionary<byte, long> _until = new();
     private readonly Dictionary<byte, TimeSpan> _pendingExtension = new();
+    private readonly Dictionary<byte, int> _extensions = new();
+    private readonly int _maxExtensions;
     private readonly object _gate = new();
+
+    /// <summary>Windows that a 0x78 moves out any number of times.</summary>
+    public SuppressedResponseWindows()
+        : this(int.MaxValue)
+    {
+    }
+
+    /// <summary>
+    /// Windows that 0x78s move out at most <paramref name="maxExtensions"/> times from each
+    /// note -- the physical client's <see cref="UdsClientOptions.MaxResponsePendingCount"/>,
+    /// which bounds a request's own wait the same way; a further 0x78 leaves the window to end
+    /// where the last one put it.
+    /// </summary>
+    public SuppressedResponseWindows(int maxExtensions)
+    {
+        _maxExtensions = maxExtensions;
+    }
 
     /// <summary>Notes that a request for <paramref name="sid"/> went out at
     /// <paramref name="sentTimestamp"/> and may be answered for <paramref name="window"/>.</summary>
@@ -33,7 +54,29 @@ internal sealed class SuppressedResponseWindows
     /// <paramref name="sentTimestamp"/> (#171).
     /// </summary>
     public void Note(byte sid, long sentTimestamp, TimeSpan window, long ticksPerSecond)
-        => Extend(sid, sentTimestamp + Ticks(window, ticksPerSecond));
+    {
+        lock (_gate)
+        {
+            Extend(sid, sentTimestamp + Ticks(window, ticksPerSecond));
+            // A request went out: the 0x78s that may answer it are counted afresh.
+            _extensions.Remove(sid);
+        }
+    }
+
+    /// <summary>
+    /// Counts a 0x78 that is about to move the window for <paramref name="sid"/> out; false,
+    /// counting nothing, once the window has been moved out as often as it may be.
+    /// </summary>
+    public bool TryCountExtension(byte sid)
+    {
+        lock (_gate)
+        {
+            _extensions.TryGetValue(sid, out var count);
+            if (count >= _maxExtensions) return false;
+            _extensions[sid] = count + 1;
+            return true;
+        }
+    }
 
     /// <summary>
     /// As <see cref="Note(byte, long, TimeSpan, long)"/>, noting with the window how far an NRC
@@ -89,7 +132,8 @@ internal sealed class SuppressedResponseWindows
     {
         lock (_gate)
         {
-            if (_until.TryGetValue(sid, out var existing) && arrival <= existing && existing < until)
+            if (_until.TryGetValue(sid, out var existing) && arrival <= existing && existing < until
+                && TryCountExtension(sid))
                 _until[sid] = until;
         }
     }
@@ -108,6 +152,7 @@ internal sealed class SuppressedResponseWindows
             {
                 _until.Remove(sid);
                 _pendingExtension.Remove(sid);
+                _extensions.Remove(sid);
             }
         }
     }
@@ -138,6 +183,7 @@ internal sealed class SuppressedResponseWindows
         {
             _until.Remove(sid);
             _pendingExtension.Remove(sid);
+            _extensions.Remove(sid);
         }
     }
 

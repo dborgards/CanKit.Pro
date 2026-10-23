@@ -2628,6 +2628,95 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // FR-UDS-009 (edge) — MaxResponsePendingCount is how many 0x78s a request waits through:
+    // that many and the final answer is returned, one more and the request is given up (#354,
+    // the boundary uds-M3 left unpinned). P2 and P2* are a minute, so neither can end the wait
+    // before the ECU's unpaced 0x78s are in.
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(3, true)]
+    public async Task MaxResponsePendingCount_Is_The_Number_Of_Pending_Answers_A_Request_Waits_Through(
+        int pendingAnswers, bool givenUp)
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, _ => throw new EcuResponsePending(
+                pendingCount: pendingAnswers, finalResponse: new byte[] { 0xF1, 0x90, 0xAA })),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMinutes(1),
+                P2StarClientMax = TimeSpan.FromMinutes(1),
+                MaxResponsePendingCount = 2,
+            });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var read = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            if (givenUp)
+            {
+                Func<Task> act = () => read;
+                await act.Should().ThrowAsync<UdsProtocolException>()
+                    .WithMessage("*sent 3 consecutive NRC 0x78*MaxResponsePendingCount=2*");
+            }
+            else
+            {
+                (await read).Should().Equal(0xAA);
+            }
+        }
+    }
+
+    // #354 (U-5): a 0x78 to a suppressed send moves its window out by P2*, and the next
+    // request for the service waits the window out -- but no more often than
+    // MaxResponsePendingCount lets a request's own wait be moved. Without the bound a peer
+    // answering 0x78 for ever held the next request for as long as its token allowed. On the
+    // virtual clock: the ECU's second 0x78 goes out only when the test opens its gate.
+    [Fact]
+    public async Task The_Pending_Answers_That_Move_A_Window_Out_Are_Bounded_By_MaxResponsePendingCount()
+    {
+        var gates = new OrderedGates();
+        var p2Star = TimeSpan.FromMilliseconds(1500);
+        var gap = TimeSpan.FromMilliseconds(100);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = gates.WaitAsync;
+                e.On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenSilent(pendingCount: 2, delayBetween: gap);
+                    return new byte[] { 0x00 };
+                });
+            },
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = p2Star,
+                MaxResponsePendingCount = 1,
+            });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Task suppressed = Task.CompletedTask;
+        // The first 0x78 answers the suppressed send at once: at 0 ms.
+        await pair.DeliverAsync(
+            () => suppressed = pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token),
+            Negative(0x3E, 0x78));
+        await Within(suppressed);
+
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        // The one extension allowed: the window ends P2* from the first 0x78, not P2 from the send.
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.Clock.AdvanceAsync(gap);
+        await pair.DeliverAsync(gates.ReleaseNext, Negative(0x3E, 0x78)); // the second, at 100 ms: one too many
+        gates.ReleaseNext(); // the ECU is done with the suppressed send
+
+        // At 1500 ms the window is over and the request goes out; moved out by the second 0x78
+        // it would end at 1600, and the clock is never moved that far.
+        await pair.Clock.AdvanceAsync(p2Star - gap);
+        await Within(next);
+        pair.Ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x3E, 0x00 });
+    }
+
+    // -----------------------------------------------------------------------------------
     // FR-UDS-009 (edge) — MaxResponsePendingCount bounds the loop.
     // -----------------------------------------------------------------------------------
     [Fact]

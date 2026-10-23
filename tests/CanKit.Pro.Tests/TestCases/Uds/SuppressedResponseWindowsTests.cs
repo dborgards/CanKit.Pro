@@ -42,4 +42,22 @@ public class SuppressedResponseWindowsTests
         windows.TryGetDeadline(Sid, out var until).Should().BeTrue();
         until.Should().Be(1601);
     }
+
+    // #354 (U-5): the 0x78s that move a window out are bounded per note -- per request that went
+    // out -- so the next request's own 0x78s are counted afresh, its window still open or not.
+    [Fact]
+    public void A_New_Note_Counts_The_Pending_Answers_That_Move_The_Window_Afresh()
+    {
+        var windows = new SuppressedResponseWindows(maxExtensions: 1);
+        windows.Note(Sid, 1000, P2, Hz);          // open until 1300
+        windows.ExtendIfOpenAt(Sid, 1100, 2600);  // the one 0x78 allowed
+        windows.ExtendIfOpenAt(Sid, 1200, 2700);  // one too many
+        windows.TryGetDeadline(Sid, out var until).Should().BeTrue();
+        until.Should().Be(2600);
+
+        windows.Note(Sid, 2000, P2, Hz);          // the next request, inside that window
+        windows.ExtendIfOpenAt(Sid, 2100, 3600);  // its own first 0x78
+        windows.TryGetDeadline(Sid, out until).Should().BeTrue();
+        until.Should().Be(3600);
+    }
 }

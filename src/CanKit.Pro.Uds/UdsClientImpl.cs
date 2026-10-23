@@ -50,7 +50,8 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     // A suppressed send draws no positive response but may still draw a negative one, up to P2
     // after it went out. A following request for the same service would take that negative
     // response as its own; it waits until the window is over instead (Codex on #150).
-    private readonly SuppressedResponseWindows _suppressedWindows = new();
+    // Each moved out by at most MaxResponsePendingCount 0x78s, as the request's own wait is (#354).
+    private readonly SuppressedResponseWindows _suppressedWindows;
 
     private readonly IIsoTpChannel _channel;
     private readonly bool _ownsChannel;
@@ -167,6 +168,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 "BusyRepeatRequestDelay must not be negative, and must be within a timer's reach (about 49 days).");
         if (options.MaxResponsePendingCount < 0)
             throw new ArgumentException("MaxResponsePendingCount must be non-negative.", nameof(options));
+        _suppressedWindows = new SuppressedResponseWindows(options.MaxResponsePendingCount);
         if (options.TesterPresentPeriod <= TimeSpan.Zero || options.TesterPresentPeriod > MaxTimerSpan)
             throw new ArgumentException("TesterPresentPeriod must be positive and within a timer's reach (about 49 days).", nameof(options));
 
@@ -692,8 +694,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             return false;
         }
         // This service's: likewise only if the window was still open when it arrived -- a
-        // 0x78 queued after P2 ran out answers nothing the window covers (Codex on #150).
+        // 0x78 queued after P2 ran out answers nothing the window covers (Codex on #150) --
+        // and only as often as MaxResponsePendingCount lets a request's own wait be (#354).
         if (pdu.FirstFrameArrivalTimestamp > until || extendedUntil <= until) return false;
+        if (!_suppressedWindows.TryCountExtension(sid)) return false;
         until = extendedUntil;
         return true;
     }

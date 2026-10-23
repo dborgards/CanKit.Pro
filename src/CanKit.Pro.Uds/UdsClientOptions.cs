@@ -72,7 +72,17 @@ public sealed class UdsClientOptions
     /// with a <see cref="UdsProtocolException"/> instead of waiting indefinitely. Defaults to
     /// <c>100</c>.
     /// </summary>
-    public int MaxResponsePendingCount { get; init; } = 100;
+    /// <remarks>
+    /// It bounds a response window as well: an NRC 0x78 heard inside the window a suppressed
+    /// send -- or, with <see cref="QuarantineLateResponses"/>, an abandoned request -- left for
+    /// its service moves the window out by P2*, and at most this many do; the next request for
+    /// the service is then held up for a bounded time by a peer that answers 0x78 for ever
+    /// (#354).
+    /// </remarks>
+    public int MaxResponsePendingCount { get; init; } = DefaultMaxResponsePendingCount;
+
+    // Also the bound UdsFunctionalClient puts on the 0x78s that move one of its windows out.
+    internal const int DefaultMaxResponsePendingCount = 100;
 
     /// <summary>
     /// Default period for <see cref="IUdsClient.StartTesterPresentKeepAlive"/>. Defaults to 2 s
