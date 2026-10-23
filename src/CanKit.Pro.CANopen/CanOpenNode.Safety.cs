@@ -539,7 +539,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             try
             {
                 if (!_srdo.TrySendGfc())
-                    throw new InvalidOperationException("The global failsafe command needs 1300h = 1 and NMT state Operational (CiA DSP 304 §8.2).");
+                    throw new InvalidOperationException("The global failsafe command needs NMT state Operational (CiA DSP 304 §8.2).");
                 return _gfcSend!;
             }
             finally

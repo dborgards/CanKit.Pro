@@ -19,8 +19,14 @@ internal sealed partial class SrdoEngine
         if (cobId == CanOpenCobId.GlobalFailsafeCommand && SrdoCount > 0)
         {
             // §8.2.3 Write GFC: L = 0, a classic CAN frame (§8.2) — a CAN FD frame is no GFC.
-            // §8.4.2.2 1300h: "0: GFC is not valid".
-            if (!isRtr && !isFd && data.Length == 0 && _operational && IsGfcEnabled()) _host.GlobalFailsafeCommandReceived();
+            // EN 50325-5:2010 §7.2.1 (OBE-12450): the GFC consumer signals the reception to its
+            // SRLD, whatever 1300h holds — §6.4.2.1 (OBE-12439) makes 1300h the record of the
+            // indication, not a switch in front of it (#289).
+            if (!isRtr && !isFd && data.Length == 0 && _operational)
+            {
+                MarkGfc();
+                _host.GlobalFailsafeCommandReceived();
+            }
             return true;
         }
         for (int n = 1; n <= SrdoCount; n++)
@@ -44,15 +50,29 @@ internal sealed partial class SrdoEngine
         return false;
     }
 
-    /// <summary>§8.2.2 push model, unconfirmed. False when 1300h ≠ 1 or not Operational.</summary>
+    /// <summary>§8.2.2 push model, unconfirmed. False when not Operational. EN 50325-5:2010
+    /// §6.4.2.1 (OBE-12437): the request sets 1300h to 01 — the value is no precondition (#289).</summary>
     public bool TrySendGfc()
     {
-        if (_disposed || !_operational || !IsGfcEnabled()) return false;
+        if (_disposed || !_operational) return false;
+        MarkGfc();
         _host.Send(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>());
         return true;
     }
 
-    private bool IsGfcEnabled() => _od.TryReadUnsigned(SrdoRecords.GfcParameter, 0x00, out var v) && v == 1;
+    /// <summary>EN 50325-5:2010 §6.4.2.1 (OBE-12437, OBE-12439): 1300h is 01 once this SRD has
+    /// requested a GFC or been indicated one. The value stays until the application or a tool
+    /// writes it back — the norm names no event that clears it. A node whose description leaves
+    /// the optional 1300h out has nothing to set.</summary>
+    private void MarkGfc()
+    {
+        if (!_od.TryReadUnsigned(SrdoRecords.GfcParameter, 0x00, out var current) || current == 1) return;
+        try { _od.WriteRaw(SrdoRecords.GfcParameter, 0x00, new byte[] { 1 }); }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or System.Collections.Generic.KeyNotFoundException)
+        {
+            _host.ReportBackgroundException(new InvalidOperationException($"1300h could not be set to 01: {ex.Message}", ex));
+        }
+    }
 
     private void ArmConsumer(SrdoRuntime rt)
     {

@@ -61,7 +61,7 @@ public interface ICanOpenSafety
     SrdoState GetSrdoState(int srdoNumber);
 
     /// <summary>Sends the global failsafe command (§8.2: COB-ID 001h, DLC 0). Requires
-    /// <c>1300h</c> = 1 and Operational. The returned task is the send itself, not the node's
+    /// Operational, and sets <c>1300h</c> to 1 (EN 50325-5:2010 §6.4.2.1). The returned task is the send itself, not the node's
     /// actor turn that started it: it completes when the bus service confirmed the send — on its
     /// echo path once the echo arrived, otherwise once the driver accepted the frame — or reported
     /// its failure (on
@@ -70,7 +70,7 @@ public interface ICanOpenSafety
     /// Operational period: leaving Operational or disposing the node ends a send that has not
     /// reached the bus service's driver call quietly, the caller's cancellation ends it with
     /// <see cref="OperationCanceledException"/>; a frame the driver has been handed goes out (#294).</summary>
-    /// <exception cref="InvalidOperationException">1300h is 0 or the node is not Operational.</exception>
+    /// <exception cref="InvalidOperationException">The node is not Operational.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
     /// cancelled before the send was confirmed; or the bus service was disposed under the send,
     /// which is also reported on <c>BackgroundExceptionOccurred</c> as a transport failure.</exception>
@@ -220,6 +220,6 @@ public interface ICanOpenSafety
     /// <summary>An SRDO became valid or invalid (transitions only; never dropped).</summary>
     event EventHandler<SrdoStateChangedEventArgs>? SrdoStateChanged;
 
-    /// <summary>A GFC arrived while <c>1300h</c> = 1 (including the node's own, on a bus that echoes).</summary>
+    /// <summary>A GFC arrived while Operational, whatever <c>1300h</c> held; the node set it to 1 (including the node's own, on a bus that echoes).</summary>
     event EventHandler<GlobalFailsafeCommandReceivedEventArgs>? GlobalFailsafeCommandReceived;
 }
