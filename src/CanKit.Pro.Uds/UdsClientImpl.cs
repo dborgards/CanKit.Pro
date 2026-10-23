@@ -57,6 +57,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     private readonly UdsClientOptions _options;
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
+    // The lifetime source's token, taken once: an abort that outlives a disposal which gave up
+    // waiting for it reads it after the source is disposed, and the source's Token property
+    // throws then; the token itself stays cancelled.
+    private readonly CancellationToken _lifetime;
 
     // Null in production: P2/P2*, the suppressed-response windows and the busy-repeat delay are
     // measured on Stopwatch.GetTimestamp() and waited out on real timers. A test injects the
@@ -147,6 +151,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         _ownsChannel = ownsChannel;
         _clock = clock;
         _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
+        _lifetime = _lifetimeCts.Token;
 
         // Every duration here runs a timer, and a timer measures about 49 days at most: one
         // beyond that would throw when it is armed, after the request went out (Codex on #150).
@@ -553,7 +558,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             // -- it predates the send, which the window's end alone does not say -- and move
             // the window out by P2* for nothing (Codex on #150). A 0x78 for a service with a
             // window still open is routed to it by the discard, as always.
-            await DiscardStalePdusAsync().ConfigureAwait(false);
+            await DiscardStalePdusAsync(linkedToken).ConfigureAwait(false);
             // Noted before the send as well: cancelled between the driver's acceptance and the
             // confirmation, the frame is on the bus and may still be answered (Codex on #150).
             // Moved out to the transmit stamp afterwards.
@@ -615,7 +620,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                     // and it moves the window out (Bugbot on #150). Only an empty inbox ends
                     // it, and only once the channel has settled: a 0x78 stamped inside the
                     // window may still be on its way through its actor (Codex on #150).
-                    await SettleAsync().ConfigureAwait(false);
+                    await SettleAsync(linkedToken).ConfigureAwait(false);
                     if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
@@ -628,7 +633,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 }
                 catch (OperationCanceledException) when (slice.IsCancellationRequested && !linkedToken.IsCancellationRequested)
                 {
-                    await SettleAsync().ConfigureAwait(false);
+                    await SettleAsync(linkedToken).ConfigureAwait(false);
                     if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
@@ -1165,7 +1170,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         // Drop any late reply left over from a previous aborted/timed-out wait before we put a
         // new request on the wire. SID correlation alone is insufficient when the next request
         // uses the same service (the stale positive response SID would match).
-        await DiscardStalePdusAsync().ConfigureAwait(false);
+        await DiscardStalePdusAsync(linkedToken).ConfigureAwait(false);
 
         // The stamp the channel took as the request's last frame went to the bus -- not a reading
         // taken here. P2 starts when the request was transmitted, and this continuation resumes
@@ -1342,7 +1347,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             // raced with arrival), drop it under the lock so it cannot poison the next caller.
             // As the pre-send discard: settled and read first, so a 0x78 for a suppressed send
             // among it is routed to that send's window rather than dropped (Codex on #150).
-            await DiscardStalePdusAsync().ConfigureAwait(false);
+            await DiscardStalePdusAfterAbortAsync().ConfigureAwait(false);
             throw;
         }
     }
@@ -1370,18 +1375,42 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
     // The pre-send discard: what is on its way through the channel is settled first, so a 0x78
     // among it is routed to its service's window rather than dropped unseen (Codex on #150).
-    private async Task DiscardStalePdusAsync()
+    // Cancelled -- by the caller, or by Dispose -- the request is not sent.
+    private async Task DiscardStalePdusAsync(CancellationToken linkedToken)
     {
         long arrivedBefore = Now();
-        await SettleAsync().ConfigureAwait(false);
+        await SettleAsync(linkedToken).ConfigureAwait(false);
         DiscardStalePdus(arrivedBefore);
     }
 
-    private async Task SettleAsync()
+    // The discard on the way out of an abandoned request. Settled as the pre-send discard is,
+    // but under the client's lifetime rather than the request's token: a request the caller
+    // cancelled still routes what is on its way, and only a disposal ends the settling early --
+    // then whatever is queued is dropped unsettled, the channel being borrowed or going away.
+    private async Task DiscardStalePdusAfterAbortAsync()
+    {
+        long arrivedBefore = Now();
+        try
+        {
+            await SettleAsync(_lifetime).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // disposed: discard what is there without waiting for the actor
+        }
+        DiscardStalePdus(arrivedBefore);
+    }
+
+    // Every settle takes a token (#354, U-3). What a settle waits for is the channel's actor,
+    // which a caller disposing from one of the channel's callbacks holds: awaited without a
+    // token, a request parked here could be reached by nothing Dispose cancels, and Dispose
+    // waited out its bounded timeouts instead. The token ends the wait, not the settling
+    // (IIsoTpChannel.SettleAsync).
+    private async Task SettleAsync(CancellationToken cancellationToken)
     {
         try
         {
-            await _channel.SettleAsync().ConfigureAwait(false);
+            await _channel.SettleAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
         {
@@ -1505,7 +1534,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             // Settled first: a Single Frame stamped inside the budget may still be on its way
             // through the channel's actor when the deadline fires; after this it is in the
             // inbox, or its reception is on record (Codex on #150).
-            await SettleAsync().ConfigureAwait(false);
+            await SettleAsync(linkedToken).ConfigureAwait(false);
             // The in-progress check goes first: the channel withdraws the record only after the
             // completed PDU (or the abort's error item) is in the inbox, so a reception seen in
             // progress here is found by the wait below, and one not seen is either absent or

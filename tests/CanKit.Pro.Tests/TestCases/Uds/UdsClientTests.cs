@@ -3087,6 +3087,91 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             }
         }
     }
+
+    // #354 (U-3): a request parked in the channel's SettleAsync -- whose actor a caller disposing
+    // from one of the channel's callbacks holds -- is reached by the disposal's cancellation.
+    // Settled without a token it was reached by nothing, and the disposal waited out its timeout
+    // for the request lock. Parked before the send (0), or in the discard on the way out of a
+    // request the caller cancelled (1), which settles under the client's lifetime. The timeout
+    // is set far beyond the hang bound, so a disposal that has to wait it out fails the test.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task A_Request_Parked_In_The_Channels_Settle_Is_Ended_By_The_Disposal(int parkFromSettle)
+    {
+        var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, SettleParkingChannel>();
+        var stub = (SettleParkingChannel)channel;
+        stub.ParkFromSettle = parkFromSettle;
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            // Never fires: the request ends by cancellation or not at all.
+            P2ClientMax = TimeSpan.FromHours(1),
+            P2StarClientMax = TimeSpan.FromHours(1),
+        });
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromHours(1);
+        using var caller = new CancellationTokenSource();
+        var request = client.ReadDataByIdentifierAsync(0xF190, caller.Token);
+        if (parkFromSettle > 0)
+        {
+            await Within(stub.ReceiveEntered.Task);
+            caller.Cancel(); // the request is abandoned; its way out settles and parks there
+        }
+        await Within(stub.SettleParked.Task);
+
+        await Within(client.DisposeAsync().AsTask());
+
+        Func<Task> wait = () => Within(request);
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
+    }
+
+    // A channel whose SettleAsync completes for the first ParkFromSettle calls and from then on
+    // only when its token is cancelled: an actor that never gets round to the settle. A send
+    // completes at once, a receive waits for its token.
+    private class SettleParkingChannel : System.Reflection.DispatchProxy
+    {
+        private int _settles;
+
+        public int ParkFromSettle { get; set; }
+
+        public TaskCompletionSource<bool> SettleParked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> ReceiveEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod?.Name)
+            {
+                case nameof(IIsoTpChannel.SettleAsync):
+                    if (Interlocked.Increment(ref _settles) <= ParkFromSettle) return Task.CompletedTask;
+                    SettleParked.TrySetResult(true);
+                    return Task.Delay(Timeout.Infinite, (CancellationToken)args![0]!);
+                case nameof(IIsoTpChannel.SendWithTransmitStampAsync):
+                    return Task.FromResult(default(IsoTpTransmitStamps));
+                case nameof(IIsoTpChannel.ReceiveWithArrivalAsync):
+                    ReceiveEntered.TrySetResult(true);
+                    return NeverAsync((CancellationToken)args![0]!);
+                case nameof(IIsoTpChannel.GetReceptionsInProgress):
+                    return Array.Empty<IsoTpReceptionInProgress>();
+                default:
+                    var parameters = targetMethod!.GetParameters();
+                    for (var i = 0; i < parameters.Length; i++)
+                    {
+                        if (parameters[i].ParameterType.IsByRef)
+                            args![i] = Activator.CreateInstance(parameters[i].ParameterType.GetElementType()!);
+                    }
+                    var returns = targetMethod.ReturnType;
+                    if (returns == typeof(Task)) return Task.CompletedTask;
+                    return returns.IsValueType ? Activator.CreateInstance(returns) : null;
+            }
+        }
+
+        private static async Task<IsoTpReceivedPdu> NeverAsync(CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException(cancellationToken);
+        }
+    }
 #endif
 
     // The keep-alive loop is joined without a thread too, and without waiting for ever.
