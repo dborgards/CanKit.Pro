@@ -1252,7 +1252,8 @@ while LSS is on: the node then stays in NMT Initializing, sends no boot-up and s
 until configure node-id gives it a value in 1..127. That value becomes active at once and the
 node boots, and it stays in LSS configuration. A node that already has an active node-id keeps
 it until the next NMT reset communication, which copies the pending node-id into the active one
-and retargets pre-defined COB-IDs that still name the old one. Reset node copies the persistent
+and retargets pre-defined COB-IDs, and the direction of SRDO 1 (EN 50325-5:2010 Table 5), that
+still name the old one; a direction of a committed SRDO stays. Reset node copies the persistent
 node-id back into the pending one first. Neither reset reloads the bit timing.
 An identity change closes the transmit gate and drains old-ID reservations before publishing
 the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs
