@@ -4073,6 +4073,31 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeOfType<J1939TpAbortException>();
     }
 
+    // A channel that throws when a rebind disposes it: the rebind reports that and goes on to open
+    // the next channel, so the claim it belongs to still completes. (The rebind's own disposal
+    // path, which #375 restructured; a throwing channel at the node's teardown is the next test.)
+    [Fact]
+    public async Task A_Channel_That_Throws_When_A_Rebind_Disposes_It_Is_Reported_And_Replaced()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+        var failure = new InvalidOperationException("the channel would not close");
+        lock (channels) channels.Last().DisposeFailure = failure;
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        await node.ClaimAddressAsync(0x32).WithTimeout(ShortTimeout);
+
+        lock (reported) reported.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        lock (channels) channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0xFE, 0x32 },
+            "the failed disposal did not stop the rebinds the re-claim makes");
+        node.Address.Should().Be((byte)0x32);
+    }
+
     // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
     // is the node's own, so it is disposed in place.
     [Fact]
