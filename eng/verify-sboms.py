@@ -12,7 +12,8 @@ Checked against BSI TR-03183-2 (CycloneDX mapping), per SBOM:
   * the dependency graph has a node for every component, no dangling reference, and a statement
     that it is complete;
   * nothing is left at the 0.0.0 the restore stamps on sibling projects;
-  * cross-check against the package itself: every dependency the .nuspec declares is in the SBOM.
+  * cross-check against the package itself: every dependency the .nuspec declares is in the SBOM,
+    at a version no lower than the floor the .nuspec declares for it.
 
 What this does NOT do is validate the document against the CycloneDX JSON schema -- that needs
 the schema file and a validator, neither of which belongs in a repository whose scripts are
@@ -47,12 +48,63 @@ def local_name(node) -> str:
     return node.tag.rpartition('}')[2]
 
 
-def declared_dependencies(package: Path) -> set:
+def declared_dependencies(package: Path) -> dict:
+    """Dependency id (lower case) -> the version floors the .nuspec declares for it, one per
+    target-framework group that names it. A dependency with no lower bound maps to an empty list."""
     with zipfile.ZipFile(package) as archive:
         name = next(n for n in archive.namelist() if n.endswith('.nuspec') and '/' not in n)
         nuspec = ElementTree.fromstring(archive.read(name))
-    return {node.get('id').lower() for node in nuspec.iter()
-            if local_name(node) == 'dependency' and node.get('id')}
+    declared = {}
+    for node in nuspec.iter():
+        if local_name(node) == 'dependency' and node.get('id'):
+            floors = declared.setdefault(node.get('id').lower(), [])
+            floor = version_floor(node.get('version', ''))
+            if floor:
+                floors.append(floor)
+    return declared
+
+
+def version_floor(range_text: str) -> str:
+    """The lower bound of a NuGet version range: '1.2.3' and '[1.2.3, )' and '[1.2.3]' and
+    '(1.2.3, 2.0)' give '1.2.3'; '(, 2.0)' and '' give ''. An exclusive lower bound is read as
+    inclusive, which can only make the check below more lenient, never wrongly strict."""
+    text = range_text.strip()
+    if text[:1] in '[(':
+        return text[1:].split(',')[0].strip(' ]),')
+    return text
+
+
+def version_key(version: str) -> tuple:
+    """A sort key for SemVer 2 / NuGet versions: numeric parts first, a pre-release below the
+    release it precedes, build metadata ignored."""
+    core, _, rest = version.partition('+')[0].partition('-')
+    numbers = tuple(int(part) if part.isdigit() else 0 for part in core.split('.'))
+    numbers += (0,) * (4 - len(numbers))
+    if not rest:
+        return numbers, (1,)
+    return numbers, (0,) + tuple((0, int(i), '') if i.isdigit() else (1, 0, i) for i in rest.split('.'))
+
+
+def below_floor(declared: dict, components: list) -> list:
+    """One message per declared dependency whose SBOM component is older than the .nuspec's floor.
+
+    The SBOM is the restored closure, which can legitimately sit above a floor (NuGet takes the
+    lowest version that satisfies every constraint, so a transitive constraint can lift it) and
+    never legitimately below one. A package with several target-framework groups may declare a
+    different floor in each, and the SBOM is their union, so the highest version listed has to
+    reach the highest floor declared -- equality is not guaranteed."""
+    listed = {}
+    for component in components:
+        listed.setdefault(str(component.get('name', '')).lower(), []).append(str(component.get('version', '')))
+    problems = []
+    for dependency, floors in sorted(declared.items()):
+        if not floors or dependency not in listed:
+            continue
+        floor = max(floors, key=version_key)
+        highest = max(listed[dependency], key=version_key)
+        if version_key(highest) < version_key(floor):
+            problems.append(f'the .nuspec requires {dependency} >= {floor}, the SBOM lists {highest}')
+    return problems
 
 
 def creator_problem(owner: str, manufacturer) -> str:
@@ -148,9 +200,11 @@ def check(document: dict, package_id: str, package: Path, version: str) -> list:
     # What the package declares must be what the SBOM lists. The .nuspec is the ground truth for
     # "what does installing this pull in"; an SBOM missing one of its entries is wrong, however
     # well-formed.
+    declared = declared_dependencies(package)
     listed = {str(c.get('name', '')).lower() for c in components}
-    for dependency in sorted(declared_dependencies(package) - listed):
+    for dependency in sorted(set(declared) - listed):
         problems.append(f'the .nuspec depends on {dependency}, the SBOM does not list it')
+    problems += below_floor(declared, components)
 
     graph = {entry.get('ref'): entry for entry in document.get('dependencies', [])}
     for ref in refs:

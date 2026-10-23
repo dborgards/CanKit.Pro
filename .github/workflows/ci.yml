@@ -249,6 +249,11 @@ jobs:
           version="$SEMVER"
           python3 eng/verify-sboms.py artifacts/sbom artifacts/nuget "${version%%+*}"
 
+      # The checks' own tests (eng/test_*.py), standard library only. They live in this job
+      # because it is the one that runs the scripts they cover.
+      - name: Test the verification scripts
+        run: python3 -m unittest discover -s eng -p "test_*.py"
+
       - name: Upload packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
