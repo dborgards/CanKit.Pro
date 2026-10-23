@@ -4012,6 +4012,51 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // The same late teardown, on a channel that throws when it gets there. The Dispose that
+    // queued it has stopped waiting and returned, so the failure is reported through
+    // BackgroundExceptionOccurred -- it used to stay on the queued task, which nobody observes.
+    [Fact]
+    public async Task A_Teardown_The_Dispose_Stopped_Waiting_For_Reports_A_Channel_That_Throws()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var failure = new InvalidOperationException("the channel the rebind opened would not close");
+        var channels = new List<ScriptedTpChannel>();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false, actor, openTransport: sa =>
+        {
+            var channel = new ScriptedTpChannel(sa);
+            lock (channels)
+            {
+                // The third channel: the placeholder the held rebind opens once it is released.
+                if (channels.Count == 2) channel.DisposeFailure = failure;
+                channels.Add(channel);
+            }
+            return channel;
+        });
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => { if (ReferenceEquals(ex, failure)) reported.TrySetResult(ex); };
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        using var release = new ManualResetEventSlim();
+        var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
+        node.TransportTeardownTimeout = TimeSpan.Zero;
+
+        var reclaim = node.ClaimAddressAsync(0x32);
+        await inRebind.Task.AsTaskWithTimeout(ShortTimeout);
+        node.Dispose(); // gives up on the held actor at once; the teardown stays queued
+        release.Set();
+
+        (await ObserveClaim(reclaim)).Should().BeOfType<ObjectDisposedException>();
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(failure,
+            "the queued teardown's failure reaches the node's background channel");
+        lock (channels) channels.Should().HaveCount(3).And.OnlyContain(c => c.Disposed);
+    }
+
     // #375, noted in the #368 review: a reopen that fails leaves the channel it just disposed in
     // place, still carrying its address. A re-claim of that same address then found the
     // "channel already on this SA" shortcut true, and the node went Claimed on a disposed

@@ -2003,7 +2003,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         // The actor is held by a callback that has not returned within its own shutdown bound.
         // The channel visible now is disposed from here, as before #375, and the queued teardown
-        // still disposes whichever channel is current once the actor gets to it.
+        // still disposes whichever channel is current once the actor gets to it. Nobody waits
+        // for it any more, so a channel that throws there is reported where background failures
+        // go, not left on a task nobody observes.
+        _ = queued.ContinueWith(static (late, state) => ((J1939NodeImpl)state!).RaiseBackgroundException(late.Exception!.GetBaseException()),
+            this, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         return DisposeVisibleTransport();
     }
 
