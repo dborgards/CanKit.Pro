@@ -830,6 +830,37 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #354: requestSeedLevel is an odd byte up to 0x7D -- its sendKey 0x7E -- as the doc and the
+    // argument error now say; 0x7F and every even level are refused before anything is sent.
+    [Theory]
+    [InlineData(0x00)]
+    [InlineData(0x02)]
+    [InlineData(0x7F)]
+    [InlineData(0x81)]
+    public async Task SecurityAccess_Refuses_A_Seed_Level_Outside_The_Odd_Bytes_Up_To_0x7D(byte level)
+    {
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x27, _ => new byte[] { 0x01, 0x00 }));
+        using (dispose)
+        {
+            Func<Task> act = () => client.SecurityAccessAsync(level, seed => seed);
+            (await act.Should().ThrowAsync<ArgumentOutOfRangeException>())
+                .WithMessage("*odd byte in 0x01..0x7D*");
+            ecu.LastRequest.Should().BeNull("nothing was sent");
+        }
+    }
+
+    [Fact]
+    public async Task SecurityAccess_Accepts_Seed_Level_0x7D()
+    {
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x27, req => new byte[] { req[1], 0x00, 0x00 }));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SecurityAccessAsync(0x7D, seed => seed, cts.Token); // an all-zero seed: unlocked
+            ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x27, 0x7D });
+        }
+    }
+
     // The same repeat without an injected clock, where the delay is a real Task.Delay: the
     // request goes out again and succeeds. No timing is asserted -- how long the delay lasts is
     // what the clock test below proves; this only runs the wall-clock path end to end.
