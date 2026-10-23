@@ -48,9 +48,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     /// </summary>
     private static ClockedLssBench NewBench(LssMasterOptions? options = null) => new("lss-tool", options ?? Quick());
 
-    /// <summary>The release after a service waits on the master's clock, so it gets no wall-clock budget here.</summary>
-    private static LssCommissioning Tool(ILssMaster master)
-        => new(master) { ReleaseBudgetForTests = Timeout.InfiniteTimeSpan };
+    private static LssCommissioning Tool(ILssMaster master) => new(master);
 
     private static CanOpenNode Slave(ClockedLssBench bench, int channel, byte nodeId, LssSlaveOptions lss)
         => bench.Slave(channel, nodeId, lss, sdoTimeout: TimeSpan.FromMilliseconds(200));
@@ -769,6 +767,29 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         again.NodeId.Should().Be(0x12);
     }
 
+    // L-4 (#359): an abandoned activation leaves the master reserving both switch-delay periods,
+    // up to 2 x 65 535 ms, and the release waits that out before it sends. A wall-clock budget of
+    // its own either ran out in that wait -- the release was swallowed and the slaves stayed in
+    // configuration -- or inside the send, which poisons the master as an indeterminate
+    // transmission. So the release must carry a token that nothing can cancel.
+    [Fact]
+    public async Task The_Release_After_An_Abandoned_Activation_Has_No_Deadline_Of_Its_Own()
+    {
+        var master = new ServiceMaster { OnActivate = new OperationCanceledException("the caller gave up") };
+        var configure = () => new LssCommissioning(master).ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            BitTimingSelector = 0,
+            BitTimingIndex = 2,
+            ActivateDelayMilliseconds = 3000,
+        });
+
+        await configure.Should().ThrowAsync<OperationCanceledException>();
+        master.ActivateCalled.Should().BeTrue("the premise: the activation was abandoned, not skipped");
+        master.GlobalTokens.Should().HaveCount(2, "the switch to waiting before selecting, then the release");
+        master.GlobalTokens[1].CanBeCanceled.Should().BeFalse(
+            "the release waits out the master's reservation, however long, and is never cut off inside the send");
+    }
+
 #if NET
     [Fact]
     public async Task ReadIdentities_Does_Not_Treat_A_Timeout_As_A_Zero()
@@ -879,10 +900,17 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public Exception? OnRelease { get; init; }
 
+        /// <summary>Thrown by activate bit timing, as a cancelled or failed activation would.</summary>
+        public Exception? OnActivate { get; init; }
+
+        /// <summary>The token of every switch state global, in call order.</summary>
+        public List<CancellationToken> GlobalTokens { get; } = new();
+
         private int _globals;
 
         public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
         {
+            GlobalTokens.Add(cancellationToken);
             if (++_globals > 1 && OnRelease is not null) throw OnRelease;
             return Task.CompletedTask;
         }
@@ -901,7 +929,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             bool returnToWaiting = false, CancellationToken cancellationToken = default)
         {
             ActivateCalled = true;
-            return Task.CompletedTask;
+            return OnActivate is null ? Task.CompletedTask : Task.FromException(OnActivate);
         }
 
         public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)

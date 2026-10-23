@@ -22,14 +22,17 @@ namespace CanKit.Pro.CANopen.Lss;
 /// no slave matched.
 /// </para>
 /// <para>
-/// Cancellation returns promptly, but later commands wait out an abandoned response window
-/// so its delayed replies cannot answer a new request. A cancelled Fastscan also preserves
-/// its probe's cycle gap. If transmission fails or is cancelled after entering the send
-/// service, delivery can remain indeterminate: the driver may still transmit arbitrarily
-/// later. The master then rejects every subsequent command with a
-/// <see cref="CanOpenTransportException"/>. Dispose it, reset the transport and re-establish
-/// a quiescent network before opening another master. Explicit driver rejection and
-/// cancellation checked before entering the service leave the master usable.
+/// Cancellation returns promptly, but later commands wait out an abandoned response window so
+/// its delayed replies cannot answer a new request. A cancelled Fastscan also preserves its
+/// probe's cycle gap. An abandoned <see cref="ActivateBitTimingAsync"/> reserves both
+/// switch-delay periods, up to 2 × 65 535 ms, and the next command waits for them, including
+/// the release to waiting that <see cref="LssCommissioning"/> sends after a cancelled sequence.
+/// If transmission fails or is cancelled after entering the send service, delivery can remain
+/// indeterminate: the driver may still transmit arbitrarily later. The master then rejects
+/// every subsequent command with a <see cref="CanOpenTransportException"/>. Dispose it, reset
+/// the transport and re-establish a quiescent network before opening another master. Explicit
+/// driver rejection and cancellation checked before entering the service leave the master
+/// usable.
 /// </para>
 /// </remarks>
 public interface ILssMaster : IDisposable, IAsyncDisposable

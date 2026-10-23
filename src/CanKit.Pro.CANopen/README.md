@@ -1320,7 +1320,11 @@ not overlap a commissioning sequence.
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
 from a node that has already booted. A missing later sub-index is 0. A timeout or any other
 abort is not reported as a zero LSS number. Switching the slaves back to waiting after a
-service is best-effort: if that frame fails, the configuration result is still returned.
+service is best-effort: if that frame fails, the configuration result is still returned. It is
+not cut short, though: the release ignores the caller's token and has no time budget of its
+own, so a cancelled or failed sequence returns only once that frame was sent or failed. It
+first waits out whatever the master has reserved. After an abandoned activation that is both
+switch-delay periods, up to 2 × 65 535 ms.
 
 ```csharp
 var tool = new LssCommissioning(master);
