@@ -266,6 +266,92 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
             "the follow-up recheck observes the state the in-flight hint was announcing");
     }
 
+    // --- Paths the 2026-10-21 deep review found untested (actor-M4/M5/M6) -------------------
+
+    // actor-M4: ICanBus.FaultOccurred is the second hint channel, and nothing raised it, so
+    // replacing OnFaultHint's body with nothing stayed green. MailboxActor's timers never fall
+    // due, so the only way the recheck below can be queued is the fault hint.
+    [Fact]
+    public void A_Bus_Fault_Is_A_Recheck_Hint_As_Well()
+    {
+        using var bus = OpenBus();
+        using var actor = new MailboxActor();
+        using var monitor = new BusStateMonitor(bus, actor);
+        actor.RunQueuedWork();
+
+        var transitions = new List<BusStateChangedEventArgs>();
+        monitor.StateChanged += (_, e) => transitions.Add(e);
+
+        bus.BusState = BusState.BusOff;
+        bus.RaiseFault(new InvalidOperationException("receive loop died"));
+
+        actor.MailboxDepth.Should().Be(1, "a bus fault queues a recheck just as an error frame does");
+        actor.RunQueuedWork();
+        transitions.Should().ContainSingle().Which.Current.Should().Be(BusState.BusOff);
+    }
+
+    // actor-M5: Dispose unsubscribes both hints, and deleting the two `-=` stayed green. Raising
+    // a hint after Dispose cannot show it, because PostRecheck ignores hints once disposed; what a
+    // handler left attached costs is the bus keeping the monitor reachable and calling it for the
+    // bus's lifetime, so the handler count is the assertion.
+    [Fact]
+    public void Dispose_Detaches_Both_Hint_Handlers_From_The_Bus()
+    {
+        using var bus = OpenBus();
+        using var actor = new MailboxActor();
+        var errorHandlers = bus.ErrorFrameSubscriberCount;
+        var faultHandlers = bus.FaultSubscriberCount;
+
+        var monitor = new BusStateMonitor(bus, actor);
+        bus.ErrorFrameSubscriberCount.Should().Be(errorHandlers + 1);
+        bus.FaultSubscriberCount.Should().Be(faultHandlers + 1);
+
+        monitor.Dispose();
+
+        bus.ErrorFrameSubscriberCount.Should().Be(errorHandlers, "Dispose must detach the error-frame hint");
+        bus.FaultSubscriberCount.Should().Be(faultHandlers, "Dispose must detach the fault hint");
+    }
+
+    // actor-M6: the poll re-arms in a finally so that a BusState read that throws does not end
+    // monitoring for good; nothing made the read throw, so dropping the finally stayed green.
+    // The double's getter throws once it is disposed; the timer list is asked on the loop
+    // (NextTimerDelayAsync) after AdvanceAsync has run the failing tick, so whether the next poll
+    // is armed is read, not waited for.
+    [Fact]
+    public async Task A_Throwing_BusState_Read_Is_Reported_And_The_Poll_Keeps_Running()
+    {
+        using var clock = new VirtualClock();
+        using var bus = OpenBus();
+        var actor = clock.NewActor();
+        var pollInterval = TimeSpan.FromMilliseconds(20);
+        using var monitor = new BusStateMonitor(bus, actor, pollInterval);
+
+        var reported = new List<Exception>();
+        actor.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var transitions = new List<BusStateChangedEventArgs>();
+        monitor.StateChanged += (_, e) => { lock (transitions) transitions.Add(e); };
+
+        await clock.WaitUntilTimerArmedAsync(actor, pollInterval, Bounded);
+        var readFailure = new InvalidOperationException("driver status call failed");
+        bus.BusStateFailureOnceDisposed = () => readFailure;
+        bus.Dispose();
+        await clock.AdvanceAsync(pollInterval);
+
+        lock (reported)
+            reported.Should().ContainSingle("the failed read surfaces as a background exception (FR-RAW-023)")
+                .Which.Should().BeSameAs(readFailure);
+        (await actor.NextTimerDelayAsync()).Should().Be(pollInterval,
+            "the tick whose read threw must still have armed the next one");
+
+        bus.BusStateFailureOnceDisposed = null;
+        bus.BusState = BusState.BusOff;
+        await clock.AdvanceAsync(pollInterval);
+
+        lock (transitions)
+            transitions.Should().ContainSingle("monitoring resumes once the state can be read again")
+                .Which.Current.Should().Be(BusState.BusOff);
+    }
+
     // A-3 (2026-10-21 deep review): the coalescing gate is claimed before the post and released
     // by the recheck that post queues -- or, when the post is refused, by PostRecheck itself. Only
     // ObjectDisposedException released it; anything else a foreign actor's Post throws left it
