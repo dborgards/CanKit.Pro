@@ -672,6 +672,17 @@ internal static class PdoSyncEmcyChecks
             }
 
             using var tap = new BusTap(session.Service, (id, extended) => watched.Contains((id, extended)));
+
+            // The target's own SYNCs, if it makes any. 1005h bit 30 says it is a producer, and
+            // this check then injects a second SYNC stream: a TPDO answering one of the device's
+            // own SYNCs would be counted against the tool's accepted count, hiding a response
+            // missing from the injected burst, and the two counter streams interleaving makes any
+            // 1800h:06 start gate unreadable. Counting the foreign SYNCs would fix the first half
+            // and not the second, so this detects the condition and declines to measure through
+            // it — the choice the rest of this file makes about anything it cannot separate.
+            // Found in review of #388.
+            using var syncWatch = new BusTap(session.Service,
+                (id, extended) => id == sync.CobId && extended == sync.Extended);
             int quiet;
             double burstFromMs = 0;
             double burstUntilMs = 0;
@@ -766,6 +777,27 @@ internal static class PdoSyncEmcyChecks
                 return Outcome.Inconclusive(
                     "The device did not report Operational after the NMT Start command, so its synchronous TPDOs were "
                     + "never due and their silence says nothing about it.", Attribution.Transport, measurements);
+            }
+
+            // Before any per-TPDO arithmetic: if SYNCs this run did not send were on the bus during
+            // the burst, the opportunities cannot be attributed and nothing below means what it
+            // says. Neither the virtual adapter nor a hardware one delivers a channel's own
+            // transmissions back to it, and echoes are filtered besides — so what this tap holds
+            // is someone else's traffic, which on a device whose 1005h sets the generate bit is
+            // the device's own.
+            var foreignSyncs = Transmitted(syncWatch.Through(burstUntilMs))
+                .Count(f => f.AtMs >= burstFromMs);
+            if (foreignSyncs > 0)
+            {
+                measurements["SYNCs this run did not send"] = foreignSyncs.ToString(CultureInfo.InvariantCulture);
+                return Outcome.Inconclusive(
+                    $"{foreignSyncs} SYNC frame(s) on 0x{sync.CobId:X3} during the burst were not sent by this run, so "
+                    + "the target is producing SYNC itself (1005h bit 30). A TPDO answering one of those would be "
+                    + "counted against this run's SYNCs and could hide a response missing from the burst, and the two "
+                    + "counter streams interleaving makes any 1800h:06 start value unreadable. Stop the target's SYNC "
+                    + "producer — 1006h = 0, or clear bit 30 of 1005h — and re-run; nothing is concluded about its "
+                    + "synchronous TPDOs here.",
+                    Attribution.Setup, measurements);
             }
 
             if (accepted == 0)

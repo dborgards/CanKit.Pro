@@ -138,7 +138,7 @@ ParameterName=COB-ID SYNC
 ObjectType=0x7
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x40000080
+DefaultValue=0x00000080
 PDOMapping=0
 
 [1006]

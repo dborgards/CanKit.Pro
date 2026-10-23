@@ -273,7 +273,14 @@ internal static class NmtAndHeartbeatChecks
             if (period is not { } beat)
                 return Outcome.NeedsSetup("The device produces no heartbeat to consume (see HBT-02).");
 
-            var received = 0;
+            // The timestamps of the decoded beats, not a bare counter. The handler goes on before
+            // the wire tap exists and comes off after the drain, so a counter also catches events
+            // from outside the window the raw snapshot covers — and one such event offsets a
+            // genuinely dropped in-window one, making the two counts agree and passing the very
+            // loss the comparison exists to surface. HeartbeatReceivedEventArgs carries the
+            // instant the frame was processed (CanOpenEvents.cs), so both sides can be bounded by
+            // the same interval. Found in review of #388.
+            var beats = new List<DateTime>();
             var timedOut = 0;
             void OnBeat(object? sender, HeartbeatReceivedEventArgs e)
             {
@@ -285,8 +292,8 @@ internal static class NmtAndHeartbeatChecks
                 // heartbeat in its own window at all. The same "a boot-up is not a heartbeat" rule
                 // HBT-02 already applies to the wire, missing from the decoded path. Found in
                 // review of #388.
-                if (e.ProducerNodeId == session.Target && IsDefinedRunState((byte)e.State))
-                    Interlocked.Increment(ref received);
+                if (e.ProducerNodeId != session.Target || !IsDefinedRunState((byte)e.State)) return;
+                lock (beats) beats.Add(e.Timestamp);
             }
 
             void OnTimeout(object? sender, HeartbeatTimeoutEventArgs e)
@@ -343,6 +350,7 @@ internal static class NmtAndHeartbeatChecks
                 // from it. Found in review of #388.
                 var heartbeatId = CanOpenCobId.Heartbeat(session.Target);
                 using var wire = new BusTap(session.Service, (id, extended) => id == heartbeatId && !extended);
+                var windowFromUtc = DateTime.UtcNow;
 
                 // Through the tap's own window, so the pump is drained and the boundary is the one
                 // the verdict names. Swept for after the same defect was reported against HBT-04:
@@ -350,7 +358,14 @@ internal static class NmtAndHeartbeatChecks
                 // stack fault into "the device stopped producing". Found in review of #388.
                 var wireUntilMs = await wire.ListenAsync(needed, cancellationToken).ConfigureAwait(false);
 
+                // The same interval on both sides: the tap's own cutoff for the raw frames, and
+                // the wall clock from the tap's creation to the end of the window for the decoded
+                // events. Two clocks, one interval — the bounds are what has to match, not the
+                // units.
+                var windowUntilUtc = windowFromUtc.AddMilliseconds(wireUntilMs);
                 var onTheWire = Heartbeats(wire.Through(wireUntilMs)).Count;
+                int received;
+                lock (beats) received = beats.Count(t => t >= windowFromUtc && t <= windowUntilUtc);
                 var measurements = new Dictionary<string, string>
                 {
                     ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
