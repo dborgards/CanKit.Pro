@@ -1329,7 +1329,7 @@ service is best-effort: if that frame fails, the configuration result is still r
 not cut short, though: the release ignores the caller's token and has no time budget of its
 own, so a cancelled or failed sequence returns only once that frame was sent or failed. It
 first waits out whatever the master has reserved. After an abandoned activation that is both
-switch-delay periods, up to 2 × 65 535 ms.
+switch-delay periods, up to 2 × 65 535 ms. Disposing the master ends that wait.
 
 ```csharp
 var tool = new LssCommissioning(master);

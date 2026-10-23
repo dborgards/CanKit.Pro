@@ -230,7 +230,8 @@ public sealed class LssUnconfiguredScanResult
 /// Do not call the master directly while a commissioning sequence is running.
 /// A sequence that is cancelled or fails still returns its slaves to waiting before it ends. That
 /// release has no time budget of its own: it waits out whatever the master has reserved, which
-/// after an abandoned activation is both switch-delay periods (up to 2 × 65 535 ms).
+/// after an abandoned activation is both switch-delay periods (up to 2 × 65 535 ms). Disposing the
+/// master ends that wait.
 /// </remarks>
 public sealed class LssCommissioning
 {
