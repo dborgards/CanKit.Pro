@@ -989,13 +989,23 @@ namespace CanKit.Pro.Actor
 
         private void RaiseBackgroundException(Exception ex)
         {
-            try
+            var handler = BackgroundExceptionOccurred;
+            if (handler is null) return;
+
+            // One subscriber at a time, as CanOpenNode does: a multicast Invoke stops at the first
+            // subscriber that throws, so a single try around it protected the loop but not the
+            // other listeners -- every one registered after a throwing one never heard of the
+            // exception (#381).
+            foreach (var subscriber in handler.GetInvocationList())
             {
-                BackgroundExceptionOccurred?.Invoke(this, ex);
-            }
-            catch
-            {
-                // A misbehaving subscriber must never be able to crash the actor loop itself.
+                try
+                {
+                    ((EventHandler<Exception>)subscriber)(this, ex);
+                }
+                catch
+                {
+                    // A misbehaving subscriber must never be able to crash the actor loop itself.
+                }
             }
         }
 

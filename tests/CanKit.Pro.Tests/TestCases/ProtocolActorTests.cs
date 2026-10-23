@@ -212,6 +212,25 @@ public class ProtocolActorTests
         stillWorks.Should().Be(42);
     }
 
+    // #381: a multicast Invoke stops at the first handler that throws, so one try around it kept
+    // the loop alive but hid the exception from every subscriber registered after a throwing one.
+    // Post runs before the PostAsync behind it, and the report is raised inside the failing item,
+    // so by the time the ask completes both subscribers have been called -- nothing waits on a clock.
+    [Fact]
+    public async Task A_Throwing_BackgroundException_Subscriber_Does_Not_Hide_The_Exception_From_Later_Ones()
+    {
+        using var actor = new ProtocolActor();
+        var boom = new InvalidOperationException("background boom");
+        Exception? second = null;
+        actor.BackgroundExceptionOccurred += (_, _) => throw new InvalidOperationException("the first subscriber failed");
+        actor.BackgroundExceptionOccurred += (_, ex) => second = ex;
+
+        actor.Post(() => throw boom);
+        await actor.PostAsync(() => { });
+
+        second.Should().BeSameAs(boom, "every subscriber hears of the exception, whatever an earlier one does");
+    }
+
     [Fact]
     public async Task Schedule_Fires_Callback_After_The_Configured_Delay()
     {
