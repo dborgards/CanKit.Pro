@@ -69,7 +69,7 @@ public class ProtocolActorLoopCountTests
         var loopsBefore = ProtocolActor.RunningLoopCount;
         var context = mode == ActorExecutionMode.SynchronizationContext ? new SynchronizationContext() : null;
         var clock = new FailingTimeSource();
-        var actor = new ProtocolActor(mode, context, clock, shutdownTimeout: null);
+        using var actor = new ProtocolActor(mode, context, clock, shutdownTimeout: null);
         var reported = new List<Exception>();
         actor.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
 

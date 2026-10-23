@@ -302,7 +302,7 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
         var errorHandlers = bus.ErrorFrameSubscriberCount;
         var faultHandlers = bus.FaultSubscriberCount;
 
-        var monitor = new BusStateMonitor(bus, actor);
+        using var monitor = new BusStateMonitor(bus, actor);
         bus.ErrorFrameSubscriberCount.Should().Be(errorHandlers + 1);
         bus.FaultSubscriberCount.Should().Be(faultHandlers + 1);
 
