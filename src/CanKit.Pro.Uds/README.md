@@ -64,12 +64,16 @@ await uds.SecurityAccessAsync(
 
 // One-shot download (FR-UDS-012): negotiate maxNumberOfBlockLength, chunk the payload,
 // walk the block-sequence counter (0x01..0xFF, wraps to 0x00), close with RequestTransferExit.
+// Uncompressed and unencrypted (DFI 0x00), memorySize must be the payload's length: a
+// mismatch is refused before RequestDownload.
+byte[] firmware = File.ReadAllBytes("app.bin");
+int size = firmware.Length;
 await uds.DownloadAsync(
     dataFormatIdentifier: 0x00,                            // no compression / no encryption
     addressAndLengthFormatIdentifier: 0x44,                // 4-byte address, 4-byte size
     memoryAddress: new byte[] { 0x00, 0x10, 0x00, 0x00 },
-    memorySize:    new byte[] { 0x00, 0x00, 0x02, 0x00 }, // 512 bytes
-    data: firmwareChunk);
+    memorySize:    new[] { (byte)(size >> 24), (byte)(size >> 16), (byte)(size >> 8), (byte)size },
+    data: firmware);
 ```
 
 ## Design notes
