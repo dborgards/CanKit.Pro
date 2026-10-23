@@ -833,12 +833,16 @@ public class LssMasterBoundaryTests
         var cancelled = async () => await rig.RunAsync(configure);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
-        // Selection and configuration take virtual time first; the periods count from the activation.
-        string activation = events.Single(e => e.StartsWith($"{LssCommand.ActivateBitTiming:X2}@", StringComparison.Ordinal));
-        double at = double.Parse(activation.Substring(activation.IndexOf('@') + 1), System.Globalization.CultureInfo.InvariantCulture);
-        string After(double ms) => (at + ms).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        string waiting = $"{LssCommand.SwitchStateGlobal:X2}@" + After(200);
-        events.Skip(events.IndexOf(activation) + 1).Should().Equal("retune@" + After(100), waiting, waiting);
+        // RunAsync moves the clock to the next master timer without waiting for the follow-through's
+        // continuation, so the instants can come late; the order and the lower bounds cannot.
+        static (string What, double At) Parse(string e) => (e.Substring(0, e.IndexOf('@')),
+            double.Parse(e.Substring(e.IndexOf('@') + 1), System.Globalization.CultureInfo.InvariantCulture));
+        var activation = events.Select(Parse).Single(e => e.What == $"{LssCommand.ActivateBitTiming:X2}");
+        var after = events.Select(Parse).SkipWhile(e => e != activation).Skip(1).ToList();
+        string waiting = $"{LssCommand.SwitchStateGlobal:X2}";
+        after.Select(e => e.What).Should().Equal("retune", waiting, waiting);
+        after[0].At.Should().BeGreaterThanOrEqualTo(activation.At + 100, "the host follows the slaves' switch");
+        after[1].At.Should().BeGreaterThanOrEqualTo(activation.At + 200, "nothing is sent in the second period");
         slave.State.Should().Be(LssState.Waiting);
     }
 
