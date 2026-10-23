@@ -1,8 +1,6 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -496,8 +494,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         var stray = new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 };
         // In the jump table (SendingSegments = 1) and past it (AwaitEnd = 5).
-        DeliverBlockFrameWhilePhase(master, 0x11, "SendingSegments", "AwaitInitResponse", stray);
-        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitEnd", "AwaitInitResponse", stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEnd, stray);
         download.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the download");
 
         Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
@@ -533,9 +531,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
 
         var stray = new byte[] { 0x43, 0x01, 0x20, 0x00, 0xAA, 0xBB, 0xCC, 0xDD };
-        DeliverBlockFrameWhilePhase(master, 0x11, "SendingSegments", "AwaitInitResponse", stray);
-        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitSubBlockAck", "AwaitInitResponse", stray);
-        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitEndResponse", "AwaitInitResponse", stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitSubBlockAck, stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEndResponse, stray);
         upload.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the upload");
 
         var payload = new byte[] { 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77 };
@@ -549,51 +547,6 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             unusedBytesInLastSegment: 0, crc: 0));
         tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse);
         (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(payload);
-    }
-
-    // The phase is private and a block client never leaves it sitting across a bus frame, so the
-    // frame is delivered on the actor with the phase already set. Restoring the phase in that
-    // same turn is what lets the real response, sent afterwards, belong to the transfer again.
-    private static bool IsFatal(Exception ex) =>
-        ex is OutOfMemoryException
-            or StackOverflowException
-            or AccessViolationException
-            or AppDomainUnloadedException
-            or BadImageFormatException
-            or CannotUnloadAppDomainException
-            or InvalidProgramException
-            or ThreadAbortException;
-
-    private static void DeliverBlockFrameWhilePhase(ICanOpenNode node, byte serverNodeId, string phase,
-        string restore, byte[] data)
-    {
-        var nodeType = node.GetType();
-        var incoming = nodeType.GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var phaseType = nodeType.GetNestedType("SdoBlockClientPhase", BindingFlags.NonPublic)!;
-        var clientsField = nodeType.GetField("_sdoBlockClients", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var actor = nodeType.GetField("_actor", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(node)!;
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Action work = () =>
-        {
-            try
-            {
-                var clients = (IDictionary)clientsField.GetValue(node)!;
-                object? session = null;
-                foreach (DictionaryEntry entry in clients)
-                    session = entry.Value;
-                var phaseProperty = session!.GetType().GetProperty("Phase")!;
-                phaseProperty.SetValue(session, Enum.Parse(phaseType, phase));
-                incoming.Invoke(node, new object[] { CanOpenCobId.SdoTx(serverNodeId), data, false });
-                phaseProperty.SetValue(session, Enum.Parse(phaseType, restore));
-                done.TrySetResult();
-            }
-            catch (Exception ex) when (!IsFatal(ex))
-            {
-                done.TrySetException(ex);
-            }
-        };
-        actor.GetType().GetMethod("Post", new[] { typeof(Action) })!.Invoke(actor, new object[] { work });
-        done.Task.GetAwaiter().GetResult();
     }
 
     // -----------------------------------------------------------------------------------------

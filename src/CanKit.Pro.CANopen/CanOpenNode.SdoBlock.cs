@@ -1264,7 +1264,25 @@ internal sealed partial class CanOpenNode
     // Session state objects (private nested).
     // =========================================================================================
 
-    private enum SdoBlockClientPhase
+    /// <summary>
+    /// Test seam: hands <paramref name="data"/> to the incoming path as an SDO response from
+    /// <paramref name="serverNodeId"/>, in one actor turn with the open block client session set
+    /// to <paramref name="phase"/> and set back afterwards. A block client never sits in some of
+    /// its phases across a bus frame, so a frame cannot be made to meet them from the wire.
+    /// Compile-time bound, so a rename breaks the build rather than turning the tests that use
+    /// it into reflection failures (#357).
+    /// </summary>
+    internal Task DeliverBlockClientResponseInPhaseForTests(byte serverNodeId, SdoBlockClientPhase phase, byte[] data)
+        => _actor.PostAsync(() =>
+        {
+            var session = _sdoBlockClients[serverNodeId];
+            var restore = session.Phase;
+            session.Phase = phase;
+            HandleIncoming(CanOpenCobId.SdoTx(serverNodeId), data, isRtr: false);
+            session.Phase = restore;
+        });
+
+    internal enum SdoBlockClientPhase
     {
         AwaitInitResponse = 0,
         SendingSegments = 1,
