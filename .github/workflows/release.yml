@@ -50,6 +50,7 @@ jobs:
   verify:
     name: build, test and pack
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     outputs:
@@ -195,6 +196,7 @@ jobs:
     # that holds the credentials: the guard belongs on the door it protects, not only upstream.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # The only job holding the OIDC grant. It installs the release tooling, exchanges the token
     # for a one-hour NuGet key, and runs semantic-release against packages `verify` already packed.
     #
@@ -313,6 +315,7 @@ jobs:
     needs: [verify, release]
     if: ${{ !fromJSON(inputs.dry_run) && needs.verify.outputs.version != '' && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write          # the OIDC identity the attestation is signed with
