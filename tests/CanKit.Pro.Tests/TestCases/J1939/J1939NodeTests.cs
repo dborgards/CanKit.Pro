@@ -4617,6 +4617,75 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "our own echo of this frame came back long ago and left the ledger; what arrives now is a peer's");
     }
 
+    // #355 (J-1): the ledger on a bus that does not echo at all (SocketCAN or Kvaser in Normal
+    // mode). The entry the send recorded never meets its echo; it used to stay until 64 newer
+    // sends pushed it out, and a conforming peer that later took the vacated address and sent
+    // the same frame -- an all-0xFF "not available" payload is the ordinary case -- was dropped
+    // as this node's echo. The entry now lives ClaimEchoGrace past the send, as a claim marker
+    // does. On a clock the test holds, so "past the grace" is a step, not a sleep.
+    [Fact]
+    public async Task A_Ledger_Entry_On_A_Bus_That_Does_Not_Echo_Expires_After_The_Grace()
+    {
+        const uint pgn = 0xFEF1u;
+        var notAvailable = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        await node.SendAsync(new J1939Message(pgn, notAvailable)).WithTimeout(ShortTimeout);
+        await ClaimOnClockAsync(node, clock, actor, 0x32, announce);
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+
+        var heard = WaitForMessageAsync(node, m => m.Pgn == pgn && m.SourceAddress == 0x31, ShortTimeout);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x31), notAvailable,
+            isExtendedFrame: true), isEcho: false);
+        (await heard).Payload.ToArray().Should().Equal(notAvailable,
+            "nothing echoes on this bus, so past the grace the frame under the vacated address is the peer's");
+    }
+
+    // The same bus, a send the driver refused: nothing was handed over, so no echo can come and
+    // the entry goes at once -- the peer under the vacated address is heard without any grace.
+    [Fact]
+    public async Task A_Rejected_Send_Leaves_No_Ledger_Entry()
+    {
+        const uint pgn = 0xFEF1u;
+        var notAvailable = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        bus.AcceptTransmit = false;
+        Func<Task> send = () => node.SendAsync(new J1939Message(pgn, notAvailable)).WithTimeout(ShortTimeout);
+        (await send.Should().ThrowAsync<J1939NodeException>()).Which.Message.Should().Contain("Rejected");
+        bus.AcceptTransmit = true;
+        await ClaimOnClockAsync(node, clock, actor, 0x32, announce);
+
+        var heard = WaitForMessageAsync(node, m => m.Pgn == pgn && m.SourceAddress == 0x31, ShortTimeout);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x31), notAvailable,
+            isExtendedFrame: true), isEcho: false);
+        (await heard).SourceAddress.Should().Be(0x31, "a rejected send never reached the wire and owes no echo");
+    }
+
+    private static async Task ClaimOnClockAsync(J1939NodeImpl node, VirtualClock clock, ProtocolActor actor,
+        byte address, TimeSpan announce)
+    {
+        var claim = node.ClaimAddressAsync(address);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(address);
+    }
+
     // Bugbot on #140: the carve-out that serves a frame directed to this node needs an address to
     // be directed to. While the node holds none (a re-claim in flight), -1 cast to a byte is the
     // global address, and a broadcast echo -- a Request this node sent to everyone -- would read

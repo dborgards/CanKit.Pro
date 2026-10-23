@@ -111,11 +111,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // A received frame equal to one of them is this node's own echo, whatever address the
     // node holds when the echo is finally processed (#121). Bounded, oldest out: an entry
     // only matters while the echo could still arrive, and a bus that never echoes would
-    // otherwise grow it without end. Written from the send path, read and pruned on the
-    // actor loop. Address Claim / Cannot Claim do not live here: a burst of ordinary sends
+    // otherwise grow it without end. Bounded in time as well, as the claim markers are (#355,
+    // J-1): a send the driver rejected never echoes and drops its entry at once, and any other
+    // outcome lets it match for ClaimEchoGrace after the send returned, measured on the actor's
+    // clock and checked when a frame is matched -- on a bus that does not echo an entry otherwise
+    // waited for 64 newer sends, and swallowed a peer's identical frame under an address the node
+    // had since left. Written from the send path, read and pruned on the actor loop. Address Claim / Cannot Claim do not live here: a burst of ordinary sends
     // would evict one, and the next echo of our own claim would look like a peer with our
     // NAME (#180).
-    private readonly List<(uint CanId, byte[] Payload)> _ownFrames = new();
+    private readonly List<OwnFrame> _ownFrames = new();
     private readonly object _ownFramesGate = new();
     private const int OwnFramesCapacity = 64;
 
@@ -1165,29 +1169,53 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // node did not send is never mistaken for one (#121). A peer sending the identical frame
     // while ours is outstanding is swallowed once, which on a shared bus is indistinguishable
     // from the echo in any case.
-    private void RecordOwnFrame(uint canId, byte[] payload)
+    private OwnFrame RecordOwnFrame(uint canId, byte[] payload)
     {
+        var entry = new OwnFrame(canId, payload);
         lock (_ownFramesGate)
         {
             if (_ownFrames.Count >= OwnFramesCapacity) _ownFrames.RemoveAt(0);
-            _ownFrames.Add((canId, payload));
+            _ownFrames.Add(entry);
         }
+        return entry;
     }
 
     private bool TryTakeOwnFrame(uint canId, byte[] payload)
     {
         lock (_ownFramesGate)
         {
+            long now = _time.GetTimestamp();
             for (int i = 0; i < _ownFrames.Count; i++)
             {
-                var (id, data) = _ownFrames[i];
-                if (id != canId || data.Length != payload.Length) continue;
-                if (!data.AsSpan().SequenceEqual(payload)) continue;
+                var entry = _ownFrames[i];
+                if (entry.ExpiresAt <= now)
+                {
+                    _ownFrames.RemoveAt(i--);
+                    continue;
+                }
+                if (entry.CanId != canId || entry.Payload.Length != payload.Length) continue;
+                if (!entry.Payload.AsSpan().SequenceEqual(payload)) continue;
                 _ownFrames.RemoveAt(i);
                 return true;
             }
         }
         return false;
+    }
+
+    // Rejected: nothing was handed to the driver, so nothing will echo, and the entry goes now.
+    // Anything else may still echo after SendConfirmedAsync returned -- or, on a bus that does
+    // not echo, never -- and the entry stays matchable for ClaimEchoGrace. By identity: two sends
+    // of the same frame are two entries, and the one a send settles is its own; one its echo
+    // already took is simply not found.
+    private void SettleOwnFrame(OwnFrame entry, bool mayStillEcho)
+    {
+        lock (_ownFramesGate)
+        {
+            if (mayStillEcho)
+                entry.ExpiresAt = TickMath.DueAt(_time.GetTimestamp(), ClaimEchoGrace, _time.Frequency);
+            else
+                _ownFrames.Remove(entry);
+        }
     }
 
     // =========================================================================================
@@ -1248,8 +1276,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
                 using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
                 // Recorded before it is on the wire: the echo may be back before SendConfirmedAsync returns.
-                RecordOwnFrame(canId, payload);
-                var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var entry = RecordOwnFrame(canId, payload);
+                TxConfirmation confirmation;
+                try
+                {
+                    confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // A throw (a cancelled wait, a driver fault) does not say the frame stayed
+                    // off the wire.
+                    SettleOwnFrame(entry, mayStillEcho: true);
+                    throw;
+                }
+                SettleOwnFrame(entry, confirmation.Confirmed || ClaimEchoMayFollow(confirmation.FailureReason));
                 if (!confirmation.Confirmed)
                     throw new J1939NodeException(
                         $"J1939 send failed for PGN 0x{message.Pgn:X}: {confirmation.FailureReason}.");
@@ -1919,6 +1959,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Recorded outside Echo mode: only a frame the adapter flags as an echo may spend it.
         public bool FlaggedOnly { get; init; }
         public IDeadline? Grace { get; set; }
+    }
+
+    // One application single-frame send in the ledger. Identity, as with ClaimEcho: the grace
+    // of one send retires that send's entry, not an identical later one's.
+    private sealed class OwnFrame
+    {
+        public OwnFrame(uint canId, byte[] payload)
+        {
+            CanId = canId;
+            Payload = payload;
+        }
+
+        public uint CanId { get; }
+        public byte[] Payload { get; }
+
+        // On the actor's clock; unbounded while the send is still outstanding. Under the gate.
+        public long ExpiresAt { get; set; } = long.MaxValue;
     }
 
     private sealed class PendingClaim
