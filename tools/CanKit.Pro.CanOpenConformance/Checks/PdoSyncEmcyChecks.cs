@@ -63,11 +63,24 @@ internal static class PdoSyncEmcyChecks
 
         await book.RunAsync("PDO-03", "pdo", "TPDOs are transmitted in Operational and not in Stopped", Tier.Write, "FR-CO-022", async () =>
         {
-            var valid = tpdos.Where(p => p.Valid).ToList();
+            // Multiplexed TPDOs are excluded here, not only reported by PDO-01. An MPDO's payload
+            // is a destination address and an index rather than the mapped process data (CiA 301
+            // §7.2.4), so the length rule below does not apply to it and the report says MPDO is
+            // not addressed — yet this filter took every valid descriptor, so PDO-03 watched them
+            // as ordinary TPDOs and could return Pass from their traffic, contradicting the
+            // report's own coverage section. Found in review of #388.
+            var multiplexed = tpdos.Where(p => p.Valid && p.MultiplexedMode).ToList();
+            var valid = tpdos.Where(p => p.Valid && !p.MultiplexedMode).ToList();
             if (valid.Count == 0)
             {
-                return tpdos.Count == 0
-                    ? Outcome.NeedsSetup("PDO-01 read no TPDO parameters, so there is no COB-ID to watch.")
+                if (tpdos.Count == 0)
+                    return Outcome.NeedsSetup("PDO-01 read no TPDO parameters, so there is no COB-ID to watch.");
+
+                return multiplexed.Count > 0
+                    ? Outcome.NotApplicable(
+                        $"Every valid TPDO ({string.Join(", ", multiplexed.Select(p => "TPDO" + p.Number))}) is in "
+                        + "multiplexed mode, which this runner does not check, so there is no ordinary TPDO whose "
+                        + "payload length its mapping record predicts.")
                     : Outcome.NotApplicable($"All {tpdos.Count} TPDO(s) the device declares are marked invalid (1800h:01 bit 31).");
             }
 
@@ -157,6 +170,12 @@ internal static class PdoSyncEmcyChecks
                 ["frames within the first " + SettleMs + " ms of Stop"] = settling.ToString(CultureInfo.InvariantCulture),
                 ["left in state"] = restoration.State,
             };
+
+            if (multiplexed.Count > 0)
+            {
+                measurements["TPDOs set aside as multiplexed"] =
+                    string.Join(", ", multiplexed.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3}"));
+            }
 
             foreach (var pdo in valid)
             {
@@ -273,12 +292,22 @@ internal static class PdoSyncEmcyChecks
                 // Event-driven TPDOs only transmit when their data changes, and a synchronous one
                 // waits for a SYNC this check does not send. Silence is therefore not a fault.
                 var synchronous = valid.Where(p => CanOpenTransmissionType.IsSynchronous(p.TransmissionType)).ToArray();
+
+                // The attribution follows which case it is, instead of Unknown for both. When
+                // *every* watched TPDO is synchronous the silence is not a fault and nothing is
+                // claimed, which is what Attribution.None means and what SYN-02 already returns
+                // for its acyclic counterpart; Unknown put a correctly behaving device in the
+                // report's "unclear" group and told the operator to go and look at it. A silent
+                // event-driven TPDO is genuinely unknown: the overdue rule above has already
+                // cleared the ones that owed a frame, and whether the application had data to
+                // send is not observable from the bus.
+                var allSynchronous = synchronous.Length == valid.Count;
                 return Outcome.Inconclusive(
                     $"No TPDO was transmitted in {session.Options.PdoWindowMs} ms of Operational. "
                     + (synchronous.Length > 0
                         ? $"{synchronous.Length} of them are synchronous and wait for a SYNC — see the sync group."
                         : "Event-driven TPDOs transmit when their mapped data changes, so a static device is legitimately silent."),
-                    Attribution.Unknown, measurements);
+                    allSynchronous ? Attribution.None : Attribution.Unknown, measurements);
             }
 
             return Outcome.Pass(
@@ -374,6 +403,21 @@ internal static class PdoSyncEmcyChecks
             // pass having tested the readable TPDOs while an omitted one may be cyclic and silent.
             // Found in review of #388.
             var unreadTypes = known.Where(p => p.Valid && !p.TransmissionTypeRead).ToList();
+
+            // A pair the peer-SDO gate blocked was never asked for, so it is the run's own input
+            // and not a device finding. Returning Inconclusive with device attribution for it
+            // blamed the device for a sub-index the bound description omits — the same
+            // blocked-versus-refused confusion PDO-01 had one level up. Found while mutating the
+            // fixture for that fix: an EDS without 1800sub2 produced "[device] SYN-02".
+            var blockedTypes = unreadTypes.Where(p => p.TransmissionTypeBlocked).ToList();
+            if (blockedTypes.Count > 0 && blockedTypes.Count == unreadTypes.Count)
+            {
+                return Outcome.NeedsSetup(
+                    $"{blockedTypes.Count} of {known.Count(p => p.Valid)} valid TPDO(s) have a transmission type this "
+                    + "run may not ask for, so whether they are synchronous is unknown: "
+                    + string.Join("; ", blockedTypes.Select(p => $"TPDO{p.Number}: " + session.GateReason((ushort)(0x1800 + p.Number - 1), 0x02))));
+            }
+
             if (unreadTypes.Count > 0)
             {
                 return Outcome.Inconclusive(
@@ -959,6 +1003,9 @@ internal static class PdoSyncEmcyChecks
     /// <summary>One PDO as its own parameters describe it.</summary>
     private readonly record struct PdoDescriptor(
         int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, bool TransmissionTypeRead,
+        // Why it is unread, not only that it is: the gate blocking 0x..02 is the run's own input
+        // and the device refusing it is the device's, and SYN-02 charged both to the device.
+        bool TransmissionTypeBlocked,
         byte SyncStartValue, bool SyncStartRead, int InhibitMs, int EventTimerMs, int Bytes, bool MappingComplete,
         bool MultiplexedMode, int MappedEntries);
 
@@ -1013,6 +1060,10 @@ internal static class PdoSyncEmcyChecks
             }
 
             // 1800h:02 / 1400h:02 is mandatory once the record exists; 03 and 05 are optional.
+            // Asked before the read, because afterwards the two reasons for an unread value are
+            // indistinguishable: ByteOrDefault returns Unreadable both for a pair the gate blocks
+            // and for one the device refuses.
+            var transmissionBlocked = !session.MayTransfer(comm, 0x02);
             var (transmission, transmissionOutcome) = await ByteOrDefault(session, comm, 0x02, problems, blocked, mandatory: true, cancellationToken).ConfigureAwait(false);
             var inhibit = await UShortOrDefault(session, comm, 0x03, problems, cancellationToken).ConfigureAwait(false);
             var eventTimer = await UShortOrDefault(session, comm, 0x05, problems, cancellationToken).ConfigureAwait(false);
@@ -1036,6 +1087,7 @@ internal static class PdoSyncEmcyChecks
                 Valid: (cobIdWord & CanOpenCobId.InvalidBit) == 0,
                 TransmissionType: transmission ?? 0xFF,
                 TransmissionTypeRead: transmissionOutcome == ReadOutcome.Read,
+                TransmissionTypeBlocked: transmissionBlocked,
                 SyncStartValue: syncStart ?? 0,
                 // Absent is resolved: the device has no start value, so 0 is the right answer.
                 // Only Unreadable leaves the prerequisite open.
@@ -1268,18 +1320,31 @@ internal static class PdoSyncEmcyChecks
         }
 
         // A pair the gate blocked is the run's own input, not a device defect: the device was
-        // never asked. Reported only when it actually left a mapping unmeasured, and only for
-        // descriptors the gate is responsible for — an MPDO is on its own list now, because
-        // telling the operator to bind a description they have already bound is worse than
+        // never asked. Reported only when it actually left a mandatory parameter unmeasured, and
+        // only for descriptors the gate is responsible for — an MPDO is on its own list now,
+        // because telling the operator to bind a description they have already bound is worse than
         // saying nothing. Found in review of #388.
-        var gateLeftIncomplete = sweep.Blocked.Count > 0
-            && sweep.Descriptors.Any(d => !d.MappingComplete && !d.MultiplexedMode);
-        if (gateLeftIncomplete)
+        //
+        // Both kinds of unmeasured parameter count, not the mapping alone. A description that
+        // declares 0x..01 and the whole mapping record but omits the mandatory transmission type
+        // at 0x..02 put that pair on `Blocked` while the mapping stayed complete, so this
+        // predicate was false, `Problems` was empty, and the verdict was Pass with the type
+        // printed as "not read" — the same false pass one level up from the one that moving the
+        // mandatory-field case onto `Blocked` was meant to fix. Found in review of #388.
+        //
+        // The transmission-type clause asks for a *valid* descriptor: a PDO disabled by bit 31 of
+        // its COB-ID transmits nothing, so not knowing when it would have transmitted costs the
+        // run nothing.
+        var incomplete = sweep.Descriptors
+            .Where(d => !d.MultiplexedMode && (!d.MappingComplete || (d.Valid && !d.TransmissionTypeRead)))
+            .ToList();
+        if (sweep.Blocked.Count > 0 && incomplete.Count > 0)
         {
             return Outcome.NeedsSetup(
                 $"{sweep.Descriptors.Count} {kind}(s) read, but the peer-SDO gate blocked {sweep.Blocked.Count} pair(s) "
-                + "that belong to their mandatory records, so the mapped payload length is unknown and PDO-03 cannot "
-                + "validate it: " + string.Join("; ", sweep.Blocked.Take(5)));
+                + $"belonging to the mandatory records of {string.Join(", ", incomplete.Select(d => kind + d.Number))}, so "
+                + "what those should carry, or when, is unknown and PDO-03 cannot judge what it sees: "
+                + string.Join("; ", sweep.Blocked.Take(5)));
         }
 
         // A multiplexed PDO is neither the operator's problem nor the device's. The other
