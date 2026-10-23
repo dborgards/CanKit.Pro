@@ -107,8 +107,9 @@ public sealed class UdsClientOptions
     public int MaxBusyRepeatRequests { get; init; } = 3;
 
     /// <summary>
-    /// The pause before a request is repeated after NRC 0x21. Default zero: the server said
-    /// "repeat", not "wait", and its P2 budget starts again with the repeated request.
+    /// The pause before a request is repeated after NRC 0x21. Default zero: the request is
+    /// repeated at once, with a fresh P2 budget. Set it where the server's documentation asks
+    /// for a delay before the repeat; the client does not derive one (#354).
     /// </summary>
     public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
 
