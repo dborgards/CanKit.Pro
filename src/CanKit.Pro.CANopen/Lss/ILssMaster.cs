@@ -119,7 +119,10 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <summary>
     /// Reads the active node-id of the single slave in LSS configuration (§7.6.2). A slave that
     /// is still in NMT initialization and has no active node-id reports its pending node-id,
-    /// which may be <see cref="CanOpenCobId.UnconfiguredNodeId"/>.
+    /// which may be <see cref="CanOpenCobId.UnconfiguredNodeId"/>. The LSS slave of a node opened
+    /// with <c>CanOpen.OpenNode</c> never holds such a pending value: it activates a node-id in
+    /// 1..127 as soon as configure node-id writes one, so without an active node-id it reports
+    /// <see cref="CanOpenCobId.UnconfiguredNodeId"/>.
     /// </summary>
     Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default);
 

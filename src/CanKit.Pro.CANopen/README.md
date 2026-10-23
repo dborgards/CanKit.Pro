@@ -1219,7 +1219,9 @@ on every activation path; a missing callback is rejected before any frame is sen
 the slave's error code (`LssCommand.NodeIdOutOfRange`, or `LssCommand.ManufacturerSpecific`
 with `LssServiceResult.SpecError`) can be observed. `FFh` is a legal pending node-id: the
 slave is then not configured. Inquire node-id reports the active node-id, or the pending one
-when the slave has no active node-id yet.
+when the slave has no active node-id yet. The slave in this package's node never has such a
+pending value: it activates a node-id in 1..127 as soon as configure node-id writes one, so
+without an active node-id it reports `FFh`.
 
 Fastscan walks vendor-id, product code, revision and serial. Bit 0 has priority over bit 1, so
 the slave found is the numerically smallest address among the unconfigured slaves that take
@@ -1239,13 +1241,14 @@ description with `LSS_Supported=1` does the same when `Lss` is left unset; an ex
 `LssSlaveOptions.Enabled = false` wins over the file. `node.LssState()` is waiting or
 configuration. It is an extension, so `ICanOpenNode` itself did not grow a member.
 
-The node-id passed to `OpenNode` is the persistent and pending node-id. `0xFF` is legal only
-while LSS is on: the node then stays in NMT Initializing, sends no boot-up and serves no SDO,
-until configure node-id gives it a value in 1..127. That value becomes active at once and the
-node boots, and it stays in LSS configuration. A node that already has an active node-id keeps
-it until the next NMT reset communication, which copies the pending node-id into the active one
-and retargets pre-defined COB-IDs that still name the old one. Reset node copies the persistent
-node-id back into the pending one first. Neither reset reloads the bit timing.
+The node-id passed to `OpenNode` is the persistent and pending node-id, unless
+`LssSlaveOptions.Store` loads one: a stored node-id replaces it, and the argument is then only
+validated. `0xFF` is legal only while LSS is on: the node then stays in NMT Initializing, sends no
+boot-up and serves no SDO, until configure node-id gives it a value in 1..127. That value becomes
+active at once and the node boots, and it stays in LSS configuration. A node that already has an
+active node-id keeps it until the next NMT reset communication, which copies the pending node-id
+into the active one and retargets pre-defined COB-IDs that still name the old one. Reset node copies
+the persistent node-id back into the pending one first. Neither reset reloads the bit timing.
 An identity change closes the transmit gate and drains old-ID reservations before publishing
 the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs
 resolve their COB-ID after the change. A bit-rate switch already holding the gate stays silent.
