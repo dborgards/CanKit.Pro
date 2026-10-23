@@ -254,9 +254,21 @@ internal static class LssAndStoreChecks
                 if (raw.Length != 4) return Outcome.NeedsSetup("1010h:01 did not read back as UNSIGNED32; see STO-01.");
                 capability = BitConverter.ToUInt32(raw, 0);
             }
-            catch (SdoAbortException)
+            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                      or (uint)SdoAbortCode.SubIndexDoesNotExist)
             {
-                return Outcome.NotApplicable("The device has no 1010h.");
+                return Outcome.NotApplicable("The device has no 1010h; storing parameters is optional in CiA 301.");
+            }
+            catch (SdoAbortException abort)
+            {
+                // Any other abort — a protocol timeout, a refused read — is the device not
+                // answering a prerequisite, not the feature being absent. An earlier version
+                // reported all of them as "no 1010h" and skipped the store check quietly. Found in
+                // review of #388.
+                return Outcome.Inconclusive(
+                    $"1010h:01 aborted {IdentityAndSdoChecks.Describe(abort)}, which is not \"the object does not "
+                    + "exist\". Whether the device can store on command is unknown, so nothing was written to it.",
+                    Attribution.Device);
             }
 
             if ((capability & 1) == 0)
@@ -301,9 +313,10 @@ internal static class LssAndStoreChecks
                         $"Refused with 0x{abort.AbortCode:X8} rather than 0x08000020. The refusal is what matters; "
                         + "the code is not the one CiA 301 names.", Attribution.Device, measurements);
             }
-            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist)
+            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                      or (uint)SdoAbortCode.SubIndexDoesNotExist)
             {
-                return Outcome.NotApplicable("The device has no 1010h.");
+                return Outcome.NotApplicable("The device has no 1010h; storing parameters is optional in CiA 301.");
             }
         }).ConfigureAwait(false);
     }

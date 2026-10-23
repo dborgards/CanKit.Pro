@@ -242,8 +242,11 @@ internal static class NmtAndHeartbeatChecks
                     await session.Client.SdoDownloadAsync(session.Target, 0x1017, 0x00, new byte[] { 0, 0 }, cancellationToken)
                         .ConfigureAwait(false);
                 }
-                catch (SdoAbortException abort)
+                catch (SdoAbortException abort) when (abort.Origin == SdoAbortOrigin.Peer)
                 {
+                    // Only the peer refusing proves nothing was written. A local abort — the
+                    // client giving up because the response was lost — leaves the flag set, so
+                    // the restore is still attempted. Found in review of #388.
                     mayHaveStopped = false;
                     return Outcome.NotApplicable(
                         $"The device refuses a write of 0 to 1017h:00 ({IdentityAndSdoChecks.Describe(abort)}), so its "
@@ -251,6 +254,10 @@ internal static class NmtAndHeartbeatChecks
                         + "the device. Nothing is wrong with that: 1017h may be read-only.");
                 }
 
+                // A local abort (a lost response) arrives here with mayHaveStopped still set: the
+                // device may well have applied the write, so the observation below is run and the
+                // restore in the finally happens either way.
+                //
                 // Two budgets, so a beat already in flight when the write landed cannot be
                 // mistaken for the producer still running.
                 await Task.Delay((int)Math.Min(15_000, budget.TotalMilliseconds * 2 + 300), cancellationToken).ConfigureAwait(false);

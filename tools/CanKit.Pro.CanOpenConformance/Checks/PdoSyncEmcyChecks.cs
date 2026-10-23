@@ -24,6 +24,14 @@ internal static class PdoSyncEmcyChecks
     /// a device may have up to 512, and reading all of them is a different tool's job.</summary>
     private const int PdoCount = 4;
 
+    /// <summary>
+    /// The frames the tap saw that the target actually transmitted: remote-transmission requests
+    /// are another node asking for a PDO, not the target producing one, and must not be counted
+    /// as its traffic in either direction.
+    /// </summary>
+    private static List<TappedFrame> Transmitted(BusTap tap)
+        => tap.Frames.Where(f => !f.IsRemote).ToList();
+
     /// <summary>How long after an NMT Stop a frame may still be one that was already in flight.
     /// Frames inside it are reported, not judged; frames after it are the device's fault.</summary>
     private const int SettleMs = 200;
@@ -59,6 +67,11 @@ internal static class PdoSyncEmcyChecks
 
             var watched = valid.Select(p => p.CobId).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
+            // An RTR frame on a TPDO's COB-ID is another master asking for it, not the target
+            // sending it. Counting one as the target's traffic failed a conforming device in the
+            // stopped window and made a silent one look busy in the operational one. The tap keeps
+            // IsRemote, so the filter is here rather than in the counting below. Found in review
+            // of #388.
             using var tap = new BusTap(session.Service, id => watched.Contains(id));
 
             TappedFrame[] inOperational;
@@ -72,14 +85,14 @@ internal static class PdoSyncEmcyChecks
                 // state, which is the failure that matters on a machine being switched off.
                 await session.Client.SendNmtCommandAsync(NmtCommand.Start, session.Target, cancellationToken).ConfigureAwait(false);
                 await tap.ListenAsync(session.Options.PdoWindowMs, cancellationToken).ConfigureAwait(false);
-                inOperational = tap.Frames.ToArray();
+                inOperational = Transmitted(tap).ToArray();
 
                 await session.Client.SendNmtCommandAsync(NmtCommand.Stop, session.Target, cancellationToken).ConfigureAwait(false);
-                var atStop = tap.Frames.Count;
+                var atStop = Transmitted(tap).Count;
                 await Task.Delay(SettleMs, cancellationToken).ConfigureAwait(false);
-                settling = tap.Frames.Count - atStop;
+                settling = Transmitted(tap).Count - atStop;
                 await tap.ListenAsync(Math.Min(2000, session.Options.PdoWindowMs), cancellationToken).ConfigureAwait(false);
-                inStopped = tap.Frames.Count - atStop - settling;
+                inStopped = Transmitted(tap).Count - atStop - settling;
             }
             finally
             {
@@ -263,7 +276,7 @@ internal static class PdoSyncEmcyChecks
             // for another SYNC COB-ID received none of these frames and was then failed for
             // silence. Found in review of #388.
             var syncCobId = await TargetSyncCobIdAsync(session, cancellationToken).ConfigureAwait(false);
-            if (syncCobId is not { } syncId)
+            if (syncCobId is not { } sync)
             {
                 return Outcome.NeedsSetup(
                     "The target's 1005h could not be read, so there is no way to know which COB-ID its synchronous "
@@ -281,12 +294,13 @@ internal static class PdoSyncEmcyChecks
                 await session.Client.SendNmtCommandAsync(NmtCommand.Start, session.Target, cancellationToken).ConfigureAwait(false);
                 await Task.Delay(300, cancellationToken).ConfigureAwait(false);
 
-                quiet = tap.Frames.Count;
+                quiet = Transmitted(tap).Count;
                 for (var i = 0; i < syncs; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     // A SYNC without a counter is a frame with no data (CiA 301 §7.2.5).
-                    if (session.Bus.Transmit(CanFrame.Classic((int)syncId, Array.Empty<byte>())) <= 0) rejected++;
+                    var syncFrame = CanFrame.Classic((int)sync.CobId, Array.Empty<byte>(), isExtendedFrame: sync.Extended);
+                    if (session.Bus.Transmit(syncFrame) <= 0) rejected++;
                     await Task.Delay(SyncPeriodMs, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -301,13 +315,13 @@ internal static class PdoSyncEmcyChecks
             if (rejected == syncs)
             {
                 return Outcome.TransportFault(
-                    $"The driver rejected all {syncs} SYNC frames on 0x{syncId:X3}, so the device was never synchronised.");
+                    $"The driver rejected all {syncs} SYNC frames on 0x{sync.CobId:X3}, so the device was never synchronised.");
             }
 
-            var after = tap.Frames.Skip(quiet).ToArray();
+            var after = Transmitted(tap).Skip(quiet).ToArray();
             var measurements = new Dictionary<string, string>
             {
-                ["SYNCs sent"] = $"{syncs} on 0x{syncId:X3} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})"
+                ["SYNCs sent"] = $"{syncs} on 0x{sync.CobId:X3}{(sync.Extended ? " (29-bit)" : string.Empty)} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})"
                     + (rejected > 0 ? $"; the driver rejected {rejected}" : string.Empty),
                 ["frames before the SYNCs"] = quiet.ToString(CultureInfo.InvariantCulture),
                 ["left in state"] = restoration.State,
@@ -491,7 +505,11 @@ internal static class PdoSyncEmcyChecks
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
         using var probe = new BusTap(session.Service, id => id == cobId);
-        await probe.WaitForAsync(frames => frames.Count >= 1, Math.Max(500, session.Options.HeartbeatWindowMs / 2),
+        // The operator's whole window, not half of it: a producer whose period HBT-02 accepted
+        // could be missed here, and the state would then be "unknown" and the device put back to
+        // pre-operational though it had been Operational — the restore defeating itself. It
+        // returns on the first frame, so a fast producer costs nothing. Found in review of #388.
+        await probe.WaitForAsync(frames => frames.Count >= 1, Math.Max(500, session.Options.HeartbeatWindowMs),
             cancellationToken).ConfigureAwait(false);
         var frames = probe.Frames;
         for (var i = frames.Count - 1; i >= 0; i--)
@@ -505,20 +523,25 @@ internal static class PdoSyncEmcyChecks
     /// with something unusable. Bit 30 of that word is the device's own produce flag and says
     /// nothing about which identifier it consumes.
     /// </summary>
-    private static async Task<uint?> TargetSyncCobIdAsync(Session session, CancellationToken cancellationToken)
+    private static async Task<(uint CobId, bool Extended)?> TargetSyncCobIdAsync(Session session, CancellationToken cancellationToken)
     {
-        if (!session.MayTransfer(0x1005, 0x00)) return CanOpenCobId.Sync;
+        if (!session.MayTransfer(0x1005, 0x00)) return (CanOpenCobId.Sync, false);
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1005, 0x00, cancellationToken).ConfigureAwait(false);
             if (raw.Length != 4) return null;
             var word = BitConverter.ToUInt32(raw, 0);
-            return (word & CanOpenCobId.ExtendedFrameBit) != 0 ? word & 0x1FFF_FFFFu : word & CanOpenCobId.CanIdMask;
+            // The frame format travels with the identifier. Sending a 29-bit SYNC as an 11-bit
+            // frame means a device consuming the extended one hears nothing, and a large
+            // identifier does not fit the 11-bit frame at all. Found in review of #388.
+            return (word & CanOpenCobId.ExtendedFrameBit) != 0
+                ? (word & 0x1FFF_FFFFu, true)
+                : (word & CanOpenCobId.CanIdMask, false);
         }
         catch (SdoAbortException)
         {
             // No 1005h at all means the default, which is what such a device uses.
-            return CanOpenCobId.Sync;
+            return (CanOpenCobId.Sync, false);
         }
     }
 
