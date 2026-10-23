@@ -1161,6 +1161,30 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.ClaimState.Should().Be(J1939ClaimState.Claimed);
     }
 
+    // Codex on #397: the age of the observation is the time from the frame to the claim's start,
+    // not to its announcement. Between the two the round raises AddressClaimChanged and rebinds
+    // the transport -- application code and thread joins, either of which can outlast the window
+    // by itself -- and a claim queued right behind the frame was then judged stale and claimed
+    // the address of a CA that will not retransmit. Here the Claiming handler costs more than the
+    // window on the clock the test holds.
+    [Fact]
+    public async Task An_Equal_Name_Heard_Just_Before_A_Claim_Loses_It_However_Long_The_Claim_Takes_To_Announce()
+    {
+        var (clock, _, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        await HearOurNameOnAsync(node, busB, name, 0x11);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claiming)
+                clock.Advance(node.Options.ClaimAnnounceTimeout + TimeSpan.FromMilliseconds(1));
+        };
+
+        Func<Task> claim = () => node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        await claim.Should().ThrowAsync<J1939CannotClaimException>();
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+    }
+
     private static (VirtualClock Clock, ProtocolActor Actor, J1939NodeImpl Node, ICanBus PeerBus) NodeOnClockWithPeer(
         out J1939Name name, out CompositeDisposable disposables)
     {

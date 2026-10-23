@@ -551,6 +551,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return;
         }
 
+        // Whether an equal NAME remembered for this address is recent enough to be the race with
+        // this claim (J-7, below) is decided on entry: the state handlers and the transport
+        // rebind that follow run application code and join threads, and either can outlast the
+        // window by itself (Codex on #397).
+        bool equalNameIsRecent = _equalNameHeardOn == preferredAddress
+            && _time.GetTimestamp() - _equalNameHeardAt <= TickMath.ToTicks(_options.ClaimAnnounceTimeout, _time.Frequency);
+
         // Invalidate any previously-claimed address *before* announcing the new preferred SA:
         // application traffic must not race and go out on the old SA while the wire already
         // advertises a different preferred address. SendCoreAsync gates on ClaimState==Claimed
@@ -588,14 +595,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // retransmit it — this round would otherwise finish uncontested. The announce above
         // is what unseats them; the loss here is ours. A value still stored is this address:
         // one heard on any other address was cleared before the announce. Only a recent one,
-        // though: a claim queued behind that frame reaches this line within one announce
-        // window, and an observation older than that is a CA that may long have gone -- it
-        // used to make a claim an hour later lose at once (#355, J-7).
+        // though: a claim queued behind that frame starts within one announce window, and an
+        // observation older than that is a CA that may long have gone -- it used to make a
+        // claim an hour later lose at once (#355, J-7).
         if (_equalNameHeardOn is not null)
         {
             _equalNameHeardOn = null;
-            if (_time.GetTimestamp() - _equalNameHeardAt <= TickMath.ToTicks(_options.ClaimAnnounceTimeout, _time.Frequency))
-                LoseEqualNameContest(preferredAddress, _name);
+            if (equalNameIsRecent) LoseEqualNameContest(preferredAddress, _name);
         }
     }
 
