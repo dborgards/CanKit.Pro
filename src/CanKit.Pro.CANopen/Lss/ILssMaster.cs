@@ -178,6 +178,15 @@ public enum LssFastscanFieldMode
     /// Do not look at this LSS number. At most two numbers may be skipped, and the vendor-id
     /// may not. The caller has to know the resulting address still selects one slave.
     /// </summary>
+    /// <remarks>
+    /// CiA 305 §6.7.1 allows skipping LSS numbers, the serial number for instance. The last number
+    /// that is not skipped is confirmed with BitCheck 0, LSSSub naming that number and LSSNext 0,
+    /// and per §6.7.3 that message switches the identified slave into LSS configuration, whatever
+    /// the LSSSub. A slave that switches only on the serial number does not conform: it answers
+    /// every step of a scan that skips the serial number and stays in waiting, so the scan reports
+    /// success and the services that follow reach no slave. Against such a slave, scan or match
+    /// the serial number.
+    /// </remarks>
     Skip,
 }
 
@@ -213,6 +222,9 @@ public sealed class LssFastscanRequest
     /// <summary>Revision number.</summary>
     public LssFastscanField RevisionNumber { get; init; } = new();
 
-    /// <summary>Serial number.</summary>
+    /// <summary>
+    /// Serial number. A scan that skips it ends on an earlier LSS number, which a conforming
+    /// slave completes on (CiA 305 §6.7.3); see <see cref="LssFastscanFieldMode.Skip"/>.
+    /// </summary>
     public LssFastscanField SerialNumber { get; init; } = new();
 }

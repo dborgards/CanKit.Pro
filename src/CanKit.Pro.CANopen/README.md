@@ -1230,6 +1230,12 @@ Fastscan walks vendor-id, product code, revision and serial. Bit 0 has priority 
 the slave found is the numerically smallest address among the unconfigured slaves that take
 part. A field can be scanned, matched (the number is already known) or skipped. The vendor-id
 cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
+Skipping the serial number is allowed by CiA 305 §6.7.1. The last number that is not skipped is
+confirmed with BitCheck 0, LSSSub naming that number and LSSNext 0, and per §6.7.3 that message
+switches the identified slave into configuration whatever the LSSSub; the slave in this package's
+node does. A slave that ties the switch to the serial number does not conform: it answers every
+step and still stays in waiting, so the scan reports success and the services after it reach no
+slave. Against such a slave, scan or match the serial number.
 `KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
 Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
 extra gap before the next Fastscan request, including the reset of a new scan. A completed scan
