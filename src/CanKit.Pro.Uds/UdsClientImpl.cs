@@ -418,7 +418,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         if (computeKey is null) throw new ArgumentNullException(nameof(computeKey));
         if (requestSeedLevel == 0 || requestSeedLevel >= 0x7F || (requestSeedLevel & 0x01) == 0)
             throw new ArgumentOutOfRangeException(nameof(requestSeedLevel),
-                "SecurityAccess requestSeedLevel must be an odd byte in 0x01..0x7F.");
+                "SecurityAccess requestSeedLevel must be an odd byte in 0x01..0x7D.");
 
         byte sendKeyLevel = (byte)(requestSeedLevel + 1);
 

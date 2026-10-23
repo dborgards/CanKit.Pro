@@ -13,8 +13,10 @@ namespace CanKit.Pro.Uds;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The MVP surface covers the seven services listed in SRS FR-UDS-001..007 (0x10, 0x11, 0x22,
-/// 0x27, 0x2E, 0x31, 0x3E) plus the raw escape hatch
+/// The surface covers eleven services: the seven of SRS FR-UDS-001..007 (0x10, 0x11, 0x22,
+/// 0x27, 0x2E, 0x31, 0x3E) and the four of the upload/download sequence, FR-UDS-012 (0x34,
+/// 0x35, 0x36, 0x37), with a multi-DID 0x22 (FR-UDS-011) and the one-shot
+/// <see cref="DownloadAsync"/> and <see cref="UploadAsync"/> on top -- plus the raw escape hatch
 /// <see cref="SendRawAsync(ReadOnlyMemory{byte}, System.Threading.CancellationToken)"/>. Every
 /// method:
 /// </para>
@@ -168,13 +170,14 @@ public interface IUdsClient : IDisposable
     ///   the returned key, then send <c>0x27 sendKeyLevel</c> with the caller-computed key
     ///   bytes.</description></item>
     /// </list>
-    /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7F</c> and
-    /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically. A zero-length seed
-    /// (ISO 14229-1 §9.4.5.3 "already unlocked") short-circuits the exchange without invoking
-    /// <paramref name="computeKey"/>.
+    /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7D</c> and
+    /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically, so at most
+    /// <c>0x7E</c>. A seed of all zeroes -- of any length, including none -- means "already
+    /// unlocked" (ISO 14229-1 §9.4.5.3) and short-circuits the exchange without invoking
+    /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="requestSeedLevel"/> is not
-    /// an odd byte in the range <c>0x01..0x7F</c>.</exception>
+    /// an odd byte in the range <c>0x01..0x7D</c>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="computeKey"/> is <c>null</c>.</exception>
     Task SecurityAccessAsync(byte requestSeedLevel, Func<byte[], byte[]> computeKey,
         CancellationToken cancellationToken = default);
