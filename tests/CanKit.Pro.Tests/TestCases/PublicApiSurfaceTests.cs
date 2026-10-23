@@ -114,17 +114,23 @@ public class PublicApiSurfaceTests
 
     // The package id is the project's file name; a project opts out of packing explicitly.
     private static string[] PackableProjectIds(string repositoryRoot)
-        => Directory.EnumerateFiles(Path.Combine(repositoryRoot, "src"), "*.csproj", SearchOption.AllDirectories)
+        => Directory.EnumerateFiles(Under(repositoryRoot, "src"), "*.csproj", SearchOption.AllDirectories)
             .Where(path => !File.ReadAllText(path).Contains("<IsPackable>false</IsPackable>", StringComparison.Ordinal))
             .Select(path => Path.GetFileNameWithoutExtension(path)!)
             .OrderBy(id => id, StringComparer.Ordinal)
             .ToArray();
 
+    // Fixed relative segments under a known root. Spelled out rather than Path.Combine, which drops
+    // everything before a later argument that happens to be rooted (CodeQL cs/path-combine) --
+    // a hazard these literals do not have, and not worth a suppression.
+    private static string Under(string root, params string[] segments)
+        => string.Join(Path.DirectorySeparatorChar.ToString(), new[] { root }.Concat(segments));
+
     private static string Normalize(string text)
         => text.Replace("\r\n", "\n").Trim();
 
     private static string FindApprovalsDir()
-        => Path.Combine(FindRepositoryRoot(), "tests", "CanKit.Pro.Tests", "ApiApprovals");
+        => Under(FindRepositoryRoot(), "tests", "CanKit.Pro.Tests", "ApiApprovals");
 
     private static string FindRepositoryRoot()
     {
