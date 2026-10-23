@@ -1368,6 +1368,81 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
     }
 
+    // #357 C-13: the toggle bit alternates per segment (CiA 301 §7.2.4.3.5, §7.2.4.3.7), and a
+    // segment or segment ack carrying the wrong one is answered with 0503 0000h. The server's
+    // download direction had a test (Sdo_Segmented_Download_Wrong_Toggle_Aborts); the client's
+    // two checks and the server's upload direction had none, and each survived `if (false)`.
+    [Fact]
+    public async Task Sdo_Client_Upload_Aborts_A_Segment_With_The_Wrong_Toggle()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 10));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadSegmentBase, "the first request, toggle 0");
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: true, lastSegment: false, new byte[] { 1, 2, 3, 4, 5, 6, 7 }));
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+    }
+
+    [Fact]
+    public async Task Sdo_Client_Download_Aborts_A_Segment_Ack_With_The_Wrong_Toggle()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var download = client.SdoDownloadAsync(0x02, 0x2100, 0x00, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsDownloadInitSegmented);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), new byte[] { SdoFrames.ScsDownloadInitAck, 0x00, 0x21, 0x00, 0, 0, 0, 0 });
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsDownloadSegmentBase, "the first segment, toggle 0, not the last");
+        Send(rawBus, CanOpenCobId.SdoTx(0x02),
+            new byte[] { (byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit), 0, 0, 0, 0, 0, 0, 0 });
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => download.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+    }
+
+    [Fact]
+    public void Sdo_Server_Upload_Aborts_A_Segment_Request_With_The_Wrong_Toggle()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[20]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoFrames.BuildUploadInit(0x2100, 0x00));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsUploadInitSegmented);
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[]
+        {
+            (byte)(SdoFrames.CcsUploadSegmentBase | SdoFrames.ToggleBit), 0, 0, 0, 0, 0, 0, 0,
+        });
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+        SdoFrames.ReadIndex(abort).Should().Be(((ushort)0x2100, (byte)0x00));
+    }
+
     // #357 C-5: the block-upload client read "s = 1, size 0" as no size at all and accepted
     // whatever followed; the classic client above refuses it. The same announced length of
     // nothing, the same answer.
