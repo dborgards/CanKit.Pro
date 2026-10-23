@@ -11,11 +11,16 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Only a superseded pull-request run is worth cancelling. On `main` the group is constant, so
-  # cancelling there would leave the first of two quick merges with a CI run that never finished,
-  # and `git log --first-parent main` would land on it when asking which commit went red.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Only a superseded pull-request run is worth cancelling. On `main` the ref is constant, so a
+  # shared group would cancel the first of two quick merges and leave its merge commit with a CI
+  # run that never finished -- `git log --first-parent main` would then land on it when asking
+  # which commit went red. Every other event therefore gets a group of its own (the run id).
+  #
+  # The group, not `cancel-in-progress`, carries the distinction: with an expression in
+  # `cancel-in-progress`, re-running this pull request's run ended in `startup_failure` twice
+  # (run 39915771444), where a literal is what every other re-run in the repository has used.
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
