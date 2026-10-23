@@ -1755,6 +1755,64 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("EndOfMsgAck");
     }
 
+    // #356 T-3: a non-conforming peer clears the next block early and then holds, both while the
+    // last DT of this block is unconfirmed. At the block end the stashed CTS wins and starts the
+    // next block; the remembered hold belonged to the block that ended, so the block after it
+    // must end under T3 as usual, not under a T4 the peer never asked for at that point.
+    [Fact]
+    public async Task A_Hold_Behind_A_Stashed_Cts_Does_Not_Outlive_The_Block_It_Was_Sent_In()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 11); // three packets, granted one at a time
+        var options = new J1939TpOptions().With(
+            t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
+            ownsService: false, actor);
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+        async Task DeliverAsync(byte[] data)
+        {
+            var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(data));
+            bus.RaiseObserved(PeerCm(peerSa, subjectSa, data), isEcho: false);
+            await handedOver.WaitAsync(ShortTimeout);
+            await actor.PostAsync(() => 0);
+        }
+
+        var send = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        // The next block, cleared early (stashed), then a hold, both before DT 1 is confirmed.
+        await DeliverAsync(J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn));
+        var hold = new byte[8];
+        hold[0] = J1939TpFrames.ControlCts;
+        hold[2] = 0x02;
+        hold[3] = hold[4] = 0xFF;
+        hold[5] = (byte)(pgn & 0xFF);
+        hold[6] = (byte)((pgn >> 8) & 0xFF);
+        hold[7] = (byte)((pgn >> 16) & 0xFF);
+        await DeliverAsync(hold);
+
+        bus.DeferredEchoes.ReleaseNext(); // DT 1: the block ends, the stashed CTS starts the next
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // DT 2
+        bus.DeferredEchoes.ReleaseNext(); // that block ends too, with no CTS for packet 3 yet
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
+        await clock.AdvanceAsync(options.T3);
+
+        Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
+        ex.Message.Should().Contain("T3 expired waiting for CTS");
+    }
+
     // FR-TP-031: the receiver must cap its CTS grant at the originator's RTS-advertised
     // maximum (here 2), even though its own MaxPacketsPerCts (16) is larger — and keep the
     // cap on every subsequent block's CTS.

@@ -1317,6 +1317,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         session.HasPendingCts = false;
         session.PendingCtsIsRetransmit = false;
+        // A hold remembered behind the stashed CTS belonged to the block that just ended; the
+        // stashed grant supersedes it, so the block it starts ends under T3 like any other, not
+        // under a T4 nobody asked for at that point (#356, T-3).
+        session.HoldPending = false;
         session.State = TxStage.SendingDt;
         session.NextSn = session.PendingCtsNextSn;
         session.BlockRemaining = session.PendingCtsNumPackets;
