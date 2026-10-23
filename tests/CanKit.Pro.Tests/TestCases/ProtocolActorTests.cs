@@ -151,7 +151,9 @@ public class ProtocolActorTests
     }
 
     // A cancelled-while-queued task that is never released would otherwise hang the run instead of
-    // failing it. Task.WaitAsync does not exist on every target framework this suite runs on.
+    // failing it. Not Task.WaitAsync, which Polyfill provides on every target this suite runs on:
+    // its TimeoutException says only that the wait timed out, and this one names what was not
+    // released.
     private static async Task WithinTenSeconds(Task task)
     {
         var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(10)));
