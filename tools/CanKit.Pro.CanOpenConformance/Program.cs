@@ -175,6 +175,18 @@ internal static class Program
             return 1;
         }
 
+        // And the synchronous half of the same hole: a check that threw an unexpected runner
+        // exception is inconclusive with a tool attribution, which AnyFailure does not see. A run
+        // whose own report says this repository failed internally must not exit 0. Found in review
+        // of #388.
+        if (!book.AnyFailure && book.AnyToolFinding)
+        {
+            Console.WriteLine("No check failed, but at least one finding is attributed to this tool rather than to "
+                + "the device: exit code 1 rather than 0. The report names it under the failures and unclear "
+                + "sections.");
+            return 1;
+        }
+
         return book.AnyFailure ? 1 : 0;
     }
 

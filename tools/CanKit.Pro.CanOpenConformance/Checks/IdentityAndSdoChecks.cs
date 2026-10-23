@@ -258,7 +258,13 @@ internal static class IdentityAndSdoChecks
                 .ConfigureAwait(false);
 
             var responses = tap.Frames.Where(f => !f.IsRemote).ToList();
-            var answer = responses.FirstOrDefault(f => f.Data.Length >= 8);
+
+            // Exactly eight, not at least eight. An SDO frame is always 8 bytes (CiA 301 §7.2.4),
+            // and on a CAN FD run a longer frame is a protocol violation — which this selection
+            // accepted as long as its first eight bytes parsed, so a malformed response could
+            // pass or skip the check. Found in review of #388.
+            var answer = responses.FirstOrDefault(f => f.Data.Length == 8);
+            var oversized = responses.Where(f => f.Data.Length > 8).ToList();
             if (responses.Count == 0)
             {
                 return Outcome.Fail(
@@ -266,11 +272,21 @@ internal static class IdentityAndSdoChecks
                     + $"{session.Options.SdoTimeoutMs} ms. A client has no way to distinguish that from a dead node.");
             }
 
-            if (answer.Data is null || answer.Data.Length < 8)
+            if (answer.Data is null || answer.Data.Length != 8)
+            {
+                var lengths = responses.Select(f => f.Data.Length).Distinct().OrderBy(n => n);
+                return Outcome.Fail(
+                    $"The device answered on 0x{responseId:X3} with {string.Join("/", lengths)} byte(s); an SDO "
+                    + "server response is always 8.");
+            }
+
+            if (oversized.Count > 0)
             {
                 return Outcome.Fail(
-                    $"The device answered on 0x{responseId:X3} with {answer.Data?.Length ?? 0} byte(s); an SDO server "
-                    + "response is always 8.");
+                    $"The device answered on 0x{responseId:X3} with {oversized.Count} frame(s) of "
+                    + $"{string.Join("/", oversized.Select(f => f.Data.Length).Distinct())} byte(s) beside a valid "
+                    + "one. An SDO server response is always 8 bytes, so the longer frame is a protocol violation "
+                    + "whatever its first eight bytes say.");
             }
 
             var measurements = new Dictionary<string, string>
@@ -319,11 +335,32 @@ internal static class IdentityAndSdoChecks
                     BitConverter.GetBytes((uint)SdoAbortCode.General).CopyTo(abort, 4);
                     var sent = session.Bus.Transmit(
                         CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), abort));
-                    measurements["segmented transfer"] = sent > 0
-                        ? "the response opened a segmented upload; closed with a client abort (0x08000000)"
-                        : $"the response opened a segmented upload and the client abort was rejected by the driver "
-                          + $"(Transmit returned {sent}), so the device may still hold the session — a later SDO "
-                          + "check could inherit it";
+                    if (sent <= 0)
+                    {
+                        // Not a note on a skip. The driver refused the abort, so the server is
+                        // left holding the 5FFFh session and the next SDO transfer can collect
+                        // its stale response — the contamination this cleanup exists to prevent,
+                        // now unprevented. Recording it and returning "not applicable" told the
+                        // operator nothing was wrong. A transport fault says the bus is the
+                        // problem and the incident puts it in the error list, so every later SDO
+                        // finding in the report is read in its light. Found in review of #388.
+                        book.Note("SDO-02 segmented cleanup", "TransmitRejected",
+                            $"The client abort for the 0x{Absent:X4} upload was rejected by the driver (Transmit "
+                            + "returned " + sent + "). The device may still hold that SDO session, and later SDO "
+                            + "checks in this run can inherit its response.", Attribution.Transport);
+                        measurements["segmented transfer"] =
+                            $"the response opened a segmented upload and the client abort was rejected by the driver "
+                            + $"(Transmit returned {sent}); the device may still hold the session";
+                        return Outcome.TransportFault(
+                            $"The device answered the 0x{Absent:X4} probe with a segmented upload, and the driver "
+                            + "refused the client abort that would have closed it. The session may still be open, "
+                            + "so this run can no longer promise that a later SDO check is talking to a clean "
+                            + "server. Fix the adapter or re-run; nothing is concluded about the device.",
+                            measurements);
+                    }
+
+                    measurements["segmented transfer"] =
+                        "the response opened a segmented upload; closed with a client abort (0x08000000)";
                 }
 
                 // Not a failure: 5FFFh is in the manufacturer-specific range, and a device is

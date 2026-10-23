@@ -148,6 +148,22 @@ internal sealed class Checkbook
     /// <summary>Whether any finding is a <see cref="Verdict.Fail"/>; the exit code follows this.</summary>
     public bool AnyFailure => _findings.Any(f => f.Verdict == Verdict.Fail);
 
+    /// <summary>
+    /// Whether any finding points at this repository rather than at the device, the bus or the
+    /// run's own input — including the ones that are only <see cref="Verdict.Inconclusive"/>.
+    /// </summary>
+    /// <remarks>
+    /// An explicit <see cref="Outcome.ToolFault"/> is already a Fail, but a check that *throws*
+    /// an unexpected runner exception is recorded as inconclusive with <see
+    /// cref="Attribution.Tool"/> — correctly, because nothing was measured — and that made a run
+    /// with an internal synchronous failure exit 0. The same hole the background-exception fix
+    /// closed, through the other door. The verdict stays inconclusive, because changing it would
+    /// claim a measurement that did not happen; the exit code is what has to notice. Found in
+    /// review of #388.
+    /// </remarks>
+    public bool AnyToolFinding => _findings.Any(f => f.Attribution == Attribution.Tool
+                                                     && f.Verdict is Verdict.Fail or Verdict.Inconclusive);
+
     /// <summary>Whether the group was selected for this run.</summary>
     public bool Wants(string group) => _options.Groups.Contains(group, StringComparer.OrdinalIgnoreCase);
 

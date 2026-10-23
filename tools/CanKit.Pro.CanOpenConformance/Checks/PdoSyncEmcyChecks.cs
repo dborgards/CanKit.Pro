@@ -860,10 +860,21 @@ internal static class PdoSyncEmcyChecks
             }
 
             session.Client.EmcyReceived += OnEmcy;
+            List<TappedFrame> frames;
+            int polls;
             try
             {
-
                 await tap.ListenAsync(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
+
+                // One snapshot, taken at the window's edge, used for the drain *and* for the
+                // verdict. The previous version snapshotted twice: the drain waited for the
+                // payloads present when the window closed, and the verdict re-read the tap after
+                // the grace — so an emergency arriving during the grace was in the verdict's set
+                // without ever having been in the set the drain waited for, and its decode could
+                // still be queued when the handler came off. A false stack fault, from the fix
+                // for a false stack fault. Both reviewers found it. Found in review of #388.
+                frames = Transmitted(tap);
+                polls = tap.Frames.Count - frames.Count;
 
                 // The tap and the decoder do not share an instant. A frame arriving near the end
                 // of the window is in the tap's list while the node's actor has not yet raised
@@ -879,9 +890,7 @@ internal static class PdoSyncEmcyChecks
                 // same quantity SettleMs covers elsewhere in this file. Whether it was enough is
                 // recorded, so a report can never present a timeout as a decoder defect without
                 // saying so. Found in review of #388.
-                var pending = Transmitted(tap)
-                    .Select(f => Convert.ToHexString(f.Data))
-                    .ToHashSet(StringComparer.Ordinal);
+                var pending = frames.Select(f => Convert.ToHexString(f.Data)).ToHashSet(StringComparer.Ordinal);
                 var grace = System.Diagnostics.Stopwatch.StartNew();
                 while (grace.Elapsed.TotalMilliseconds < SettleMs)
                 {
@@ -904,8 +913,6 @@ internal static class PdoSyncEmcyChecks
             // malformed emergency and failed the device, and an eight-byte one produced a tool
             // fault because the stack had correctly decoded nothing. The heartbeat and PDO paths
             // filtered IsRemote and this one did not. Found in review of #388.
-            var frames = Transmitted(tap);
-            var polls = tap.Frames.Count - frames.Count;
             var measurements = new Dictionary<string, string>
             {
                 ["window"] = $"{session.Options.ListenMs} ms",
