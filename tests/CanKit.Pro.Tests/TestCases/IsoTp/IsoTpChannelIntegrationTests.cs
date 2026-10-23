@@ -2209,6 +2209,164 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             flowControls.Should().BeEquivalentTo(new[] { (0x311u, (byte)0xAA), (0x310u, (byte)0xBB) });
     }
 
+    // Test gap of the 2026-10-21 review (#353, carried over from 2026-09-30 §3): Mixed and
+    // NormalFixed addressing had no channel-level test, only codec and property tests. One
+    // record per frame a sniffer saw: identifier, identifier format, and the first two payload
+    // bytes -- where the address extension and the PCI sit under the two modes.
+    private readonly record struct SniffedFrame(uint CanId, bool IsExtendedId, byte Byte0, byte Byte1);
+
+    // Records every frame the sniffer sees and completes once it has seen `expected` of them. The
+    // sniffer is one more hub delivery, ordered against nothing the channels do: the frames are
+    // waited for, and compared as a multiset rather than in order (#362).
+    private static (List<SniffedFrame> Frames, Task AllSeen) Sniff(ICanBus sniffer, int expected)
+    {
+        var frames = new List<SniffedFrame>();
+        var allSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sniffer.FrameObserved += (_, e) =>
+        {
+            var payload = e.CanFrame.Data.ToArray();
+            lock (frames)
+            {
+                frames.Add(new SniffedFrame((uint)e.CanFrame.ID, e.CanFrame.IsExtendedFrame,
+                    payload.Length > 0 ? payload[0] : (byte)0, payload.Length > 1 ? payload[1] : (byte)0));
+                if (frames.Count >= expected) allSeen.TrySetResult(true);
+            }
+        };
+        return (frames, allSeen.Task);
+    }
+
+    // Mixed addressing: one address-extension byte, the same in both directions, first on every
+    // frame -- the Flow Control the receiver builds included -- with the PCI behind it; 11-bit and
+    // 29-bit identifiers alike. A Single Frame one way, then a multi-frame transfer each way.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MixedAddressing_Transfers_Single_And_MultiFrame_Both_Ways(bool extendedIds)
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var snifferBus = OpenClassic(session, 2);
+
+        uint aliceTx = extendedIds ? 0x18CE20F1u : 0x320u;
+        uint bobTx = extendedIds ? 0x18CEF120u : 0x321u;
+        var alice = IsoTpEndpoint.Mixed(txCanId: aliceTx, rxCanId: bobTx, addressExtension: 0x5A, isExtendedCanId: extendedIds);
+        var bob = IsoTpEndpoint.Mixed(txCanId: bobTx, rxCanId: aliceTx, addressExtension: 0x5A, isExtendedCanId: extendedIds);
+
+        // 30 bytes behind the AE byte: FF carries 5, CFs 6 each -- FF, five CFs and one FC per way.
+        var expected = new List<SniffedFrame> { new(aliceTx, extendedIds, 0x5A, 0x03) };
+        foreach (var (sender, receiver) in new[] { (aliceTx, bobTx), (bobTx, aliceTx) })
+        {
+            expected.Add(new(sender, extendedIds, 0x5A, 0x10));
+            expected.Add(new(receiver, extendedIds, 0x5A, 0x30));
+            for (byte sn = 1; sn <= 5; sn++)
+                expected.Add(new(sender, extendedIds, 0x5A, (byte)(0x20 | sn)));
+        }
+        var (frames, allSeen) = Sniff(snifferBus, expected.Count);
+
+        using var aliceChannel = IsoTpFactory.Open(busA, alice, FastOptions());
+        using var bobChannel = IsoTpFactory.Open(busB, bob, FastOptions());
+
+        byte[] single = { 0x11, 0x22, 0x33 };
+        using var singleTimeout = new CancellationTokenSource(ShortTimeout);
+        var singleOnBob = bobChannel.ReceiveAsync(singleTimeout.Token);
+        await aliceChannel.SendAsync(single).WaitAsync(ShortTimeout);
+        (await singleOnBob).Should().Equal(single);
+
+        byte[] a2b = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
+        using var bobTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvOnBob = bobChannel.ReceiveAsync(bobTimeout.Token);
+        await aliceChannel.SendAsync(a2b).WaitAsync(ShortTimeout);
+        (await recvOnBob).Should().Equal(a2b);
+
+        byte[] b2a = Enumerable.Range(100, 30).Select(i => (byte)i).ToArray();
+        using var aliceTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvOnAlice = aliceChannel.ReceiveAsync(aliceTimeout.Token);
+        await bobChannel.SendAsync(b2a).WaitAsync(ShortTimeout);
+        (await recvOnAlice).Should().Equal(b2a);
+
+        await allSeen.WaitAsync(ShortTimeout);
+        lock (frames)
+            frames.Should().BeEquivalentTo(expected);
+    }
+
+    // Mixed addressing filters on the address-extension byte as Extended does: a frame on the
+    // channel's identifier carrying another byte belongs to another node and is not received.
+    [Fact]
+    public async Task MixedAddressing_Ignores_A_Frame_With_Another_Address_Extension()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var channel = IsoTpFactory.Open(busA,
+            IsoTpEndpoint.Mixed(txCanId: 0x320, rxCanId: 0x321, addressExtension: 0x5A), FastOptions());
+
+        // Both Single Frames from one transmitter, the foreign one first: by the time the second
+        // is received, the first has been taken through the channel too.
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x5B, 0x02, 0xEE, 0xEE, 0xCC, 0xCC, 0xCC, 0xCC }));
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x5A, 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC }));
+
+        using var timeout = new CancellationTokenSource(ShortTimeout);
+        (await channel.ReceiveAsync(timeout.Token)).Should().Equal(0x0A, 0x0B);
+        await channel.SettleAsync().WaitAsync(ShortTimeout);
+        channel.TryReceiveWithArrival(out _).Should().BeFalse("the frame with another address extension is not this channel's");
+    }
+
+    // NormalFixed addressing: 29-bit identifiers and no address-extension byte -- the PCI is the
+    // first payload byte of every frame, the Flow Control included. A Single Frame one way, then a
+    // multi-frame transfer each way.
+    [Fact]
+    public async Task NormalFixedAddressing_Transfers_Single_And_MultiFrame_Both_Ways()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var snifferBus = OpenClassic(session, 2);
+
+        const uint aliceTx = 0x18DA10F1u; // N_TA 0x10, N_SA 0xF1
+        const uint bobTx = 0x18DAF110u;
+        var alice = IsoTpEndpoint.NormalFixed(txCanId: aliceTx, rxCanId: bobTx);
+        var bob = IsoTpEndpoint.NormalFixed(txCanId: bobTx, rxCanId: aliceTx);
+
+        // 30 bytes: FF carries 6, CFs 7 each -- FF, four CFs and one FC per way. Byte 1 is the
+        // first data byte here (the FF's length low byte, 30; the FC's BS; a CF's payload), so
+        // the PCI byte in byte 0 is what is checked, with byte 1 where it is fixed.
+        var expected = new List<SniffedFrame> { new(aliceTx, true, 0x03, 0x11) };
+        foreach (var (sender, receiver, first) in new[] { (aliceTx, bobTx, 0), (bobTx, aliceTx, 100) })
+        {
+            expected.Add(new(sender, true, 0x10, 30));
+            expected.Add(new(receiver, true, 0x30, 0x00));
+            for (int sn = 1; sn <= 4; sn++)
+                expected.Add(new(sender, true, (byte)(0x20 | sn), (byte)(first + 6 + (sn - 1) * 7)));
+        }
+        var (frames, allSeen) = Sniff(snifferBus, expected.Count);
+
+        using var aliceChannel = IsoTpFactory.Open(busA, alice, FastOptions());
+        using var bobChannel = IsoTpFactory.Open(busB, bob, FastOptions());
+
+        byte[] single = { 0x11, 0x22, 0x33 };
+        using var singleTimeout = new CancellationTokenSource(ShortTimeout);
+        var singleOnBob = bobChannel.ReceiveAsync(singleTimeout.Token);
+        await aliceChannel.SendAsync(single).WaitAsync(ShortTimeout);
+        (await singleOnBob).Should().Equal(single);
+
+        byte[] a2b = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
+        using var bobTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvOnBob = bobChannel.ReceiveAsync(bobTimeout.Token);
+        await aliceChannel.SendAsync(a2b).WaitAsync(ShortTimeout);
+        (await recvOnBob).Should().Equal(a2b);
+
+        byte[] b2a = Enumerable.Range(100, 30).Select(i => (byte)i).ToArray();
+        using var aliceTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvOnAlice = aliceChannel.ReceiveAsync(aliceTimeout.Token);
+        await bobChannel.SendAsync(b2a).WaitAsync(ShortTimeout);
+        (await recvOnAlice).Should().Equal(b2a);
+
+        await allSeen.WaitAsync(ShortTimeout);
+        lock (frames)
+            frames.Should().BeEquivalentTo(expected);
+    }
+
     // --------------------------------------------------------------------------------
     // Bugbot 3596468541 (MEDIUM) — Dispose must not tear down _sendGate while an in-flight
     // SendAsync still holds it. Otherwise Release in SendAsync's finally throws
