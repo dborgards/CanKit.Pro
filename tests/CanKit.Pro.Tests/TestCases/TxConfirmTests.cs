@@ -465,6 +465,40 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #352 (R-5): a remote frame with a data length -- built through the memory-owner factory,
+    // which allows it -- is a frame the echo path transmits as it is. The approximated path used to
+    // rebuild it through the ReadOnlyMemory factory, which refuses that shape, and threw before
+    // the driver call. Both paths now send it, and the driver gets the same frame.
+    [Fact]
+    public async Task A_Remote_Frame_With_A_Data_Length_Is_Sent_On_Both_Paths()
+    {
+        CanFrame RemoteWithLength() => CanFrame.Classic(0x322, new ScrubbedOwner(new byte[8]), isRemoteFrame: true, ownMemory: false);
+
+        using (var plain = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm")))
+        using (var service = new CanBusService(plain))
+        {
+            var original = RemoteWithLength();
+            var result = await service.SendConfirmedAsync(original, ShortTimeout);
+            result.Confirmed.Should().BeTrue();
+            result.IsApproximated.Should().BeTrue();
+
+            var handed = await plain.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+            handed.FrameKind.Should().Be(original.FrameKind);
+            handed.ID.Should().Be(original.ID);
+            handed.Flags.Should().Be(original.Flags);
+            handed.IsRemoteFrame.Should().BeTrue();
+            handed.Len.Should().Be(8, "the data length of a remote frame is part of the frame");
+        }
+
+        using (var echo = OpenEcho())
+        using (var service = new CanBusService(echo))
+        {
+            var result = await service.SendConfirmedAsync(RemoteWithLength(), ShortTimeout);
+            result.Confirmed.Should().BeTrue();
+            result.IsApproximated.Should().BeFalse();
+        }
+    }
+
     private sealed class ScrubbedOwner : System.Buffers.IMemoryOwner<byte>
     {
         private readonly byte[] _buffer;
