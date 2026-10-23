@@ -108,7 +108,10 @@ public interface ICanOpenNode : IDisposable
     /// queued in between, and a producer with
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> distinct emergencies already waiting
     /// has its further ones discarded, reported once per burst on
-    /// <see cref="BackgroundExceptionOccurred"/>.</summary>
+    /// <see cref="BackgroundExceptionOccurred"/>. The producer is the COB-ID minus <c>080h</c>,
+    /// the pre-defined connection set: for a peer whose <c>1014h</c> was moved off that set,
+    /// <see cref="EmcyMessage.ProducerNodeId"/> is not the peer's node-id, and the folding above
+    /// is keyed on it as well.</summary>
     event EventHandler<EmcyReceivedEventArgs>? EmcyReceived;
 
     /// <summary>Raised whenever a SYNC frame is received on the configured SYNC COB-ID

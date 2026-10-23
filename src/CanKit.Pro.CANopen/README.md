@@ -634,7 +634,9 @@ discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundE
 is not queued.
 
 **Emergency.** An EMCY frame shorter than eight bytes is dropped without a report: it is
-neither padded, as an SDO frame is, nor surfaced anywhere.
+neither padded, as an SDO frame is, nor surfaced anywhere. `EmcyMessage.ProducerNodeId` is the
+COB-ID minus `080h`, the pre-defined connection set: for a peer whose `1014h` was moved off that
+set it is not the peer's node-id, and the per-producer backlog above is keyed on it too.
 
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after

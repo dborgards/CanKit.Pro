@@ -45,7 +45,8 @@ public sealed class EmcyMessage
 
     /// <summary>Node-id of the emergency producer (derived from COB-ID <c>0x080 + node-id</c>).
     /// Zero when the frame does not carry a node association (i.e. anonymous EMCY on a bus
-    /// scanner).</summary>
+    /// scanner). On a received EMCY it is the COB-ID minus <c>080h</c>, which names the
+    /// producer only while its <c>1014h</c> keeps the pre-defined connection set's value.</summary>
     public byte ProducerNodeId { get; }
 
     /// <summary>Standardized error code (CiA 301 §7.2.7.3.1 Table 26).</summary>
