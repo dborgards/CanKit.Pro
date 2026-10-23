@@ -1502,8 +1502,34 @@ internal sealed class J1939NodeImpl : IJ1939Node
             schedule.Dispose();
             throw;
         }
+
+        // Registered once started, so every schedule the teardown finds has a tick to cancel. The
+        // teardown stops every schedule it finds registered; one registered after the teardown
+        // took its list -- a Dispose that began after the check at the top -- is stopped here
+        // instead: the flag is set before the teardown is queued, so either that teardown sees
+        // this schedule or this read sees the flag (Codex on #397).
+        lock (_schedulesGate) _schedules.Add(schedule);
+        AfterPeriodicScheduleStarted?.Invoke();
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            schedule.Dispose();
+            throw new ObjectDisposedException(nameof(J1939NodeImpl));
+        }
         return schedule;
     }
+
+    // Every schedule StartPeriodicSend handed out and its caller has not disposed. The node's
+    // teardown cancels their ticks: an injected actor outlives the node, and a schedule's tick
+    // re-armed on it for ever, each emission failing on the disposed node (#355).
+    private readonly HashSet<PeriodicSchedule> _schedules = new();
+    private readonly object _schedulesGate = new();
+
+    /// <summary>
+    /// A seam for tests, null in production: runs once <see cref="StartPeriodicSend"/> has
+    /// registered and started a schedule and before it checks whether the node was disposed
+    /// meanwhile -- the instant a concurrent Dispose has to land for that check to matter.
+    /// </summary>
+    internal Action? AfterPeriodicScheduleStarted;
 
     // =========================================================================================
     // Wire helpers
@@ -1966,6 +1992,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
             pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939NodeImpl)));
         }
 
+        // On the actor, after any tick that was already running: one that re-armed is cancelled
+        // here, and none fires afterwards (Codex on #397).
+        PeriodicSchedule[] schedules;
+        lock (_schedulesGate) schedules = _schedules.ToArray();
+        foreach (var schedule in schedules)
+            schedule.StopTicking();
+
         _transport.Dispose();
         return _transportReaderTask;
     }
@@ -2198,10 +2231,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
         private void OnTick()
         {
             if (Volatile.Read(ref _disposed) != 0) return;
-            // Nor once the node is gone. An owned actor discards the tick with the node, but an
-            // injected one outlives it, and the schedule then ticked for ever, each emission
-            // failing on the disposed node and the tick re-arming regardless (#355).
-            if (Volatile.Read(ref _owner._disposed) != 0) return;
 
             // Never overlap emissions of the same schedule (a multi-frame PGN occupies one
             // TP session per send): a tick whose previous emission is still running is
@@ -2256,9 +2285,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _tick = _owner._deadlines.Arm(delay, OnTick);
         }
 
+        // Actor loop, from the node's teardown: the tick goes, the handle stays the caller's. A
+        // schedule is registered only once Start has armed its first tick, so there is one.
+        public void StopTicking() => Volatile.Read(ref _tick)!.Dispose();
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            lock (_owner._schedulesGate) _owner._schedules.Remove(this);
             try { _tick?.Dispose(); } catch { }
             try { _cts.Cancel(); }
             catch (Exception ex) when (ex is AggregateException or ObjectDisposedException) { /* a callback threw, or the emission that ended first released it */ }

@@ -5458,7 +5458,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // #355: a periodic handle the application never disposed, on a node it did. With the node's
     // own actor the tick goes with that actor; with an injected one (the test seam) it outlived
     // the node, and the schedule ticked for ever -- each emission throwing on the disposed node,
-    // each tick re-arming the next. A tick after the node is gone arms nothing.
+    // each tick re-arming the next. The node's teardown, on the actor and so after any tick in
+    // progress there, cancels the armed tick (Codex on #397: a check in the tick itself left a
+    // Dispose between that check and the re-arm one period of retention).
     [Fact]
     public async Task A_Periodic_Schedule_Stops_Ticking_Once_Its_Node_Is_Disposed()
     {
@@ -5468,7 +5470,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var actor = clock.NewActor();
         var announce = TimeSpan.FromMilliseconds(80);
         var period = TimeSpan.FromMilliseconds(100);
-        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
             ownsService: false, actor);
         await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
 
@@ -5476,9 +5478,31 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
         node.Dispose();
 
-        await clock.AdvanceAsync(period); // the tick armed before the disposal fires on the surviving actor
-        (await actor.NextTimerDelayAsync()).Should().BeNull("a tick on a disposed node does not arm the next one");
-        node.PeriodicEmissionsCompleted.Should().Be(0, "and starts no emission");
+        (await actor.NextTimerDelayAsync()).Should().BeNull("the node's teardown cancelled the schedule's armed tick");
+        await clock.AdvanceAsync(period);
+        node.PeriodicEmissionsCompleted.Should().Be(0, "no tick fired on the disposed node");
+    }
+
+    // The other order (Codex on #397): a Dispose that lands while StartPeriodicSend is between its
+    // own disposed check and registering the schedule. The teardown's list cannot hold it, so
+    // StartPeriodicSend stops it itself and reports the disposal, as its first check would have.
+    [Fact]
+    public async Task A_Periodic_Schedule_Started_Across_A_Disposal_Is_Stopped()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        node.AfterPeriodicScheduleStarted = node.Dispose;
+        Action start = () => node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), TimeSpan.FromMilliseconds(100));
+
+        start.Should().Throw<ObjectDisposedException>();
+        (await actor.NextTimerDelayAsync()).Should().BeNull("no tick of the refused schedule is left armed");
     }
 
     // #355 (the previous review's M1): a tick whose previous emission is still in flight is
