@@ -2285,6 +2285,57 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         ex.Reason.Should().Be(J1939TpAbortReason.DuplicateSequenceNumber);
     }
 
+    // #356 T-5: a TP.DT numbered 0 is below the expected packet but is no repeat of one -- no
+    // message has a packet 0 -- so it is a bad sequence number (code 7), not a duplicate (8).
+    // Sent after packet 1, where "below the expected one" alone would call it a duplicate.
+    [Fact]
+    public async Task Cm_Receiver_A_Dt_Numbered_Zero_Aborts_As_Bad_Sequence_Not_Duplicate()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte receiverSa = 0xA7;
+        const byte peerSa = 0xA8;
+        const uint pgn = 0xFEA7u;
+        var payload = RandomPayload(21, seed: 167); // 3 packets
+
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: RoundtripOptions());
+
+        var ctsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peerBus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != receiverSa || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            var data = e.CanFrame.Data.ToArray();
+            if (data.Length < 8 || J1939TpFrames.ReadDataPgn(data) != pgn) return;
+            if (data[0] == J1939TpFrames.ControlCts) ctsSeen.TrySetResult(null);
+            else if (data[0] == J1939TpFrames.ControlAbort) abortSeen.TrySetResult(data);
+        };
+
+        var recvTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+
+        var rts = J1939TpFrames.BuildRts(totalBytes: payload.Length, totalPackets: 3, maxPacketsPerCts: 0xFF, dataPgn: pgn);
+        peerBus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa), rts, isExtendedFrame: true));
+        await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        var dtId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa);
+        peerBus.Transmit(CanFrame.Classic(dtId, J1939TpFrames.BuildDt(sn: 1, pdu: payload, offset: 0), isExtendedFrame: true));
+        // Expecting 2; a packet 0, which the codec will not build.
+        var zero = J1939TpFrames.BuildDt(sn: 2, pdu: payload, offset: 7);
+        zero[0] = 0;
+        peerBus.Transmit(CanFrame.Classic(dtId, zero, isExtendedFrame: true));
+
+        var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        abort[1].Should().Be(7, "J1939-21 table 7: bad sequence number (#33); packet 0 repeats nothing");
+
+        Func<Task> act = () => recvTask;
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
+    }
+
     // A CTS asking for packet 0 asks for a packet no message has: a bad sequence number
     // (code 7), not a retransmit request (Codex on #145).
     [Fact]
