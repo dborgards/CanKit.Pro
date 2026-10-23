@@ -355,58 +355,23 @@ internal static class PdoSyncEmcyChecks
 
                 var cobIdWord = BitConverter.ToUInt32(raw, 0);
 
-                // The same check the PDO communication records got, one object along, and reached
-                // by sweeping for it rather than by being told: a 1005h word with bit 29 set,
-                // reserved bits 11..28 set, or a restricted base id was masked into a frame
-                // identifier, so SYN-01 reported malformed parameters as read and SYN-02 sent
-                // SYNCs on the normalised id and could pass. The stack's IsUsableCobIdWord rejects
-                // exactly these, and unlike the PDO case it rejects an extended word outright:
-                // CiA 301 §7.5.2.6 gives SYNC an 11-bit COB-ID. Bit 30 is the generate flag and
-                // bit 31 is reserved here, so neither is part of the mask. Found in review of
-                // #388 — the fourth object in this family.
-                if ((cobIdWord & CanOpenCobId.ExtendedFrameBit) != 0)
+                // Decoded by the same function SYN-02's sender uses, so the two cannot disagree.
+                // They did: this check validated the word inline while TargetSyncCobIdAsync masked
+                // it again, and a word failed here was still transmitted on there. The reasoning
+                // for each condition — including why bit 31 is absent — is on DecodeSyncCobId.
+                // Found in review of #388.
+                var (syncId, syncProblem) = DecodeSyncCobId(cobIdWord);
+                if (syncProblem is { } unusable)
                 {
-                    return Outcome.Fail(
-                        $"1005h:00 is 0x{cobIdWord:X8} with bit 29 set, which asks for a 29-bit SYNC identifier. "
-                        + "CiA 301 §7.5.2.6 defines SYNC on an 11-bit COB-ID.",
-                        new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
-                }
-
-                // Bit 31 is deliberately NOT in this mask, and that is a reversal: the commit
-                // before added it, on a review finding that called it reserved and on my own
-                // comment repeating the claim. Both were wrong. CiA 301 §7.5.2.5 Table 55 defines
-                // bit 31 of 1005h as "x — do not care", unlike the PDO records' valid bit, and
-                // this repository already says so in two places:
-                // CanOpenNode.CommunicationProfile.cs:332 ("bit 31 do not care, bit 30 gen., bit
-                // 29 frame") and docs/reviews/2026-09-15-canopen-scope.md item 27, which records
-                // it in as many words *so that nobody adds it as a forgotten valid bit* — which
-                // is precisely what the last commit did. The stack's own IsUsableCobIdWord does
-                // not test it either, and I noted that while going stricter anyway.
-                //
-                // So a conforming device returning 80000080h was failed. The rule this broke is
-                // this repository's own: a claim about a standard is checkable, so check the
-                // record instead of accepting a reviewer's reading of it. Found in review of #388.
-                if ((cobIdWord & 0x1FFF_F800) != 0)
-                {
-                    return Outcome.Fail(
-                        $"1005h:00 is 0x{cobIdWord:X8}: bits 11..28 are reserved in an 11-bit COB-ID entry and must "
-                        + "be zero (CiA 301 §7.5.2.5 Table 55).",
+                    return Outcome.Fail(unusable,
                         new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
                 }
 
                 var cobId = cobIdWord;
-                if (CanOpenCobId.IsRestricted(cobId & CanOpenCobId.CanIdMask))
-                {
-                    return Outcome.Fail(
-                        $"1005h:00 names CAN-ID 0x{cobId & CanOpenCobId.CanIdMask:X3}, which CiA 301 §7.3.5 restricts "
-                        + "to another communication object; SYNC may not use it.",
-                        new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
-                }
-
                 var generates = (cobId & CanOpenCobId.SyncGenerateBit) != 0;
                 var measurements = new Dictionary<string, string>
                 {
-                    ["1005h COB-ID SYNC"] = $"0x{cobId:X8} (id 0x{cobId & CanOpenCobId.CanIdMask:X3})",
+                    ["1005h COB-ID SYNC"] = $"0x{cobId:X8} (id 0x{syncId:X3})",
                     ["generates SYNC"] = generates.ToString(),
                 };
 
@@ -614,12 +579,34 @@ internal static class PdoSyncEmcyChecks
             // for another SYNC COB-ID received none of these frames and was then failed for
             // silence. Found in review of #388.
             var syncCobId = await TargetSyncCobIdAsync(session, cancellationToken).ConfigureAwait(false);
-            if (syncCobId is not { } sync)
+            switch (syncCobId.State)
             {
-                return Outcome.NeedsSetup(
-                    "The target's 1005h could not be read, so there is no way to know which COB-ID its synchronous "
-                    + "TPDOs are waiting on. See SYN-01.");
+                case SyncCobIdState.Blocked:
+                    return Outcome.NeedsSetup(
+                        "The target's 1005h may not be read by this run, so there is no way to know which COB-ID its "
+                        + $"synchronous TPDOs are waiting on: {syncCobId.Detail} See SYN-01.");
+
+                // The one verdict this round added. Reaching here means the sweep found a cyclic
+                // synchronous TPDO, so the device supports SYNC, and CiA 301 §7.5.2.5 then makes
+                // 1005h mandatory. Resolving the absence to the 080h default let a device that
+                // omits a required object and hard-wires 080h be measured as conforming. Found in
+                // review of #388.
+                case SyncCobIdState.Absent:
+                    return Outcome.Fail(
+                        $"{cyclic.Count} cyclic synchronous TPDO(s) are configured, so this device supports SYNC and "
+                        + "CiA 301 §7.5.2.5 makes 1005h mandatory — and the device answers that it does not exist. "
+                        + "No SYNC was sent: 080h is the identifier a device without SYNC support would use, and "
+                        + "sending on it here would measure the default rather than the device.");
+
+                case SyncCobIdState.Unusable:
+                    return Outcome.Fail(
+                        "The target's 1005h does not name an identifier this run can send on, so no SYNC was "
+                        + $"produced: {syncCobId.Detail} See SYN-01.");
             }
+
+            // Extended is constant now: an extended 1005h word is Unusable above, because CiA 301
+            // §7.5.2.5 gives SYNC an 11-bit COB-ID and the stack's own validator refuses one.
+            var sync = (CobId: syncCobId.CanId, Extended: false);
 
             byte counter = 0;
             var watched = cyclic.Select(p => (p.CobId, p.Extended)).ToHashSet();
@@ -906,11 +893,35 @@ internal static class PdoSyncEmcyChecks
                     measurements);
             }
 
-            return decoded.Count == 0
-                ? Outcome.ToolFault(
+            // Against the number of *distinct* payloads, not against "at least one". One decoded
+            // event used to be enough to pass, so a second, different emergency from the same
+            // target that the stack never decoded was hidden by the first — the decoder loss this
+            // check exists to catch, masked by the evidence that the decoder works. Distinct
+            // rather than total because the stack may legitimately coalesce identical queued
+            // emergencies, and failing that would be a false fault. Found in review of #388.
+            var distinct = frames
+                .Select(f => Convert.ToHexString(f.Data))
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+            measurements["distinct payloads"] = distinct.ToString(CultureInfo.InvariantCulture);
+
+            if (decoded.Count == 0)
+            {
+                return Outcome.ToolFault(
                     $"{frames.Count} well-formed emergency frame(s) were on the bus and the stack decoded none of them.",
-                    measurements)
-                : Outcome.Pass($"{decoded.Count} emergency object(s) received and decoded.", measurements);
+                    measurements);
+            }
+
+            if (decoded.Count < distinct)
+            {
+                return Outcome.ToolFault(
+                    $"{distinct} distinct emergency payload(s) from node {session.Options.TargetNode} were on the bus "
+                    + $"and the stack raised {decoded.Count} EmcyReceived event(s). The ones it did decode are listed "
+                    + "above; at least one it did not. That is a defect in the stack, not in the device.",
+                    measurements);
+            }
+
+            return Outcome.Pass($"{decoded.Count} emergency object(s) received and decoded.", measurements);
         }).ConfigureAwait(false);
     }
 
@@ -1024,12 +1035,15 @@ internal static class PdoSyncEmcyChecks
     }
 
     /// <summary>
-    /// The COB-ID the target's 1005h says its SYNC arrives on, masked to the identifier; the
-    /// 080h default when the device itself says the object is absent, and null when the gate
-    /// blocked the question or the device answered with something unusable. Bit 30 of that word
-    /// is the device's own produce flag and says nothing about which identifier it consumes.
+    /// What the target's 1005h yields for a run that wants to send SYNC on it.
     /// </summary>
-    private static async Task<(uint CobId, bool Extended)?> TargetSyncCobIdAsync(Session session, CancellationToken cancellationToken)
+    /// <remarks>
+    /// The word is decoded by <see cref="DecodeSyncCobId"/>, the same function SYN-01 reports
+    /// from. Two copies of that masking existed — the check validated the word and this helper
+    /// masked it again — so a word SYN-01 had just failed was still handed to SYN-02, which
+    /// transmitted on the normalised identifier. Found in review of #388.
+    /// </remarks>
+    private static async Task<SyncCobId> TargetSyncCobIdAsync(Session session, CancellationToken cancellationToken)
     {
         // Blocked is not absent — the distinction this whole file keeps relearning. A device that
         // aborts with "no such object" uses the default; a pair the gate refused was never asked,
@@ -1042,32 +1056,91 @@ internal static class PdoSyncEmcyChecks
         // contradicts itself, since a device with a synchronous TPDO supports SYNC and CiA 301
         // then makes 1005h mandatory. Setup is the right verdict for a contradiction in the run's
         // own input.
-        if (!session.MayTransfer(0x1005, 0x00)) return null;
+        if (!session.MayTransfer(0x1005, 0x00))
+            return new SyncCobId(SyncCobIdState.Blocked, 0, session.GateReason(0x1005, 0x00));
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1005, 0x00, cancellationToken).ConfigureAwait(false);
-            if (raw.Length != 4) return null;
-            var word = BitConverter.ToUInt32(raw, 0);
-            // The frame format travels with the identifier. Sending a 29-bit SYNC as an 11-bit
-            // frame means a device consuming the extended one hears nothing, and a large
-            // identifier does not fit the 11-bit frame at all. Found in review of #388.
-            return (word & CanOpenCobId.ExtendedFrameBit) != 0
-                ? (word & 0x1FFF_FFFFu, true)
-                : (word & CanOpenCobId.CanIdMask, false);
+            if (raw.Length != 4)
+            {
+                return new SyncCobId(SyncCobIdState.Unusable, 0,
+                    $"1005h:00 is UNSIGNED32 and the device returned {IdentityAndSdoChecks.Hex(raw)}.");
+            }
+
+            var (canId, problem) = DecodeSyncCobId(BitConverter.ToUInt32(raw, 0));
+            return problem is { } bad
+                ? new SyncCobId(SyncCobIdState.Unusable, 0, bad)
+                : new SyncCobId(SyncCobIdState.Usable, canId, null);
         }
         catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
                                                   or (uint)SdoAbortCode.SubIndexDoesNotExist)
         {
-            // No 1005h at all means the default, which is what such a device uses.
-            return (CanOpenCobId.Sync, false);
+            // Absent, reported as such rather than resolved to the 080h default here. The caller
+            // knows whether that is allowed: it reaches this helper only with a cyclic
+            // synchronous TPDO in hand, and a device with one supports SYNC, which makes 1005h
+            // mandatory (CiA 301 §7.5.2.5). Handing back the default let a device that omits a
+            // required object and hard-wires 080h pass. Found in review of #388 — the same
+            // argument I had made for the gate-blocked case one commit earlier and applied to
+            // only half of it.
+            return new SyncCobId(SyncCobIdState.Absent, CanOpenCobId.Sync, null);
         }
-        catch (SdoAbortException)
+        catch (SdoAbortException abort)
         {
             // A declared 1005h that will not be read leaves the prerequisite unresolved. Guessing
             // the default here sent every SYNC to the wrong identifier and then failed the
             // device's cyclic TPDOs for silence. Found in review of #388.
-            return null;
+            return new SyncCobId(SyncCobIdState.Unusable, 0,
+                $"1005h:00 is declared and aborted {IdentityAndSdoChecks.Describe(abort)}.");
         }
+    }
+
+    /// <summary>Which of the four things 1005h can be, for a run that wants to send SYNC.</summary>
+    private enum SyncCobIdState
+    {
+        /// <summary>The word decoded to an identifier this run may send on.</summary>
+        Usable,
+
+        /// <summary>The device says it has no 1005h. Whether that is allowed is the caller's
+        /// question, not this helper's.</summary>
+        Absent,
+
+        /// <summary>The peer-SDO gate refused the pair, so the question was never asked.</summary>
+        Blocked,
+
+        /// <summary>The device answered with something no identifier can be taken from.</summary>
+        Unusable,
+    }
+
+    private readonly record struct SyncCobId(SyncCobIdState State, uint CanId, string? Detail);
+
+    /// <summary>
+    /// The identifier a 1005h word names, or the reason it names none. One function, because the
+    /// alternative was two: SYN-01 validated the word and <see cref="TargetSyncCobIdAsync"/>
+    /// masked it again, so a word the check had failed still reached the sender. CiA 301 §7.5.2.5
+    /// Table 55: bit 31 do not care, bit 30 gen., bit 29 frame, bits 28..11 reserved and zero for
+    /// an 11-bit identifier, bits 10..0 the CAN-ID. Bit 29 is rejected outright rather than
+    /// honoured, because the stack's own IsUsableCobIdWord rejects an extended word for this
+    /// object and §7.5.2.5 gives SYNC an 11-bit COB-ID.
+    /// </summary>
+    private static (uint CanId, string? Problem) DecodeSyncCobId(uint word)
+    {
+        if ((word & CanOpenCobId.ExtendedFrameBit) != 0)
+        {
+            return (0, $"1005h:00 is 0x{word:X8} with bit 29 set, which asks for a 29-bit SYNC identifier. "
+                + "CiA 301 §7.5.2.5 defines SYNC on an 11-bit COB-ID.");
+        }
+
+        if ((word & 0x1FFF_F800) != 0)
+        {
+            return (0, $"1005h:00 is 0x{word:X8}: bits 11..28 are reserved in an 11-bit COB-ID entry and must be "
+                + "zero (CiA 301 §7.5.2.5 Table 55).");
+        }
+
+        var canId = word & CanOpenCobId.CanIdMask;
+        return CanOpenCobId.IsRestricted(canId)
+            ? (0, $"1005h:00 names CAN-ID 0x{canId:X3}, which CiA 301 §7.3.5 restricts to another communication "
+                + "object; SYNC may not use it.")
+            : (canId, null);
     }
 
     /// <summary>
