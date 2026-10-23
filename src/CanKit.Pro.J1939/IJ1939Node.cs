@@ -32,6 +32,13 @@ namespace CanKit.Pro.J1939;
 /// <see cref="ObjectDisposedException"/> once the transport channel is torn down.
 /// <see cref="ClaimState"/> and <see cref="Address"/> keep the last values they had.
 /// </para>
+/// <para>
+/// Called from one of this node's handlers, which run on its actor, neither
+/// <see cref="IDisposable.Dispose"/> nor <see cref="IAsyncDisposable.DisposeAsync"/> waits for
+/// the teardown: it runs on the actor once that handler's turn has ended, a failure of it is
+/// reported through <see cref="BackgroundExceptionOccurred"/>, and a
+/// <see cref="IAsyncDisposable.DisposeAsync"/> called from anywhere else completes when it has.
+/// </para>
 /// </remarks>
 public interface IJ1939Node : IDisposable, IAsyncDisposable
 {
