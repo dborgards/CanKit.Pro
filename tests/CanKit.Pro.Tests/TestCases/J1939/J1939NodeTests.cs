@@ -470,14 +470,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // early return was papering over: each side's claim is the other's peer, and each side's
     // echo — when the bus has one — is its own. Neither NAME wins §4.4.3.3, so both finish
     // Cannot Claim rather than re-announcing.
+    //
+    // #355: on a clock the test holds, so neither window can close before the other side's
+    // claim is heard, and AssertEqualNameContest can insist on the claim faulting. The NAME's
+    // backoff is zero, so the Cannot Claim each owes goes out without the clock moving.
     [Fact]
     public async Task AddressClaim_TwoNodes_SameAddress_EqualName_CannotClaim()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var serviceA = new CanBusService(busA);
+        using var serviceB = new CanBusService(busB);
 
-        var name = Name(identity: 0x0000AA);
+        var name = Name(identity: 0x00005F); // backoff 0
         var optsA = new J1939NodeOptions(name)
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
@@ -489,8 +496,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             EnableArbitraryAddressClaiming = true,
         };
 
-        using var nodeA = J1939Node.Open(busA, optsA);
-        using var nodeB = J1939Node.Open(busB, optsB);
+        using var nodeA = new J1939NodeImpl(serviceA, optsA, ownsService: false, clock.NewActor());
+        using var nodeB = new J1939NodeImpl(serviceB, optsB, ownsService: false, clock.NewActor());
 
         var taskA = nodeA.ClaimAddressAsync(0x50);
         var taskB = nodeB.ClaimAddressAsync(0x50);
@@ -506,10 +513,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Two_Nodes_Sharing_One_Service_Equal_Name_Cannot_Claim()
     {
+        using var clock = new VirtualClock(); // as above (#355)
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
 
-        var name = Name(identity: 0x0000AA);
+        var name = Name(identity: 0x00005F); // backoff 0
         var optsA = new J1939NodeOptions(name)
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
@@ -521,8 +529,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             EnableArbitraryAddressClaiming = true,
         };
 
-        using var nodeA = J1939Node.Open(service, optsA);
-        using var nodeB = J1939Node.Open(service, optsB);
+        using var nodeA = new J1939NodeImpl(service, optsA, ownsService: false, clock.NewActor());
+        using var nodeB = new J1939NodeImpl(service, optsB, ownsService: false, clock.NewActor());
 
         var taskA = nodeA.ClaimAddressAsync(0x50);
         var taskB = nodeB.ClaimAddressAsync(0x50);
@@ -1210,21 +1218,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Neither CA wins an equal NAME (§4.4.3.3), so the claim faults and the address is empty.
-    // A scanned fallback (0x80..) would show up as Claimed at some other SA.
+    // A scanned fallback (0x80..) would show up as Claimed at some other SA. Both callers run
+    // their nodes on a clock that never moves, so the window cannot close before the tie is
+    // seen: the outcome is the fault, and "claimed, then unseated" -- which this used to accept
+    // too, unable to tell a tie lost in the window from one lost afterwards -- is a failure
+    // (#355).
     private static void AssertEqualNameContest(IJ1939Node node, Exception? outcome)
     {
-        // The claim task faults when the tie is seen during the window. A CA that already
-        // finished Claimed and is then unseated has nothing left to fault; the state is the
-        // result either way. A scanned fallback would be Claimed at some other SA.
-        if (outcome is not null)
-        {
-            outcome.Should().BeOfType<J1939CannotClaimException>();
-            ((J1939CannotClaimException)outcome).PreferredAddress.Should().Be((byte)0x50);
-        }
-        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim,
-            outcome is null
-                ? "the claim completed, so the tie had to unseat it afterwards"
-                : "the claim lost the tie");
+        outcome.Should().BeOfType<J1939CannotClaimException>("the tie is seen inside a window that cannot close")
+            .Which.PreferredAddress.Should().Be((byte)0x50);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim, "the claim lost the tie");
         node.Address.Should().BeNull();
     }
 
