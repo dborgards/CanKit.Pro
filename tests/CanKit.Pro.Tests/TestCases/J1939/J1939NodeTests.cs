@@ -435,6 +435,67 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(0);
     }
 
+    // #355 (J-4): on an Echo-mode bus a confirmed claim's marker waits for the echo the service
+    // has already matched, and had no grace: that echo normally reaches this node's
+    // subscription as well. One dropped there -- a 1024-deep DropOldest buffer, so RX overload
+    // does it -- left the marker live for ever, and the next peer claim with this NAME on that
+    // address was swallowed as the echo. Here the confirmation comes without the frame ever
+    // reaching the bus, which is the node's view of a lost echo; past the grace the peer is a
+    // contest again.
+    [Fact]
+    public async Task An_Echo_Mode_Claim_Marker_Whose_Echo_Never_Arrives_Expires_After_The_Grace()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.ConfirmFirstClaimWithoutTransmit);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var name = Name(1);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(name) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x11, announce);
+
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+        var lost = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(e); };
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, name.ToBytes()), isEcho: false);
+
+        (await lost.Task.AsTaskWithTimeout(ShortTimeout)).ContendingSourceAddress.Should().Be((byte)0x11,
+            "the echo the marker waited for is a grace overdue, so this frame is a CA with our NAME");
+    }
+
+    // #355 (J-4), the other consequence: a timed-out claim's marker lingers and, at the end of its
+    // grace, re-arms while an identical marker is still live -- that is a retry whose own echo
+    // has not come back yet. A live marker whose echo was lost never stopped being live, so the
+    // lingering one re-armed every second for ever. The retry's marker now expires a grace after
+    // its confirmation, and the lingering one goes at the next grace after that.
+    [Fact]
+    public async Task A_Lingering_Claim_Marker_Stops_Rearming_Once_The_Live_One_Has_Expired()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.TimeoutFirstClaimThenConfirmWithoutTransmit);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var grace = J1939NodeImpl.ClaimEchoGrace;
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+
+        Func<Task> timedOut = () => node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        await timedOut.Should().ThrowAsync<J1939NodeException>(); // its marker lingers, a grace armed
+        await clock.WaitUntilTimerArmedAsync(actor, grace, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await ClaimOnClockAsync(node, clock, actor, 0x11, announce); // the retry: confirmed at +100 ms, never echoed
+
+        await clock.AdvanceAsync(grace - TimeSpan.FromMilliseconds(180)); // +1000 ms: the retry's marker is live
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(1, "the lingering marker re-armed for the live retry");
+
+        await clock.AdvanceAsync(grace); // +2000 ms: the retry's marker expired at +1100 ms
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(0, "nothing live is left to wait for");
+    }
+
     // A bus that declares the echo capability outside Echo mode, but never delivers one (SocketCAN
     // and Kvaser in Normal mode): the claim is recorded in case a flagged echo follows (#249),
     // and that marker may only be spent by a flagged frame. A peer with our NAME is never
@@ -5779,6 +5840,12 @@ public sealed class ScriptedClaimBus : ICanBusService
         HoldAfterFirstClaim,
         // The first two Address Claims return Timeout without being transmitted.
         TimeoutFirstTwoClaims,
+        // The first Address Claim is confirmed without being transmitted: the service saw its
+        // echo, the node's subscription never does (#355, J-4). Later ones are forwarded.
+        ConfirmFirstClaimWithoutTransmit,
+        // The first Address Claim returns Timeout, every later one is confirmed without being
+        // transmitted. Neither reaches the bus.
+        TimeoutFirstClaimThenConfirmWithoutTransmit,
     }
 
     public enum ReleaseKind
@@ -5906,6 +5973,7 @@ public sealed class ScriptedClaimBus : ICanBusService
                 if (outcome == ClaimOutcome.HoldThenForward)
                     await WaitForCannotHoldAsync().ConfigureAwait(false);
                 if (outcome == ClaimOutcome.Reject) return Rejected();
+                if (outcome == ClaimOutcome.ConfirmUnsent) return Accepted();
                 if (outcome == ClaimOutcome.Timeout) return TimedOut();
                 if (outcome == ClaimOutcome.Throw) throw new InvalidOperationException("address claim transmit failed");
             }
@@ -5941,6 +6009,12 @@ public sealed class ScriptedClaimBus : ICanBusService
             case Script.TimeoutFirstTwoClaims:
                 if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
                 return Interlocked.Increment(ref _claimSends) <= 2 ? ClaimOutcome.Timeout : ClaimOutcome.Forward;
+            case Script.ConfirmFirstClaimWithoutTransmit:
+                if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
+                return Interlocked.Increment(ref _claimSends) == 1 ? ClaimOutcome.ConfirmUnsent : ClaimOutcome.Forward;
+            case Script.TimeoutFirstClaimThenConfirmWithoutTransmit:
+                if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
+                return Interlocked.Increment(ref _claimSends) == 1 ? ClaimOutcome.Timeout : ClaimOutcome.ConfirmUnsent;
             default:
                 return ClaimOutcome.Forward;
         }
@@ -5948,7 +6022,7 @@ public sealed class ScriptedClaimBus : ICanBusService
 
     private int _claimSends;
 
-    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw, Timeout }
+    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw, Timeout, ConfirmUnsent }
 
     private static TxConfirmation Accepted() => new TxConfirmation
     {

@@ -1062,9 +1062,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 return;
             }
 
-            // Confirmed without an echo of our own to match: a flagged echo, if this adapter
-            // delivers one outside Echo mode, may still follow.
-            if (echo is { FlaggedOnly: true }) NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+            SettleConfirmedClaimEcho(echo);
             try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
@@ -1112,8 +1110,28 @@ internal sealed class J1939NodeImpl : IJ1939Node
         return echo;
     }
 
+    // Confirmed. Outside Echo mode there was no echo of our own to match: a flagged one, if
+    // this adapter delivers one there, may still follow, and the marker lingers for the grace.
+    // In Echo mode the service has matched the echo, and the same frame normally reaches this
+    // node's subscription too -- but that is a 1024-deep DropOldest buffer, and an echo dropped
+    // there under RX overload left the marker live for ever: the next peer claim with this NAME
+    // on that address was swallowed as the echo, and a lingering sibling re-armed its grace
+    // every second (#355, J-4). It stays matchable for the grace and expires after it, read off
+    // the actor's clock where markers are matched, so a confirmation arms no timer.
+    private void SettleConfirmedClaimEcho(ClaimEcho? echo)
+    {
+        if (echo is null) return;
+        if (echo.FlaggedOnly) NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+        else echo.ExpiresAt = TickMath.DueAt(_time.GetTimestamp(), ClaimEchoGrace, _time.Frequency);
+    }
+
+    private bool IsExpired(ClaimEcho echo, long now) => echo.ExpiresAt <= now;
+
     private bool TryTakeClaimEcho(uint canId, byte[] payload, bool isEcho)
     {
+        long now = _time.GetTimestamp();
+        _claimEchoes.RemoveAll(echo => IsExpired(echo, now));
+
         // A live send is still waiting for its echo. Prefer that marker over an older one
         // whose confirm already timed out: otherwise the retry's echo is spent on the
         // predecessor, and the predecessor's late echo — or the next real peer — is the
@@ -1209,8 +1227,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private bool HasLiveClaimEcho(ClaimEcho lingering)
     {
+        long now = _time.GetTimestamp();
         return _claimEchoes
-            .Where(other => !ReferenceEquals(other, lingering) && !other.Lingering)
+            .Where(other => !ReferenceEquals(other, lingering) && !other.Lingering && !IsExpired(other, now))
             .Any(other => ClaimEchoMatches(other, lingering.CanId, lingering.Payload));
     }
 
@@ -1509,9 +1528,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RaiseBackgroundException(new J1939NodeException(
                     $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
             }
-            else if (echo is { FlaggedOnly: true })
+            else
             {
-                NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+                SettleConfirmedClaimEcho(echo);
             }
         }
         catch (Exception ex)
@@ -2016,6 +2035,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Recorded outside Echo mode: only a frame the adapter flags as an echo may spend it.
         public bool FlaggedOnly { get; init; }
         public IDeadline? Grace { get; set; }
+
+        // On the actor's clock: an Echo-mode marker whose send was confirmed stops matching here
+        // (J-4). Written by the send's continuation, read on the actor.
+        public long ExpiresAt
+        {
+            get => Volatile.Read(ref _expiresAt);
+            set => Volatile.Write(ref _expiresAt, value);
+        }
+
+        private long _expiresAt = long.MaxValue;
     }
 
     // One application single-frame send in the ledger. Identity, as with ClaimEcho: the grace
