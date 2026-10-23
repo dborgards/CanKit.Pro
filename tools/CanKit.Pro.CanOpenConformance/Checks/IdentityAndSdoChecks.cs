@@ -301,6 +301,40 @@ internal static class IdentityAndSdoChecks
             var requestCutoff = requests.ElapsedMs;
             await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
 
+            // The client's half of the protocol, done before any verdict rather than inside one.
+            // A response that opens a segmented upload of this pair leaves the server holding the
+            // session, and the next check's transfer then collects its stale abort on the same
+            // COB-ID — so SDO-03 fails for what SDO-02 left behind. The abort used to be sent
+            // only in the branch that judges a non-abort answer, which every early return skips:
+            // the shared-channel returns added in the last two rounds, the one for a reply set
+            // that is not one frame of eight bytes, and the one for no reply at all. It is sent
+            // here, once, for any frame the tap holds that opened such a session — command
+            // specifier 2 with the expedited bit clear, echoing 5FFFh:00 — and the branch below
+            // reads the result rather than repeating the send. Found in review of #388.
+            var openedSegmented = tap.Frames.FirstOrDefault(f => !f.IsRemote && f.Data.Length == 8
+                && (f.Data[0] & 0xE0) == 0x40 && (f.Data[0] & 0x02) == 0
+                && (f.Data[1] | (f.Data[2] << 8)) == Absent && f.Data[3] == 0x00);
+            int? segmentedAbortRejected = null;
+            if (openedSegmented.Data is not null)
+            {
+                var abort = new byte[8];
+                abort[0] = 0x80; // ccs 4: abort transfer
+                abort[1] = unchecked((byte)Absent);
+                abort[2] = (byte)(Absent >> 8);
+                BitConverter.GetBytes((uint)SdoAbortCode.General).CopyTo(abort, 4);
+                var sentAbort = session.Bus.Transmit(
+                    CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), abort));
+                if (sentAbort <= 0)
+                {
+                    segmentedAbortRejected = sentAbort;
+
+                    book.Note("SDO-02 segmented cleanup", "TransmitRejected",
+                        $"The client abort for the 0x{Absent:X4} upload was rejected by the driver (Transmit "
+                        + "returned " + sentAbort + "). The device may still hold that SDO session, and later SDO "
+                        + "checks in this run can inherit its response.", Attribution.Transport);
+                }
+            }
+
             var beforeAsking = tap.Through(askedFrom).Where(f => !f.IsRemote).ToList();
             var responses = tap.Through(replyCutoff).Where(f => f.AtMs > askedFrom && !f.IsRemote).ToList();
 
@@ -430,14 +464,7 @@ internal static class IdentityAndSdoChecks
                 // of #388.
                 if ((answer.Data[0] & 0x02) == 0)
                 {
-                    var abort = new byte[8];
-                    abort[0] = 0x80; // ccs 4: abort transfer
-                    abort[1] = unchecked((byte)Absent);
-                    abort[2] = (byte)(Absent >> 8);
-                    BitConverter.GetBytes((uint)SdoAbortCode.General).CopyTo(abort, 4);
-                    var sent = session.Bus.Transmit(
-                        CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), abort));
-                    if (sent <= 0)
+                    if (segmentedAbortRejected is { } rejectedBy)
                     {
                         // Not a note on a skip. The driver refused the abort, so the server is
                         // left holding the 5FFFh session and the next SDO transfer can collect
@@ -446,13 +473,9 @@ internal static class IdentityAndSdoChecks
                         // operator nothing was wrong. A transport fault says the bus is the
                         // problem and the incident puts it in the error list, so every later SDO
                         // finding in the report is read in its light. Found in review of #388.
-                        book.Note("SDO-02 segmented cleanup", "TransmitRejected",
-                            $"The client abort for the 0x{Absent:X4} upload was rejected by the driver (Transmit "
-                            + "returned " + sent + "). The device may still hold that SDO session, and later SDO "
-                            + "checks in this run can inherit its response.", Attribution.Transport);
                         measurements["segmented transfer"] =
-                            $"the response opened a segmented upload and the client abort was rejected by the driver "
-                            + $"(Transmit returned {sent}); the device may still hold the session";
+                            "the response opened a segmented upload and the client abort was rejected by the driver "
+                            + $"(Transmit returned {rejectedBy}); the device may still hold the session";
                         return Outcome.TransportFault(
                             $"The device answered the 0x{Absent:X4} probe with a segmented upload, and the driver "
                             + "refused the client abort that would have closed it. The session may still be open, "
