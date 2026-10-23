@@ -27,6 +27,34 @@ internal static class LssAndStoreChecks
         => session.Lss.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken);
 
     /// <summary>
+    /// Switches every slave back to Waiting on the way out, and reports whether it worked. A slave
+    /// left in Configuration has stopped doing its job, so a check that cannot switch it back must
+    /// not pass — the same restoration rule the NMT checks follow. Found in review of #388.
+    /// </summary>
+    private static async Task<Restoration> RestoreWaitingAsync(Session session, Checkbook book, string checkId)
+    {
+        try
+        {
+            await session.Lss.SwitchStateGlobalAsync(LssState.Waiting, CancellationToken.None).ConfigureAwait(false);
+            return Restoration.Ok("waiting");
+        }
+        catch (Exception ex)
+        {
+            book.Note($"{checkId} switch back to LSS Waiting", ex);
+            return Restoration.Broke(
+                $"FAILED ({ex.GetType().Name}) — a slave may still be in LSS configuration state and out of service");
+        }
+    }
+
+    /// <summary>The verdict a check returns when its own result stands but the bus was left in
+    /// LSS configuration state.</summary>
+    private static Outcome LeftInConfiguration(Restoration restoration, IReadOnlyDictionary<string, string>? measurements = null)
+        => Outcome.Failed(Attribution.Unknown,
+            "The check itself completed, but the bus could not be switched back to LSS Waiting: " + restoration.State
+            + ". A slave in configuration state is not doing its job, so this fails whatever the measurements say.",
+            measurements);
+
+    /// <summary>
     /// Whether the bound description says outright that the device has no LSS. CiA 305 support is
     /// optional and an EDS declares it with LSS_Supported, so a file that says no turns the whole
     /// group into "not applicable" instead of three services timing out.
@@ -88,68 +116,78 @@ internal static class LssAndStoreChecks
             }
 
             var measurements = new Dictionary<string, string> { ["LSS address from 1018h"] = expected.ToString() };
-            try
-            {
-                // The slave answers a selective switch only from Waiting, so the state is
-                // normalised rather than assumed from whatever ran before.
-                await NormaliseToWaitingAsync(session, cancellationToken).ConfigureAwait(false);
-                var selected = await session.Lss.SwitchStateSelectiveAsync(expected, cancellationToken).ConfigureAwait(false);
-                measurements["selective switch answered"] = selected.ToString();
-                if (!selected)
-                {
-                    // A device the file declares as having no LSS is not failing by staying
-                    // silent; it is answering the only way it can. Without a declaration the
-                    // silence is genuinely ambiguous — LSS is optional in CiA 301 — so it is
-                    // inconclusive rather than a fault. An earlier version failed both. Found in
-                    // review of #388.
-                    if (session.TargetDescription is { } description && !description.DeviceInfo.LssSupported)
-                    {
-                        return Outcome.NotApplicable(
-                            $"{System.IO.Path.GetFileName(session.Options.EdsPath)} declares LSS_Supported=0, and the "
-                            + "device did not answer a selective switch. That is consistent: LSS is optional in "
-                            + "CiA 301 and this device does not have it.");
-                    }
 
-                    return Outcome.Inconclusive(
-                        "The device did not answer a selective LSS switch for the address its own 1018h reports. Either "
-                        + "it does not implement LSS — which CiA 301 permits, and which an EDS would say with "
-                        + "LSS_Supported — or its LSS address differs from its identity object, which CiA 305 forbids. "
-                        + "Nothing observed here separates the two; pass an EDS and the check can.",
-                        Attribution.Unknown, measurements);
-                }
-
-                var inquired = await session.Lss.InquireAddressAsync(cancellationToken).ConfigureAwait(false);
-                var nodeId = await session.Lss.InquireNodeIdAsync(cancellationToken).ConfigureAwait(false);
-                measurements["LSS address from inquire"] = inquired.ToString();
-                measurements["node-id from inquire"] = nodeId.ToString(CultureInfo.InvariantCulture);
-
-                var problems = new List<string>();
-                if (inquired != expected) problems.Add($"inquire returned {inquired}, 1018h says {expected}");
-                if (nodeId != session.Target) problems.Add($"inquire returned node-id {nodeId}, the device answers SDO on {session.Target}");
-
-                return problems.Count == 0
-                    ? Outcome.Pass("The device selected on its 1018h address and inquired the same address and node-id back.", measurements)
-                    : Outcome.Fail(string.Join("; ", problems) + ".", measurements);
-            }
-            catch (LssTimeoutException timeout)
-            {
-                measurements["timeout on command specifier"] = $"0x{timeout.CommandSpecifier:X2} after {timeout.Timeout.TotalMilliseconds:F0} ms";
-                return Outcome.Inconclusive(
-                    "The device did not answer an LSS request. LSS is optional in CiA 301 — a device that does not "
-                    + "implement it is silent on 7E5h, which is indistinguishable from one that is not listening.",
-                    Attribution.Device, measurements);
-            }
-            finally
+            // The body is a local function so that the restore in the finally can decide the
+            // verdict: with the returns inside the try, a slave left in configuration state was
+            // only a note beside a passing check. Found in review of #388.
+            async Task<Outcome> SelectAndInquireAsync()
             {
                 try
                 {
-                    await session.Lss.SwitchStateGlobalAsync(LssState.Waiting, CancellationToken.None).ConfigureAwait(false);
+                    // The slave answers a selective switch only from Waiting, so the state is
+                    // normalised rather than assumed from whatever ran before.
+                    await NormaliseToWaitingAsync(session, cancellationToken).ConfigureAwait(false);
+                    var selected = await session.Lss.SwitchStateSelectiveAsync(expected, cancellationToken).ConfigureAwait(false);
+                    measurements["selective switch answered"] = selected.ToString();
+                    if (!selected)
+                    {
+                        // A device the file declares as having no LSS is not failing by staying
+                        // silent; it is answering the only way it can. Without a declaration the
+                        // silence is genuinely ambiguous — LSS is optional in CiA 301 — so it is
+                        // inconclusive rather than a fault. An earlier version failed both. Found in
+                        // review of #388.
+                        if (session.TargetDescription is { } description && !description.DeviceInfo.LssSupported)
+                        {
+                            return Outcome.NotApplicable(
+                                $"{System.IO.Path.GetFileName(session.Options.EdsPath)} declares LSS_Supported=0, and the "
+                                + "device did not answer a selective switch. That is consistent: LSS is optional in "
+                                + "CiA 301 and this device does not have it.");
+                        }
+
+                        return Outcome.Inconclusive(
+                            "The device did not answer a selective LSS switch for the address its own 1018h reports. Either "
+                            + "it does not implement LSS — which CiA 301 permits, and which an EDS would say with "
+                            + "LSS_Supported — or its LSS address differs from its identity object, which CiA 305 forbids. "
+                            + "Nothing observed here separates the two; pass an EDS and the check can.",
+                            Attribution.Unknown, measurements);
+                    }
+
+                    var inquired = await session.Lss.InquireAddressAsync(cancellationToken).ConfigureAwait(false);
+                    var nodeId = await session.Lss.InquireNodeIdAsync(cancellationToken).ConfigureAwait(false);
+                    measurements["LSS address from inquire"] = inquired.ToString();
+                    measurements["node-id from inquire"] = nodeId.ToString(CultureInfo.InvariantCulture);
+
+                    var problems = new List<string>();
+                    if (inquired != expected) problems.Add($"inquire returned {inquired}, 1018h says {expected}");
+                    if (nodeId != session.Target) problems.Add($"inquire returned node-id {nodeId}, the device answers SDO on {session.Target}");
+
+                    return problems.Count == 0
+                        ? Outcome.Pass("The device selected on its 1018h address and inquired the same address and node-id back.", measurements)
+                        : Outcome.Fail(string.Join("; ", problems) + ".", measurements);
                 }
-                catch (Exception ex)
+                catch (LssTimeoutException timeout)
                 {
-                    book.Note("LSS-02 cleanup", ex);
+                    measurements["timeout on command specifier"] = $"0x{timeout.CommandSpecifier:X2} after {timeout.Timeout.TotalMilliseconds:F0} ms";
+                    return Outcome.Inconclusive(
+                        "The device did not answer an LSS request. LSS is optional in CiA 301 — a device that does not "
+                        + "implement it is silent on 7E5h, which is indistinguishable from one that is not listening.",
+                        Attribution.Device, measurements);
                 }
             }
+
+            Restoration restoration;
+            Outcome outcome;
+            try
+            {
+                outcome = await SelectAndInquireAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                restoration = await RestoreWaitingAsync(session, book, "LSS-02").ConfigureAwait(false);
+            }
+
+            measurements["left in LSS state"] = restoration.State;
+            return restoration.Succeeded ? outcome : LeftInConfiguration(restoration, measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("LSS-03", "lss", "Fastscan finds an unconfigured slave's address", Tier.Commission, "FR-CO-049", async () =>
@@ -166,40 +204,46 @@ internal static class LssAndStoreChecks
             // the check report "no unconfigured slave" -- a false negative that looked like a clean
             // bus. Found in review of #388.
             await NormaliseToWaitingAsync(session, cancellationToken).ConfigureAwait(false);
-            try
-            {
-                var result = await session.Lss.FastscanAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
-                var measurements = new Dictionary<string, string> { ["status"] = result.Status.ToString() };
-                if (result.Status == LssFastscanStatus.Found) measurements["address"] = result.Address.ToString();
-                else if (result.Status == LssFastscanStatus.NoMatch) measurements["partial"] = result.Address.ToString();
 
-                return result.Status switch
-                {
-                    LssFastscanStatus.Found => Outcome.Pass($"Fastscan identified {result.Address}.", measurements),
-                    LssFastscanStatus.NoUnconfiguredSlave => Outcome.NotApplicable(
-                        "No unconfigured slave is on the bus, so Fastscan has nothing to find. Power up a device "
-                        + "without a node-id to exercise this."),
-                    _ => Outcome.Fail(
-                        "Fastscan started and did not resolve an address, although a slave answered the first step. "
-                        + "That is a slave which answers the protocol inconsistently.", measurements),
-                };
-            }
-            catch (LssTimeoutException timeout)
-            {
-                return Outcome.Inconclusive(
-                    $"Fastscan timed out on command specifier 0x{timeout.CommandSpecifier:X2}.", Attribution.Device);
-            }
-            finally
+            async Task<Outcome> ScanAsync()
             {
                 try
                 {
-                    await session.Lss.SwitchStateGlobalAsync(LssState.Waiting, CancellationToken.None).ConfigureAwait(false);
+                    var result = await session.Lss.FastscanAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                    var measurements = new Dictionary<string, string> { ["status"] = result.Status.ToString() };
+                    if (result.Status == LssFastscanStatus.Found) measurements["address"] = result.Address.ToString();
+                    else if (result.Status == LssFastscanStatus.NoMatch) measurements["partial"] = result.Address.ToString();
+
+                    return result.Status switch
+                    {
+                        LssFastscanStatus.Found => Outcome.Pass($"Fastscan identified {result.Address}.", measurements),
+                        LssFastscanStatus.NoUnconfiguredSlave => Outcome.NotApplicable(
+                            "No unconfigured slave is on the bus, so Fastscan has nothing to find. Power up a device "
+                            + "without a node-id to exercise this."),
+                        _ => Outcome.Fail(
+                            "Fastscan started and did not resolve an address, although a slave answered the first step. "
+                            + "That is a slave which answers the protocol inconsistently.", measurements),
+                    };
                 }
-                catch (Exception ex)
+                catch (LssTimeoutException timeout)
                 {
-                    book.Note("LSS-03 cleanup", ex);
+                    return Outcome.Inconclusive(
+                        $"Fastscan timed out on command specifier 0x{timeout.CommandSpecifier:X2}.", Attribution.Device);
                 }
             }
+
+            Restoration restoration;
+            Outcome outcome;
+            try
+            {
+                outcome = await ScanAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                restoration = await RestoreWaitingAsync(session, book, "LSS-03").ConfigureAwait(false);
+            }
+
+            return restoration.Succeeded ? outcome : LeftInConfiguration(restoration);
         }).ConfigureAwait(false);
 
         await book.RunAsync("STO-01", "store", "1010h/1011h save and restore parameters", Tier.Read, "CiA 301 1010h/1011h", async () =>

@@ -109,6 +109,18 @@ internal static class EdsChecks
                 }
             }
 
+            // Order matters here: an earlier version returned "the file declares no 1018h values"
+            // whenever nothing compared, which is what a device that aborted every declared value
+            // produced — blaming the file for the device's refusal. Found in review of #388.
+            if (unreadable.Count > 0 && compared == 0)
+            {
+                return Outcome.Inconclusive(
+                    $"The file declares 1018h values, and the device would not return any of them "
+                    + $"({string.Join(", ", unreadable)}). Nothing was compared, so whether the file is for this device "
+                    + "is unknown — and this is the device's answer, not a gap in the file.",
+                    Attribution.Device, measurements);
+            }
+
             if (compared == 0)
                 return Outcome.NeedsSetup("The file declares no 1018h values to compare (an EDS template often does not).");
 
@@ -205,10 +217,25 @@ internal static class EdsChecks
 
             if (absent.Count == 0 && lengthMismatch.Count == 0)
             {
-                return ok > 0
-                    ? Outcome.Pass($"All {ok} readable declared object(s) read back at the declared length.", measurements)
-                    : Outcome.Inconclusive(
+                if (ok == 0)
+                {
+                    return Outcome.Inconclusive(
                         "The sweep read no object at all, so nothing was established.", Attribution.Unknown, measurements);
+                }
+
+                // A truncated sweep cannot say the description matched: everything past the limit
+                // was never asked, and "Every readable declared object exists" under *What works*
+                // would be a claim about objects nobody queried. Found in review of #388.
+                if (readable.Count > SweepLimit)
+                {
+                    return Outcome.Inconclusive(
+                        $"The {ok} object(s) that were read all matched, but the file declares {readable.Count} readable "
+                        + $"pairs and this sweep reads at most {SweepLimit}. The remaining {readable.Count - SweepLimit} "
+                        + "were never asked for, so the description as a whole is not confirmed.",
+                        Attribution.Setup, measurements);
+                }
+
+                return Outcome.Pass($"All {ok} readable declared object(s) read back at the declared length.", measurements);
             }
 
             return Outcome.Failed(Attribution.Unknown,

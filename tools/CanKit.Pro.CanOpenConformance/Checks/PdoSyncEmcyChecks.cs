@@ -538,10 +538,18 @@ internal static class PdoSyncEmcyChecks
                 ? (word & 0x1FFF_FFFFu, true)
                 : (word & CanOpenCobId.CanIdMask, false);
         }
-        catch (SdoAbortException)
+        catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                  or (uint)SdoAbortCode.SubIndexDoesNotExist)
         {
             // No 1005h at all means the default, which is what such a device uses.
             return (CanOpenCobId.Sync, false);
+        }
+        catch (SdoAbortException)
+        {
+            // A declared 1005h that will not be read leaves the prerequisite unresolved. Guessing
+            // the default here sent every SYNC to the wrong identifier and then failed the
+            // device's cyclic TPDOs for silence. Found in review of #388.
+            return null;
         }
     }
 
@@ -629,7 +637,12 @@ internal static class PdoSyncEmcyChecks
         try
         {
             var count = await session.Client.SdoUploadAsync(session.Target, map, 0x00, cancellationToken).ConfigureAwait(false);
-            if (count.Length != 1) return (0, 0);
+            if (count.Length != 1)
+            {
+                problems.Add($"0x{map:X4}:00 is UNSIGNED8, got {IdentityAndSdoChecks.Hex(count)}");
+                return (0, 0);
+            }
+
 
             var bits = 0;
             for (byte sub = 1; sub <= count[0] && sub <= 64; sub++)
@@ -647,8 +660,20 @@ internal static class PdoSyncEmcyChecks
 
             return (bits, count[0]);
         }
-        catch (SdoAbortException)
+        catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                  or (uint)SdoAbortCode.SubIndexDoesNotExist)
         {
+            // No mapping record at all is a device without that PDO; the communication record
+            // read above already told us whether it exists.
+            return (0, 0);
+        }
+        catch (SdoAbortException abort)
+        {
+            // Anything else is the mandatory mapping record not being readable, which an earlier
+            // version turned into an empty mapping -- so PDO-01/PDO-02 passed reporting zero
+            // entries and PDO-03 skipped the payload-length check for that PDO. Found in review
+            // of #388.
+            problems.Add($"0x{map:X4} is the mandatory mapping record and aborted {IdentityAndSdoChecks.Describe(abort)}");
             return (0, 0);
         }
     }

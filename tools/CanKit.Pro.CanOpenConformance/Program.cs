@@ -154,6 +154,16 @@ internal static class Program
 
         // An unopened bus is not a device verdict, and must not be reported as a passing run.
         if (openError is not null) return 1;
+
+        // Nor is an interrupted one. A wrapper that reads only the exit code would otherwise
+        // accept a deliberately incomplete conformance run as a successful one, which is the
+        // worst thing a conformance tool's exit code can do. Found in review of #388.
+        if (book.Interrupted)
+        {
+            Console.WriteLine("The run was interrupted, so it is incomplete: exit code 2 rather than 0.");
+            return 2;
+        }
+
         return book.AnyFailure ? 1 : 0;
     }
 

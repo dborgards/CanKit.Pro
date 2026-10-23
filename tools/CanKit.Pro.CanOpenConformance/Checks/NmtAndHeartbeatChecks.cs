@@ -228,6 +228,7 @@ internal static class NmtAndHeartbeatChecks
             var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 2 + 100));
             var restoredOk = true;
             var restored = "yes";
+            string? lostResponse = null;
             // Set before the write, not after it. The device may accept the download and the call
             // still not return — a cancel in that window used to skip the restore and leave the
             // heartbeat switched off, which is exactly the guarantee this check makes. An abort is
@@ -242,6 +243,15 @@ internal static class NmtAndHeartbeatChecks
                     await session.Client.SdoDownloadAsync(session.Target, 0x1017, 0x00, new byte[] { 0, 0 }, cancellationToken)
                         .ConfigureAwait(false);
                 }
+                catch (SdoAbortException abort) when (abort.Origin == SdoAbortOrigin.Local)
+                {
+                    // The client gave up on the response. The device may well have applied the
+                    // write, so the flag stays set and the finally restores; the check is recorded
+                    // here rather than thrown, because leaving it to Checkbook's handler skipped
+                    // the restore verdict below and a failed restore became a mere note. Found in
+                    // review of #388.
+                    lostResponse = IdentityAndSdoChecks.Describe(abort);
+                }
                 catch (SdoAbortException abort) when (abort.Origin == SdoAbortOrigin.Peer)
                 {
                     // Only the peer refusing proves nothing was written. A local abort — the
@@ -254,10 +264,6 @@ internal static class NmtAndHeartbeatChecks
                         + "the device. Nothing is wrong with that: 1017h may be read-only.");
                 }
 
-                // A local abort (a lost response) arrives here with mayHaveStopped still set: the
-                // device may well have applied the write, so the observation below is run and the
-                // restore in the finally happens either way.
-                //
                 // Two budgets, so a beat already in flight when the write landed cannot be
                 // mistaken for the producer still running.
                 await Task.Delay((int)Math.Min(15_000, budget.TotalMilliseconds * 2 + 300), cancellationToken).ConfigureAwait(false);
@@ -306,9 +312,18 @@ internal static class NmtAndHeartbeatChecks
             if (!restoredOk)
             {
                 return Outcome.Failed(Attribution.Unknown,
-                    "The consumer behaved as asked, but 1017h could not be written back: " + restored
+                    "1017h could not be written back: " + restored
                     + ". The device is left with its heartbeat disabled and needs attention before it is trusted again.",
                     measurements);
+            }
+
+            if (lostResponse is not null)
+            {
+                measurements["stop write"] = $"no response ({lostResponse}); the device may or may not have applied it";
+                return Outcome.Inconclusive(
+                    "The write of 1017h = 0 got no answer, so whether the producer was ever stopped is unknown and the "
+                    + "timeout below cannot be read as the consumer's behaviour. The original interval was written back "
+                    + "regardless, which is the part that matters.", Attribution.Device, measurements);
             }
 
             return timedOut > 0
@@ -353,7 +368,11 @@ internal static class NmtAndHeartbeatChecks
         {
             var cobId = CanOpenCobId.Heartbeat(session.Target);
             using var tap = new BusTap(session.Service, id => id == cobId);
-            await tap.ListenAsync(500, cancellationToken).ConfigureAwait(false);
+            // The operator's window, returning on the first state frame: a fixed 500 ms missed a
+            // slower producer depending on its phase and skipped the check although HBT-02 had
+            // just observed it. Found in review of #388.
+            await tap.WaitForAsync(frames => frames.Any(f => f.Data.Length == 1),
+                Math.Max(500, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
             if (tap.Frames.Count == 0)
             {
                 return Outcome.NeedsSetup(

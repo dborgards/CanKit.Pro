@@ -77,7 +77,8 @@ internal sealed record RunOptions(
           --out <dir>            Where the report goes. Default: the current directory.
           --help
 
-        Exit code 0 when no check failed, 1 when one did, 2 on a usage error.
+        Exit code 0 when no check failed, 1 when one did or the bus could not be opened, 2 on a usage
+        error or an interrupted run — an incomplete run is never reported as a successful one.
         """;
 
     /// <summary>
