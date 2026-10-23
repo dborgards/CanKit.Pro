@@ -283,6 +283,49 @@ internal static class IdentityAndSdoChecks
             // abort code is the last four, little-endian.
             if (answer.Data[0] != 0x80)
             {
+                // "Not an abort" is not the same as "implements the object", and treating it as
+                // such accepted a protocol violation as evidence of conformance. An initiate
+                // upload response has server command specifier 2 — bits 7..5 of byte 0 are 010 —
+                // and echoes the pair it answers in bytes 1..3 (CiA 301 §7.2.4.3.6). A download
+                // response, a segment, or an answer about another object is none of those things.
+                // Bit 4 is reserved and not tested: failing a device for a reserved bit it set
+                // would be the false FAIL this branch already exists to avoid. Found in review
+                // of #388.
+                var specifier = answer.Data[0] & 0xE0;
+                var answered = (ushort)(answer.Data[1] | (answer.Data[2] << 8));
+                if (specifier != 0x40 || answered != Absent || answer.Data[3] != 0x00)
+                {
+                    measurements["echoed index"] = $"0x{answered:X4}:{answer.Data[3]:X2}";
+                    return Outcome.Fail(
+                        $"The device answered an upload of 0x{Absent:X4}:00 with byte 0 = 0x{answer.Data[0]:X2} "
+                        + $"echoing 0x{answered:X4}:{answer.Data[3]:X2}. That is neither an abort nor an initiate "
+                        + "upload response for the pair that was asked for (CiA 301 §7.2.4.3.6 gives the response "
+                        + "server command specifier 2 and has it echo the index and sub-index), so it is a protocol "
+                        + "violation rather than an implementation of that object.", measurements);
+                }
+
+                // Bit 1 of byte 0 is the expedited flag. Clear means the server has just opened a
+                // segmented transfer and is holding the session: leaving it open let the next
+                // check's transfer supersede it and collect the stale abort on the same response
+                // COB-ID, so SDO-03 could fail for something SDO-02 left behind. The client's own
+                // half of the protocol is to abort what it will not finish. Found in review
+                // of #388.
+                if ((answer.Data[0] & 0x02) == 0)
+                {
+                    var abort = new byte[8];
+                    abort[0] = 0x80; // ccs 4: abort transfer
+                    abort[1] = unchecked((byte)Absent);
+                    abort[2] = (byte)(Absent >> 8);
+                    BitConverter.GetBytes((uint)SdoAbortCode.General).CopyTo(abort, 4);
+                    var sent = session.Bus.Transmit(
+                        CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), abort));
+                    measurements["segmented transfer"] = sent > 0
+                        ? "the response opened a segmented upload; closed with a client abort (0x08000000)"
+                        : $"the response opened a segmented upload and the client abort was rejected by the driver "
+                          + $"(Transmit returned {sent}), so the device may still hold the session — a later SDO "
+                          + "check could inherit it";
+                }
+
                 // Not a failure: 5FFFh is in the manufacturer-specific range, and a device is
                 // entitled to implement it. The probe needs an object proven absent, and nothing
                 // here proves that — so this says the check could not be performed rather than
