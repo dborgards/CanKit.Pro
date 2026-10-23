@@ -333,6 +333,15 @@ namespace CanKit.Pro.RawCan
         /// </summary>
         internal Action<Exception> AbandonedTransmitFaultObserved { get; set; } = static _ => { };
 
+        /// <summary>
+        /// Arms a confirmation's timeout on the token source that ends its wait: the runtime's
+        /// timer here, a clock the test moves itself in a test (#362). Every timeout this service
+        /// enforces goes through it, so "each call waits out its own timeout" is decided on that
+        /// clock instead of being measured against a host that can stall between two readings.
+        /// </summary>
+        internal Action<CancellationTokenSource, TimeSpan> ArmConfirmTimeout { get; set; }
+            = static (source, timeout) => source.CancelAfter(timeout);
+
         private async Task<TxConfirmation> SendApproximatedAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
             // FR-RAW-032: best-effort approximation -- confirmed as soon as the driver accepts the
@@ -407,7 +416,7 @@ namespace CanKit.Pro.RawCan
                 // caller who cancels a stalled send must not have to wait the timeout out and then
                 // be told "timed out" (Bugbot on #216).
                 using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                waitCts.CancelAfter(timeout);
+                ArmConfirmTimeout(waitCts, timeout);
                 var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 using var registration = waitCts.Token.Register(
                     static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), expired);
@@ -572,7 +581,7 @@ namespace CanKit.Pro.RawCan
                 }
             }, (pending, cancellationToken));
 
-            timeoutCts.CancelAfter(timeout);
+            ArmConfirmTimeout(timeoutCts, timeout);
             return await pending.Tcs.Task.ConfigureAwait(false);
         }
 
