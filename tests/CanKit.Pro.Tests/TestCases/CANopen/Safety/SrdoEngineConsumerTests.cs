@@ -520,4 +520,35 @@ public class SrdoEngineConsumerTests : IDisposable
         _host.Gfcs.Should().Be(1, "outside Operational nothing is signalled");
         _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "and nothing is recorded");
     }
+
+    /// <summary>1300h is an optional object (EN 50325-5:2010 §6.4.2.1): a node whose description
+    /// leaves it out has nothing to record, and the GFC still goes both ways.</summary>
+    [Fact]
+    public void A_Gfc_Works_On_A_Node_Without_1300h()
+    {
+        StartConsumer();
+        _od.Remove(SrdoRecords.GfcParameter, 0).Should().BeTrue();
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(1);
+        bool sent = false;
+        OnActor(() => sent = _engine.TrySendGfc());
+        sent.Should().BeTrue();
+        _host.Exceptions.Should().BeEmpty("there was nothing to set");
+    }
+
+    /// <summary>A dictionary that refuses the record write does not stop the command: the
+    /// reception is still signalled and the refusal reported, once per attempt.</summary>
+    [Fact]
+    public void A_Refused_Write_Of_1300h_Is_Reported_And_Does_Not_Stop_The_Gfc()
+    {
+        StartConsumer();
+        RefuseWritesTo(SrdoRecords.GfcParameter);
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(1);
+        bool sent = false;
+        OnActor(() => sent = _engine.TrySendGfc());
+        sent.Should().BeTrue();
+        _host.Exceptions.Should().HaveCount(2).And.OnlyContain(e => e.Message.Contains("1300h"));
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u);
+    }
 }
