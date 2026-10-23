@@ -152,12 +152,27 @@ internal static class NmtAndHeartbeatChecks
 
             if (heartbeats <= 0)
             {
+                // The 1017h lookup belongs here, not only on the no-frames-at-all path: a reboot
+                // during the window makes the frame count nonzero, which bypassed it and turned a
+                // verified zero into a device-attributed finding. Found in review of #388.
+                var producer = await ProducerHeartbeatTimeAsync(session, cancellationToken).ConfigureAwait(false);
+                if (producer == 0)
+                {
+                    measurements["1017h producer heartbeat time"] = "0 ms (heartbeat switched off)";
+                    return Outcome.NotApplicable(
+                        $"The device is configured not to produce a heartbeat (1017h = 0), so nothing on 0x{cobId:X3} "
+                        + "is expected"
+                        + (bootUps > 0 ? $"; the {bootUps} frame(s) seen are boot-up messages." : ".")
+                        + " That is an optional configuration, not a fault.");
+                }
+
                 return Outcome.Inconclusive(
-                    bootUps > 0
+                    (bootUps > 0
                         ? $"No heartbeat on 0x{cobId:X3}: the {bootUps} frame(s) seen are boot-up messages (00h), which "
                           + "CiA 301 does not report in a heartbeat. The device rebooted during the window and is not "
-                          + "producing one."
-                        : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms.",
+                          + "producing one"
+                        : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms")
+                    + (producer is { } ms ? $", although 1017h says {ms} ms." : "."),
                     Attribution.Device, measurements);
             }
 
@@ -402,9 +417,22 @@ internal static class NmtAndHeartbeatChecks
             if (!session.MayTransfer(0x100C, 0x00) || !session.MayTransfer(0x100D, 0x00))
                 return Outcome.NeedsSetup(session.GateReason(0x100C, 0x00));
 
+            // One try per object: they shared a catch, so an absent 100Dh reported that the device
+            // has no 100Ch. The same shape as STO-01's 1011h and SYN-01's 1006h — swept for here
+            // rather than waited for. Found in review of #388.
+            byte[] guardTime;
             try
             {
-                var guardTime = await session.Client.SdoUploadAsync(session.Target, 0x100C, 0x00, cancellationToken).ConfigureAwait(false);
+                guardTime = await session.Client.SdoUploadAsync(session.Target, 0x100C, 0x00, cancellationToken).ConfigureAwait(false);
+            }
+            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                      or (uint)SdoAbortCode.SubIndexDoesNotExist)
+            {
+                return Outcome.NotApplicable("The device has no 100Ch; node guarding is optional and deprecated.");
+            }
+
+            try
+            {
                 var lifeFactor = await session.Client.SdoUploadAsync(session.Target, 0x100D, 0x00, cancellationToken).ConfigureAwait(false);
                 var measurements = new Dictionary<string, string>
                 {
@@ -421,9 +449,13 @@ internal static class NmtAndHeartbeatChecks
                         + "CiA 301 deprecates it in favour of the heartbeat.", measurements)
                     : Outcome.Pass($"Node guarding is active: {time} ms x {lifeFactor[0]}.", measurements);
             }
-            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist)
+            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                      or (uint)SdoAbortCode.SubIndexDoesNotExist)
             {
-                return Outcome.NotApplicable("The device has no 100Ch/100Dh; node guarding is optional and deprecated.");
+                return Outcome.Fail(
+                    $"The device has 100Ch ({(guardTime.Length == 2 ? BitConverter.ToUInt16(guardTime, 0) + " ms" : IdentityAndSdoChecks.Hex(guardTime))}) "
+                    + "and says it has no 100Dh. CiA 301 defines the two together: a guard time without a life time "
+                    + "factor cannot be evaluated.");
             }
         }).ConfigureAwait(false);
 
@@ -544,6 +576,12 @@ internal static class NmtAndHeartbeatChecks
         // a "period", so HBT-03 and HBT-04 ran on it and could blame the stack for not reporting
         // heartbeats that were never sent — right after HBT-02 had said none were. Found in
         // review of #388.
+        // No period while guarding traffic shares the COB-ID. A toggle-zero response is
+        // byte-for-byte a heartbeat, so a period measured over the remainder would be measured
+        // over an unknown mixture — and HBT-03/HBT-04 would then run on it and could blame the
+        // stack for beats nobody sent. The evidence was local to HBT-02 until now. Found in
+        // review of #388.
+        if (HasGuardingTraffic(probe.Frames)) return null;
         return BusTap.Summarise(Heartbeats(probe.Frames));
     }
 
@@ -599,6 +637,14 @@ internal static class NmtAndHeartbeatChecks
     /// master's conversation with the target, legitimate traffic, and not a malformed heartbeat;
     /// calling it one failed a conforming device. Found in review of #388.
     /// </summary>
+    /// <summary>
+    /// Whether another master's node guarding is visible on the heartbeat COB-ID: an RTR poll or a
+    /// toggle-one response proves it. Shared so that every check drawing a conclusion from this
+    /// COB-ID uses the same evidence.
+    /// </summary>
+    private static bool HasGuardingTraffic(IReadOnlyList<TappedFrame> frames)
+        => frames.Any(f => f.IsRemote || (f.Data.Length == 1 && IsGuardingResponse(f.Data[0])));
+
     private static bool IsGuardingResponse(byte payload)
         => (payload & 0x80) != 0 && IsDefinedRunState((byte)(payload & 0x7F));
 

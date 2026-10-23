@@ -303,20 +303,39 @@ internal static class PdoSyncEmcyChecks
                     ["generates SYNC"] = ((cobId & CanOpenCobId.SyncGenerateBit) != 0).ToString(),
                 };
 
+                // Its own try: it sat inside 1005h's catch, so an absent 1006h reported that the
+                // device has no 1005h at all. A SYNC consumer may expose 1005h without being a
+                // producer that needs 1006h. Found in review of #388 — the same shape as STO-01's
+                // 1011h and GRD-01's 100Dh.
                 if (session.MayTransfer(0x1006, 0x00))
                 {
-                    var period = await session.Client.SdoUploadAsync(session.Target, 0x1006, 0x00, cancellationToken).ConfigureAwait(false);
-                    if (period.Length == 4)
+                    try
                     {
-                        measurements["1006h communication cycle period"] = $"{BitConverter.ToUInt32(period, 0)} us";
+                        var period = await session.Client.SdoUploadAsync(session.Target, 0x1006, 0x00, cancellationToken).ConfigureAwait(false);
+                        if (period.Length == 4)
+                        {
+                            measurements["1006h communication cycle period"] = $"{BitConverter.ToUInt32(period, 0)} us";
+                        }
+                        else
+                        {
+                            // An implemented 1006h that is not UNSIGNED32 is the device contradicting
+                            // itself, not a detail for the measurements. Found in review of #388.
+                            measurements["1006h communication cycle period"] = IdentityAndSdoChecks.Hex(period);
+                            return Outcome.Fail(
+                                $"1006h:00 is UNSIGNED32 and the device returned {period.Length} byte(s).", measurements);
+                        }
                     }
-                    else
+                    catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                              or (uint)SdoAbortCode.SubIndexDoesNotExist)
                     {
-                        // An implemented 1006h that is not UNSIGNED32 is the device contradicting
-                        // itself, not a detail for the measurements. Found in review of #388.
-                        measurements["1006h communication cycle period"] = IdentityAndSdoChecks.Hex(period);
-                        return Outcome.Fail(
-                            $"1006h:00 is UNSIGNED32 and the device returned {period.Length} byte(s).", measurements);
+                        measurements["1006h communication cycle period"] = "absent; a SYNC consumer need not be a producer";
+                    }
+                    catch (SdoAbortException abort)
+                    {
+                        measurements["1006h communication cycle period"] = $"aborted {IdentityAndSdoChecks.Describe(abort)}";
+                        return Outcome.Inconclusive(
+                            "1005h was read, but the declared 1006h would not answer, so the SYNC cycle period is "
+                            + "unknown.", Attribution.Device, measurements);
                     }
                 }
 
@@ -1054,6 +1073,16 @@ internal static class PdoSyncEmcyChecks
             if (count.Length != 1)
             {
                 problems.Add($"0x{map:X4}:00 is UNSIGNED8, got {IdentityAndSdoChecks.Hex(count)}");
+                return (0, 0, false, false);
+            }
+
+            if (count[0] > 64 && count[0] < (byte)MpdoAddressMode.Source)
+            {
+                // 41h..FDh is reserved; CanKit.Pro's own README documents it as an invalid mapping
+                // count. Reading the first 64 and reporting the device's full count as complete
+                // let a malformed device pass. Found in review of #388.
+                problems.Add($"0x{map:X4}:00 is 0x{count[0]:X2}; 41h..FDh is a reserved mapping count and CiA 301 "
+                    + "allows at most 64 entries.");
                 return (0, 0, false, false);
             }
 

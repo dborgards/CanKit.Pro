@@ -113,6 +113,7 @@ internal static class IdentityAndSdoChecks
             };
             var measurements = new Dictionary<string, string>();
             var blocked = new List<string>();
+            var unresolved = new List<string>();
             var read = 0;
             foreach (var (index, name) in wanted)
             {
@@ -133,9 +134,18 @@ internal static class IdentityAndSdoChecks
                     measurements[name] = $"\"{Printable(raw)}\" ({raw.Length} bytes{protocol})";
                     read++;
                 }
+                catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                          or (uint)SdoAbortCode.SubIndexDoesNotExist)
+                {
+                    measurements[name] = $"absent (1008h..100Ah are optional in CiA 301)";
+                }
                 catch (SdoAbortException abort)
                 {
-                    measurements[name] = $"aborted {Describe(abort)} (1008h..100Ah are optional in CiA 301)";
+                    // Not absence. An object the run was allowed to ask for that then would not
+                    // answer is unresolved, and returning Pass because a *different* string read
+                    // put it under "What works". Found in review of #388.
+                    measurements[name] = $"aborted {Describe(abort)}";
+                    unresolved.Add($"{name} ({Describe(abort)})");
                 }
             }
 
@@ -144,6 +154,14 @@ internal static class IdentityAndSdoChecks
                 return blocked.Count == wanted.Length
                     ? Outcome.NeedsSetup($"{string.Join(", ", blocked)} blocked: {session.GateReason(0x1008, 0x00)}")
                     : Outcome.NotApplicable("The device implements none of 1008h, 1009h, 100Ah; all three are optional.");
+            }
+
+            if (unresolved.Count > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{read} of 3 strings read, and {unresolved.Count} the run was allowed to ask for would not answer "
+                    + $"({string.Join(", ", unresolved)}). Those are not absences, so the check is not complete.",
+                    Attribution.Device, measurements);
             }
 
             var segmented = measurements.Values.Count(v => v.Contains(", segmented", StringComparison.Ordinal));
