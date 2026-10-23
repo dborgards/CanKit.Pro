@@ -25,8 +25,10 @@ analyser reads it; the PR body is not analysed. See CONTRIBUTING.md. Examples:
 
 ## Checklist
 
-- [ ] `dotnet build CanKit.Pro.sln -c Release` succeeds
-- [ ] `dotnet test CanKit.Pro.sln -c Release` passes
+<!-- The commands are in CONTRIBUTING.md § "Before you push". Tick a box only for something you ran. -->
+
+- [ ] Build with `-p:CI=true`, test (`net10.0`), `dotnet format --verify-no-changes`, and pack +
+  `eng/verify-packages.py` all pass locally (CONTRIBUTING.md § "Before you push")
 - [ ] Public API changes are documented with XML comments
 - [ ] New behaviour is covered by a test
 - [ ] The requirement or ADR this relates to is referenced (e.g. `FR-RAW-031`, `ADR-7`), if any

@@ -81,10 +81,58 @@ public class PublicApiSurfaceTests
     public static IEnumerable<object[]> TrackedPackages
         => Tracked.Select(t => new object[] { t.PackageId, t.AssemblyName });
 
+    /// <summary>
+    /// <see cref="Tracked"/> is a hand-kept copy of "the packable projects", and a theory over a
+    /// list can only check the entries it was given: dropping a package from the list, or adding
+    /// a package without listing it, left every test green. This pins the list to
+    /// <c>src/*/*.csproj</c>, where each project is packable by <c>src/Directory.Build.props</c>
+    /// unless it opts out.
+    /// </summary>
+    [Fact]
+    public void Every_Packable_Project_Is_Tracked()
+    {
+        var packable = PackableProjectIds(FindRepositoryRoot());
+
+        Tracked.Select(t => t.PackageId).OrderBy(id => id, StringComparer.Ordinal)
+            .Should().Equal(packable,
+                "every project under src/ ships as a package and needs a Tracked entry here and an " +
+                "approved file — and the count lives in eng/verify-packages.py, eng/verify-sboms.py and " +
+                "eng/build-api-docs.sh too (eng/test_package_registry.py checks those)");
+    }
+
+    [Fact]
+    public void Every_Approved_File_Belongs_To_A_Tracked_Package()
+    {
+        var approved = Directory.EnumerateFiles(FindApprovalsDir(), "*.approved.txt")
+            .Select(path => Path.GetFileName(path)![..^".approved.txt".Length])
+            .OrderBy(id => id, StringComparer.Ordinal);
+
+        approved.Should().Equal(Tracked.Select(t => t.PackageId).OrderBy(id => id, StringComparer.Ordinal),
+            "an approved file nobody tests guards nothing, and a package without one is " +
+            "created from the first received file");
+    }
+
+    // The package id is the project's file name; a project opts out of packing explicitly.
+    private static string[] PackableProjectIds(string repositoryRoot)
+        => Directory.EnumerateFiles(Under(repositoryRoot, "src"), "*.csproj", SearchOption.AllDirectories)
+            .Where(path => !File.ReadAllText(path).Contains("<IsPackable>false</IsPackable>", StringComparison.Ordinal))
+            .Select(path => Path.GetFileNameWithoutExtension(path)!)
+            .OrderBy(id => id, StringComparer.Ordinal)
+            .ToArray();
+
+    // Fixed relative segments under a known root. Spelled out rather than Path.Combine, which drops
+    // everything before a later argument that happens to be rooted (CodeQL cs/path-combine) --
+    // a hazard these literals do not have, and not worth a suppression.
+    private static string Under(string root, params string[] segments)
+        => string.Join(Path.DirectorySeparatorChar.ToString(), new[] { root }.Concat(segments));
+
     private static string Normalize(string text)
         => text.Replace("\r\n", "\n").Trim();
 
     private static string FindApprovalsDir()
+        => Under(FindRepositoryRoot(), "tests", "CanKit.Pro.Tests", "ApiApprovals");
+
+    private static string FindRepositoryRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CanKit.Pro.sln")))
@@ -95,7 +143,7 @@ public class PublicApiSurfaceTests
         {
             throw new InvalidOperationException("Could not locate the repository root (CanKit.Pro.sln).");
         }
-        return Path.Combine(dir.FullName, "tests", "CanKit.Pro.Tests", "ApiApprovals");
+        return dir.FullName;
     }
 
     // Canonical, diff-stable rendering of the assembly's public API.
