@@ -714,9 +714,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // #356 T-7: every frame goes to the driver from its own pool work item, so the abort of a CM
     // send cancelled while its RTS is unconfirmed could overtake that RTS -- and a peer that sees
     // Abort, then RTS, holds a session nobody serves for T2. The abort now waits for the RTS to be
-    // confirmed, and the destination stays taken until then, so a send queued behind it does not
-    // hand its RTS out first either. Every confirmation is held by the bus double, so "not yet"
-    // is a state of the test, not a race.
+    // confirmed, and the destination stays taken until the abort has been handed to the service,
+    // so a send queued behind it cannot hand its RTS over first either (Codex on #390). Every
+    // confirmation, and here the abort's hand-off too, is held by the bus double, so "not yet" is
+    // a state of the test, not a race.
     [Fact]
     public async Task A_Cm_Send_Cancelled_Before_Its_Rts_Is_Confirmed_Aborts_Only_After_The_Rts()
     {
@@ -744,15 +745,20 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await Task.Delay(TimeSpan.FromMilliseconds(100));
         service.HandedCount.Should().Be(1, "the abort waits for the RTS's confirmation");
 
+        // The abort's hand-off to the service is held inside the service, as a slow one would.
+        service.HoldHandOffOf(d => d[0] == J1939TpFrames.ControlAbort);
         service.Confirm(0);
+        handed = await service.WaitForHandedAsync(2, ShortTimeout);
+        handed[1][0].Should().Be(J1939TpFrames.ControlAbort);
+        J1939TpFrames.ReadDataPgn(handed[1]).Should().Be(cancelledPgn);
+        handed[1][1].Should().Be((byte)J1939TpAbortReason.NoResourcesAvailable);
+        (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(1,
+            "the queued send starts only once the abort has been handed over");
+
+        service.ReleaseHandOff();
         handed = await service.WaitForHandedAsync(3, ShortTimeout);
-        // The abort and the queued send's RTS are handed out in the same actor step.
-        handed.Skip(1).Select(d => (d[0], J1939TpFrames.ReadDataPgn(d))).Should().BeEquivalentTo(new[]
-        {
-            (J1939TpFrames.ControlAbort, cancelledPgn),
-            (J1939TpFrames.ControlRts, nextPgn),
-        });
-        handed.Single(d => d[0] == J1939TpFrames.ControlAbort)[1].Should().Be((byte)J1939TpAbortReason.NoResourcesAvailable);
+        handed[2][0].Should().Be(J1939TpFrames.ControlRts);
+        J1939TpFrames.ReadDataPgn(handed[2]).Should().Be(nextPgn);
         (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(0);
         next.IsCompleted.Should().BeFalse("the queued send is on the wire now, waiting for its CTS");
     }
@@ -787,11 +793,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         if (throws) service.Throw(0, new InvalidOperationException("driver gone"));
         else service.Reject(0);
         var handed = await service.WaitForHandedAsync(3, ShortTimeout);
-        handed.Skip(1).Select(d => (d[0], J1939TpFrames.ReadDataPgn(d))).Should().BeEquivalentTo(new[]
-        {
+        handed.Skip(1).Select(d => (d[0], J1939TpFrames.ReadDataPgn(d))).Should().Equal(
             (J1939TpFrames.ControlAbort, cancelledPgn),
-            (J1939TpFrames.ControlRts, nextPgn),
-        });
+            (J1939TpFrames.ControlRts, nextPgn));
         // The failed RTS belongs to no send any more: it is reported where background faults go.
         lock (background)
             background.Should().ContainSingle().Which.Should().BeOfType(
@@ -5041,8 +5045,18 @@ internal sealed class HeldConfirmationBusService : ICanBusService
     private readonly object _gate = new();
     private readonly List<(byte[] Data, TaskCompletionSource<TxConfirmation> Confirmation)> _handed = new();
     private readonly SemaphoreSlim _signal = new(0);
+    private readonly ManualResetEventSlim _handOffGate = new(false);
+    private Func<byte[], bool>? _holdHandOff;
 
     public HeldConfirmationBusService(ICanBusService inner) => _inner = inner;
+
+    /// <summary>
+    /// From now on a frame matching <paramref name="match"/> is recorded and then held inside
+    /// <see cref="SendConfirmedAsync"/>, before the call returns, until <see cref="ReleaseHandOff"/>.
+    /// </summary>
+    public void HoldHandOffOf(Func<byte[], bool> match) => Volatile.Write(ref _holdHandOff, match);
+
+    public void ReleaseHandOff() => _handOffGate.Set();
 
     public int HandedCount { get { lock (_gate) return _handed.Count; } }
 
@@ -5105,15 +5119,20 @@ internal sealed class HeldConfirmationBusService : ICanBusService
     {
         // Continuations run inline on the settling thread: see the class remarks.
         var confirmation = new TaskCompletionSource<TxConfirmation>();
-        lock (_gate) _handed.Add((frame.Data.ToArray(), confirmation));
+        var data = frame.Data.ToArray();
+        lock (_gate) _handed.Add((data, confirmation));
         _signal.Release();
+        if (Volatile.Read(ref _holdHandOff)?.Invoke(data) == true)
+            _handOffGate.Wait(TimeSpan.FromSeconds(30));
         return confirmation.Task;
     }
 
     public void Dispose()
     {
+        _handOffGate.Set();
         _inner.Dispose();
         _signal.Dispose();
+        _handOffGate.Dispose();
     }
 }
 

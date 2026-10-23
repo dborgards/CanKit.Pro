@@ -81,8 +81,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
     // CM sends cancelled while their RTS was still unconfirmed, by destination. Their Connection
     // Abort waits for that confirmation, so it cannot overtake the RTS it ends, and the
-    // destination stays taken until the abort has been handed out, so the RTS of a send queued
-    // behind it is not handed out first (#356, T-7). Actor-loop state.
+    // destination stays taken until the abort has been handed to the service, so the RTS of a
+    // send queued behind it cannot be handed over first (#356, T-7; Codex on #390). Actor-loop
+    // state.
     private readonly Dictionary<byte, TxSession> _abortsAwaitingRts = new();
 
     // Sends admitted per destination and not yet completed: posted to the actor and not yet run,
@@ -364,7 +365,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // overtake it -- a peer that sees Abort, then RTS, holds a session nobody serves
                 // for T2 (#356, T-7). The abort goes out from the RTS's confirmation instead
                 // (OnRtsSettled). The send is cancelled now; the destination stays taken until
-                // then, so a queued send does not hand its RTS out ahead of the abort.
+                // the abort has been handed to the service, so a queued send cannot hand its RTS
+                // over ahead of it.
                 tcs.TrySetCanceled(token);
                 _txSessions.Remove(key);
                 session.AbortAwaitingRts = true;
@@ -398,16 +400,22 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// <summary>
     /// The RTS of <paramref name="session"/> has been confirmed, or has failed: either way it is
     /// no longer on its way to the driver. An abort that waited for it goes out now, and the
-    /// destination is given back to the next send queued for it -- as a cancel after the
-    /// confirmation does at once.
+    /// destination goes to the next send queued for it once the abort has been handed to the
+    /// service: each frame reaches the service from its own pool work item, so starting that send
+    /// in this step could hand its RTS over first (Codex on #390).
     /// </summary>
     private void OnRtsSettled(TxSession session)
     {
         session.RtsSettled = true;
         if (!session.AbortAwaitingRts) return;
         session.AbortAwaitingRts = false;
+        SendTpCm(CancelAbort(session.Key), destinationAddress: session.Key.DestinationAddress,
+            onHandedOff: () => ReleaseAbortedDestination(session));
+    }
+
+    private void ReleaseAbortedDestination(TxSession session)
+    {
         byte destination = session.Key.DestinationAddress;
-        SendTpCm(CancelAbort(session.Key), destinationAddress: destination);
         _abortsAwaitingRts.Remove(destination);
         StartNextQueued(destination);
     }
@@ -1429,8 +1437,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         => _options.SendConnectionAbortRole ? role : J1939TpAbortRole.NotAvailable;
 
     private void SendTpCm(byte[] payload, byte destinationAddress, TxSession? session = null,
-        Action? onConfirmed = null, Action? onFailed = null)
-        => SendControlFrame(J1939Pgn.TpCm, payload, destinationAddress, session, onConfirmed, onFailed);
+        Action? onConfirmed = null, Action? onFailed = null, Action? onHandedOff = null)
+        => SendControlFrame(J1939Pgn.TpCm, payload, destinationAddress, session, onConfirmed, onFailed, onHandedOff);
 
     private void FailOrRaiseTx(TxSession? session, Exception ex)
     {
@@ -1448,9 +1456,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     }
 
     // onFailed runs on the actor after FailOrRaiseTx when the frame is not confirmed: a step that
-    // must follow the frame whatever became of it.
+    // must follow the frame whatever became of it. onHandedOff runs on the actor once the service
+    // has been handed the frame (or has refused it by throwing): a frame that must reach the
+    // service before another one does starts the other from there.
     private void SendControlFrame(uint pgn, byte[] payload, byte destinationAddress,
-        TxSession? session, Action? onConfirmed, Action? onFailed = null)
+        TxSession? session, Action? onConfirmed, Action? onFailed = null, Action? onHandedOff = null)
     {
         uint canId = J1939Id.ComposePgn(_options.Priority, pgn, _sourceAddress, destinationAddress);
         var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
@@ -1459,7 +1469,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             try
             {
-                var confirmation = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
+                Task<TxConfirmation> sending;
+                try
+                {
+                    sending = _service.SendConfirmedAsync(frame);
+                }
+                finally
+                {
+                    if (onHandedOff is not null)
+                    {
+                        try { _actor.Post(onHandedOff); } catch (ObjectDisposedException) { /* actor gone; nothing to do */ }
+                    }
+                }
+                var confirmation = await sending.ConfigureAwait(false);
                 if (!confirmation.Confirmed)
                 {
                     // TX rejection / timeout at L2 -- surface via the owning session (if any),
