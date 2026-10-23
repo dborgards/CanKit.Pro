@@ -183,7 +183,9 @@ internal static class IdentityAndSdoChecks
             // The one check that wants a failure. A device that answers something for an index it
             // does not have is worse than one that aborts, and an SDO server that stays silent
             // makes every client wait out its timeout for a question with a known answer.
-            // 5FFFh is in the manufacturer-specific area and no profile defines it.
+            // 5FFFh is in the manufacturer-specific area, so no profile defines it and most devices
+            // do not implement it — but a device may, and one that answers is reported as
+            // not-applicable rather than failed.
             //
             // Driven on the wire rather than through ICanOpenNode, and that is the check rather
             // than a shortcut. The peer-SDO gate refuses any pair a bound description does not
@@ -240,10 +242,17 @@ internal static class IdentityAndSdoChecks
             // abort code is the last four, little-endian.
             if (answer.Data[0] != 0x80)
             {
-                return Outcome.Fail(
-                    $"The device responded with command specifier 0x{answer.Data[0]:X2} instead of aborting an upload "
-                    + $"of 0x{Absent:X4}:00. A client cannot tell an implemented object from an unimplemented one on "
-                    + "this device.", measurements);
+                // Not a failure: 5FFFh is in the manufacturer-specific range, and a device is
+                // entitled to implement it. The probe needs an object proven absent, and nothing
+                // here proves that — so this says the check could not be performed rather than
+                // calling a conforming device non-conforming. An earlier version failed it. Found
+                // in review of #388.
+                return Outcome.NotApplicable(
+                    $"The device answered an upload of 0x{Absent:X4}:00 with command specifier 0x{answer.Data[0]:X2} "
+                    + "instead of aborting, which means it implements that object. 5FFFh is manufacturer-specific and a "
+                    + "device may legitimately use it, so this probe has no object proven absent on this device and "
+                    + "draws no conclusion. Give the run an --eds and read EDS-03 instead: it compares the objects the "
+                    + "file declares against the ones the device really has.", measurements);
             }
 
             var echoed = (ushort)(answer.Data[1] | (answer.Data[2] << 8));

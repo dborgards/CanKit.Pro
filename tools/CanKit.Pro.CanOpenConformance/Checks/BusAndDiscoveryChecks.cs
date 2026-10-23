@@ -57,7 +57,10 @@ internal static class BusAndDiscoveryChecks
 
             return Task.FromResult(state switch
             {
-                BusState.BusOff => Outcome.Fail(
+                // Transport, not device: this branch names the bit rate and the termination as the
+                // cause in its own message, and Outcome.Fail would have filed it against the
+                // firmware. Found in review of #388.
+                BusState.BusOff => Outcome.TransportFault(
                     "The interface is bus-off before the run sent anything. Check the bit rate and the termination; "
                     + "nothing measured after this is about the device.", measurements),
                 BusState.ErrPassive or BusState.ErrWarning => Outcome.Inconclusive(

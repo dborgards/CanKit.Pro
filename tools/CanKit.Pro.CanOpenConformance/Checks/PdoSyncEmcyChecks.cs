@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
@@ -53,6 +54,7 @@ internal static class PdoSyncEmcyChecks
             }
 
             var watched = valid.Select(p => p.CobId).ToHashSet();
+            var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             using var tap = new BusTap(session.Service, id => watched.Contains(id));
 
             TappedFrame[] inOperational;
@@ -75,11 +77,10 @@ internal static class PdoSyncEmcyChecks
             }
             finally
             {
-                // Pre-operational is the state a CANopen device powers up in and the only one it is
-                // safe to leave a bus in. In a finally and on CancellationToken.None because a
-                // Ctrl+C between the Start and the Stop above would otherwise walk away from a
-                // machine this check had just stopped.
-                leftInState = await RestorePreOperationalAsync(session, book, "PDO-03").ConfigureAwait(false);
+                // In a finally and on CancellationToken.None because a Ctrl+C between the Start
+                // and the Stop above would otherwise walk away from a machine this check had just
+                // stopped.
+                leftInState = await RestoreNmtStateAsync(session, book, "PDO-03", initialState).ConfigureAwait(false);
             }
 
             var measurements = new Dictionary<string, string>
@@ -215,10 +216,24 @@ internal static class PdoSyncEmcyChecks
             var syncs = Math.Min(600, slowest * 2 + 2);
             const int SyncPeriodMs = 20;
 
+            // The SYNC goes on the COB-ID the *target* listens to, not this tool's own. The client
+            // node's SendSyncAsync uses its own 1005h — the 080h default — so a device configured
+            // for another SYNC COB-ID received none of these frames and was then failed for
+            // silence. Found in review of #388.
+            var syncCobId = await TargetSyncCobIdAsync(session, cancellationToken).ConfigureAwait(false);
+            if (syncCobId is not { } syncId)
+            {
+                return Outcome.NeedsSetup(
+                    "The target's 1005h could not be read, so there is no way to know which COB-ID its synchronous "
+                    + "TPDOs are waiting on. See SYN-01.");
+            }
+
             var watched = cyclic.Select(p => p.CobId).ToHashSet();
+            var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             using var tap = new BusTap(session.Service, id => watched.Contains(id));
             int quiet;
             string leftInState;
+            var rejected = 0;
             try
             {
                 await session.Client.SendNmtCommandAsync(NmtCommand.Start, session.Target, cancellationToken).ConfigureAwait(false);
@@ -227,7 +242,9 @@ internal static class PdoSyncEmcyChecks
                 quiet = tap.Frames.Count;
                 for (var i = 0; i < syncs; i++)
                 {
-                    await session.Client.SendSyncAsync(cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    // A SYNC without a counter is a frame with no data (CiA 301 §7.2.5).
+                    if (session.Bus.Transmit(CanFrame.Classic((int)syncId, Array.Empty<byte>())) <= 0) rejected++;
                     await Task.Delay(SyncPeriodMs, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -236,13 +253,20 @@ internal static class PdoSyncEmcyChecks
             }
             finally
             {
-                leftInState = await RestorePreOperationalAsync(session, book, "SYN-02").ConfigureAwait(false);
+                leftInState = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
+            }
+
+            if (rejected == syncs)
+            {
+                return Outcome.TransportFault(
+                    $"The driver rejected all {syncs} SYNC frames on 0x{syncId:X3}, so the device was never synchronised.");
             }
 
             var after = tap.Frames.Skip(quiet).ToArray();
             var measurements = new Dictionary<string, string>
             {
-                ["SYNCs sent"] = $"{syncs} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})",
+                ["SYNCs sent"] = $"{syncs} on 0x{syncId:X3} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})"
+                    + (rejected > 0 ? $"; the driver rejected {rejected}" : string.Empty),
                 ["frames before the SYNCs"] = quiet.ToString(CultureInfo.InvariantCulture),
                 ["left in state"] = leftInState,
             };
@@ -364,24 +388,82 @@ internal static class PdoSyncEmcyChecks
     /// the way out of a cancelled check as much as a successful one. A failure here is recorded
     /// rather than thrown — it would otherwise replace the finding the check had just reached.
     /// </summary>
-    private static async Task<string> RestorePreOperationalAsync(Session session, Checkbook book, string checkId)
+    private static async Task<string> RestoreNmtStateAsync(Session session, Checkbook book, string checkId, byte? initial)
     {
+        // The state the device was found in, not a fixed one. An earlier version always left
+        // pre-operational, so a --tier write run against a device found Operational stopped it
+        // from operating even when every check passed — the opposite of what the tier promises.
+        // Pre-operational remains the fallback for a device whose state could not be read, because
+        // it is the state a CANopen device powers up in. Found in review of #388.
+        var command = initial switch
+        {
+            (byte)NmtState.Operational => NmtCommand.Start,
+            (byte)NmtState.Stopped => NmtCommand.Stop,
+            _ => NmtCommand.EnterPreOperational,
+        };
+        var name = initial switch
+        {
+            (byte)NmtState.Operational => "operational",
+            (byte)NmtState.Stopped => "stopped",
+            (byte)NmtState.PreOperational => "pre-operational",
+            _ => "pre-operational (the state before the check could not be read)",
+        };
+
         try
         {
-            await session.Client.SendNmtCommandAsync(NmtCommand.EnterPreOperational, session.Target, CancellationToken.None)
-                .ConfigureAwait(false);
-            return "pre-operational";
+            await session.Client.SendNmtCommandAsync(command, session.Target, CancellationToken.None).ConfigureAwait(false);
+            return name;
         }
         catch (Exception ex)
         {
-            book.Note($"{checkId} restore to pre-operational", ex);
-            return $"UNKNOWN — the restore to pre-operational failed ({ex.GetType().Name}); the device may still be stopped";
+            book.Note($"{checkId} restore of the NMT state", ex);
+            return $"UNKNOWN — the restore to {name} failed ({ex.GetType().Name}); the device may still be stopped";
+        }
+    }
+
+    /// <summary>
+    /// The device's NMT state as its heartbeat reports it, or null when it produces none. Used to
+    /// put the state back after a check that changes it.
+    /// </summary>
+    private static async Task<byte?> ObservedNmtStateAsync(Session session, CancellationToken cancellationToken)
+    {
+        var cobId = CanOpenCobId.Heartbeat(session.Target);
+        using var probe = new BusTap(session.Service, id => id == cobId);
+        await probe.WaitForAsync(frames => frames.Count >= 1, Math.Max(500, session.Options.HeartbeatWindowMs / 2),
+            cancellationToken).ConfigureAwait(false);
+        var frames = probe.Frames;
+        for (var i = frames.Count - 1; i >= 0; i--)
+            if (frames[i].Data.Length == 1) return frames[i].Data[0];
+        return null;
+    }
+
+    /// <summary>
+    /// The COB-ID the target's 1005h says its SYNC arrives on, masked to the identifier; the
+    /// 080h default when the object is absent or the gate blocks it, and null when it answered
+    /// with something unusable. Bit 30 of that word is the device's own produce flag and says
+    /// nothing about which identifier it consumes.
+    /// </summary>
+    private static async Task<uint?> TargetSyncCobIdAsync(Session session, CancellationToken cancellationToken)
+    {
+        if (!session.MayTransfer(0x1005, 0x00)) return CanOpenCobId.Sync;
+        try
+        {
+            var raw = await session.Client.SdoUploadAsync(session.Target, 0x1005, 0x00, cancellationToken).ConfigureAwait(false);
+            if (raw.Length != 4) return null;
+            var word = BitConverter.ToUInt32(raw, 0);
+            return (word & CanOpenCobId.ExtendedFrameBit) != 0 ? word & 0x1FFF_FFFFu : word & CanOpenCobId.CanIdMask;
+        }
+        catch (SdoAbortException)
+        {
+            // No 1005h at all means the default, which is what such a device uses.
+            return CanOpenCobId.Sync;
         }
     }
 
     /// <summary>One PDO as its own parameters describe it.</summary>
     private readonly record struct PdoDescriptor(
-        int Number, uint CobId, bool Valid, byte TransmissionType, int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
+        int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, int InhibitMs, int EventTimerMs,
+        int Bytes, int MappedEntries);
 
     private readonly record struct PdoSweep(List<PdoDescriptor> Descriptors, List<string> Blocked, List<string> Absent, List<string> Problems);
 
@@ -431,9 +513,17 @@ internal static class PdoSyncEmcyChecks
 
             var (bits, entries) = await ReadMappingAsync(session, map, problems, cancellationToken).ConfigureAwait(false);
 
+            // Bit 29 of the COB-ID word selects the 29-bit frame format (CiA 301 §7.5.2.37).
+            // Masking with the 11-bit CanIdMask regardless threw most of an extended identifier
+            // away, so the check watched an unrelated base id and then failed a conforming PDO for
+            // silence. Found in review of #388.
+            var extended = (cobIdWord & CanOpenCobId.ExtendedFrameBit) != 0;
+            var cobId = extended ? cobIdWord & 0x1FFF_FFFFu : cobIdWord & CanOpenCobId.CanIdMask;
+
             descriptors.Add(new PdoDescriptor(
                 Number: i + 1,
-                CobId: cobIdWord & CanOpenCobId.CanIdMask,
+                CobId: cobId,
+                Extended: extended,
                 Valid: (cobIdWord & CanOpenCobId.InvalidBit) == 0,
                 TransmissionType: transmission ?? 0xFF,
                 InhibitMs: inhibit is { } inh ? inh / 10 : 0, // 1800h:03 counts 100 us units
@@ -510,7 +600,7 @@ internal static class PdoSyncEmcyChecks
         foreach (var pdo in sweep.Descriptors)
         {
             measurements[$"{kind}{pdo.Number}"] =
-                $"COB-ID 0x{pdo.CobId:X3}{(pdo.Valid ? string.Empty : " (invalid)")}, "
+                $"COB-ID 0x{pdo.CobId:X3}{(pdo.Extended ? " (29-bit)" : string.Empty)}{(pdo.Valid ? string.Empty : " (invalid)")}, "
                 + $"type {DescribeTransmission(pdo.TransmissionType)}, "
                 + $"{pdo.MappedEntries} entry/entries = {pdo.Bytes} B"
                 + (pdo.EventTimerMs > 0 ? $", event timer {pdo.EventTimerMs} ms" : string.Empty)

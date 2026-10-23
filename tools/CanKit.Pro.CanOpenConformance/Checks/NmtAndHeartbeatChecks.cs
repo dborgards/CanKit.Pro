@@ -101,8 +101,18 @@ internal static class NmtAndHeartbeatChecks
                     measurements);
             }
 
-            if (malformed == frames.Count)
-                return Outcome.Fail($"All {frames.Count} frame(s) on 0x{cobId:X3} have a payload other than one byte.", measurements);
+            // Any malformed frame, not only all of them. A heartbeat's payload is one byte; a frame
+            // on this COB-ID with another length is a violation the report must not hide behind
+            // the valid ones beside it. Found in review of #388.
+            if (malformed > 0)
+            {
+                return Outcome.Fail(
+                    malformed == frames.Count
+                        ? $"All {frames.Count} frame(s) on 0x{cobId:X3} have a payload other than one byte."
+                        : $"{malformed} of {frames.Count} frame(s) on 0x{cobId:X3} have a payload other than one byte. "
+                          + "A heartbeat is one byte of NMT state.",
+                    measurements);
+            }
 
             return Outcome.Pass($"{frames.Count} heartbeat(s) observed.", measurements);
         }).ConfigureAwait(false);
@@ -217,7 +227,11 @@ internal static class NmtAndHeartbeatChecks
 
             var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 2 + 100));
             var restored = "yes";
-            var stopped = false;
+            // Set before the write, not after it. The device may accept the download and the call
+            // still not return — a cancel in that window used to skip the restore and leave the
+            // heartbeat switched off, which is exactly the guarantee this check makes. An abort is
+            // the one answer that proves nothing was written. Found in review of #388.
+            var mayHaveStopped = true;
             session.Client.HeartbeatTimeout += OnTimeout;
             try
             {
@@ -226,10 +240,10 @@ internal static class NmtAndHeartbeatChecks
                 {
                     await session.Client.SdoDownloadAsync(session.Target, 0x1017, 0x00, new byte[] { 0, 0 }, cancellationToken)
                         .ConfigureAwait(false);
-                    stopped = true;
                 }
                 catch (SdoAbortException abort)
                 {
+                    mayHaveStopped = false;
                     return Outcome.NotApplicable(
                         $"The device refuses a write of 0 to 1017h:00 ({IdentityAndSdoChecks.Describe(abort)}), so its "
                         + "heartbeat cannot be stopped from the bus and the timeout cannot be provoked without pulling "
@@ -243,7 +257,7 @@ internal static class NmtAndHeartbeatChecks
             finally
             {
                 session.Client.HeartbeatTimeout -= OnTimeout;
-                if (stopped)
+                if (mayHaveStopped)
                 {
                     try
                     {
@@ -398,7 +412,14 @@ internal static class NmtAndHeartbeatChecks
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
         using var probe = new BusTap(session.Service, id => id == cobId);
-        await probe.ListenAsync(Math.Min(session.Options.HeartbeatWindowMs, 2000), cancellationToken).ConfigureAwait(false);
+
+        // The operator's window, not a cap of its own. An earlier version waited at most 2000 ms
+        // and needed the three frames Summarise asks for, so a producer at 1 s or slower was
+        // reported as having no heartbeat — right after HBT-02 had passed it on the full
+        // --heartbeat-ms window. Found in review of #388. It stops as soon as three frames are in,
+        // so a fast producer costs no more than it did.
+        await probe.WaitForAsync(frames => frames.Count >= 3, session.Options.HeartbeatWindowMs, cancellationToken)
+            .ConfigureAwait(false);
         return BusTap.Summarise(probe.Frames);
     }
 

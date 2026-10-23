@@ -156,9 +156,17 @@ internal sealed class Session : IDisposable
 
     /// <summary>The standard reason a check gives when the gate blocks what it wanted to read.</summary>
     public string GateReason(ushort index, byte subindex)
-        => TargetDescription is null
+    {
+        // A bind that failed is a third case, and it used to read as the first: the operator was
+        // told to pass --eds when they had passed one the loader could not use. Found in review
+        // of #388.
+        if (DescriptionError is { } problem)
+            return $"0x{index:X4}:{subindex:X2} is blocked because the device description could not be used: {problem}";
+
+        return TargetDescription is null
             ? $"0x{index:X4}:{subindex:X2} needs --eds: with no device description the stack transfers only 1000h:00, 1001h:00 and 1018h:00-04."
             : $"0x{index:X4}:{subindex:X2} is not declared by {System.IO.Path.GetFileName(Options.EdsPath)}; the device may still have it, but this run may not ask.";
+    }
 
     private static void Configure(IBusInitOptionsConfigurator cfg, RunOptions options)
     {
