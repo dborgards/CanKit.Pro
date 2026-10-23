@@ -85,13 +85,6 @@ namespace CanKit.Pro.Actor
         // now measured as one.
         private readonly ITimeSource _time;
 
-        /// <summary>
-        /// The clock this actor measures its timers against. Exposed so a component that keeps
-        /// its own elapsed-time arithmetic alongside a deadline armed here -- J1939's fixed-rate
-        /// anchor is the one that does -- can read the same clock rather than a second one.
-        /// Asking the actor is what makes a mismatch unrepresentable: there is one clock per
-        /// loop and no way to pass a different one alongside it.
-        /// </summary>
         // How many actor loops are running process-wide. Two Interlocked operations per actor
         // lifetime, and nothing reads it in production.
         //
@@ -112,6 +105,13 @@ namespace CanKit.Pro.Actor
 
         private static void ExitLoopCount() => Interlocked.Decrement(ref s_runningLoops);
 
+        /// <summary>
+        /// The clock this actor measures its timers against. Exposed so a component that keeps
+        /// its own elapsed-time arithmetic alongside a deadline armed here -- J1939's fixed-rate
+        /// anchor is the one that does -- can read the same clock rather than a second one.
+        /// Asking the actor is what makes a mismatch unrepresentable: there is one clock per
+        /// loop and no way to pass a different one alongside it.
+        /// </summary>
         internal ITimeSource TimeSource => _time;
 
         /// <summary>
