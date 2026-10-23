@@ -965,6 +965,48 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         configured.ObjectDictionary.ReadUnsigned(0x1301, 0x06).Should().Be(0);
     }
 
+    /// <summary>EN 50325-5:2010 Table 5 (#289): the default direction of 1301h:01 is a function of
+    /// the node-id, so a node that LSS gives another id holds what a node powered up with it
+    /// holds — across 32/33, into the range from 255 and out of it above 64.</summary>
+    [Theory]
+    [InlineData(255, 5, 1u)]
+    [InlineData(5, 40, 2u)]
+    [InlineData(40, 5, 1u)]
+    [InlineData(32, 33, 2u)]
+    [InlineData(33, 32, 1u)]
+    [InlineData(5, 70, 0u)]
+    [InlineData(70, 5, 1u)]
+    public async Task The_Default_Direction_Of_Srdo_1_Follows_An_Lss_Node_Id(byte from, byte to, uint direction)
+    {
+        using var bench = NewBench();
+        var slave = bench.Slave(1, from, new LssSlaveOptions(), srdoCount: 1);
+        var od = slave.ObjectDictionary;
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench, slave);
+        (await bench.Master.ConfigureNodeIdAsync(to)).Succeeded.Should().BeTrue();
+        if (from != CanOpenCobId.UnconfiguredNodeId) await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, from);
+        await bench.WaitUntilAsync(() => slave.NodeId == to && slave.State == NmtState.PreOperational);
+        od.ReadUnsigned(0x1301, 0x01).Should().Be(direction);
+    }
+
+    /// <summary>A direction the application chose is not the old node-id's default and stays.</summary>
+    [Fact]
+    public async Task A_Direction_The_Application_Chose_Survives_An_Lss_Node_Id_Change()
+    {
+        using var bench = NewBench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions(), srdoCount: 1);
+        var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x1301, 0x01, 0); // node-id 5 produces by default; this one was deleted on purpose
+        slave.StoreParameters(); // a reset brings back the power-on values; the stored ones are the application's
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench, slave);
+        (await bench.Master.ConfigureNodeIdAsync(40)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await bench.WaitUntilAsync(() => slave.NodeId == 40 && slave.State == NmtState.PreOperational);
+        od.ReadUnsigned(0x1301, 0x01).Should().Be(0u, "node-id 40 would consume by default");
+        od.ReadUnsigned(0x1301, 0x05).Should().Be(CanOpenCobId.SrdoDefaultCobId1(40));
+    }
+
     [Fact]
     public async Task A_Committed_Srdo_Stays_Valid_When_The_Node_Id_Stays_In_The_Predefined_Range()
     {
@@ -1020,6 +1062,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await bench.WaitUntilAsync(() => slave.NodeId == 70 && slave.State == NmtState.PreOperational);
         od.ReadUnsigned(0x1301, 0x05).Should().Be(0);
         od.ReadUnsigned(0x13FE, 0).Should().Be(0);
+        od.ReadUnsigned(0x1301, 0x01).Should().Be(1u, "a committed SRDO keeps its role behind the signature that was lost, not the new id's default");
     }
 
     [Fact]
@@ -1028,6 +1071,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         using var bench = NewBench();
         var slave = bench.Slave(1, 5, new LssSlaveOptions(), srdoCount: 1);
         var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x1301, 1, 0); // inactive: SRDO 1 of a node-id 1..32 produces at power-on (Table 5, #289)
         od.WriteUnsigned(0x13FE, 0, 0xA5);
         slave.StoreParameters();
         var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });

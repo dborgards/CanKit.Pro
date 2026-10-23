@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <!--
+      The description the simulated device is built from, and bound for it. It travels with the
+      executable because a published folder on a Windows test bench has no repository around it.
+    -->
+    <None Update="Fixtures/simulated-device.eds" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CanKit.Pro.CANopen/CanKit.Pro.CANopen.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CanKit.Core" />
+    <PackageReference Include="CanKit.Adapter.Virtual" />
+    <PackageReference Include="CanKit.Adapter.PCAN" />
+    <PackageReference Include="CanKit.Adapter.Kvaser" />
+    <PackageReference Include="CanKit.Adapter.Vector" />
+  </ItemGroup>
+
+</Project>
