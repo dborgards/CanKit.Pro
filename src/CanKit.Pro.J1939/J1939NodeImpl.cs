@@ -1360,18 +1360,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // Recorded before it is on the wire: the echo may be back before SendConfirmedAsync returns.
                 var entry = RecordOwnFrame(canId, payload);
                 TxConfirmation confirmation;
+                // A throw -- a cancelled wait, a driver fault -- does not say the frame stayed off
+                // the wire; only a rejection does.
+                var mayStillEcho = true;
                 try
                 {
                     confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    mayStillEcho = ClaimEchoMayFollow(confirmation.FailureReason);
                 }
-                catch
+                finally
                 {
-                    // A throw (a cancelled wait, a driver fault) does not say the frame stayed
-                    // off the wire.
-                    SettleOwnFrame(entry, mayStillEcho: true);
-                    throw;
+                    SettleOwnFrame(entry, mayStillEcho);
                 }
-                SettleOwnFrame(entry, confirmation.Confirmed || ClaimEchoMayFollow(confirmation.FailureReason));
                 if (!confirmation.Confirmed)
                     throw new J1939NodeException(
                         $"J1939 send failed for PGN 0x{message.Pgn:X}: {confirmation.FailureReason}.");
