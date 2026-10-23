@@ -215,7 +215,8 @@ jobs:
       id-token: write        # request the OIDC token for NuGet Trusted Publishing
     # A release must never publish something CI has not built and tested on this exact commit.
     # The three-OS CI is required by the `main` branch ruleset, so anything on `main` has passed
-    # it; the `verify` job re-runs the suite on the commit that is actually packed.
+    # it; the `verify` job re-runs the net10.0 suite on Linux on the commit that is actually
+    # packed. Its net48 leg (Windows only) and the Windows and macOS legs are not repeated here.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
