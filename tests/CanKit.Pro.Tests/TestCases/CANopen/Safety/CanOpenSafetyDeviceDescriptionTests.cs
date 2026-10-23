@@ -350,6 +350,9 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
     {
         "as shipped" => SafetyDcfText(),
         "no mapping record" => WithOptional(SafetyDcfText(), 0x1300, 0x1301, 0x1302, 0x1382, 0x13FE, 0x13FF),
+        // The file leaves out both records of SRDO 1 and declares SRDO 2: the node-id default of
+        // 1301h:01 (EN 50325-5:2010 Table 5, #289) must not keep the omitted SRDO alive.
+        "SRDO 1 not declared" => WithOptional(SafetyDcfText(), 0x1300, 0x1302, 0x1382, 0x13FE, 0x13FF),
         "no refresh time" => WithoutSubIndex(SafetyDcfText(), 0x1301, 2),
         "no COB-ID 1" => WithoutSubIndex(SafetyDcfText(), 0x1301, 5),
         "no COB-ID 2" => WithoutSubIndex(SafetyDcfText(), 0x1301, 6),
@@ -378,6 +381,8 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
     [InlineData("as shipped", 5, true, 0x109, 0x10A)]
     [InlineData("as shipped", 6, true, 0x109, 0x10A)]
     [InlineData("no mapping record", 5, false, 0, 0)]
+    [InlineData("SRDO 1 not declared", 5, false, 0, 0)]
+    [InlineData("SRDO 1 not declared", 40, false, 0, 0)]
     [InlineData("no refresh time", 5, true, 0x109, 0x10A)]
     [InlineData("no COB-ID 1", 5, true, 0x109, 0x10A)]
     [InlineData("no COB-ID 2", 5, true, 0x109, 0x10A)]

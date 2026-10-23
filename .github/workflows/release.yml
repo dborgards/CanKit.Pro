@@ -50,6 +50,7 @@ jobs:
   verify:
     name: build, test and pack
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     outputs:
@@ -111,16 +112,20 @@ jobs:
       # from a commit no pull request ever built -- the release commit carries [skip ci].
       # When a version was resolved, the 1.3.0 window guard sees it too.
       - name: Verify release configuration
-        run: node eng/verify-release-config.mjs ${{ steps.version.outputs.version }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node eng/verify-release-config.mjs "$VERSION"
 
       - name: Restore
         run: dotnet restore CanKit.Pro.sln
 
       - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           extra=()
-          if [ -n "${{ steps.version.outputs.version }}" ]; then
-            extra+=(-p:Version=${{ steps.version.outputs.version }})
+          if [ -n "$VERSION" ]; then
+            extra+=("-p:Version=$VERSION")
           fi
           dotnet build CanKit.Pro.sln --configuration Release --no-restore "${extra[@]}"
 
@@ -133,10 +138,12 @@ jobs:
       # are handed to `release` as an artifact so that job never invokes MSBuild.
       - name: Pack
         if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: >
           dotnet pack CanKit.Pro.sln
           --configuration Release
-          -p:Version=${{ steps.version.outputs.version }}
+          "-p:Version=$VERSION"
           --output artifacts/nuget
           --no-restore
           --no-build
@@ -149,15 +156,19 @@ jobs:
       - name: Generate SBOMs
         id: sbom
         if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          python3 eng/generate-sboms.py artifacts/nuget "${{ steps.version.outputs.version }}" artifacts/sbom
+          python3 eng/generate-sboms.py artifacts/nuget "$VERSION" artifacts/sbom
           packages=$(python3 -c "import json,pathlib; print(json.dumps(sorted(p.name[:-len('.cdx.json')] for p in pathlib.Path('artifacts/sbom').glob('*.cdx.json'))))")
           echo "packages=$packages" >> "$GITHUB_OUTPUT"
 
       - name: Verify SBOMs
         if: steps.version.outputs.version != ''
-        run: python3 eng/verify-sboms.py artifacts/sbom artifacts/nuget "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 eng/verify-sboms.py artifacts/sbom artifacts/nuget "$VERSION"
 
       - name: Upload packages
         if: steps.version.outputs.version != ''
@@ -185,6 +196,7 @@ jobs:
     # that holds the credentials: the guard belongs on the door it protects, not only upstream.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # The only job holding the OIDC grant. It installs the release tooling, exchanges the token
     # for a one-hour NuGet key, and runs semantic-release against packages `verify` already packed.
     #
@@ -203,7 +215,8 @@ jobs:
       id-token: write        # request the OIDC token for NuGet Trusted Publishing
     # A release must never publish something CI has not built and tested on this exact commit.
     # The three-OS CI is required by the `main` branch ruleset, so anything on `main` has passed
-    # it; the `verify` job re-runs the suite on the commit that is actually packed.
+    # it; the `verify` job re-runs the net10.0 suite on Linux on the commit that is actually
+    # packed. Its net48 leg (Windows only) and the Windows and macOS legs are not repeated here.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -303,6 +316,7 @@ jobs:
     needs: [verify, release]
     if: ${{ !fromJSON(inputs.dry_run) && needs.verify.outputs.version != '' && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write          # the OIDC identity the attestation is signed with

@@ -407,6 +407,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 2);
         using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
+        var powerOnDirection = device.ObjectDictionary.ReadUnsigned(0x1301, 1); // Table 5: by node-id (#289)
         master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false));
         var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true, Storage = storage }
             .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
@@ -424,7 +425,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         device.State.Should().Be(NmtState.PreOperational);
         if (storage == PeerSafetyStorage.None)
         {
-            od.ReadUnsigned(0x1301, 1).Should().Be(0u, "the power-on values are back: nothing was stored");
+            od.ReadUnsigned(0x1301, 1).Should().Be(powerOnDirection, "the power-on values are back: nothing was stored");
             od.ReadUnsigned(0x13FE, 0).Should().Be(0u);
         }
         else
@@ -735,10 +736,11 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 2);
         using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
+        var powerOnDirection = device.ObjectDictionary.ReadUnsigned(0x1301, 1);
         var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x1018, (byte)0x01, false), "the first transfer, which has nothing to be compared with");
         ex.Message.Should().Contain("CiA 319 §5.2");
-        device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+        device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(powerOnDirection, "nothing was sent");
     }
 
     /// <summary>A verification reads no identity, so without a bound description it is the gate
@@ -765,6 +767,9 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
+        // SRDO 1 exists at power-on (Table 5, #289) with a checksum of 0: Operational would clear
+        // 13FEh on it. This test is about the refused write, so the SRDO is deleted first.
+        device.ObjectDictionary.WriteUnsigned(0x1301, 1, 0);
         device.ObjectDictionary.WriteUnsigned(0x13FE, 0, 0xA5);
         var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         device.NmtCommandReceived += (_, e) => { if (e.Command == NmtCommand.Start) started.TrySetResult(true); }; // raised after the node acted on it
@@ -1057,6 +1062,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 2);
         using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB); // SrdoCount = 2
+        var powerOnDirection = device.ObjectDictionary.ReadUnsigned(0x1301, 1);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var tooMany = Configuration()
             .Add(3, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x10D, 0x10E),
@@ -1067,7 +1073,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("SRDO 3").And.Contain("2 SRDO");
         ex.ParamName.Should().Be(verify ? "expected" : "configuration", "the public method's own parameter, whichever pre-check refuses");
         device.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u, "nothing was sent");
-        device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+        device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(powerOnDirection, "nothing was sent");
     }
 
     /// <summary>The file may declare more SRDO records than the peer reports in 13FFh:00. An SRDO

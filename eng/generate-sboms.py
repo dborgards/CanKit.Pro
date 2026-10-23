@@ -216,7 +216,9 @@ def generate(package_id: str, version: str, packages: dict, output: Path) -> Pat
             # guideline's SPDX requirement for a component that is not even in the product. The
             # flag is deprecated in tool 6.x but still filters; the tool is pinned, and
             # verify-sboms.py fails if a licence is not SPDX, so a tool that stops filtering is
-            # noticed here rather than shipped.
+            # noticed here rather than shipped. The converse -- a real dependency dropped by the
+            # filter -- is caught by verify-sboms.py's cross-check against the .nuspec: every
+            # declared dependency must be listed, at no lower a version than the .nuspec declares.
             '--exclude-dev',
         ]
         result = subprocess.run(command, cwd=REPOSITORY_ROOT, capture_output=True, text=True)

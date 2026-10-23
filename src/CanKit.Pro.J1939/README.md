@@ -31,6 +31,9 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   summed, times 0.6 ms), so two nodes colliding on an address do not answer in
   lockstep; and a second `ClaimAddressAsync` while one is in arbitration faults
   with `InvalidOperationException` rather than silently cancelling the first (#58).
+  That includes the move after a successful claim was lost: no task represents
+  it and no token cancels it, so wait for `AddressClaimChanged` to report where
+  it ended before claiming again.
 - **Request for Address Claimed** (SAE J1939-81 §4.2.2): a Request for PGN
   0xEE00 is answered by the node itself — with its Address Claimed while it
   holds or arbitrates an address, with Cannot Claim while it holds none — so
@@ -144,6 +147,8 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 **Validated:** PGN send and receive, SPN extraction and its indicator values, address claiming and its fallback, Request-PGN and periodic sends, by the test suite in `tests/CanKit.Pro.Tests`, between nodes of this implementation over `CanKit.Adapter.Virtual`, directly or through a controllable bus double.
 
 **Not validated:** Address-claim arbitration against third-party ECUs and behaviour on a real J1939 network. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+
+**Not supported: PCAN in Echo mode.** Measured on a PCAN USB Pro FD, the adapter delivers the node's own frames in Echo mode without the echo flag ([#249](https://github.com/dborgards/CanKit.Pro/issues/249), filed upstream as [pkuyo/CanKit#71](https://github.com/pkuyo/CanKit/issues/71)). In Echo mode `CanBusService` confirms a send only by a flagged echo, so the confirmation of every Address Claim times out and every `ClaimAddressAsync` faults with `J1939NodeException`. This stays so until RawCan can match an echo that is not flagged.
 
 ## Install
 
