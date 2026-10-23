@@ -769,6 +769,46 @@ public class LssMasterBoundaryTests
     }
 
     [Fact]
+    public async Task An_Indeterminate_Waiting_Send_Of_A_Followed_Through_Activation_Locks_Out_A_Queued_Command()
+    {
+        // Review of #393: the follow-through sends without holding the gate. A command already
+        // queued behind it must still see the lockout an indeterminate send of it sets.
+        using var cancel = new CancellationTokenSource();
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (_, _) => Task.CompletedTask,
+        });
+        var send = rig.Service.Send;
+        int sentAfterActivation = 0;
+        rig.Service.Send = async frame =>
+        {
+            byte command = frame.Data.Span[0];
+            if (command == LssCommand.SwitchStateGlobal)
+            {
+                Interlocked.Increment(ref sentAfterActivation);
+                return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout };
+            }
+            var confirmation = await send(frame);
+            if (command == LssCommand.ActivateBitTiming) cancel.Cancel();
+            return confirmation;
+        };
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true, cancel.Token);
+        var abandoned = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
+        await abandoned.Should().ThrowAsync<OperationCanceledException>();
+        var queued = rig.Master.InquireNodeIdAsync();
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+
+        var locked = async () => await queued.WaitAsync(LssTestTiming.SchedulingBudget);
+        (await locked.Should().ThrowAsync<CanOpenTransportException>()).WithMessage("*indeterminate transmission*");
+        sentAfterActivation.Should().Be(1, "only the follow-through's waiting frame was attempted");
+        rig.Service.Commands.Should().NotContain(LssCommand.InquireNodeId);
+    }
+
+    [Fact]
     public async Task A_Cancelled_Commissioning_Releases_The_Slave_Only_After_The_Host_Followed_The_Switch()
     {
         // The review's scenario: LssCommissioning's release after a cancelled activation waits out

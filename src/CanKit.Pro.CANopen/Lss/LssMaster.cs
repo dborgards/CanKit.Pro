@@ -434,11 +434,12 @@ internal sealed partial class LssMaster : ILssMaster
             {
                 ThrowIfDisposed();
                 linked.Token.ThrowIfCancellationRequested();
-                if (_indeterminateSend is { } failure)
-                    throw new CanOpenTransportException(
-                        "The LSS master cannot continue after an indeterminate transmission. Reset the transport and re-establish a quiescent network before opening another master.", failure);
+                ThrowIfIndeterminate();
                 await DelayUntilAsync(_nextCommandAt, linked.Token).ConfigureAwait(false);
                 await WaitOrCancelAsync(_pendingFollow, linked.Token).ConfigureAwait(false);
+                // An activation followed through after its caller left sends without the gate,
+                // and that send may have been indeterminate while this command waited.
+                ThrowIfIndeterminate();
                 return await body(linked.Token).ConfigureAwait(false);
             }
             finally
@@ -676,6 +677,13 @@ internal sealed partial class LssMaster : ILssMaster
         {
             _inbound.Writer.TryComplete();
         }
+    }
+
+    private void ThrowIfIndeterminate()
+    {
+        if (_indeterminateSend is { } failure)
+            throw new CanOpenTransportException(
+                "The LSS master cannot continue after an indeterminate transmission. Reset the transport and re-establish a quiescent network before opening another master.", failure);
     }
 
     private void ThrowIfDisposed()
