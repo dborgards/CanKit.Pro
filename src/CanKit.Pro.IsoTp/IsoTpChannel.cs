@@ -594,16 +594,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var lossConfirmed = false;
         while (true)
         {
-            // Before any read: a canceled token must not consume a buffered PDU, as the wait on the
-            // token did before this loop existed (and as TryReceiveWithArrival documents).
-            cancellationToken.ThrowIfCancellationRequested();
             // Under the read gate, as in TryReceiveWithArrival: a discard is wholly before or
             // after this read, so an empty inbox is not a discard's retained items out for a
             // moment, and an item taken is not one the discard is dropping (#383).
             RxInboxItem item;
             bool taken;
             lock (_inboxReadGate)
+            {
+                // Before any read: a canceled token must not consume a buffered PDU, as the wait
+                // on the token did before this loop existed (and as TryReceiveWithArrival
+                // documents). Checked once the gate is held, not before it: the token can be
+                // cancelled while this waits for a discard (Codex on #394).
+                cancellationToken.ThrowIfCancellationRequested();
                 taken = _pduInbox.Reader.TryRead(out item);
+            }
             if (taken) return (true, item);
             var lost = _inboxLost;
             if (lost is not null || _inboxClosed)

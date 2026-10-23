@@ -1183,14 +1183,28 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await discard.WaitAsync(ShortTimeout)).Should().Be(0);
     }
 
+    // Runs `read` on a thread of its own, started now, and returns once that read has either
+    // finished or blocked -- a thread blocked on a lock is in WaitSleepJoin, and nothing before the
+    // inbox's read gate on a receive path waits. A signal rather than a delay: called while a
+    // discard holds the gate, it tells "the read waits for the discard" from "the read ran past
+    // it" without a timing margin (#362). The returned task carries the read's outcome.
+    private static Task<T> StartReadAndLetItReachTheGate<T>(Func<T> read)
+    {
+        var task = new Task<T>(read);
+        var thread = new Thread(() => task.RunSynchronously());
+        thread.IsBackground = true;
+        thread.Start();
+        SpinWait.SpinUntil(() => task.IsCompleted || (thread.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0,
+            ShortTimeout).Should().BeTrue("the read either finished or blocked");
+        return task;
+    }
+
     // #383 (Codex on #376): a receive was not serialised with a discard's drain. One made while
     // the discard was reading the inbox took the PDU the discard was about to drop -- a stale
     // response reached the caller, and the discard's count was one short. The observer starts the
-    // receive on its own thread from the actor, once the discard holds the inbox and before it
-    // reads anything, and gives it a moment to finish there. Serialised, the receive cannot read
-    // until the discard is done, and then finds only what the discard kept; the moment is a
-    // negative window -- on a slow host the unserialised receive might not run within it, so it
-    // can only pass falsely, never fail falsely.
+    // receive from the actor, once the discard holds the inbox and before it reads anything, and
+    // lets the discard go on only once the receive has finished or blocked. Serialised, it blocks
+    // until the discard is done and then finds only what the discard kept.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1208,41 +1222,53 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             new byte[] { 0x02, 0xBB, 0x02, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None), 300);
         await channel.SettleAsync().WaitAsync(ShortTimeout);
 
-        byte[]? received = null;
-        Exception? readerFault = null;
-        using var readerDone = new ManualResetEventSlim();
-        channel.DiscardDrainStartingObserver = () =>
-        {
-            var reader = new Thread(() =>
-            {
-                try
-                {
-                    if (awaiting)
-                        received = channel.ReceiveWithArrivalAsync().GetAwaiter().GetResult().Pdu;
-                    else if (channel.TryReceiveWithArrival(out var pdu))
-                        received = pdu.Pdu;
-                }
-                catch (Exception ex)
-                {
-                    readerFault = ex;
-                }
-                finally
-                {
-                    readerDone.Set();
-                }
-            });
-            reader.IsBackground = true;
-            reader.Start();
-            readerDone.Wait(TimeSpan.FromMilliseconds(500));
-        };
+        Task<byte[]?>? read = null;
+        channel.DiscardDrainStartingObserver = () => read = StartReadAndLetItReachTheGate<byte[]?>(() =>
+            awaiting
+                ? channel.ReceiveWithArrivalAsync().GetAwaiter().GetResult().Pdu
+                : channel.TryReceiveWithArrival(out var pdu) ? pdu.Pdu : null);
 
         channel.DiscardPendingPdus(arrivedBefore: 200).Should().Be(1, "the PDU stamped before the discard is dropped by it");
         channel.DiscardDrainStartingObserver = null;
 
-        readerDone.Wait(ShortTimeout).Should().BeTrue("the receive ends once the discard is done");
-        readerFault.Should().BeNull();
-        received.Should().Equal(new byte[] { 0xBB, 0x02 }, "a receive concurrent with the discard reads after it, and finds what it kept");
+        (await read!.WaitAsync(ShortTimeout)).Should().Equal(new byte[] { 0xBB, 0x02 },
+            "a receive concurrent with the discard reads after it, and finds what it kept");
         channel.TryReceiveWithArrival(out _).Should().BeFalse("nothing else was kept");
+    }
+
+    // Codex on #394: a receive whose token is cancelled while it waits for a discard must not then
+    // take a PDU. The token is checked before the read; checked only before the wait for the
+    // discard, a cancellation made during the wait was missed and the retained PDU consumed.
+    [Fact]
+    public async Task A_Receive_Cancelled_While_It_Waits_For_A_Discard_Takes_Nothing()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x02, 0xBB, 0x02, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None), 300);
+        await channel.SettleAsync().WaitAsync(ShortTimeout);
+
+        using var cts = new CancellationTokenSource();
+        Task<byte[]>? read = null;
+        channel.DiscardGapObserver = () =>
+        {
+            // The token is live when the receive starts; it is cancelled only once the receive
+            // waits at the gate the discard holds.
+            read = StartReadAndLetItReachTheGate(() =>
+                channel.ReceiveWithArrivalAsync(cts.Token).GetAwaiter().GetResult().Pdu);
+            cts.Cancel();
+        };
+
+        channel.DiscardPendingPdus(arrivedBefore: 200).Should().Be(0, "the PDU arrived after the discard's stamp");
+        channel.DiscardGapObserver = null;
+
+        Func<Task> act = () => read!.WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        channel.TryReceiveWithArrival(out var left).Should().BeTrue("the cancelled receive took nothing");
+        left.Pdu.Should().Equal(0xBB, 0x02);
     }
 
     // #262: a Dispose that arrives while a discard has the retained PDU out of the inbox must not
