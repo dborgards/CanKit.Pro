@@ -34,7 +34,12 @@ namespace CanKit.Pro.Uds;
 /// not corrupt the client (the next call will still see a clean state).
 /// </para>
 /// <para><see cref="IDisposable.Dispose"/> is thread-safe and idempotent; disposing an active
-/// client cancels any pending request and stops the TesterPresent keep-alive (if any).</para>
+/// client cancels any pending request and stops the TesterPresent keep-alive (if any). It then
+/// waits for the keep-alive loop to end and for the request in flight to release the request
+/// lock, each wait bounded by five seconds -- up to ten in all where both outlast the
+/// cancellation -- and holds the calling thread meanwhile.
+/// <see cref="UdsClientExtensions.DisposeAsync(IUdsClient)"/> does the same without holding a
+/// thread.</para>
 /// </remarks>
 public interface IUdsClient : IDisposable
 {

@@ -145,9 +145,12 @@ await uds.DownloadAsync(
   earlier request as its own. A read for more than one DID is refused, a Single Frame holding
   no more. The keep-alive to everyone is `TesterPresentAsync()` (`3E 80`, not collected for)
   (#57).
-* `Dispose` waits up to five seconds for a request in flight to release the request lock; a
-  holder that outlasts the wait keeps an undisposed semaphore, so its eventual release does not
-  throw into an operation that was merely slow (#57).
+* `Dispose` cancels the request in flight and the keep-alive, then waits up to five seconds for
+  the keep-alive loop to end and up to five more for the request to release the request lock —
+  ten in all where both outlast the cancellation. A holder that outlasts the wait keeps an
+  undisposed semaphore, so its eventual release does not throw into an operation that was
+  merely slow (#57). `await uds.DisposeAsync()` (`UdsClientExtensions`) does the same without
+  holding a thread while it waits (#271).
 * `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
   *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
   answer a key for that seed with NRC 0x24.
