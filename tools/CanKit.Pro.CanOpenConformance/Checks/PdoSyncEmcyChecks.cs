@@ -1092,6 +1092,24 @@ internal static class PdoSyncEmcyChecks
             if (unmeasuredShared.Count > 0)
                 measurements["not measured (shares a COB-ID with another record)"] = string.Join(", ", unmeasuredShared);
 
+            if (tooMany.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{string.Join(", ", tooMany)} transmitted more often than its transmission type allows. Type N "
+                    + "means one transmission per N SYNCs (CiA 301 §7.5.2.37), so a TPDO answering more SYNCs than "
+                    + "its divisor gives it is ignoring its own 1800h:02 — and a consumer that expects the declared "
+                    + "rate gets data it did not ask for, at a rate it did not agree to.",
+                    measurements);
+            }
+
+            // Before the two branches that excuse a shortfall or silence when the driver rejected
+            // a SYNC, because this finding is the one thing a rejection cannot explain: a SYNC
+            // that never reached the bus can only take traffic away, never add it. Ranked after
+            // them, one over-transmitting TPDO beside one short or silent one had its Fail
+            // replaced by a transport-inconclusive — and the run then exited 0 — on the strength
+            // of a single rejected frame that had nothing to do with it. Found in review of #388,
+            // against the ceiling added one commit earlier.
+
             // A partial rejection makes the count the device actually saw uncertain, so silence
             // cannot be charged to it. Found in review of #388.
             // A shortfall is judged the same way silence is: chargeable to the device only when
@@ -1119,16 +1137,6 @@ internal static class PdoSyncEmcyChecks
                     $"{string.Join(", ", silent)} transmitted nothing, but the driver rejected {rejected} of {syncs} "
                     + "SYNC frames, so how many the device actually saw is uncertain and its silence cannot be charged "
                     + "to it. Re-run on an interface that accepts every frame.", Attribution.Transport, measurements);
-            }
-
-            if (tooMany.Count > 0)
-            {
-                return Outcome.Fail(
-                    $"{string.Join(", ", tooMany)} transmitted more often than its transmission type allows. Type N "
-                    + "means one transmission per N SYNCs (CiA 301 §7.5.2.37), so a TPDO answering more SYNCs than "
-                    + "its divisor gives it is ignoring its own 1800h:02 — and a consumer that expects the declared "
-                    + "rate gets data it did not ask for, at a rate it did not agree to.",
-                    measurements);
             }
 
             if (silent.Count > 0)
