@@ -70,12 +70,22 @@ internal static class BusAndDiscoveryChecks
             });
         }).ConfigureAwait(false);
 
+        // What the passive scan heard about the target, for DSC-02 to read: whether a node with no
+        // SDO server answering ought to have one is a question about its NMT state, and the state
+        // is on the bus rather than behind the SDO server that is not answering. Shared the way
+        // PDO-01's descriptors are shared with PDO-03, and in the order the groups already run.
+        NmtState? targetStateHeard = null;
+
         await book.RunAsync("DSC-01", "discovery", "Passive presence scan (heartbeat and boot-up)", Tier.Read, "FR-CO-033", async () =>
         {
             // Listen-only in the sense that matters: ListenAsync opens no node and sends nothing,
             // so what it finds is what the bus volunteers.
             var window = TimeSpan.FromMilliseconds(session.Options.ListenMs);
             var heard = await CanOpenDiscovery.ListenAsync(session.Service, window, cancellationToken).ConfigureAwait(false);
+            if (session.Options.TargetNode is { } listenTarget)
+            {
+                targetStateHeard = heard.FirstOrDefault(n => n.NodeId == listenTarget)?.HeartbeatState;
+            }
             var measurements = heard.ToDictionary(
                 n => $"node {n.NodeId}",
                 n => Describe(n),
@@ -121,9 +131,35 @@ internal static class BusAndDiscoveryChecks
 
             if (session.Options.TargetNode is { } target && answered.All(n => n.NodeId != target))
             {
+                // A node in Stopped has no SDO server, by CiA 301 Table 37 — the same rule the NMT
+                // and PDO checks are built around, and the reason the confirmation budget cannot
+                // read 1017h there. Failing the device for not answering a scan in that state
+                // reported a conforming node as broken and took the run's exit code with it, so
+                // the state the bus volunteered decides. Found in review of #388.
+                if (targetStateHeard is NmtState.Stopped)
+                {
+                    measurements[$"node {target}"] = "heard in NMT state Stopped (04h), where CiA 301 Table 37 has no "
+                        + "SDO server";
+                    return Outcome.NotApplicable(
+                        $"Node {target} did not answer an SDO upload of 1000h:00, and DSC-01 heard it in NMT state "
+                        + "Stopped — where CiA 301 Table 37 gives it no SDO server to answer with. Nothing is "
+                        + "concluded from the silence of a service the device is not meant to be running. Start the "
+                        + "node (or let the nmt group do it) to scan it actively.", measurements);
+                }
+
+                if (targetStateHeard is null)
+                {
+                    return Outcome.Inconclusive(
+                        $"Node {target} did not answer an SDO upload of 1000h:00, although {answered.Count} other "
+                        + "node(s) did — and DSC-01 heard no NMT state from it, so whether it ought to have an SDO "
+                        + "server answering is unknown: a node in Stopped conformingly has none (CiA 301 Table 37). "
+                        + "The bus works, which is what the other answers show.", Attribution.Unknown, measurements);
+                }
+
                 return Outcome.Fail(
-                    $"Node {target} did not answer an SDO upload of 1000h:00, although {answered.Count} other node(s) did. "
-                    + "The bus works; that node-id does not have an SDO server answering on it.", measurements);
+                    $"Node {target} did not answer an SDO upload of 1000h:00, although {answered.Count} other node(s) did, "
+                    + $"and DSC-01 heard it in NMT state {targetStateHeard} — a state in which CiA 301 requires an SDO "
+                    + "server. The bus works; that node-id does not have one answering on it.", measurements);
             }
 
             return Outcome.Pass($"{answered.Count} node(s) answered.", measurements);
