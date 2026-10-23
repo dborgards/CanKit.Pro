@@ -3688,6 +3688,12 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // pending (a duplicate would slip through, and the bound was exceeded). The hook runs where
     // that window was; a second thread takes the gate there and records what it sees. With
     // release and publish under the gate it cannot get in until the task is complete.
+    //
+    // The probe's start is pool-scheduled. The 200 ms the hook gives it can only let a broken
+    // order pass on a slow host, never fail a correct one: once the hook returns, the correct
+    // order still holds the gate until the task is complete. The outcome is then read from the
+    // probe itself, not polled for -- polling a fixed second let a probe that started late fail
+    // a correct order (#356, the #92 class); ShortTimeout only bounds a hang.
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -3697,12 +3703,12 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     {
         var gate = new object();
         var completion = new J1939TpChannel.TxCompletion(gate, () => { });
-        bool? completedWhenAdmitGotIn = null;
+        Task<bool>? probe = null;
         completion.BetweenReleaseAndPublish = () =>
         {
-            var probe = Task.Run(() =>
+            probe = Task.Run(() =>
             {
-                lock (gate) completedWhenAdmitGotIn = completion.Task.IsCompleted;
+                lock (gate) return completion.Task.IsCompleted;
             });
             // Blocked on the gate for as long as the completing thread holds it.
             probe.Wait(TimeSpan.FromMilliseconds(200));
@@ -3717,7 +3723,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             _ => completion.TrySetCanceled(new CancellationToken(true)),
         };
 
-        for (var i = 0; i < 100 && completedWhenAdmitGotIn is null; i++) await Task.Delay(10);
+        probe.Should().NotBeNull("completing the send runs the hook");
+        var completedWhenAdmitGotIn = await probe!.WaitAsync(ShortTimeout);
         completedWhenAdmitGotIn.Should().BeTrue(
             "the slot is free only once the outcome is published; an Admit that gets in earlier is accepted while the send is pending");
     }
