@@ -86,6 +86,19 @@ internal enum Tier
     Commission = 2,
 }
 
+/// <summary>
+/// What an attempt to put the device back as it was found left behind. Carried as a result rather
+/// than a message because a check that failed to restore must not pass: the write tier's promise
+/// is that the device is unchanged afterwards, and a run that breaks it has to say so in its
+/// verdict and in its exit code, not only in a line of its measurements.
+/// </summary>
+internal readonly record struct Restoration(string State, bool Succeeded)
+{
+    public static Restoration Ok(string state) => new(state, true);
+
+    public static Restoration Broke(string detail) => new(detail, false);
+}
+
 /// <summary>One check's outcome, as it goes into the report.</summary>
 internal sealed record Finding(
     string Id,

@@ -226,6 +226,7 @@ internal static class NmtAndHeartbeatChecks
             }
 
             var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 2 + 100));
+            var restoredOk = true;
             var restored = "yes";
             // Set before the write, not after it. The device may accept the download and the call
             // still not return — a cancel in that window used to skip the restore and leave the
@@ -267,6 +268,7 @@ internal static class NmtAndHeartbeatChecks
                     catch (Exception ex)
                     {
                         book.Note("HBT-04 restore of 1017h", ex);
+                        restoredOk = false;
                         restored = $"FAILED ({ex.GetType().Name}) — the device's heartbeat may still be switched off";
                     }
                 }
@@ -289,6 +291,18 @@ internal static class NmtAndHeartbeatChecks
                 ["HeartbeatTimeout events after the stop"] = timedOut.ToString(CultureInfo.InvariantCulture),
                 ["1017h restored"] = restored,
             };
+
+            // A failed restore outranks the measurement: this check switched the device's heartbeat
+            // off on purpose, and a write-tier run that cannot switch it back has broken the one
+            // promise the tier makes. Passing on `timedOut` alone let the process exit 0 with the
+            // device left mute. Found in review of #388.
+            if (!restoredOk)
+            {
+                return Outcome.Failed(Attribution.Unknown,
+                    "The consumer behaved as asked, but 1017h could not be written back: " + restored
+                    + ". The device is left with its heartbeat disabled and needs attention before it is trusted again.",
+                    measurements);
+            }
 
             return timedOut > 0
                 ? Outcome.Pass($"The producer was stopped and the consumer raised {timedOut} timeout(s).", measurements)
@@ -357,6 +371,7 @@ internal static class NmtAndHeartbeatChecks
             };
 
             var problems = new List<string>();
+            var restoreFailed = false;
             try
             {
                 foreach (var (command, expected) in steps)
@@ -392,9 +407,20 @@ internal static class NmtAndHeartbeatChecks
                     catch (Exception ex)
                     {
                         book.Note("NMT-01 restore", ex);
+                        restoreFailed = true;
                         measurements["restored to"] = $"FAILED ({ex.GetType().Name}) — the device may be left in a state it was not found in";
                     }
                 }
+            }
+
+            if (restoreFailed)
+            {
+                return Outcome.Failed(Attribution.Unknown,
+                    (problems.Count == 0
+                        ? "The device reached every commanded state, but it could not be returned to the state it was "
+                        : "The device did not reach every commanded state (" + string.Join("; ", problems) + "), and it could not be returned to the state it was ")
+                    + "found in. A write-tier run promises the device is unchanged afterwards; this one has left it "
+                    + "somewhere it was not found, which needs attention before the bus is trusted again.", measurements);
             }
 
             return problems.Count == 0

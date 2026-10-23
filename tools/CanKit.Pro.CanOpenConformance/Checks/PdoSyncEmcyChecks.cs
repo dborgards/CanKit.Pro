@@ -24,6 +24,10 @@ internal static class PdoSyncEmcyChecks
     /// a device may have up to 512, and reading all of them is a different tool's job.</summary>
     private const int PdoCount = 4;
 
+    /// <summary>How long after an NMT Stop a frame may still be one that was already in flight.
+    /// Frames inside it are reported, not judged; frames after it are the device's fault.</summary>
+    private const int SettleMs = 200;
+
     public static async Task RunAsync(Session session, Checkbook book, CancellationToken cancellationToken)
     {
         var tpdos = new List<PdoDescriptor>();
@@ -59,7 +63,8 @@ internal static class PdoSyncEmcyChecks
 
             TappedFrame[] inOperational;
             int inStopped;
-            string leftInState;
+            int settling;
+            Restoration restoration;
             try
             {
                 // Operational is the state PDOs flow in; Stopped is the state they must not.
@@ -70,17 +75,18 @@ internal static class PdoSyncEmcyChecks
                 inOperational = tap.Frames.ToArray();
 
                 await session.Client.SendNmtCommandAsync(NmtCommand.Stop, session.Target, cancellationToken).ConfigureAwait(false);
-                await Task.Delay(200, cancellationToken).ConfigureAwait(false);
-                var beforeStopWindow = tap.Frames.Count;
+                var atStop = tap.Frames.Count;
+                await Task.Delay(SettleMs, cancellationToken).ConfigureAwait(false);
+                settling = tap.Frames.Count - atStop;
                 await tap.ListenAsync(Math.Min(2000, session.Options.PdoWindowMs), cancellationToken).ConfigureAwait(false);
-                inStopped = tap.Frames.Count - beforeStopWindow;
+                inStopped = tap.Frames.Count - atStop - settling;
             }
             finally
             {
                 // In a finally and on CancellationToken.None because a Ctrl+C between the Start
                 // and the Stop above would otherwise walk away from a machine this check had just
                 // stopped.
-                leftInState = await RestoreNmtStateAsync(session, book, "PDO-03", initialState).ConfigureAwait(false);
+                restoration = await RestoreNmtStateAsync(session, book, "PDO-03", initialState).ConfigureAwait(false);
             }
 
             var measurements = new Dictionary<string, string>
@@ -88,7 +94,8 @@ internal static class PdoSyncEmcyChecks
                 ["TPDOs watched"] = string.Join(", ", valid.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3}")),
                 ["frames in Operational"] = $"{inOperational.Length} in {session.Options.PdoWindowMs} ms",
                 ["frames in Stopped"] = inStopped.ToString(CultureInfo.InvariantCulture),
-                ["left in state"] = leftInState,
+                ["frames within the first " + SettleMs + " ms of Stop"] = settling.ToString(CultureInfo.InvariantCulture),
+                ["left in state"] = restoration.State,
             };
 
             foreach (var pdo in valid)
@@ -115,11 +122,32 @@ internal static class PdoSyncEmcyChecks
                 }
             }
 
+            if (!restoration.Succeeded)
+            {
+                return Outcome.Failed(Attribution.Unknown,
+                    "The check itself completed, but the device could not be put back into the state it was found in: "
+                    + restoration.State + ". A write-tier run promises the device is unchanged afterwards, so this "
+                    + "fails whatever the measurements say — the device needs looking at before it is trusted again.",
+                    measurements);
+            }
+
             if (inStopped > 0)
             {
                 return Outcome.Fail(
-                    $"{inStopped} TPDO frame(s) were transmitted while the device was Stopped. CiA 301 allows process "
-                    + "data only in Operational.", measurements);
+                    $"{inStopped} TPDO frame(s) were transmitted more than {SettleMs} ms after the device was Stopped. "
+                    + "CiA 301 allows process data only in Operational.", measurements);
+            }
+
+            // A frame already on the wire when Stop arrived is not a violation; one the device
+            // started afterwards is. The window cannot tell them apart, so it is reported rather
+            // than judged — but it is no longer invisible, which it was while the baseline was
+            // taken after the delay.
+            if (settling > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"No TPDO arrived more than {SettleMs} ms after Stop, but {settling} did within it. A frame already "
+                    + "in flight when the command landed explains that, and so does a device that stops a moment late; "
+                    + "this window cannot separate the two.", Attribution.Unknown, measurements);
             }
 
             var mismatched = valid.Any(p => inOperational.Any(f => f.CanId == p.CobId && p.Bytes > 0 && f.Data.Length != p.Bytes));
@@ -188,17 +216,31 @@ internal static class PdoSyncEmcyChecks
             // worst outcome it has. Type 0 is separated out for the same reason: a synchronous
             // *acyclic* TPDO transmits after a SYNC only when the application has data pending, so
             // its silence is not the device's fault and cannot be concluded on.
-            var cyclic = tpdos
-                .Where(p => p.Valid && p.TransmissionType >= CanOpenTransmissionType.SynchronousEverySync
+            // The pdo group may not have run — --groups presents them as independently selectable —
+            // so the prerequisite is read here rather than reported as a setup skip under every
+            // sync-only invocation. Found in review of #388.
+            var known = tpdos;
+            if (known.Count == 0)
+            {
+                var sweep = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
+                known = sweep.Descriptors;
+            }
+
+            // Only PDOs whose transmission type was actually read: a default standing in for a
+            // failed mandatory read must not decide which ones are synchronous.
+            var cyclic = known
+                .Where(p => p.Valid && p.TransmissionTypeRead
+                            && p.TransmissionType >= CanOpenTransmissionType.SynchronousEverySync
                             && p.TransmissionType <= CanOpenTransmissionType.SynchronousCyclicMax)
                 .ToList();
-            var acyclic = tpdos
-                .Where(p => p.Valid && p.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic)
+            var acyclic = known
+                .Where(p => p.Valid && p.TransmissionTypeRead
+                            && p.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic)
                 .ToList();
 
             if (cyclic.Count == 0)
             {
-                if (tpdos.Count == 0) return Outcome.NeedsSetup("PDO-01 read no TPDO parameters.");
+                if (known.Count == 0) return Outcome.NeedsSetup("No TPDO communication parameters could be read; see PDO-01.");
                 return acyclic.Count > 0
                     ? Outcome.Inconclusive(
                         $"{acyclic.Count} TPDO(s) are synchronous acyclic (1800h:02 = 0): they transmit after a SYNC "
@@ -206,8 +248,8 @@ internal static class PdoSyncEmcyChecks
                         + "No cyclic synchronous TPDO (type 1..240) exists to measure.",
                         Attribution.None)
                     : Outcome.NotApplicable(
-                        "No TPDO has a cyclic synchronous transmission type (1800h:02 in 1..240), so a SYNC changes "
-                        + "nothing observable.");
+                        $"None of the {known.Count} TPDO(s) read has a cyclic synchronous transmission type "
+                        + "(1800h:02 in 1..240), so a SYNC changes nothing observable.");
             }
 
             // Enough SYNCs for the slowest of them to have had two opportunities, plus a margin,
@@ -232,7 +274,7 @@ internal static class PdoSyncEmcyChecks
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             using var tap = new BusTap(session.Service, id => watched.Contains(id));
             int quiet;
-            string leftInState;
+            Restoration restoration;
             var rejected = 0;
             try
             {
@@ -253,7 +295,7 @@ internal static class PdoSyncEmcyChecks
             }
             finally
             {
-                leftInState = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
+                restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
             }
 
             if (rejected == syncs)
@@ -268,12 +310,21 @@ internal static class PdoSyncEmcyChecks
                 ["SYNCs sent"] = $"{syncs} on 0x{syncId:X3} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})"
                     + (rejected > 0 ? $"; the driver rejected {rejected}" : string.Empty),
                 ["frames before the SYNCs"] = quiet.ToString(CultureInfo.InvariantCulture),
-                ["left in state"] = leftInState,
+                ["left in state"] = restoration.State,
             };
             if (acyclic.Count > 0)
             {
                 measurements["acyclic TPDOs not concluded on"] = string.Join(", ",
                     acyclic.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3} type 0"));
+            }
+
+            if (!restoration.Succeeded)
+            {
+                return Outcome.Failed(Attribution.Unknown,
+                    "The check itself completed, but the device could not be put back into the state it was found in: "
+                    + restoration.State + ". A write-tier run promises the device is unchanged afterwards, so this "
+                    + "fails whatever the measurements say — the device needs looking at before it is trusted again.",
+                    measurements);
             }
 
             var silent = new List<string>();
@@ -371,8 +422,18 @@ internal static class PdoSyncEmcyChecks
             var malformed = frames.Count(f => f.Data.Length != 8);
             if (malformed > 0) measurements["payload not 8 bytes"] = malformed.ToString(CultureInfo.InvariantCulture);
 
-            if (malformed == frames.Count)
-                return Outcome.Fail($"All {frames.Count} frame(s) on the emergency COB-ID have a payload other than 8 bytes.", measurements);
+            // Any malformed frame, not only all of them — the same correction as HBT-02. An
+            // emergency object is eight bytes; a frame on this COB-ID with another length is a
+            // violation the report must not let a valid neighbour cover for.
+            if (malformed > 0)
+            {
+                return Outcome.Fail(
+                    malformed == frames.Count
+                        ? $"All {frames.Count} frame(s) on the emergency COB-ID have a payload other than 8 bytes."
+                        : $"{malformed} of {frames.Count} frame(s) on the emergency COB-ID have a payload other than "
+                          + "8 bytes. An emergency object is always 8.",
+                    measurements);
+            }
 
             return decoded.Count == 0
                 ? Outcome.ToolFault(
@@ -388,7 +449,7 @@ internal static class PdoSyncEmcyChecks
     /// the way out of a cancelled check as much as a successful one. A failure here is recorded
     /// rather than thrown — it would otherwise replace the finding the check had just reached.
     /// </summary>
-    private static async Task<string> RestoreNmtStateAsync(Session session, Checkbook book, string checkId, byte? initial)
+    private static async Task<Restoration> RestoreNmtStateAsync(Session session, Checkbook book, string checkId, byte? initial)
     {
         // The state the device was found in, not a fixed one. An earlier version always left
         // pre-operational, so a --tier write run against a device found Operational stopped it
@@ -412,12 +473,13 @@ internal static class PdoSyncEmcyChecks
         try
         {
             await session.Client.SendNmtCommandAsync(command, session.Target, CancellationToken.None).ConfigureAwait(false);
-            return name;
+            return Restoration.Ok(name);
         }
         catch (Exception ex)
         {
             book.Note($"{checkId} restore of the NMT state", ex);
-            return $"UNKNOWN — the restore to {name} failed ({ex.GetType().Name}); the device may still be stopped";
+            return Restoration.Broke(
+                $"UNKNOWN — the restore to {name} failed ({ex.GetType().Name}); the device may still be stopped");
         }
     }
 
@@ -462,8 +524,8 @@ internal static class PdoSyncEmcyChecks
 
     /// <summary>One PDO as its own parameters describe it.</summary>
     private readonly record struct PdoDescriptor(
-        int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, int InhibitMs, int EventTimerMs,
-        int Bytes, int MappedEntries);
+        int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, bool TransmissionTypeRead,
+        int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
 
     private readonly record struct PdoSweep(List<PdoDescriptor> Descriptors, List<string> Blocked, List<string> Absent, List<string> Problems);
 
@@ -507,9 +569,10 @@ internal static class PdoSyncEmcyChecks
                 continue;
             }
 
-            var transmission = await ByteOrDefault(session, comm, 0x02, cancellationToken).ConfigureAwait(false);
-            var inhibit = await UShortOrDefault(session, comm, 0x03, cancellationToken).ConfigureAwait(false);
-            var eventTimer = await UShortOrDefault(session, comm, 0x05, cancellationToken).ConfigureAwait(false);
+            // 1800h:02 / 1400h:02 is mandatory once the record exists; 03 and 05 are optional.
+            var transmission = await ByteOrDefault(session, comm, 0x02, problems, mandatory: true, cancellationToken).ConfigureAwait(false);
+            var inhibit = await UShortOrDefault(session, comm, 0x03, problems, cancellationToken).ConfigureAwait(false);
+            var eventTimer = await UShortOrDefault(session, comm, 0x05, problems, cancellationToken).ConfigureAwait(false);
 
             var (bits, entries) = await ReadMappingAsync(session, map, problems, cancellationToken).ConfigureAwait(false);
 
@@ -526,6 +589,7 @@ internal static class PdoSyncEmcyChecks
                 Extended: extended,
                 Valid: (cobIdWord & CanOpenCobId.InvalidBit) == 0,
                 TransmissionType: transmission ?? 0xFF,
+                TransmissionTypeRead: transmission is not null,
                 InhibitMs: inhibit is { } inh ? inh / 10 : 0, // 1800h:03 counts 100 us units
                 EventTimerMs: eventTimer ?? 0,
                 Bytes: (bits + 7) / 8,
@@ -566,30 +630,48 @@ internal static class PdoSyncEmcyChecks
         }
     }
 
-    private static async Task<byte?> ByteOrDefault(Session session, ushort index, byte sub, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads one byte of a PDO communication record. An abort is recorded in
+    /// <paramref name="problems"/> rather than swallowed: 1800h:02 and 1400h:02 are mandatory for
+    /// an implemented PDO, and an earlier version turned a failed read of one into the plausible
+    /// default 0xFF, so PDO-01 and PDO-02 passed as though they had read it. Null means only "the
+    /// gate blocks it" or "the device returned the wrong length", both of which are recorded too.
+    /// </summary>
+    private static async Task<byte?> ByteOrDefault(
+        Session session, ushort index, byte sub, List<string> problems, bool mandatory, CancellationToken cancellationToken)
     {
         if (!session.MayTransfer(index, sub)) return null;
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, index, sub, cancellationToken).ConfigureAwait(false);
-            return raw.Length == 1 ? raw[0] : null;
+            if (raw.Length == 1) return raw[0];
+            problems.Add($"0x{index:X4}:{sub:X2} is UNSIGNED8, got {IdentityAndSdoChecks.Hex(raw)}");
+            return null;
         }
-        catch (SdoAbortException)
+        catch (SdoAbortException abort)
         {
+            if (mandatory)
+                problems.Add($"0x{index:X4}:{sub:X2} is mandatory for an implemented PDO and aborted {IdentityAndSdoChecks.Describe(abort)}");
             return null;
         }
     }
 
-    private static async Task<int?> UShortOrDefault(Session session, ushort index, byte sub, CancellationToken cancellationToken)
+    /// <summary>As <see cref="ByteOrDefault"/>, for the two-byte optional entries (inhibit time,
+    /// event timer). Those are optional, so an abort is the device saying it has none.</summary>
+    private static async Task<int?> UShortOrDefault(
+        Session session, ushort index, byte sub, List<string> problems, CancellationToken cancellationToken)
     {
         if (!session.MayTransfer(index, sub)) return null;
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, index, sub, cancellationToken).ConfigureAwait(false);
-            return raw.Length == 2 ? BitConverter.ToUInt16(raw, 0) : null;
+            if (raw.Length == 2) return BitConverter.ToUInt16(raw, 0);
+            problems.Add($"0x{index:X4}:{sub:X2} is UNSIGNED16, got {IdentityAndSdoChecks.Hex(raw)}");
+            return null;
         }
         catch (SdoAbortException)
         {
+            // 1800h:03 and 1800h:05 are optional; their absence is not a problem.
             return null;
         }
     }
@@ -601,7 +683,7 @@ internal static class PdoSyncEmcyChecks
         {
             measurements[$"{kind}{pdo.Number}"] =
                 $"COB-ID 0x{pdo.CobId:X3}{(pdo.Extended ? " (29-bit)" : string.Empty)}{(pdo.Valid ? string.Empty : " (invalid)")}, "
-                + $"type {DescribeTransmission(pdo.TransmissionType)}, "
+                + $"type {(pdo.TransmissionTypeRead ? DescribeTransmission(pdo.TransmissionType) : "not read")}, "
                 + $"{pdo.MappedEntries} entry/entries = {pdo.Bytes} B"
                 + (pdo.EventTimerMs > 0 ? $", event timer {pdo.EventTimerMs} ms" : string.Empty)
                 + (pdo.InhibitMs > 0 ? $", inhibit {pdo.InhibitMs} ms" : string.Empty);

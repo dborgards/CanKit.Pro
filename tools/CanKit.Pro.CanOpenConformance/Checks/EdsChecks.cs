@@ -84,6 +84,7 @@ internal static class EdsChecks
             var names = new[] { "", "vendor-id", "product code", "revision number", "serial number" };
             var measurements = new Dictionary<string, string>();
             var mismatches = new List<string>();
+            var unreadable = new List<string>();
             var compared = 0;
             for (byte sub = 1; sub <= 4; sub++)
             {
@@ -104,14 +105,27 @@ internal static class EdsChecks
                 catch (SdoAbortException abort)
                 {
                     measurements[names[sub]] = $"file 0x{expected:X8}, device aborted {IdentityAndSdoChecks.Describe(abort)}";
+                    unreadable.Add($"{names[sub]} ({IdentityAndSdoChecks.Describe(abort)})");
                 }
             }
 
             if (compared == 0)
                 return Outcome.NeedsSetup("The file declares no 1018h values to compare (an EDS template often does not).");
 
+            // A declared value the device would not hand over leaves the comparison unfinished, and
+            // "1 identity value(s) agree" is not a statement that the file fits the device. An
+            // earlier version passed on exactly that. Found in review of #388.
+            if (mismatches.Count == 0 && unreadable.Count > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{compared} declared identity value(s) agree, but {unreadable.Count} the file declares could not "
+                    + $"be read from the device ({string.Join(", ", unreadable)}). The check has not established that "
+                    + "the file is for this device, so nothing in the eds group should be read as confirmed.",
+                    Attribution.Device, measurements);
+            }
+
             return mismatches.Count == 0
-                ? Outcome.Pass($"{compared} identity value(s) agree.", measurements)
+                ? Outcome.Pass($"all {compared} declared identity value(s) agree.", measurements)
                 : Outcome.Failed(Attribution.Setup,
                     $"The file is for a different device: {string.Join(", ", mismatches)}. Every other finding in the "
                     + "eds group was measured against this file and should be discarded — pass the device's own EDS "

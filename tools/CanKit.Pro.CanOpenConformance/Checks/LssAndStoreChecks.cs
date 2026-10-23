@@ -26,10 +26,24 @@ internal static class LssAndStoreChecks
     private static Task NormaliseToWaitingAsync(Session session, CancellationToken cancellationToken)
         => session.Lss.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken);
 
+    /// <summary>
+    /// Whether the bound description says outright that the device has no LSS. CiA 305 support is
+    /// optional and an EDS declares it with LSS_Supported, so a file that says no turns the whole
+    /// group into "not applicable" instead of three services timing out.
+    /// </summary>
+    private static bool DeclaredWithoutLss(Session session)
+        => session.TargetDescription is { } description && !description.DeviceInfo.LssSupported;
+
+    private static string NoLssReason(Session session)
+        => $"{System.IO.Path.GetFileName(session.Options.EdsPath)} declares LSS_Supported=0: the device has no Layer "
+           + "Setting Services, which CiA 301 permits.";
+
     public static async Task RunAsync(Session session, Checkbook book, CancellationToken cancellationToken)
     {
         await book.RunAsync("LSS-01", "lss", "Unconfigured slaves on the bus", Tier.Write, "FR-CO-047", async () =>
         {
+            if (DeclaredWithoutLss(session)) return Outcome.NotApplicable(NoLssReason(session));
+
             // This is the one LSS service that is safe on a working bus: it addresses only slaves
             // whose node-id is FFh, i.e. devices that are not participating yet. It still needs
             // the write tier, because the global state command it sends reaches every slave.
@@ -49,6 +63,8 @@ internal static class LssAndStoreChecks
 
         await book.RunAsync("LSS-02", "lss", "Selective addressing by LSS address, and inquire", Tier.Write, "FR-CO-047", async () =>
         {
+            if (DeclaredWithoutLss(session)) return Outcome.NotApplicable(NoLssReason(session));
+
             // The LSS address is 1018h:01..04. Reading it over SDO first and then asking LSS to
             // select the device by it is what makes this a conformance check rather than two
             // unrelated reads: the two paths have to agree about the same device.
@@ -81,10 +97,25 @@ internal static class LssAndStoreChecks
                 measurements["selective switch answered"] = selected.ToString();
                 if (!selected)
                 {
-                    return Outcome.Fail(
-                        "The device did not answer a selective LSS switch for the address its own 1018h reports. "
-                        + "Either it does not implement LSS, or its LSS address differs from its identity object — "
-                        + "CiA 305 says they are the same four values.", measurements);
+                    // A device the file declares as having no LSS is not failing by staying
+                    // silent; it is answering the only way it can. Without a declaration the
+                    // silence is genuinely ambiguous — LSS is optional in CiA 301 — so it is
+                    // inconclusive rather than a fault. An earlier version failed both. Found in
+                    // review of #388.
+                    if (session.TargetDescription is { } description && !description.DeviceInfo.LssSupported)
+                    {
+                        return Outcome.NotApplicable(
+                            $"{System.IO.Path.GetFileName(session.Options.EdsPath)} declares LSS_Supported=0, and the "
+                            + "device did not answer a selective switch. That is consistent: LSS is optional in "
+                            + "CiA 301 and this device does not have it.");
+                    }
+
+                    return Outcome.Inconclusive(
+                        "The device did not answer a selective LSS switch for the address its own 1018h reports. Either "
+                        + "it does not implement LSS — which CiA 301 permits, and which an EDS would say with "
+                        + "LSS_Supported — or its LSS address differs from its identity object, which CiA 305 forbids. "
+                        + "Nothing observed here separates the two; pass an EDS and the check can.",
+                        Attribution.Unknown, measurements);
                 }
 
                 var inquired = await session.Lss.InquireAddressAsync(cancellationToken).ConfigureAwait(false);
@@ -123,6 +154,8 @@ internal static class LssAndStoreChecks
 
         await book.RunAsync("LSS-03", "lss", "Fastscan finds an unconfigured slave's address", Tier.Commission, "FR-CO-049", async () =>
         {
+            if (DeclaredWithoutLss(session)) return Outcome.NotApplicable(NoLssReason(session));
+
             // Fastscan leaves the slave it finds selected and in configuration state, which is why
             // this is the commission tier even though it writes nothing: a device left there has
             // stopped doing its job until it is switched back or power-cycled.
