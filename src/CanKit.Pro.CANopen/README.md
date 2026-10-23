@@ -162,10 +162,18 @@ Deliberate omissions, each checked against the norm text:
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
   periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
   that callback between them. The callback must retune the channel this master is already
-  reading; it must not dispose that bus. The second delay, and a waiting frame after a zero
-  delay, still go out on it. An adapter that cannot change rate while open is left alone:
-  omit `returnToWaiting`, dispose this master after the call returns, and send switch state
-  global from a new master on the new bus.
+  reading; it must not dispose that bus. The second delay, and the waiting frame
+  `returnToWaiting` then sends after both periods, still go out on it. An adapter that cannot
+  change rate while open is left alone: omit `returnToWaiting`, dispose this master after the
+  call returns, and send switch state global from a new master on the new bus.
+* **Switch state global (waiting) inside the first switch delay** — CiA 305 §6.4.4 and Figure 15
+  keep the master and every slave silent until the second `switch_delay` has elapsed. With a
+  host switch (`bitsPerSecond` and `BitRateSwitch`) `returnToWaiting` keeps to that: waiting goes
+  out after both periods, on the new rate. Without one, the master would be left on the old
+  rate, so a positive delay sends waiting before the first period ends instead — a deliberate
+  departure from §6.4.4. If its confirmation comes back at or after the first deadline, the
+  call fails after both periods. 2.0 is planned to require a host switch for `returnToWaiting`
+  with a delay; the conforming alternative today is the one in the previous item.
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
@@ -1312,7 +1320,8 @@ node-id parks each unconfigured slave in configuration so Fastscan does not retu
 then switches every slave back to waiting. A scan that assigns node-ids switches every slave
 to waiting first, then configures the slave Fastscan left in configuration. Switch state
 selective is not repeated after Fastscan. The scan switches back to waiting after each slave,
-unless activation already sent that frame before the switch delay. Bit timing is activated
+unless activation already sent that frame: after both switch delays with `ActivateBitRate`, before
+the first one ends without it (see [Not built, and why](#not-built-and-why) for that departure from CiA 305 §6.4.4). Bit timing is activated
 during a scan only when `Limit` is 1. A scan that can select more than one slave configures
 the table and leaves the rate unchanged, so a slave that already has a node-id stays on the
 bitrate the next Fastscan still uses. Activating one selectively switched slave is valid when

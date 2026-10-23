@@ -426,6 +426,69 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task With_A_Host_Switch_The_Master_Returns_To_Waiting_Only_After_Both_Periods_On_The_New_Rate()
+    {
+        // CiA 305 §6.4.4 and Figure 15 (L-5, #359): the slave switches after the first
+        // switch_delay, nobody transmits before the second has elapsed, and the master's
+        // switch state global (waiting) then goes out on the rate it retuned to.
+        var delay = TimeSpan.FromMilliseconds(100);
+        ClockedLssBench? clock = null;
+        ClockedLssBench.Listener? heard = null;
+        TimeSpan? retunedAt = null;
+        int masterFramesAtRetune = -1;
+        int slaveSwitches = 0;
+        var options = new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            BitRateSwitch = (_, _) =>
+            {
+                retunedAt = clock!.Now;
+                masterFramesAtRetune = MasterFrames(heard!);
+                return Task.CompletedTask;
+            },
+        };
+        using var bench = new ClockedLssBench("lss-slave", options);
+        clock = bench;
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref slaveSwitches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench, slave);
+        (await bench.Master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, 3)).Succeeded.Should().BeTrue();
+        heard = bench.Listen();
+
+        var start = bench.Now;
+        var activate = bench.Undriven.ActivateBitTimingAsync((ushort)delay.TotalMilliseconds, 250_000,
+            returnToWaiting: true);
+        await bench.SettleAsync();
+        MasterFrames(heard).Should().Be(1, "only the activation is on the bus");
+
+        await bench.AdvanceAsync(delay - TimeSpan.FromTicks(1));
+        MasterFrames(heard).Should().Be(1, "the master is silent during the first period");
+        retunedAt.Should().BeNull();
+        await bench.AdvanceAsync(TimeSpan.FromTicks(1));
+        await bench.WaitUntilAsync(() => Volatile.Read(ref slaveSwitches) == 1);
+        retunedAt.Should().Be(start + delay);
+        masterFramesAtRetune.Should().Be(1);
+
+        await bench.AdvanceAsync(delay - TimeSpan.FromTicks(1));
+        MasterFrames(heard).Should().Be(1, "the master is silent during the second period");
+        slave.LssState().Should().Be(LssState.Configuration);
+
+        await bench.RunAsync(activate);
+        bench.Now.Should().Be(start + delay + delay);
+        MasterFrames(heard).Should().Be(2, "switch state global (waiting) follows both periods");
+        await bench.WaitUntilAsync(() => slave.LssState() == LssState.Waiting);
+
+        static int MasterFrames(ClockedLssBench.Listener listener)
+            => listener.Ids.Count(id => id == CanOpenCobId.LssMasterMessage);
+    }
+
+    [Fact]
     public async Task Disposing_The_Slave_Drops_A_Held_Nmt()
     {
         int switches = 0;

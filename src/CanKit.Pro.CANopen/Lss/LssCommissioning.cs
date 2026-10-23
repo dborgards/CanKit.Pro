@@ -128,8 +128,11 @@ public sealed class LssSlaveConfiguration
 
     /// <summary>
     /// When <see langword="true"/> (the default), switch state global returns the slave to
-    /// waiting after the services, whether they succeeded or not. Activation sends that frame
-    /// before the switch delay, while the slave is still on the current bitrate.
+    /// waiting after the services, whether they succeeded or not. With
+    /// <see cref="ActivateBitRate"/>, activation sends that frame after both switch-delay
+    /// periods, on the new rate (CiA 305 §6.4.4). Without it, activation sends it before the
+    /// first period ends, on the rate the slave still uses: a deliberate departure from
+    /// §6.4.4, described on <see cref="ILssMaster.ActivateBitTimingAsync"/>.
     /// </summary>
     public bool ReleaseToWaiting { get; init; } = true;
 }
@@ -412,8 +415,10 @@ public sealed class LssCommissioning
         }
         finally
         {
-            // Activation with returnToWaiting already sent the waiting frame, on the rate the
-            // slave can still hear. A second one after the switch goes out at the old rate.
+            // Activation with returnToWaiting already sent the waiting frame on a rate the slave
+            // hears: after both periods on the new rate with a host switch, or before the first
+            // period ends without one. Without a host switch, a second one would go out at the
+            // old rate after the slave has left it.
             if (configuration.ReleaseToWaiting && !applied.ReleasedByActivation)
                 await ReleaseToWaitingAsync().ConfigureAwait(false);
         }

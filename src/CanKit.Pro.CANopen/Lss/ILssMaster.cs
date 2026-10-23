@@ -78,14 +78,19 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <paramref name="bitsPerSecond"/> and <see cref="LssMasterOptions.BitRateSwitch"/> are both
     /// set, the switch runs after the first period, before slaves may transmit again.
     /// When <paramref name="returnToWaiting"/> is <see langword="true"/>, switch state global
-    /// (waiting) is sent while both ends still share a bitrate. A positive delay sends it
-    /// before either delay when its confirmation returns before the first deadline.
-    /// If that window was missed, the host switches rate and sends waiting after the second
-    /// period; without a host switch the call fails after both periods have elapsed. A zero
-    /// delay has already moved the slave, so the frame is sent
-    /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
-    /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
-    /// switch the master is still on the old rate and the slave will not hear the frame.
+    /// (waiting) follows. With <paramref name="bitsPerSecond"/> and the switch callback it is
+    /// sent once both periods have elapsed, on the new rate: CiA 305 §6.4.4 and Figure 15 keep
+    /// the master and every slave silent through both periods. A zero delay has already moved
+    /// the slave, so it then requires both, and the frame is sent after the switch. Without a
+    /// host switch the master would stay on the old rate, so a positive delay sends waiting
+    /// before either period ends instead, while both ends still share a bitrate. That frame
+    /// inside the first period is a deliberate departure from §6.4.4, kept for adapters that
+    /// cannot change rate while open; 2.0 is planned to require a host switch for it. If its
+    /// confirmation returns at or after the first deadline, the call fails with
+    /// <see cref="CanOpenTransportException"/> after both periods have elapsed. The alternative
+    /// that keeps to §6.4.4 without a host switch: omit <paramref name="returnToWaiting"/>,
+    /// dispose this master after the call returns, and send switch state global from a new
+    /// master on the new bus.
     /// Cancellation or failure after a confirmed send returns to the caller promptly;
     /// subsequent commands still wait for the activation's two periods. An indeterminate
     /// send makes the master unusable as described in the interface remarks.

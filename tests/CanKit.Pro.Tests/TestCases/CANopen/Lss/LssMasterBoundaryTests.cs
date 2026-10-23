@@ -330,53 +330,77 @@ public class LssMasterBoundaryTests
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
     }
 
-    [Fact]
-    public async Task Activation_And_Waiting_Confirmations_Do_Not_Restart_The_Switch_Delay()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Activation_And_Waiting_Confirmations_Do_Not_Restart_The_Switch_Delay(bool hostSwitch)
     {
+        // The activation confirms 60 ms late and the waiting frame 30 ms late. Neither moves the
+        // two periods, which are measured from the activation's transmit stamp.
         var switched = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waitingAt = new System.Collections.Generic.List<TimeSpan>();
         using var rig = new ClockedLssRig(new LssMasterOptions
         {
-            BitRateSwitch = (_, _) => { switched.TrySetResult(true); return Task.CompletedTask; },
+            BitRateSwitch = hostSwitch ? (_, _) => { switched.TrySetResult(true); return Task.CompletedTask; } : null,
         });
         var send = rig.Service.Send;
         rig.Service.Send = async frame =>
         {
+            bool isWaiting = frame.Data.Span[0] == LssCommand.SwitchStateGlobal;
+            if (isWaiting) waitingAt.Add(rig.Clock.Elapsed - TimeSpan.FromSeconds(1));
             var confirmation = await send(frame);
-            rig.Clock.Advance(TimeSpan.FromMilliseconds(
-                frame.Data.Span[0] == LssCommand.ActivateBitTiming ? 60 : 30));
+            rig.Clock.Advance(TimeSpan.FromMilliseconds(isWaiting ? 30 : 60));
             return confirmation;
         };
 
-        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true);
-        await rig.ArmedAsync(TimeSpan.FromMilliseconds(10));
-        switched.Task.IsCompleted.Should().BeFalse();
-        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(9));
-        switched.Task.IsCompleted.Should().BeFalse();
-        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
-        await switched.Task.WaitAsync(LssTestTiming.SchedulingBudget);
-        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
-        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
-        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
-        (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(200));
+        var activating = rig.Master.ActivateBitTimingAsync(100, hostSwitch ? 250_000 : null, returnToWaiting: true);
+        if (hostSwitch)
+        {
+            // CiA 305 §6.4.4, Figure 15: the master stays silent through both periods and sends
+            // waiting after them, on the rate it switched to after the first.
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(40));
+            waitingAt.Should().BeEmpty("nothing is sent during the first period");
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(39));
+            switched.Task.IsCompleted.Should().BeFalse();
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+            await switched.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+            waitingAt.Should().BeEmpty("nothing is sent during the second period");
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+            await activating.WaitAsync(LssTestTiming.SchedulingBudget);
+            waitingAt.Should().Equal(TimeSpan.FromMilliseconds(200));
+            (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(230));
+        }
+        else
+        {
+            // Without a host switch, waiting still goes out on the old rate before the switch.
+            waitingAt.Should().Equal(TimeSpan.FromMilliseconds(60));
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(10));
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(10));
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+            await activating.WaitAsync(LssTestTiming.SchedulingBudget);
+            waitingAt.Should().ContainSingle();
+            (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(200));
+        }
     }
 
     [Theory]
     [InlineData(100)]
     [InlineData(150)]
     [InlineData(250)]
-    public async Task A_Late_Waiting_Confirmation_Resends_At_The_New_Rate_Despite_An_Early_Transmit_Stamp(int latency)
+    public async Task A_Late_Old_Rate_Waiting_Confirmation_Fails_Despite_An_Early_Transmit_Stamp(int latency)
     {
-        bool retuned = false;
-        var waiting = new System.Collections.Generic.List<(TimeSpan At, bool Retuned)>();
-        using var rig = new ClockedLssRig(new LssMasterOptions
-        {
-            BitRateSwitch = (_, _) => { retuned = true; return Task.CompletedTask; },
-        });
+        // No host switch: the waiting frame goes out on the old rate before the first deadline.
+        // A confirmation that returns at or after that deadline cannot show the frame was on the
+        // wire in time, whatever the driver stamped, and there is no new rate to resend it on.
+        var waiting = new System.Collections.Generic.List<TimeSpan>();
+        using var rig = new ClockedLssRig();
         var send = rig.Service.Send;
         rig.Service.Send = async frame =>
         {
             bool isWaiting = frame.Data.Span[0] == LssCommand.SwitchStateGlobal;
-            if (isWaiting) waiting.Add((rig.Clock.Elapsed - TimeSpan.FromSeconds(1), retuned));
+            if (isWaiting) waiting.Add(rig.Clock.Elapsed - TimeSpan.FromSeconds(1));
             var confirmation = await send(frame);
             // The driver's early stamp remains unchanged while confirmation arrives later.
             if (isWaiting && waiting.Count == 1)
@@ -384,21 +408,17 @@ public class LssMasterBoundaryTests
             return confirmation;
         };
 
-        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true);
-        retuned.Should().BeTrue();
+        var activating = rig.Master.ActivateBitTimingAsync(100, returnToWaiting: true);
         if (latency < 200)
         {
             var remaining = TimeSpan.FromMilliseconds(200 - latency);
             await rig.ArmedAsync(remaining);
-            activating.IsCompleted.Should().BeFalse();
+            activating.IsCompleted.Should().BeFalse("both periods are waited out first");
             await rig.Clock.AdvanceAsync(remaining);
         }
-        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
-
-        waiting.Should().HaveCount(2);
-        waiting[0].Retuned.Should().BeFalse();
-        waiting[1].Retuned.Should().BeTrue();
-        waiting[1].At.Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, latency)));
+        var activate = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
+        await activate.Should().ThrowAsync<CanOpenTransportException>();
+        waiting.Should().Equal(TimeSpan.Zero);
     }
 
     [Theory]
@@ -645,14 +665,14 @@ public class LssMasterBoundaryTests
     }
 
     [Theory]
-    [InlineData(150, 0, false)]
-    [InlineData(250, 0, false)]
-    [InlineData(0, 150, false)]
-    [InlineData(0, 150, true)]
-    [InlineData(0, 0, true)]
-    public async Task A_Missed_Old_Rate_Waiting_Frame_Is_Sent_After_Retuning(
-        int activationLatency, int waitingDriverLatency, bool unstampedWaiting)
+    [InlineData(0)]
+    [InlineData(50)]
+    [InlineData(150)]
+    [InlineData(250)]
+    public async Task With_A_Host_Switch_Waiting_Is_Sent_Once_After_Both_Periods_On_The_New_Rate(int activationLatency)
     {
+        // CiA 305 §6.4.4, Figure 15. A late activation confirmation does not move the periods;
+        // when it returns after both, waiting goes out at once.
         bool retuned = false;
         var waiting = new System.Collections.Generic.List<(TimeSpan At, bool Retuned)>();
         using var rig = new ClockedLssRig(new LssMasterOptions
@@ -663,47 +683,34 @@ public class LssMasterBoundaryTests
         rig.Service.Send = async frame =>
         {
             bool isWaiting = frame.Data.Span[0] == LssCommand.SwitchStateGlobal;
-            if (isWaiting && waiting.Count == 0)
-                rig.Clock.Advance(TimeSpan.FromMilliseconds(waitingDriverLatency));
             if (isWaiting)
                 waiting.Add((rig.Clock.Elapsed - TimeSpan.FromSeconds(1), retuned));
             var confirmation = await send(frame);
             if (!isWaiting)
                 rig.Clock.Advance(TimeSpan.FromMilliseconds(activationLatency));
-            return isWaiting && unstampedWaiting ? confirmation with { HostTransmitTimestamp = 0 } : confirmation;
+            return confirmation;
         };
 
         var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true);
-        bool missed = activationLatency >= 100 || waitingDriverLatency >= 100;
-        if (missed)
+        if (activationLatency < 100)
         {
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100 - activationLatency));
+            waiting.Should().BeEmpty("nothing is sent during the first period");
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100 - activationLatency));
             retuned.Should().BeTrue();
-            int remaining = 200 - Math.Max(activationLatency, waitingDriverLatency);
-            if (remaining > 0)
-            {
-                await rig.ArmedAsync(TimeSpan.FromMilliseconds(remaining));
-                await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(remaining));
-            }
         }
-        else
+        int remaining = 200 - Math.Max(100, activationLatency);
+        if (remaining > 0)
         {
-            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
-            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
-            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
-            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(remaining));
+            waiting.Should().BeEmpty("nothing is sent during the second period");
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(remaining));
         }
         await activating.WaitAsync(LssTestTiming.SchedulingBudget);
-        waiting.Should().NotBeEmpty();
-        if (missed)
-        {
-            waiting[waiting.Count - 1].Retuned.Should().BeTrue();
-            waiting[waiting.Count - 1].At.Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, Math.Max(activationLatency, waitingDriverLatency))));
-        }
-        else
-        {
-            waiting.Should().ContainSingle();
-            waiting[0].Retuned.Should().BeFalse();
-        }
+
+        waiting.Should().ContainSingle();
+        waiting[0].Retuned.Should().BeTrue();
+        waiting[0].At.Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, activationLatency)));
     }
 
     [Theory]

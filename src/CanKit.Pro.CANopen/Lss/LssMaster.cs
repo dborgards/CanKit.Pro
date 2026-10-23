@@ -180,9 +180,13 @@ internal sealed partial class LssMaster : ILssMaster
             long switchAt = TickMath.DueAt(start, delay, time.Frequency);
             long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
             Reserve(resumeAt);
+            // CiA 305 §6.4.4 and Figure 15: nothing is sent during either switch_delay period. A
+            // host that switches with the slaves sends waiting after both, on the new rate. A
+            // host that cannot switch would be left talking at the old rate, so it keeps the
+            // documented departure: waiting goes out before the first period ends (L-5, #359).
             var waiting = !returnToWaiting ? WaitingPhase.None
                 : delay == TimeSpan.Zero ? WaitingPhase.AfterSwitch
-                : time.GetTimestamp() >= switchAt ? WaitingPhase.AfterResume
+                : bitsPerSecond is not null || time.GetTimestamp() >= switchAt ? WaitingPhase.AfterResume
                 : WaitingPhase.BeforeDelay;
 
             async Task SendWaitingAtAsync(WaitingPhase phase)
@@ -192,7 +196,9 @@ internal sealed partial class LssMaster : ILssMaster
                     throw new CanOpenTransportException(
                         "The waiting frame could not be verified before the old-rate deadline. Both switch-delay periods have elapsed; a host bit-rate switch is required to return the slaves to waiting.");
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
-                // A driver stamp is not wire completion. A late confirmation needs a resend.
+                // A driver stamp is not wire completion. A confirmation at or after the first
+                // deadline may have missed the old rate; without a host switch the call then
+                // fails once both periods have elapsed.
                 if (phase == WaitingPhase.BeforeDelay && time.GetTimestamp() >= switchAt)
                     waiting = WaitingPhase.AfterResume;
             }
