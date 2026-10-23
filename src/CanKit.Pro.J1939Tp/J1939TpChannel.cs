@@ -228,6 +228,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (destinationAddress == J1939Pgn.GlobalAddress)
             throw new ArgumentOutOfRangeException(nameof(destinationAddress),
                 "TP.CM requires a specific destination address; use SendBamAsync for broadcasts.");
+        // The reader drops every frame from this channel's own source address (RunReaderAsync),
+        // so a session with itself could never be answered and would only end on T3 (#356).
+        if (destinationAddress == _sourceAddress)
+            throw new ArgumentOutOfRangeException(nameof(destinationAddress), destinationAddress,
+                $"TP.CM to the channel's own source address 0x{_sourceAddress:X2} can never be answered.");
         ValidateSendPayload(pgn, payload.Length);
 
         var key = new TxSessionKey(destinationAddress, pgn);

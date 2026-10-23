@@ -2694,6 +2694,22 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             "validation throws before either call ever posts to the actor, so nothing was ever queued to transmit");
     }
 
+    // #356 T-8: the reader drops every frame from the channel's own source address, so a TP.CM to
+    // that address can never be answered. Refused at the call, like 0xFF, instead of an RTS that
+    // waits out T3 for a peer that cannot exist.
+    [Fact]
+    public void A_Cm_Send_To_The_Channels_Own_Address_Is_Refused_At_The_Call()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x10);
+        int transmitted = 0;
+        bus.FrameObserved += (_, e) => { if (e.CanFrame.IsExtendedFrame) Interlocked.Increment(ref transmitted); };
+
+        Action act = () => sender.SendCmAsync(0xFEC0u, destinationAddress: 0x10, RandomPayload(14, seed: 2));
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("destinationAddress");
+        transmitted.Should().Be(0, "the call throws before anything is posted to the actor");
+    }
+
     // #58: an RTS that allows no packet per CTS can never be served -- every CTS would be a
     // hold -- and is not "no limit"; no session is opened, and the next well-formed RTS from
     // the same peer is served.

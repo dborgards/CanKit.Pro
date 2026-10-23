@@ -67,7 +67,7 @@ public interface IJ1939TpChannel : IDisposable
     /// EndOfMsgAck arrives (or faults with <see cref="J1939TpAbortException"/> on abort/timeout).
     /// </summary>
     /// <param name="pgn">Data PGN of the multi-packet message being sent.</param>
-    /// <param name="destinationAddress">Target node's source address (must not be 0xFF).</param>
+    /// <param name="destinationAddress">Target node's source address (must not be 0xFF nor this channel's own <see cref="SourceAddress"/>).</param>
     /// <param name="payload">User payload; 9..1785 bytes.</param>
     /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
     /// <exception cref="J1939TpSendRejectedException">
