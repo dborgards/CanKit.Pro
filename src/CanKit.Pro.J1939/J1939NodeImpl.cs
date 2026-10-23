@@ -797,7 +797,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // be queued behind this frame (#168). Remember the address so that claim loses
                 // too; §4.4.3.3 will not make the other CA retransmit an equal NAME for us.
                 _equalNameHeardOn = peerSa;
-                _equalNameHeardAt = _time.GetTimestamp();
+                // When the frame arrived, not when the actor got to it: a backlog on the actor
+                // must not make an old observation look recent (Codex on #397).
+                _equalNameHeardAt = receivedAt;
             }
             return;
         }
@@ -936,8 +938,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // retransmit an equal NAME. Actor-only. It belongs to that queued race: an unrelated round
     // drops it on the way in, and any round that ends drops whatever arrived during it, so a
     // later claim of the remembered address is not lost to a contender who has gone (#180).
-    // Nor is one that starts more than an announce window after the frame (J-7): the time it
-    // was heard, on the actor's clock, is kept beside it.
+    // Nor is one that starts more than an announce window after the frame (J-7): the time the
+    // frame arrived, on the actor's clock, is kept beside it.
     private byte? _equalNameHeardOn;
     private long _equalNameHeardAt;
 

@@ -1185,6 +1185,27 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
     }
 
+    // Codex on #397: the observation's age runs from when its frame arrived, not from when the
+    // actor got to it. A frame that waited on the actor for longer than the window is that old
+    // already, and a claim after it is not lost to a CA that may have gone.
+    [Fact]
+    public async Task An_Equal_Name_Frame_That_Waited_On_The_Actor_Ages_From_Its_Arrival()
+    {
+        var (clock, actor, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        var equalName = AddressClaim(sourceAddress: 0x11, name.ToBytes());
+        node.AfterFrameRead = canId =>
+        {
+            if (canId == (uint)equalName.ID) clock.Advance(node.Options.ClaimAnnounceTimeout + TimeSpan.FromMilliseconds(1));
+        };
+        await HearOurNameOnAsync(node, busB, name, 0x11);
+        node.AfterFrameRead = null;
+
+        await ClaimOnClockAsync(node, clock, actor, 0x11, node.Options.ClaimAnnounceTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
     private static (VirtualClock Clock, ProtocolActor Actor, J1939NodeImpl Node, ICanBus PeerBus) NodeOnClockWithPeer(
         out J1939Name name, out CompositeDisposable disposables)
     {
