@@ -367,6 +367,9 @@ internal sealed partial class CanOpenNode
                     }
                     session.CrcActive = session.LocalCrcSupported && SdoBlockFrames.ReadCrcSupportedBit(cs);
                     session.DeclaredTotalSize = declared;
+                    // s = 1 with a size of 0 announces an empty value; only s = 0 leaves the
+                    // length open (as the classic client decides since 124130a, #357 C-5).
+                    session.SizeIndicated = (cs & 0x02) != 0;
                     session.Payload = declared > 0 ? new byte[declared] : Array.Empty<byte>();
                     session.Offset = 0;
                     session.NextExpectedSeq = 1;
@@ -403,7 +406,7 @@ internal sealed partial class CanOpenNode
                         session.Offset -= n;
                     }
 
-                    if (session.DeclaredTotalSize > 0 && session.Offset != session.DeclaredTotalSize)
+                    if (session.SizeIndicated && session.Offset != session.DeclaredTotalSize)
                     {
                         AbortBlockClient(session,
                             session.Offset > session.DeclaredTotalSize
@@ -1338,6 +1341,8 @@ internal sealed partial class CanOpenNode
         public byte LocalBlockSize = 127;
         public byte NextExpectedSeq = 1;
         public uint DeclaredTotalSize;
+        // The initiate response set s: DeclaredTotalSize is a length, zero included.
+        public bool SizeIndicated;
         // A segment of the current sub-block was lost or reordered: the rest of the sub-block
         // is ignored and its one confirm carries the last good seqno (#39, CiA 301 §7.2.4.3.14).
         public bool SubBlockDamaged;

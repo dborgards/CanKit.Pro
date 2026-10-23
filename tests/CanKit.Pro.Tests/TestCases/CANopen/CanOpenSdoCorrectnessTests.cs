@@ -1368,6 +1368,36 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
     }
 
+    // #357 C-5: the block-upload client read "s = 1, size 0" as no size at all and accepted
+    // whatever followed; the classic client above refuses it. The same announced length of
+    // nothing, the same answer.
+    [Fact]
+    public async Task Sdo_BlockClient_Upload_Aborts_When_The_Server_Announces_Zero_And_Sends_Data()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00, mode: SdoTransferMode.Block);
+        (tap.Next(ShortTimeout)[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2100, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true,
+            new byte[] { 1, 2, 3, 0, 0, 0, 0 }));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
+            unusedBytesInLastSegment: 4, crc: 0));
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+    }
+
     [Fact]
     public async Task Sdo_Client_Upload_Returns_Short_Data_And_Reports_The_Shortfall()
     {
