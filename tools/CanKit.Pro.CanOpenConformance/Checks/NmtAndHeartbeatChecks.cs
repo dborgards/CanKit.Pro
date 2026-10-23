@@ -629,8 +629,15 @@ internal static class NmtAndHeartbeatChecks
                 foreach (var (command, expected) in steps)
                 {
                     await session.Client.SendNmtCommandAsync(command, session.Target, cancellationToken).ConfigureAwait(false);
+                    // The newest *heartbeat*, not the newest frame. On a bus where another master
+                    // is guarding this node, an RTR poll or a toggle-one response arriving after a
+                    // valid heartbeat displaced it from frames[^1], so the wait timed out and the
+                    // step was recorded as a device failure — while LatestState, which filters,
+                    // reported the expected state in the very next line. The two now ask the same
+                    // question of the same frames. Found in review of #388.
                     var reached = await tap.WaitForAsync(
-                        frames => frames.Count > 0 && frames[^1].Data.Length == 1 && frames[^1].Data[0] == (byte)expected,
+                        frames => Heartbeats(frames) is { Count: > 0 } beats
+                                  && beats[^1].Data[0] == (byte)expected,
                         Math.Max(1000, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
                     var actual = LatestState(tap);
                     measurements[$"after {command}"] = actual is { } s ? DescribeState(s) : "(no heartbeat)";

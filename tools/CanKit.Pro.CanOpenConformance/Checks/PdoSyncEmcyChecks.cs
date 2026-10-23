@@ -372,18 +372,25 @@ internal static class PdoSyncEmcyChecks
                         new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
                 }
 
-                // Bit 31 is in the mask, not only in the sentence above it. The previous commit's
-                // comment named it as reserved and then tested bits 11..28 and bit 29 only, so
-                // 80000080h passed and SYN-02 went on to send SYNCs on the masked 080h. The
-                // stack's IsUsableCobIdWord does not test it either — it is about whether a word
-                // is usable for communication — but CiA 301 §7.5.2.6 defines bit 31 of this entry
-                // as reserved, and claiming that in a comment while not checking it is how the
-                // last one got through. Found in review of #388.
-                if ((cobIdWord & 0x9FFF_F800) != 0)
+                // Bit 31 is deliberately NOT in this mask, and that is a reversal: the commit
+                // before added it, on a review finding that called it reserved and on my own
+                // comment repeating the claim. Both were wrong. CiA 301 §7.5.2.5 Table 55 defines
+                // bit 31 of 1005h as "x — do not care", unlike the PDO records' valid bit, and
+                // this repository already says so in two places:
+                // CanOpenNode.CommunicationProfile.cs:332 ("bit 31 do not care, bit 30 gen., bit
+                // 29 frame") and docs/reviews/2026-09-15-canopen-scope.md item 27, which records
+                // it in as many words *so that nobody adds it as a forgotten valid bit* — which
+                // is precisely what the last commit did. The stack's own IsUsableCobIdWord does
+                // not test it either, and I noted that while going stricter anyway.
+                //
+                // So a conforming device returning 80000080h was failed. The rule this broke is
+                // this repository's own: a claim about a standard is checkable, so check the
+                // record instead of accepting a reviewer's reading of it. Found in review of #388.
+                if ((cobIdWord & 0x1FFF_F800) != 0)
                 {
                     return Outcome.Fail(
-                        $"1005h:00 is 0x{cobIdWord:X8}: bit 31 and bits 11..28 are reserved in this entry and must "
-                        + "be zero (CiA 301 §7.5.2.6).",
+                        $"1005h:00 is 0x{cobIdWord:X8}: bits 11..28 are reserved in an 11-bit COB-ID entry and must "
+                        + "be zero (CiA 301 §7.5.2.5 Table 55).",
                         new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
                 }
 
