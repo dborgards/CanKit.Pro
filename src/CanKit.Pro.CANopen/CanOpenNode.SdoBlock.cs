@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
@@ -1159,8 +1160,17 @@ internal sealed partial class CanOpenNode
         // sending task, which is why the field is volatile. The segments still to go would
         // otherwise reach a client that has no session for them any more: a client that aborts
         // and starts its next transfer at once sees them interleaved with that transfer's frames.
+        //
+        // The slot cannot tell this batch from the session's next one, though: an ack that
+        // arrives while the batch is still going -- a partial one asking for a retransmission,
+        // or a full one moving on -- starts the next send for the same session (#378). So the
+        // batch also stops once the session has sent anything newer, as the block client's
+        // LatestSendId decides which of its sends still counts (#197).
+        int generation = Interlocked.Increment(ref session.SendGeneration);
         _ = SendOrderedControlFrames(onSendCompleted: null,
-            shouldStop: () => !ReferenceEquals(_sdoBlockServer, session), frames.ToArray());
+            shouldStop: () => !ReferenceEquals(_sdoBlockServer, session)
+                || Volatile.Read(ref session.SendGeneration) != generation,
+            frames.ToArray());
     }
 
     private void SendBlockUploadEnd(SdoBlockServerSession session)
@@ -1175,6 +1185,8 @@ internal sealed partial class CanOpenNode
         var end = SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
             session.LastSegmentUnusedBytes, crc);
         session.Phase = SdoBlockServerPhase.AwaitEndResponse;
+        // The end frame is the session's newest send: a sub-block batch still going stops (#378).
+        Interlocked.Increment(ref session.SendGeneration);
         _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), end);
     }
 
@@ -1369,5 +1381,9 @@ internal sealed partial class CanOpenNode
         public byte ResumeSeqno { get; set; } = 1;
         public byte SubBlockLastSeqno { get; set; }
         public int Retransmissions { get; set; }
+
+        /// <summary>Numbers the upload server's sends; a sub-block batch stops once a newer one
+        /// exists (#378). Written on the actor, read on the batch's sending task.</summary>
+        public int SendGeneration;
     }
 }

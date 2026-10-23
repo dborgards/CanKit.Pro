@@ -120,6 +120,70 @@ public class CanOpenSdoBlockUploadServerTests
         sent.Count(f => (f[0] & 0x80) == 0 && f[0] is >= 2 and <= 20).Should().Be(0, "no further segment was sent");
     }
 
+    public static TheoryData<string> MidBatchAcks => new() { "a partial ack", "a full ack" };
+
+    // #378: the batch's stop check asks whether the session is still the open one, and an ack
+    // that arrives while the batch is still going leaves it open -- a partial ack starts the
+    // retransmission as a second batch for the same session, a full ack of the last sub-block
+    // sends the end frame. The batch already running must stop then, or its remaining segments
+    // reach the client interleaved with the retransmission, or behind the end frame.
+    [Theory]
+    [MemberData(nameof(MidBatchAcks))]
+    public async Task An_Ack_While_The_SubBlock_Is_Still_Being_Sent_Stops_That_Batch(string ack)
+    {
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-server-midack-{Guid.NewGuid():N}");
+        var toClient = new List<byte[]>();
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoTx(ServerNodeId)) lock (toClient) toClient.Add(frame.Data.ToArray());
+        };
+        using var server = new CanOpenNode(new CanBusService(bus), ServerNodeId,
+            new CanOpenNodeOptions(), ownsService: true);
+        var nmtSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.NmtCommandReceived += (_, e) =>
+        {
+            if (e.Command == NmtCommand.EnterPreOperational) nmtSeen.TrySetResult();
+        };
+        server.ObjectDictionary.AddDomain(Index, 0x00,
+            Enumerable.Range(0, 140).Select(i => (byte)i).ToArray(), OdAccess.ReadOnly); // 20 segments
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        FromClient(bus, SdoBlockFrames.BuildBlockUploadInit(Index, 0x00, clientCrcSupported: false, blockSize: 20, pst: 0));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate response
+        bus.DeferredEchoes.ReleaseAll();
+        FromClient(bus, SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, its confirmation held
+
+        // A partial ack asks for segment 20 again; a full one confirms all 20, and the end
+        // frame follows. An NMT command behind the ack is handled behind it.
+        FromClient(bus, SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck,
+            lastAckedSeq: ack == "a partial ack" ? (byte)19 : (byte)20, nextBlockSize: 20));
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new byte[] { (byte)NmtCommand.EnterPreOperational, ServerNodeId }), isEcho: false);
+        await nmtSeen.Task.WithTimeoutAsync(ShortTimeout);
+
+        // Let both sends run. The first batch, still sending, would go on with segment 2 at
+        // once and one more segment at every later release. No signal says "nothing more is
+        // coming", so this is a negative window: it can only pass falsely on a slow host.
+        for (var i = 0; i < 3; i++)
+        {
+            bus.DeferredEchoes.ReleaseAll();
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+        }
+        bus.DeferredEchoes.ReleaseAll();
+
+        byte[][] sent;
+        lock (toClient) sent = toClient.ToArray();
+        sent.Count(f => (f[0] & 0x80) == 0 && f[0] is >= 2 and <= 19).Should().Be(0,
+            "the first batch stopped at the ack");
+        if (ack == "a partial ack")
+            sent.Last()[0].Should().Be(0x94, "segment 20, the last (c = 1), is the retransmission");
+        else
+            (sent.Last()[0] & 0xE3).Should().Be(SdoBlockFrames.ScsBlockUploadEndBase, "the end frame comes last");
+        sent.Length.Should().Be(3, "the initiate response, segment 1, and what the ack asked for");
+    }
+
     // An empty object cannot be expedited and used to leave the block path without a segment
     // at all: the client waited for seqno 1, the server for an ack, and both timed out. The
     // encoding has the case: one last segment carrying nothing, n = 7 in the end frame.
