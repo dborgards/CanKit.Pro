@@ -25,8 +25,9 @@ public class CanOpenNodeConstructionTests
     [Fact]
     public void A_Description_That_Cannot_Be_Applied_Leaves_No_Actor_Running()
     {
-        var description = CanOpenDeviceDescription.Load(Path.Combine(AppContext.BaseDirectory,
-            "TestCases", "CANopen", "Fixtures", "device.eds"));
+        var sep = Path.DirectorySeparatorChar;
+        var description = CanOpenDeviceDescription.Load(
+            $"{AppContext.BaseDirectory.TrimEnd('/', '\\')}{sep}TestCases{sep}CANopen{sep}Fixtures{sep}device.eds");
         // An object the loader cannot read: a sub-object slot with nothing in it.
         var broken = new CanOpenObject { Index = 0x2345 };
         broken.SubObjects[0x00] = null!;
