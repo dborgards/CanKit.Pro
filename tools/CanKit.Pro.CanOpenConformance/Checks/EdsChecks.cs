@@ -93,7 +93,16 @@ internal static class EdsChecks
                 {
                     var raw = await session.Client.SdoUploadAsync(session.Target, 0x1018, sub, cancellationToken)
                         .ConfigureAwait(false);
-                    if (raw.Length != 4) continue;
+                    if (raw.Length != 4)
+                    {
+                        // Neither compared nor unreadable before, so a malformed declared field
+                        // simply vanished from the verdict. 1018h's sub-indices are UNSIGNED32.
+                        // Found in review of #388.
+                        measurements[names[sub]] = $"file 0x{expected:X8}, device returned {raw.Length} byte(s): {IdentityAndSdoChecks.Hex(raw)}";
+                        unreadable.Add($"{names[sub]} (UNSIGNED32 expected, {raw.Length} byte(s) returned)");
+                        continue;
+                    }
+
                     var actual = BitConverter.ToUInt32(raw, 0);
                     compared++;
                     measurements[names[sub]] = $"file 0x{expected:X8}, device 0x{actual:X8}";

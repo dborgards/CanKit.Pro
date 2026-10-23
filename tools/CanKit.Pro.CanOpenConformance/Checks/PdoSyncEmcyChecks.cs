@@ -233,10 +233,26 @@ internal static class PdoSyncEmcyChecks
             // so the prerequisite is read here rather than reported as a setup skip under every
             // sync-only invocation. Found in review of #388.
             var known = tpdos;
+            var prerequisiteProblems = new List<string>();
             if (known.Count == 0)
             {
                 var sweep = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
                 known = sweep.Descriptors;
+                // The sweep's problems have to travel with it. Dropping them turned an unread
+                // mandatory 1800h:02 into "no cyclic synchronous TPDO exists", which reads as a
+                // clean not-applicable. Found in review of #388.
+                prerequisiteProblems.AddRange(sweep.Problems);
+            }
+
+            // A descriptor whose transmission type could not be read cannot be classified, so the
+            // prerequisite is unresolved rather than the feature absent.
+            if (prerequisiteProblems.Count > 0 && known.All(p => !p.TransmissionTypeRead))
+            {
+                return Outcome.Inconclusive(
+                    "No TPDO's transmission type could be read, so which of them are synchronous is unknown: "
+                    + string.Join("; ", prerequisiteProblems.Take(5)) + ".",
+                    Attribution.Device,
+                    new Dictionary<string, string> { ["prerequisite problems"] = string.Join("; ", prerequisiteProblems) });
             }
 
             // Only PDOs whose transmission type was actually read: a default standing in for a
@@ -283,6 +299,8 @@ internal static class PdoSyncEmcyChecks
                     + "TPDOs are waiting on. See SYN-01.");
             }
 
+            var counterOverflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            byte counter = 0;
             var watched = cyclic.Select(p => p.CobId).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             using var tap = new BusTap(session.Service, id => watched.Contains(id));
@@ -298,8 +316,14 @@ internal static class PdoSyncEmcyChecks
                 for (var i = 0; i < syncs; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    // A SYNC without a counter is a frame with no data (CiA 301 §7.2.5).
-                    var syncFrame = CanFrame.Classic((int)sync.CobId, Array.Empty<byte>(), isExtendedFrame: sync.Extended);
+                    // 1019h in 2..240 means the device's SYNC carries a one-byte counter, and a
+                    // conforming consumer rejects a zero-length frame outright — the stack's own
+                    // TryAcceptSync enforces that DLC rule. Sending DLC 0 regardless failed a
+                    // conforming device for silence. Found in review of #388.
+                    var payload = counterOverflow >= 2
+                        ? new[] { (byte)(counter = (byte)(counter % counterOverflow + 1)) }
+                        : Array.Empty<byte>();
+                    var syncFrame = CanFrame.Classic((int)sync.CobId, payload, isExtendedFrame: sync.Extended);
                     if (session.Bus.Transmit(syncFrame) <= 0) rejected++;
                     await Task.Delay(SyncPeriodMs, cancellationToken).ConfigureAwait(false);
                 }
@@ -321,6 +345,7 @@ internal static class PdoSyncEmcyChecks
             var after = Transmitted(tap).Skip(quiet).ToArray();
             var measurements = new Dictionary<string, string>
             {
+                ["SYNC counter (1019h)"] = counterOverflow >= 2 ? $"overflow {counterOverflow}, one-byte counter sent" : "none, DLC 0",
                 ["SYNCs sent"] = $"{syncs} on 0x{sync.CobId:X3}{(sync.Extended ? " (29-bit)" : string.Empty)} at {SyncPeriodMs} ms (slowest cyclic type is {slowest})"
                     + (rejected > 0 ? $"; the driver rejected {rejected}" : string.Empty),
                 ["frames before the SYNCs"] = quiet.ToString(CultureInfo.InvariantCulture),
@@ -487,7 +512,6 @@ internal static class PdoSyncEmcyChecks
         try
         {
             await session.Client.SendNmtCommandAsync(command, session.Target, CancellationToken.None).ConfigureAwait(false);
-            return Restoration.Ok(name);
         }
         catch (Exception ex)
         {
@@ -495,6 +519,32 @@ internal static class PdoSyncEmcyChecks
             return Restoration.Broke(
                 $"UNKNOWN — the restore to {name} failed ({ex.GetType().Name}); the device may still be stopped");
         }
+
+        // Sending is not arriving. SendNmtCommandAsync hands out a Task rather than the
+        // Task<bool> underneath it, so a frame the adapter rejected completes this await normally
+        // and only the background-exception event hears about it — and an earlier version returned
+        // Ok on exactly that. The state is verified against the heartbeat instead. Found in review
+        // of #388.
+        var reached = await ObservedNmtStateAsync(session, CancellationToken.None).ConfigureAwait(false);
+        if (reached is null)
+        {
+            // No heartbeat means no way to observe the NMT state from outside. That is a real
+            // limit, not a pass: it is reported as unverified rather than claimed as restored.
+            return Restoration.Ok($"{name} (commanded, not verified — the device produces no heartbeat to confirm it)");
+        }
+
+        var expected = command switch
+        {
+            NmtCommand.Start => (byte)NmtState.Operational,
+            NmtCommand.Stop => (byte)NmtState.Stopped,
+            _ => (byte)NmtState.PreOperational,
+        };
+
+        return reached == expected
+            ? Restoration.Ok(name)
+            : Restoration.Broke(
+                $"the device reports {NmtAndHeartbeatChecks.DescribeState(reached.Value)} after being commanded back to {name}; the restore "
+                + "did not take effect");
     }
 
     /// <summary>
@@ -550,6 +600,24 @@ internal static class PdoSyncEmcyChecks
             // the default here sent every SYNC to the wrong identifier and then failed the
             // device's cyclic TPDOs for silence. Found in review of #388.
             return null;
+        }
+    }
+
+    /// <summary>
+    /// 1019h, the SYNC counter overflow. A value of 2..240 means the device's SYNC carries a
+    /// one-byte counter that rolls 1..value; 0 or 1 (and an absent object) mean no counter.
+    /// </summary>
+    private static async Task<byte> TargetSyncOverflowAsync(Session session, CancellationToken cancellationToken)
+    {
+        if (!session.MayTransfer(0x1019, 0x00)) return 0;
+        try
+        {
+            var raw = await session.Client.SdoUploadAsync(session.Target, 0x1019, 0x00, cancellationToken).ConfigureAwait(false);
+            return raw.Length == 1 ? raw[0] : (byte)0;
+        }
+        catch (SdoAbortException)
+        {
+            return 0;
         }
     }
 
@@ -648,7 +716,20 @@ internal static class PdoSyncEmcyChecks
             for (byte sub = 1; sub <= count[0] && sub <= 64; sub++)
             {
                 if (!session.MayTransfer(map, sub)) continue;
-                var entry = await session.Client.SdoUploadAsync(session.Target, map, sub, cancellationToken).ConfigureAwait(false);
+                byte[] entry;
+                try
+                {
+                    entry = await session.Client.SdoUploadAsync(session.Target, map, sub, cancellationToken).ConfigureAwait(false);
+                }
+                catch (SdoAbortException abort)
+                {
+                    // 1A00h:00 said this entry exists, so refusing it is a contradiction the
+                    // device is responsible for — not a reason to report a shorter mapping.
+                    problems.Add($"0x{map:X4}:{sub:X2} is within the {count[0]} entries 0x{map:X4}:00 declares and aborted "
+                        + IdentityAndSdoChecks.Describe(abort));
+                    continue;
+                }
+
                 if (entry.Length != 4)
                 {
                     problems.Add($"0x{map:X4}:{sub:X2} is UNSIGNED32, got {IdentityAndSdoChecks.Hex(entry)}");
@@ -660,20 +741,17 @@ internal static class PdoSyncEmcyChecks
 
             return (bits, count[0]);
         }
-        catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
-                                                  or (uint)SdoAbortCode.SubIndexDoesNotExist)
-        {
-            // No mapping record at all is a device without that PDO; the communication record
-            // read above already told us whether it exists.
-            return (0, 0);
-        }
         catch (SdoAbortException abort)
         {
-            // Anything else is the mandatory mapping record not being readable, which an earlier
-            // version turned into an empty mapping -- so PDO-01/PDO-02 passed reporting zero
-            // entries and PDO-03 skipped the payload-length check for that PDO. Found in review
-            // of #388.
-            problems.Add($"0x{map:X4} is the mandatory mapping record and aborted {IdentityAndSdoChecks.Describe(abort)}");
+            // Every abort is a problem here, absence included. This helper is reached only after
+            // the PDO's communication record has been read, so the PDO exists — and CiA 301 makes
+            // the mapping record mandatory for one that does. The round-6 narrowing treated the
+            // absence codes as "no such PDO" and thereby moved the false pass rather than removing
+            // it: a device with 1800h and no 1A00h was recorded with zero mapped bytes and no
+            // problem, so PDO-01/PDO-02 passed and PDO-03 skipped the payload-length check for it.
+            // Found in review of #388.
+            problems.Add($"0x{map:X4} is the mapping record of a PDO whose communication record exists, and it aborted "
+                + IdentityAndSdoChecks.Describe(abort));
             return (0, 0);
         }
     }
