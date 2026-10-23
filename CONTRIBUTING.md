@@ -27,6 +27,8 @@ dotnet build CanKit.Pro.sln -c Release
 dotnet test  CanKit.Pro.sln -c Release
 ```
 
+That is enough to start; [Before you push](#before-you-push) lists what a pull request is held to.
+
 You need the **.NET 10 SDK or newer** (`global.json` pins `10.0.100` and rolls forward to a later
 major if that is what you have installed). No CAN hardware is needed — the whole suite runs on CanKit's `virtual://` loopback
 adapter and on in-repo test doubles.
@@ -40,11 +42,30 @@ dotnet tool restore
 dotnet gitversion
 ```
 
-Optional but useful before pushing:
+## Before you push
+
+The pull-request checks run the same commands, and `format` and `pack (dry run)` are required
+checks of the `main` ruleset, so run them first rather than letting CI be the compiler:
 
 ```bash
-dotnet format CanKit.Pro.sln    # applies .editorconfig
+dotnet build  CanKit.Pro.sln -c Release -p:CI=true       # CI=true turns warnings into errors
+dotnet test   CanKit.Pro.sln -c Release --no-build --framework net10.0
+dotnet format CanKit.Pro.sln --verify-no-changes         # `dotnet format CanKit.Pro.sln` fixes it
+out=$(mktemp -d) && dotnet pack CanKit.Pro.sln -c Release -o "$out" \
+  && python3 eng/verify-packages.py "$out"               # fresh dir: a stale one hides a missing package
 ```
+
+Why each step matters locally:
+
+- `-p:CI=true` — warnings are errors only in CI (`Directory.Build.props`), so a plain build can be
+  green and the pull request red.
+- `dotnet format` is not optional: it is the single arbiter of code style and a required check.
+- Packing runs package validation (ApiCompat, `src/Directory.Build.props`), which a build never
+  does; without it the first you hear of an API break is the `pack (dry run)` job.
+
+Two more checks run in CI and are quick to run locally: `python3 eng/verify-requirements-traceability.py`
+(every `Must` requirement needs a test, and every id you cite must exist) and the SBOM pair in
+[docs/supply-chain.md](https://github.com/dborgards/CanKit.Pro/blob/main/docs/supply-chain.md) when you touch packaging.
 
 ## Branching
 
@@ -52,7 +73,7 @@ Trunk-based, one long-lived branch:
 
 | Branch | Purpose |
 | --- | --- |
-| `main` | Always releasable. Every merge is analysed by semantic-release and may publish a release. |
+| `main` | Always releasable. Releases are cut by hand (the `Release` workflow, `workflow_dispatch`); semantic-release then analyses every commit since the last tag, so a merge alone publishes nothing. |
 | `feat/…`, `fix/…`, `docs/…` | Short-lived. Branch from `main`, open a pull request into `main`. |
 
 There is no `develop` and no release branch: the version is computed from the commits, so a
