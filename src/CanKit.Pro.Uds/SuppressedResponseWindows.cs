@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using CanKit.Pro.Actor;
 
 namespace CanKit.Pro.Uds;
@@ -43,15 +42,12 @@ internal sealed class SuppressedResponseWindows
         _maxExtensions = maxExtensions;
     }
 
-    /// <summary>Notes that a request for <paramref name="sid"/> went out at
-    /// <paramref name="sentTimestamp"/> and may be answered for <paramref name="window"/>.</summary>
-    public void Note(byte sid, long sentTimestamp, TimeSpan window)
-        => Note(sid, sentTimestamp, window, Stopwatch.Frequency);
-
     /// <summary>
-    /// As <see cref="Note(byte, long, TimeSpan)"/>, counting <paramref name="window"/> in
-    /// <paramref name="ticksPerSecond"/> so the deadline is on the same clock as
-    /// <paramref name="sentTimestamp"/> (#171).
+    /// Notes that a request for <paramref name="sid"/> went out at
+    /// <paramref name="sentTimestamp"/> and may be answered for <paramref name="window"/>,
+    /// counted in <paramref name="ticksPerSecond"/> so the deadline is on the same clock as
+    /// <paramref name="sentTimestamp"/> (#171). There is no overload that assumes the
+    /// Stopwatch's frequency: on an injected clock it would be wrong (#354).
     /// </summary>
     public void Note(byte sid, long sentTimestamp, TimeSpan window, long ticksPerSecond)
     {
@@ -121,12 +117,10 @@ internal sealed class SuppressedResponseWindows
         }
     }
 
-    /// <summary>The instant the window for <paramref name="sid"/> ends, if one is open.</summary>
     /// <summary>
     /// Extends the window for <paramref name="sid"/> to <paramref name="until"/> only if one is
     /// noted and was still open at <paramref name="arrival"/>: a 0x78 that arrived after a
-    /// window's deadline answers nothing the window still covers, and must not revive it
-    ///.
+    /// window's deadline answers nothing the window still covers, and must not revive it.
     /// </summary>
     public void ExtendIfOpenAt(byte sid, long arrival, long until)
     {
@@ -171,6 +165,7 @@ internal sealed class SuppressedResponseWindows
         }
     }
 
+    /// <summary>The instant the window for <paramref name="sid"/> ends, if one is open.</summary>
     public bool TryGetDeadline(byte sid, out long until)
     {
         lock (_gate) return _until.TryGetValue(sid, out until);
@@ -187,13 +182,9 @@ internal sealed class SuppressedResponseWindows
         }
     }
 
-    /// <summary>How long from now until <paramref name="until"/>, or zero if it has passed.</summary>
-    public static TimeSpan Remaining(long until)
-        => Remaining(until, Stopwatch.GetTimestamp(), Stopwatch.Frequency);
-
     /// <summary>
-    /// As <see cref="Remaining(long)"/>, measured from <paramref name="now"/> on a clock whose
-    /// frequency is <paramref name="ticksPerSecond"/>.
+    /// How long from <paramref name="now"/> until <paramref name="until"/>, or zero if it has
+    /// passed, on a clock whose frequency is <paramref name="ticksPerSecond"/>.
     /// </summary>
     public static TimeSpan Remaining(long until, long now, long ticksPerSecond)
     {
