@@ -3028,6 +3028,49 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref bams).Should().Be(0, "a directed payload is not broadcast");
     }
 
+    // #355: a PDU2 PGN carries no destination in its identifier, and a single frame of one goes
+    // out global whatever DestinationAddress says. The multi-frame path routes on it all the
+    // same: a PDU2 payload over 8 bytes with a specific destination is a TP.CM session to that
+    // address (SAE J1939-21 allows a PDU2 parameter group to be sent with the destination-
+    // specific transport protocol), not a BAM -- which J1939Message used to say it never was.
+    [Fact]
+    public async Task Send_LargePdu2Payload_ToASpecificDestination_UsesJ1939TpCmPath()
+    {
+        const uint pdu2Pgn = 0xFECAu; // PF 0xFE >= 240
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var spectator = Open(session, 2);
+
+        using var sender = J1939Node.Open(busA, new J1939NodeOptions(Name(1)));
+        using var receiver = J1939Node.Open(busB, new J1939NodeOptions(Name(2)));
+        await sender.ClaimAddressAsync(0x93).WithTimeout(ShortTimeout);
+        await receiver.ClaimAddressAsync(0x94).WithTimeout(ShortTimeout);
+
+        int rtsToReceiver = 0, bams = 0;
+        spectator.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 1) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != 0x93 || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            if (J1939Pgn.IsBamControlByte(e.CanFrame.Data.Span[0])) Interlocked.Increment(ref bams);
+            else if (fields.DestinationAddress == 0x94) Interlocked.Increment(ref rtsToReceiver);
+        };
+
+        var payload = new byte[20];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)(0x70 + i);
+        var recvTask = WaitForMessageAsync(receiver,
+            m => m.Pgn == pdu2Pgn && m.Payload.Length == 20 && m.SourceAddress == 0x93, ShortTimeout);
+
+        await sender.SendAsync(new J1939Message(pdu2Pgn, payload, destinationAddress: 0x94)).WithTimeout(ShortTimeout);
+
+        var received = await recvTask;
+        received.Payload.ToArray().Should().Equal(payload);
+        received.DestinationAddress.Should().Be(0x94);
+        Volatile.Read(ref rtsToReceiver).Should().BeGreaterThan(0, "the destination routes the session even for a PDU2 PGN");
+        Volatile.Read(ref bams).Should().Be(0);
+    }
+
     // ---------------------------------------------------------------------------------------
     // Bugbot 3600377721 regression: after a successful address claim the node MUST accept
     // directed TP.CM traffic to the claimed SA. Before the fix J1939NodeImpl kept its internal
