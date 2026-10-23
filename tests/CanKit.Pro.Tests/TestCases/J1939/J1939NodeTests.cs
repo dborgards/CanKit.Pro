@@ -2690,6 +2690,47 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "after losing 0x80 the node must retry with the next arbitrary-field candidate (J1939-81 §4.5)");
     }
 
+    // #355 (the previous review's M5): every test above sets EnableArbitraryAddressClaiming. Left
+    // null, the option defers to the NAME's Arbitrary Address Capable bit (J1939-81 §4.5.1), and
+    // a NAME carrying it moves on after a lost contest instead of going Cannot Claim. On a clock
+    // the test holds: the contest is put on the wire once the window is armed, so the window
+    // cannot close first.
+    [Fact]
+    public async Task A_Name_With_The_Arbitrary_Address_Capable_Bit_Scans_Without_The_Option()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var nodeName = new J1939Name(identityNumber: 0x0000BB, manufacturerCode: 0x100, ecuInstance: 0,
+            functionInstance: 0, function: 0x81, reserved: false, vehicleSystem: 0, vehicleSystemInstance: 0,
+            industryGroup: 0, arbitraryAddressCapable: true);
+        var backoff = TimeSpan.FromMilliseconds((nodeName.ToBytes().Sum(b => (int)b) & 0xFF) * 0.6);
+        var options = new J1939NodeOptions(nodeName) { ClaimAnnounceTimeout = announce };
+        options.EnableArbitraryAddressClaiming.Should().BeNull("the NAME bit is what is under test");
+        using var node = new J1939NodeImpl(service, options, ownsService: false, actor);
+        var moving = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == 0x81) moving.TrySetResult(true); };
+
+        var claim = node.ClaimAddressAsync(0x80);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        busB.Transmit(AddressClaim(sourceAddress: 0x80, Name(0x000001).ToBytes()));
+        await moving.Task.AsTaskWithTimeout(ShortTimeout);
+
+        if (backoff > TimeSpan.Zero)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+            await clock.AdvanceAsync(backoff);
+        }
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)0x81, "the NAME is arbitrary-address capable, so the lost contest moves it on");
+    }
+
     // ---------------------------------------------------------------------------------------
     // FR-J1939-004 (SRS verification "all addresses taken"): a peer that contests EVERY
     // candidate drives the arbitrary-address scan to exhaustion — the node must then signal
