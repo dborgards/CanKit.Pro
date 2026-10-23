@@ -602,7 +602,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
     // The channel refuses a request before transmitting it with an argument error -- an
     // empty or oversized PDU -- or because it is disposed; a cancellation or a transport fault
-    // comes after the frame may be out.
+    // comes after the frame may be out. A channel disposed in the middle of the send also
+    // throws ObjectDisposedException, the frame perhaps on the bus by then, and is counted as
+    // refused all the same: the window that is put back would hold up only a later request
+    // through that channel, and there is none (#354).
     private static bool RefusedBeforeTransmission(Exception ex)
         => ex is ArgumentException or InvalidOperationException or ObjectDisposedException;
 

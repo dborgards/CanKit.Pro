@@ -160,9 +160,12 @@ await uds.DownloadAsync(
 * `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
   *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
   answer a key for that seed with NRC 0x24.
-* Transport-layer failures (ISO-TP timeout, overflow, WFTmax, etc.) are re-thrown as their
-  original `IsoTpException` subclasses so callers can distinguish "ECU said no" from "wire
-  broken".
+* Transport-layer failures are re-thrown as they are, never wrapped: the ISO-TP protocol errors
+  (timeout, overflow, WFTmax, etc.) as their `IsoTpException` subclasses, so callers can tell
+  "ECU said no" from "wire broken". A channel disposed during a send surfaces
+  `ObjectDisposedException`, one disposed during a receive `InvalidOperationException`, and a
+  failed driver call the bus layer's own exception; those are not `IsoTpException`s
+  (`UdsException` says the same).
 
 ## Documentation
 
