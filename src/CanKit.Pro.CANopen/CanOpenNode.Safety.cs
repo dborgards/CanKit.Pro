@@ -740,7 +740,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         {
             cancellationToken.ThrowIfCancellationRequested();
             var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-            var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var confirmation = await HandToDriver(_service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)).ConfigureAwait(false);
             return confirmation.Confirmed ? null : new CanOpenTransportException(
                 $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {confirmation.FailureReason}.");
         }
