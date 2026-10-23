@@ -128,12 +128,23 @@ internal static class FlyingMasterRig
         await QuiesceAsync(left, right);
     }
 
-    /// <summary>Two actor iterations, then a real wait for <c>SendControlFrame</c>'s send task,
-    /// then two more so a peer handles that frame before the clock moves again.</summary>
+    /// <summary>Two actor iterations, then until every send those timers started has been handed
+    /// to the bus, then two more so a peer handles that frame before the clock moves again.</summary>
+    /// <remarks>
+    /// The middle step used to be only a 40 ms sleep for <c>SendControlFrame</c>'s send task to
+    /// reach the bus. A thread-pool start later than that let the clock move on with the frame
+    /// still unsent (#362); the witnessed nodes now say when no reserved send is short of the
+    /// driver. The sleep stays for what no witness covers: the safety boot-up tests answer the
+    /// master's SDO reads from a slave on the wall clock, and their settle loops count on each
+    /// step leaving that slave real time. Removing it would trade this false pass for their
+    /// false red.
+    /// </remarks>
     internal static async Task QuiesceAsync(ActorWitness left, ActorWitness? right)
     {
         await left.SettleAsync();
         if (right is not null) await right.SettleAsync();
+        await left.SendsHandedOverAsync();
+        if (right is not null) await right.SendsHandedOverAsync();
         await Task.Delay(40);
         await left.SettleAsync();
         if (right is not null) await right.SettleAsync();
@@ -181,10 +192,12 @@ internal static class FlyingMasterRig
     {
         private readonly ICanBus _peerBus;
         private readonly byte _witnessPeer;
+        private readonly CanOpenNode _node;
         private readonly SemaphoreSlim _seen = new(0, int.MaxValue);
 
-        public ActorWitness(ICanOpenNode node, ICanBus peerBus, byte witnessPeer)
+        public ActorWitness(CanOpenNode node, ICanBus peerBus, byte witnessPeer)
         {
+            _node = node;
             _peerBus = peerBus;
             _witnessPeer = witnessPeer;
             node.HeartbeatReceived += (_, e) =>
@@ -197,6 +210,19 @@ internal static class FlyingMasterRig
         {
             await PokeAsync();
             await PokeAsync();
+        }
+
+        /// <summary>Until no send of the node has passed its transmit gate without reaching the bus.
+        /// A send a test double holds has reached it. The budget bounds a thread-pool hand-off.</summary>
+        public async Task SendsHandedOverAsync()
+        {
+            var deadline = DateTime.UtcNow + ShortTimeout;
+            while (_node.HasTransmitsAwaitingDriverForTests)
+            {
+                if (DateTime.UtcNow > deadline)
+                    throw new TimeoutException($"A send of the node did not reach the bus within {ShortTimeout}.");
+                await Task.Delay(1);
+            }
         }
 
         private async Task PokeAsync()
