@@ -50,7 +50,8 @@ def local_name(node) -> str:
 
 def declared_dependencies(package: Path) -> dict:
     """Dependency id (lower case) -> the version floors the .nuspec declares for it, one per
-    target-framework group that names it. A dependency with no lower bound maps to an empty list."""
+    target-framework group that names it, each as (version, exclusive). A dependency with no
+    lower bound maps to an empty list."""
     with zipfile.ZipFile(package) as archive:
         name = next(n for n in archive.namelist() if n.endswith('.nuspec') and '/' not in n)
         nuspec = ElementTree.fromstring(archive.read(name))
@@ -59,19 +60,20 @@ def declared_dependencies(package: Path) -> dict:
         if local_name(node) == 'dependency' and node.get('id'):
             floors = declared.setdefault(node.get('id').lower(), [])
             floor = version_floor(node.get('version', ''))
-            if floor:
+            if floor[0]:
                 floors.append(floor)
     return declared
 
 
-def version_floor(range_text: str) -> str:
-    """The lower bound of a NuGet version range: '1.2.3' and '[1.2.3, )' and '[1.2.3]' and
-    '(1.2.3, 2.0)' give '1.2.3'; '(, 2.0)' and '' give ''. An exclusive lower bound is read as
-    inclusive, which can only make the check below more lenient, never wrongly strict."""
+def version_floor(range_text: str) -> tuple:
+    """The lower bound of a NuGet version range as (version, exclusive): '1.2.3', '[1.2.3, )' and
+    '[1.2.3]' give ('1.2.3', False), '(1.2.3, 2.0)' gives ('1.2.3', True), and '(, 2.0)' and ''
+    have no lower bound: ('', False)."""
     text = range_text.strip()
-    if text[:1] in '[(':
-        return text[1:].split(',')[0].strip(' ]),')
-    return text
+    if text[:1] in ('[', '('):
+        floor = text[1:].split(',')[0].strip(' ]),')
+        return floor, bool(floor) and text[0] == '('
+    return text, False
 
 
 def version_key(version: str) -> tuple:
@@ -100,10 +102,12 @@ def below_floor(declared: dict, components: list) -> list:
     for dependency, floors in sorted(declared.items()):
         if not floors or dependency not in listed:
             continue
-        floor = max(floors, key=version_key)
+        # The strongest floor: the highest version, and at the same version an exclusive bound.
+        floor, exclusive = max(floors, key=lambda f: (version_key(f[0]), f[1]))
         highest = max(listed[dependency], key=version_key)
-        if version_key(highest) < version_key(floor):
-            problems.append(f'the .nuspec requires {dependency} >= {floor}, the SBOM lists {highest}')
+        if version_key(highest) < version_key(floor) or (exclusive and version_key(highest) == version_key(floor)):
+            problems.append(f'the .nuspec requires {dependency} {">" if exclusive else ">="} {floor}, '
+                            f'the SBOM lists {highest}')
     return problems
 
 
