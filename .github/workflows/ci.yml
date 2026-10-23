@@ -12,7 +12,10 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only a superseded pull-request run is worth cancelling. On `main` the group is constant, so
+  # cancelling there would leave the first of two quick merges with a CI run that never finished,
+  # and `git log --first-parent main` would land on it when asking which commit went red.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
