@@ -175,7 +175,10 @@ namespace CanKit.Pro.RawCan
         /// already timed out or been cancelled cannot be told from the next identical send's and
         /// is matched to that send (#349);
         /// otherwise it is a documented approximation based on driver acceptance
-        /// (<see cref="TxConfirmation.IsApproximated"/>, FR-RAW-032). Never hangs: timeout,
+        /// (<see cref="TxConfirmation.IsApproximated"/>, FR-RAW-032) -- that is, on the bus's
+        /// transmit returning a positive count, which means what that bus makes it mean: on a bus
+        /// wrapped in CanKit's <c>QueuedCanBus</c> it means queued in process, not taken by a
+        /// driver. Never hangs: timeout,
         /// bus-off, and outright rejection all resolve the returned task within bounded time
         /// (FR-RAW-033) — see <see cref="TxConfirmation"/> for exactly how.
         /// <para>

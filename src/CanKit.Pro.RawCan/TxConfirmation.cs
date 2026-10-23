@@ -62,6 +62,12 @@ namespace CanKit.Pro.RawCan
         /// hardware echo (FR-RAW-032) — i.e. "best-effort acknowledgment", not a guarantee the
         /// frame reached the wire. Always false when <see cref="Confirmed"/> is false.
         /// </summary>
+        /// <remarks>
+        /// "Driver acceptance" is the bus's transmit returning a positive count, and means no more
+        /// than that bus makes it mean. CanKit's <c>QueuedCanBus</c> returns the number of frames
+        /// it queued in process -- its own documentation says so -- so behind it an approximated
+        /// confirmation says the frame was queued, not that a driver took it.
+        /// </remarks>
         public bool IsApproximated { get; init; }
 
         /// <summary>
