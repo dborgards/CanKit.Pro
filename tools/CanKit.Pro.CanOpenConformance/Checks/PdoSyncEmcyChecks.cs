@@ -1104,12 +1104,12 @@ internal static class PdoSyncEmcyChecks
                     ? id > CanOpenCobId.EmcyBase && id < CanOpenCobId.EmcyBase + 128
                     : id == cobId));
 
-            var decoded = new List<string>();
-            // The payloads themselves, reconstructed from the decoded message, so the comparison
-            // below can be between *sets* rather than counts. Byte 0..1 are the error code
-            // little-endian, byte 2 the error register and bytes 3..7 the manufacturer field
-            // (CiA 301 §7.2.7.1), which is exactly what the frame carried.
-            var decodedPayloads = new HashSet<string>(StringComparer.Ordinal);
+            // The decoded events with the instant each was raised, so the comparison below can
+            // share a start boundary with the tap. The payloads are reconstructed from the
+            // message, so that comparison can be between *sets* rather than counts: byte 0..1 are
+            // the error code little-endian, byte 2 the error register and bytes 3..7 the
+            // manufacturer field (CiA 301 §7.2.7.1), which is exactly what the frame carried.
+            var events = new List<(DateTime At, string Text, string Payload)>();
             void OnEmcy(object? sender, EmcyReceivedEventArgs e)
             {
                 var m = e.Message;
@@ -1126,19 +1126,36 @@ internal static class PdoSyncEmcyChecks
                 payload[2] = m.ErrorRegister;
                 m.ManufacturerSpecific.CopyTo(payload, 3);
 
-                lock (decoded)
-                {
-                    decoded.Add($"node {m.ProducerNodeId}: error 0x{m.ErrorCode:X4}, register 0x{m.ErrorRegister:X2}, "
-                        + $"manufacturer {IdentityAndSdoChecks.Hex(m.ManufacturerSpecific)}");
-                    decodedPayloads.Add(Convert.ToHexString(payload));
-                }
+                var text = $"node {m.ProducerNodeId}: error 0x{m.ErrorCode:X4}, register 0x{m.ErrorRegister:X2}, "
+                    + $"manufacturer {IdentityAndSdoChecks.Hex(m.ManufacturerSpecific)}";
+                lock (events) events.Add((e.Timestamp, text, Convert.ToHexString(payload)));
             }
 
+            // Attached before the tap exists, and the window opened after a drain, so that the
+            // two observations start together. The handler used to go on *after* the tap, so an
+            // emergency arriving in between was in the tap's list while the node had delivered
+            // its event to no subscriber at all — and the subset rule below then reported a
+            // decoder defect against a stack that had decoded everything it was asked to. The
+            // drain closes the other side of the same gap: an event for a frame that arrived
+            // before the tap is raised within it, so the window's lower bound excludes it and a
+            // payload the target repeats cannot be cleared by a decode from before the window.
+            // Found in review of #388, by the same sweep that closed HBT-03's leading edge.
             session.Client.EmcyReceived += OnEmcy;
             List<TappedFrame> frames;
             int polls;
+            List<string> decoded;
+            HashSet<string> decodedPayloads;
             try
             {
+                await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
+                var windowFromMs = tap.ElapsedMs;
+                var windowFromUtc = DateTime.UtcNow;
+
+                List<(DateTime At, string Text, string Payload)> InWindow()
+                {
+                    lock (events) return events.Where(d => d.At >= windowFromUtc).ToList();
+                }
+
                 var untilMs = await tap.ListenAsync(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
 
                 // One snapshot, taken at the window's edge, used for the drain *and* for the
@@ -1148,7 +1165,7 @@ internal static class PdoSyncEmcyChecks
                 // without ever having been in the set the drain waited for, and its decode could
                 // still be queued when the handler came off. A false stack fault, from the fix
                 // for a false stack fault. Both reviewers found it. Found in review of #388.
-                var window = tap.Through(untilMs);
+                var window = tap.Through(untilMs).Where(f => f.AtMs > windowFromMs).ToList();
                 frames = Transmitted(window);
                 polls = window.Count - frames.Count;
 
@@ -1170,14 +1187,13 @@ internal static class PdoSyncEmcyChecks
                 var grace = System.Diagnostics.Stopwatch.StartNew();
                 while (grace.Elapsed.TotalMilliseconds < SettleMs)
                 {
-                    lock (decoded)
-                    {
-                        if (pending.IsSubsetOf(decodedPayloads)) break;
-                    }
-
+                    if (pending.IsSubsetOf(InWindow().Select(d => d.Payload).ToHashSet(StringComparer.Ordinal))) break;
                     await Task.Delay(5, cancellationToken).ConfigureAwait(false);
                 }
 
+                var inWindow = InWindow();
+                decoded = inWindow.Select(d => d.Text).ToList();
+                decodedPayloads = inWindow.Select(d => d.Payload).ToHashSet(StringComparer.Ordinal);
             }
             finally
             {
@@ -1193,7 +1209,12 @@ internal static class PdoSyncEmcyChecks
             {
                 ["window"] = $"{session.Options.ListenMs} ms",
                 ["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture),
-                ["decoded by the stack"] = decoded.Count.ToString(CultureInfo.InvariantCulture),
+                // What it is, now that the lower bound is the window's: events raised from the
+                // window's start onward, which includes a decode that landed during the grace —
+                // for a frame of the window, or for one that arrived just after it. It can
+                // therefore exceed the frame count, and the payload rows below are what the
+                // verdict actually rests on.
+                ["EmcyReceived events since the window opened"] = decoded.Count.ToString(CultureInfo.InvariantCulture),
             };
             if (polls > 0)
             {
@@ -1235,8 +1256,7 @@ internal static class PdoSyncEmcyChecks
             // may legitimately coalesce identical queued emergencies, and failing that would be a
             // fault the device never caused. Found in review of #388.
             var rawPayloads = frames.Select(f => Convert.ToHexString(f.Data)).ToHashSet(StringComparer.Ordinal);
-            HashSet<string> seen;
-            lock (decoded) seen = new HashSet<string>(decodedPayloads, StringComparer.Ordinal);
+            var seen = decodedPayloads;
             var missed = rawPayloads.Except(seen, StringComparer.Ordinal).ToList();
 
             measurements["distinct payloads"] = rawPayloads.Count.ToString(CultureInfo.InvariantCulture);
@@ -1244,7 +1264,9 @@ internal static class PdoSyncEmcyChecks
                 .ToString(CultureInfo.InvariantCulture);
 
             if (missed.Count == 0)
-                return Outcome.Pass($"{decoded.Count} emergency object(s) received, every payload decoded.", measurements);
+                return Outcome.Pass(
+                    $"{frames.Count} emergency object(s) on the bus in this window, every payload decoded.",
+                    measurements);
 
             // Reached only after the grace above has fully elapsed, because the loop leaves early
             // exactly when nothing is missing. So this is not the decoder being slower than the

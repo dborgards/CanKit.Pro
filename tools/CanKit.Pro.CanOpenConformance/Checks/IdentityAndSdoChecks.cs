@@ -244,7 +244,17 @@ internal static class IdentityAndSdoChecks
             // Sub-index 0 and the four reserved bytes stay zero.
 
             var responseId = CanOpenCobId.SdoTx(session.Target);
+            var requestId = CanOpenCobId.SdoRx(session.Target);
             using var tap = new BusTap(session.Service, (id, extended) => id == responseId && !extended);
+
+            // The other half of this node's SDO channel, watched but not judged. Every rule below
+            // reads 0x580+node-id as "the answer to the question this check asked" — and a second
+            // client asking its own question during the window gets its answer on the same
+            // COB-ID, which the exactly-one-response rule would then charge to the device as a
+            // protocol violation. This tool's own request is not delivered back to it (echoes are
+            // filtered and no adapter loops a channel's transmissions to itself), so anything on
+            // this identifier is someone else's traffic. Found in review of #388.
+            using var requests = new BusTap(session.Service, (id, extended) => id == requestId && !extended);
 
             var accepted = session.Bus.Transmit(CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), request));
             if (accepted <= 0)
@@ -269,6 +279,29 @@ internal static class IdentityAndSdoChecks
             await Task.Delay(SdoReplySettleMs, cancellationToken).ConfigureAwait(false);
 
             var responses = tap.Frames.Where(f => !f.IsRemote).ToList();
+
+            // Before any verdict on the set: a window another client shared cannot be read as one
+            // transaction, and this check does not get to decide whose frame is whose. Reported
+            // as the run's own condition rather than the device's — an SDO channel is a
+            // point-to-point relationship between one client and one server, so two clients on it
+            // is a property of the bus this run was pointed at. Found in review of #388.
+            var foreign = requests.Frames.Where(f => !f.IsRemote).ToList();
+            if (foreign.Count > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{foreign.Count} SDO request frame(s) from another client reached 0x{requestId:X3} while this "
+                    + $"check was waiting for its own answer on 0x{responseId:X3}, so the {responses.Count} frame(s) "
+                    + "that came back cannot be read as the answer to one question. CiA 301 §7.2.4 makes an SDO "
+                    + "channel a relationship between one client and one server; nothing is concluded about the "
+                    + "device until it has this one to itself.",
+                    Attribution.Setup,
+                    new Dictionary<string, string>
+                    {
+                        ["request"] = $"0x{requestId:X3} {Hex(request)}",
+                        ["another client's requests"] = string.Join(" / ", foreign.Take(3).Select(f => Hex(f.Data))),
+                        ["frames on the response COB-ID"] = string.Join(" / ", responses.Take(3).Select(f => Hex(f.Data))),
+                    });
+            }
 
             // Exactly eight, not at least eight. An SDO frame is always 8 bytes (CiA 301 §7.2.4),
             // and on a CAN FD run a longer frame is a protocol violation — which this selection
