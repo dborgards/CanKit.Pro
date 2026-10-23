@@ -130,6 +130,11 @@ internal sealed class BusTap : IDisposable
     /// puts in front of it — not an allowance for the device being late.</summary>
     private const int DrainMs = 50;
 
+    /// <summary>The drain, for a caller that has to allow for the same lag on another clock — the
+    /// decoded-event side of HBT-03, whose timestamps are actor-loop processing instants and so
+    /// always later than arrival.</summary>
+    public const int DrainAllowanceMs = DrainMs;
+
     /// <summary>
     /// Waits until <paramref name="predicate"/> holds for the frames collected, or the deadline
     /// passes. Returns whether it held — a check reports the timeout itself, because "the device

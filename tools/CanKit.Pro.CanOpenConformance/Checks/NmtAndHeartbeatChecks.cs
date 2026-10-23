@@ -362,7 +362,14 @@ internal static class NmtAndHeartbeatChecks
                 // the wall clock from the tap's creation to the end of the window for the decoded
                 // events. Two clocks, one interval — the bounds are what has to match, not the
                 // units.
-                var windowUntilUtc = windowFromUtc.AddMilliseconds(wireUntilMs);
+                // The decoded side's end is the window plus the drain, not the window. The event
+                // carries the instant the frame was *processed on the actor loop*, which is always
+                // later than its arrival — so bounding both sides at the same instant
+                // systematically under-counts the decoded side at the window's edge and reports a
+                // loss that did not happen. A false [tool] verdict, from the fix that aligned the
+                // two counts one commit earlier. The drain exists precisely so an in-window
+                // frame's event has landed by then. Found in review of #388.
+                var windowUntilUtc = windowFromUtc.AddMilliseconds(wireUntilMs + BusTap.DrainAllowanceMs);
                 var onTheWire = Heartbeats(wire.Through(wireUntilMs)).Count;
                 int received;
                 lock (beats) received = beats.Count(t => t >= windowFromUtc && t <= windowUntilUtc);
@@ -857,7 +864,13 @@ internal static class NmtAndHeartbeatChecks
                     var reached = await tap.WaitForAsync(
                         frames => Heartbeats(frames) is { Count: > 0 } beats
                                   && beats[^1].Data[0] == (byte)expected,
-                        Math.Max(1000, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
+                        // Sized from the device's own period: a window shorter than one period
+                        // confirms from a phase, and NMT-01 then records a state change the device
+                        // did make as one it did not. The same budget PDO-03's and SYN-02's
+                        // confirmations use. Found in review of #388.
+                        await PdoSyncEmcyChecks.NmtConfirmationBudgetMsAsync(session, cancellationToken)
+                            .ConfigureAwait(false),
+                        cancellationToken).ConfigureAwait(false);
                     var actual = LatestState(tap);
                     measurements[$"after {command}"] = actual is { } s ? DescribeState(s) : "(no heartbeat)";
                     if (!reached)
@@ -954,6 +967,11 @@ internal static class NmtAndHeartbeatChecks
             if (IsDefinedRunState(frames[i].Data[0])) return frames[i].Data[0];
         return null;
     }
+
+    /// <summary>The producer heartbeat time for a confirmation budget; null when it cannot be
+    /// read. Exposed so the PDO and SYNC checks size their own confirmations the same way.</summary>
+    internal static Task<ushort?> ProducerHeartbeatTimeForConfirmationAsync(Session session, CancellationToken cancellationToken)
+        => ProducerHeartbeatTimeAsync(session, cancellationToken);
 
     /// <summary>
     /// 1017h, the producer heartbeat time in milliseconds; null when it cannot be read. HBT-02

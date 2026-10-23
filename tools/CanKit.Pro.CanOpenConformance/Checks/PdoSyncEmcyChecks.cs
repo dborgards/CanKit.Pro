@@ -1348,9 +1348,17 @@ internal static class PdoSyncEmcyChecks
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
         using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
+
+        // Sized from the device's own period, not from --heartbeat-ms alone. The state probe that
+        // let this check run can catch a beat by chance in a window shorter than one period, and
+        // this confirmation then waited that same short window — so a device that *did* restore
+        // was reported as having failed to, with a warning that it may have been left stopped.
+        // The worst kind of false verdict: it tells the operator to go and look at a device that
+        // is fine, about a state the run itself changed. Found in review of #388.
         await probe.WaitForAsync(
             frames => frames.LastOrDefault(f => f.Data.Length == 1) is { Data.Length: 1 } last && last.Data[0] == expected,
-            Math.Max(1000, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
+            await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
 
         var frames = probe.Frames;
         for (var i = frames.Count - 1; i >= 0; i--)
@@ -1366,6 +1374,20 @@ internal static class PdoSyncEmcyChecks
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// How long a confirmation may wait for the next heartbeat: two of the device's own periods
+    /// plus the margin, from whichever of 1017h and a previously measured period is larger, and
+    /// never less than the operator's window. A confirmation that waits less than one period
+    /// concludes from a phase rather than from the device.
+    /// </summary>
+    internal static async Task<int> NmtConfirmationBudgetMsAsync(Session session, CancellationToken cancellationToken)
+    {
+        var declared = await NmtAndHeartbeatChecks.ProducerHeartbeatTimeForConfirmationAsync(session, cancellationToken)
+            .ConfigureAwait(false);
+        var fromPeriod = declared is { } ms && ms > 0 ? ms * 2 + 200 : 0;
+        return Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), fromPeriod);
     }
 
     /// <summary>
@@ -1613,6 +1635,30 @@ internal static class PdoSyncEmcyChecks
                 MappingComplete: mappingComplete,
                 MultiplexedMode: multiplexed,
                 MappedEntries: entries));
+        }
+
+        // PDOs past the limit, named rather than silently outside the sweep. CiA 301 allows 512
+        // of each and this reads the first four, which is a defensible scope for a tool — but a
+        // device with a TPDO5 then had its COB-ID undiscovered, so PDO-03 could report that
+        // nothing was transmitted in Stopped while that TPDO kept transmitting, and the report's
+        // coverage section did not list it. A tool whose own report overstates what it covered is
+        // the failure this report is built to avoid. The bound description is the evidence: it
+        // declares which PDOs the device has. Found in review of #388 (P1).
+        if (session.TargetDescription is { } description)
+        {
+            var beyond = description.Objects.Objects
+                .Select(o => o.Key)
+                .Where(i => i > commBase + PdoCount - 1 && i < commBase + 512)
+                .OrderBy(i => i)
+                .ToList();
+            if (beyond.Count > 0)
+            {
+                notAddressed.Add($"the bound description declares {beyond.Count} further communication record(s) — "
+                    + string.Join(", ", beyond.Take(8).Select(i => $"0x{i:X4}"))
+                    + (beyond.Count > 8 ? ", …" : string.Empty)
+                    + $" — and this runner reads the first {PdoCount} of each direction, so they were neither read "
+                    + "nor watched");
+            }
         }
 
         return new PdoSweep(descriptors, blocked, absent, problems, notAddressed);
@@ -1882,6 +1928,20 @@ internal static class PdoSyncEmcyChecks
 
         // A multiplexed PDO is neither the operator's problem nor the device's. The other
         // descriptors are still measured; only this one is set aside.
+        // A PDO the sweep never reached makes the verdict incomplete, whatever the ones it did
+        // reach say: "no TPDO was transmitted in Stopped" is a claim about every TPDO. Reported
+        // as setup because the limit is the run's, not the device's. Found in review of #388.
+        var beyondLimit = sweep.NotAddressed
+            .Where(n => n.Contains("further communication record", StringComparison.Ordinal))
+            .ToList();
+        if (beyondLimit.Count > 0)
+        {
+            return Outcome.NeedsSetup(
+                $"{sweep.Descriptors.Count} {kind}(s) were read and found sound, but " + beyondLimit[0]
+                + ". Nothing is concluded about the ones that were not: a verdict on \"every PDO\" cannot be drawn "
+                + "from the first four.", measurements);
+        }
+
         if (sweep.NotAddressed.Count > 0 && sweep.Descriptors.All(d => d.MultiplexedMode || !d.Valid))
         {
             return Outcome.NotApplicable(
