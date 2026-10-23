@@ -1285,50 +1285,61 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex and Bugbot on #153: an arbitrary-address node unseated from a claimed address loses
     // the address the instant the winning claim is heard; only its next claim waits the
-    // backoff. Measured from the winner's claim frame to the node's Claiming transition: at
-    // once, against a NAME whose backoff is 150 ms -- the reading a node that invalidated only
-    // when the delayed round ran would give -- with 75 ms to either.
+    // backoff.
+    //
+    // #362: this used to be measured on the wall clock, from the winner's claim frame to the
+    // node's Claiming transition, against 75 ms -- and that span is a reader, an actor post and
+    // an event, all of which a loaded host stretches. The node now runs on a clock the test
+    // holds, and the clock does not move between the winning claim and the checks: a node that
+    // invalidated only when the delayed round ran would still hold the address, because on this
+    // clock the 150 ms backoff never elapses. What it must have done instead is lose the address
+    // and arm exactly that backoff for the reclaim.
     [Fact]
     public async Task An_Unseated_Node_Loses_The_Address_At_Once_And_Waits_Only_To_Reclaim()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
         const byte contended = 0x40;
 
         var ownerName = Name(0x000158); // backoff 150 ms
-        ((ownerName.ToBytes().Sum(b => (int)b) & 0xFF) * 0.6).Should().Be(150);
-        using var owner = J1939Node.Open(busA, new J1939NodeOptions(ownerName)
+        ((ownerName.ToBytes().Sum(b => (int)b) & 0xFF) * 0.6).Should().Be(backoff.TotalMilliseconds);
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(ownerName)
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            ClaimAnnounceTimeout = announce,
             EnableArbitraryAddressClaiming = true,
-        });
+        }, ownsService: false, actor);
         using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010))
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            ClaimAnnounceTimeout = announce,
         });
-        await owner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
 
-        long winnerClaimAt = 0;
+        var ownerClaim = owner.ClaimAddressAsync(contended);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await ownerClaim.WithTimeout(ShortTimeout);
+        owner.Address.Should().Be(contended);
+
         // What the handler reads is read in the actor's step that made the transition; read
-        // after the await, the address could be the re-claimed one already on a host that
-        // schedules the continuation late (macOS CI on #153).
-        var claiming = new TaskCompletionSource<(long At, byte? Address)>(TaskCreationOptions.RunContinuationsAsynchronously);
-        busA.FrameObserved += (_, e) =>
-        {
-            if (!e.CanFrame.IsExtendedFrame) return;
-            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended && Interlocked.Read(ref winnerClaimAt) == 0 && !e.IsEcho)
-                Interlocked.Exchange(ref winnerClaimAt, Stopwatch.GetTimestamp());
-        };
-        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult((Stopwatch.GetTimestamp(), owner.Address)); };
+        // after the await, the address could be a later one (macOS CI on #153).
+        var claiming = new TaskCompletionSource<byte?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult(owner.Address); };
+        var lostAt = clock.Elapsed;
 
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        var (claimingAt, addressThen) = await claiming.Task.AsTaskWithTimeout(ShortTimeout);
-        addressThen.Should().BeNull("the address is the winner's from the instant its claim was heard");
-        Interlocked.Read(ref winnerClaimAt).Should().NotBe(0);
-        var reaction = TimeSpan.FromSeconds((claimingAt - Interlocked.Read(ref winnerClaimAt)) / (double)Stopwatch.Frequency);
-        reaction.Should().BeLessThan(TimeSpan.FromMilliseconds(75), "the invalidation does not wait the backoff");
+
+        // The reclaim waits the backoff: once that timer is armed, the loss has been handled.
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        clock.Elapsed.Should().Be(lostAt, "nothing in this test moves the clock after the winning claim");
+        claiming.Task.IsCompleted.Should().BeTrue(
+            "the node is Claiming its next candidate from the instant the winning claim was heard, not after the backoff");
+        (await claiming.Task).Should().BeNull("the address is the winner's from the instant its claim was heard");
+        owner.Address.Should().BeNull();
     }
 
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
@@ -2082,9 +2093,17 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // that send. Claim B is allowed while A's Cannot Claim is still inside SendConfirmedAsync,
     // and B can lose — and park its own Cannot Claim — before A's send returns. Releasing
     // A completes A only; B stays incomplete until its own send is released.
+    //
+    // #362: the node's 80 ms announce window used to run on the wall clock, and B loses only
+    // when the winner's defence reaches it. A host that delayed that defence past the window
+    // let B claim the address on its own timer -- and then lose it to the defence, which sends
+    // a second Cannot Claim all the same -- so B was complete where the test says it waits. On
+    // a clock the test holds and never moves, the window cannot close: every outcome here is
+    // driven by frames and by the releases, which is what the test is about.
     [Fact]
     public async Task A_Second_Loss_During_The_First_Cannot_Claim_Handoff_Faults_Each_Claim_On_Its_Own_Send()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
@@ -2094,7 +2113,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
         await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
-        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 0
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, // backoff 0
+            ownsService: false, clock.NewActor());
 
         int cannotClaims = 0;
         busC.FrameObserved += (_, e) =>
@@ -2510,17 +2530,27 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // candidate drives the arbitrary-address scan to exhaustion — the node must then signal
     // Cannot-Claim (SA=0xFE) exactly as if no fallback existed.
     // ---------------------------------------------------------------------------------------
+    //
+    // #362: each of the scan's rounds is lost only when the fake peer's contest reaches the
+    // node, and on the wall clock the node's 80 ms announce window ran meanwhile -- a host
+    // stall of that length in any one of the rounds let the node claim the candidate instead.
+    // The node now runs on a clock the test holds and never moves, so no window can close and
+    // the scan is driven by the contests alone, as the subject requires. The run takes tens of
+    // milliseconds; 15 s bounds a hang, not the scan.
     [Fact]
     public async Task AddressClaim_ArbitraryFallback_ExhaustsField_ThenCannotClaim()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator for the final Cannot-Claim broadcast
+        using var service = new CanBusService(busA);
 
         // A NAME whose §4.4.4.3 backoff is zero (the bytes sum to 256, low byte 0): the scan
         // pays the backoff before every one of its 240 rounds, and this test's subject is the
-        // exhaustion, not the delay -- with a 56 ms backoff it took 13 s more (#153).
+        // exhaustion, not the delay -- with a 56 ms backoff it took 13 s more (#153). On the
+        // frozen clock a non-zero backoff would never elapse at all.
         var nodeName = Name(0x00005F);
         var peerName = Name(0x000001);
         var opts = new J1939NodeOptions(nodeName)
@@ -2528,7 +2558,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
             EnableArbitraryAddressClaiming = true,
         };
-        using var node = J1939Node.Open(busA, opts);
+        using var node = new J1939NodeImpl(service, opts, ownsService: false, clock.NewActor());
 
         var cannotClaimSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         busC.FrameObserved += (_, e) =>
@@ -3186,6 +3216,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(2)));
 
         int sent = 0;
+        using var sentSignal = new SemaphoreSlim(0);
         using var peerCts = new CancellationTokenSource();
         var peerTask = Task.Run(async () =>
         {
@@ -3196,6 +3227,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                     await peerTp.SendBamAsync(backgroundPgn, Datagram(Volatile.Read(ref sent)), peerCts.Token)
                         .ConfigureAwait(false);
                     Interlocked.Increment(ref sent);
+                    sentSignal.Release();
                 }
             }
             catch (OperationCanceledException) { /* expected on cancel */ }
@@ -3205,8 +3237,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // Cycle re-claims to a new SA every iteration. Each ClaimAddressAsync triggers two
         // RebindTransportOnLoop calls (unbind to 0xFE, then rebind to the new SA) — that is
         // where the old/new channel overlap window lived pre-fix.
+        //
+        // Each cycle first waits until the background stream has completed at least one BAM per
+        // claim so far, so the stream is demonstrably running across the rebinds however slowly
+        // the host paces it. This replaced a floor on the number of BAMs sent in the time the
+        // eight claims happened to take (`finalSent > 5`), which a host with coarse timers or
+        // under load could miss without anything being wrong with the node (#362): how much
+        // traffic a fixed span of wall time produces is the runner's property, not the node's.
         for (int i = 0; i < claims; i++)
         {
+            while (Volatile.Read(ref sent) <= i)
+            {
+                if (!await sentSignal.WaitAsync(ShortTimeout))
+                    throw new TimeoutException($"The background stream completed only {Volatile.Read(ref sent)} BAM(s) before claim {i}.");
+            }
+
             byte sa = (byte)(0x30 + i);
             await node.ClaimAddressAsync(sa).WithTimeout(ShortTimeout);
             node.ClaimState.Should().Be(J1939ClaimState.Claimed);
@@ -3237,8 +3282,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         // Sanity: the background stream exists to put a BAM in flight across the rebinds, so
         // the uniqueness assertion below is only meaningful if it actually produced traffic.
-        // The slowest configuration measured above still managed 8, and Windows CI 29.
-        finalSent.Should().BeGreaterThan(5,
+        // The loop above waited for it, one BAM per claim; this states the outcome.
+        finalSent.Should().BeGreaterThanOrEqualTo(claims,
             "the background stream must generate BAM traffic across the rebind windows");
 
         // The actual invariant. Before the fix, the fire-and-forget Dispose of the previous
