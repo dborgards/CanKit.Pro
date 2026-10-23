@@ -843,7 +843,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     // through AddressClaimChanged like any claim's, and a failure — the field
                     // exhausted, a TX fault — is reported as a background exception.
                     var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    _ = tcs.Task.ContinueWith(t => RaiseBackgroundException(t.Exception!.GetBaseException()),
+                    UnattendedClaimReported = tcs.Task.ContinueWith(t => ReportUnattendedClaimFailure(t.Exception!.GetBaseException()),
                         CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
                     // The lost address is the peer's from this instant: invalidated now, so no
                     // application traffic goes out under it during the backoff; only the next
@@ -870,6 +870,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 SendAddressClaimFrame(sourceAddress: (byte)_addressStore);
             }
         }
+    }
+
+    /// <summary>
+    /// A seam for tests: the report of the latest automatic round's failure, which runs on the
+    /// thread pool once that round faults (and is cancelled, as a continuation, when it does not).
+    /// Awaiting it is how a test knows the report has been made, or deliberately not made.
+    /// </summary>
+    internal Task? UnattendedClaimReported { get; private set; }
+
+    // A disposal ends an automatic round as it ends any claim, with ObjectDisposedException, and
+    // that is not a failure of the round: the application disposed the node, and nothing about
+    // the bus went wrong (#355, J-3). A cancellation never faults this task -- nothing holds a
+    // token for it -- so it needs no exclusion.
+    private void ReportUnattendedClaimFailure(Exception error)
+    {
+        if (error is ObjectDisposedException) return;
+        RaiseBackgroundException(error);
     }
 
     // Set when an Address Claimed carrying our NAME arrives for an SA we are not claiming or

@@ -1342,6 +1342,47 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         owner.Address.Should().BeNull();
     }
 
+    // #355 (J-3): an arbitrary-address node unseated by a conforming peer moves on its own, and
+    // a failure of that unattended round is reported through BackgroundExceptionOccurred. A
+    // `using` scope ending during the move is not such a failure, but the disposal faults every
+    // claim in hand with ObjectDisposedException, and the automatic round's report forwarded it
+    // -- the outcome A_Cannot_Claim_Handoff_That_Arrives_After_Dispose_Is_Dropped rules out.
+    // Held in the backoff on a clock the test owns; the report runs on the pool, so the test
+    // waits for it instead of for a quiet interval.
+    [Fact]
+    public async Task Disposing_During_An_Automatic_Move_Reports_No_Background_Failure()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x40;
+
+        var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        await ClaimOnClockAsync(owner, clock, actor, contended, announce);
+
+        var reported = new List<Exception>();
+        owner.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout); // the automatic round is in hand
+        var report = owner.UnattendedClaimReported;
+        report.Should().NotBeNull();
+
+        owner.Dispose();
+
+        await report!.WithTimeout(ShortTimeout); // ran: the round did fault, with the disposal
+        lock (reported) reported.Should().BeEmpty("disposing the node is not a failure of the move it interrupted");
+    }
+
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
     // the in-flight guard -- the claim in hand stays registered through the backoff -- and the
     // re-claim completes for its caller.
