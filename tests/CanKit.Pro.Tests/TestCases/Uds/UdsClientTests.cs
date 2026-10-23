@@ -3090,6 +3090,23 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         client.Dispose(); // a client with no keep-alive of the refused one disposes as usual
     }
 
+    // #354 (U-8): without a period the keep-alive uses the options' TesterPresentPeriod, which
+    // the constructor accepts up to a timer's reach (about 49 days) and the keep-alive can wait
+    // only up to int.MaxValue milliseconds. The refusal says that the value is the option's,
+    // not an argument that was never passed.
+    [Fact]
+    public void A_KeepAlive_Without_A_Period_Names_The_Option_Too_Long_For_It()
+    {
+        var (client, _, dispose) = BuildPair(e => { },
+            options: new UdsClientOptions { TesterPresentPeriod = TimeSpan.FromDays(30) });
+        using var teardown = dispose;
+
+        Action act = () => client.StartTesterPresentKeepAlive();
+
+        act.Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("No period was passed, and UdsClientOptions.TesterPresentPeriod*");
+    }
+
 #if NET5_0_OR_GREATER
     // An operation's cancellation callback throws when the client is disposed: Cancel surfaces an
     // AggregateException, and the disposal still ends -- the owned channel is released and the

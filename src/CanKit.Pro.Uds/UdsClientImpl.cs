@@ -501,9 +501,14 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         if (interval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(period), "TesterPresent period must be positive.");
         // The loop waits with Task.Delay, which accepts at most int.MaxValue milliseconds; a longer
-        // period would fault the loop on its first tick instead of failing here.
+        // period would fault the loop on its first tick instead of failing here. Without a period
+        // the value is the options', which the constructor accepted up to a timer's reach (about
+        // 49 days): the message says so, rather than blaming an argument that was never passed
+        // (#354, U-8). The parameter is still the one to change.
         if (interval.TotalMilliseconds > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(period), "TesterPresent period must not exceed int.MaxValue milliseconds.");
+            throw new ArgumentOutOfRangeException(nameof(period), period is null
+                ? $"No period was passed, and UdsClientOptions.TesterPresentPeriod ({interval}) is longer than the keep-alive can wait (int.MaxValue milliseconds, about 24.8 days); pass a shorter period."
+                : "TesterPresent period must not exceed int.MaxValue milliseconds.");
 
         var candidate = new TesterPresentKeepAlive(this, interval,
             _options.KeepAliveSuppressPositiveResponse);
