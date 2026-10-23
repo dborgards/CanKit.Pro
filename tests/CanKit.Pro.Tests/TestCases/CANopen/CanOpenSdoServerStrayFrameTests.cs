@@ -165,6 +165,62 @@ public class CanOpenSdoServerStrayFrameTests
         SdoFrames.ReadIndex(after).Should().Be(((ushort)0, (byte)0));
     }
 
+    public static TheoryData<string> MalformedInitiates => new()
+    {
+        "naming the open classic transfer", "naming the open block transfer", "naming another object",
+    };
+
+    // An upload initiate with reserved bits set (ccs = 2, here 0x44) is the one frame that reaches
+    // the unknown-specifier answer carrying a multiplexer, and the abort names it. A client that
+    // matches aborts by object ends its transfer on that abort, so when the abort names the open
+    // session that session ends here too -- otherwise the next initiate meets a supersede abort
+    // for a transfer the client already gave up (Codex on #392). An abort naming another object
+    // ends nothing.
+    [Theory]
+    [MemberData(nameof(MalformedInitiates))]
+    public void A_Malformed_Initiate_Ends_The_Open_Session_Only_When_Its_Abort_Names_It(string named)
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-initiate-{Guid.NewGuid():N}");
+        using var toClient = TapResponses(bus);
+        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        var value = Enumerable.Range(0, 20).Select(i => (byte)(0x60 + i)).ToArray();
+        server.ObjectDictionary.AddDomain(Index, 0x00, value, OdAccess.ReadOnly);
+        server.ObjectDictionary.AddDomain(0x2101, 0x00, value, OdAccess.ReadOnly);
+
+        bool block = named == "naming the open block transfer";
+        if (block)
+        {
+            FromClient(bus, SdoBlockFrames.BuildBlockUploadInit(Index, 0x00, clientCrcSupported: false, blockSize: 3, pst: 0));
+            (Next(toClient)[0] & 0xE0).Should().Be(SdoBlockFrames.ScsBlockUploadInitResponseBase);
+        }
+        else
+        {
+            FromClient(bus, SdoFrames.BuildUploadInit(Index, 0x00));
+            Next(toClient)[0].Should().Be(SdoFrames.ScsUploadInitSegmented);
+        }
+
+        var target = named == "naming another object" ? (ushort)0x2101 : Index;
+        var malformed = SdoFrames.BuildUploadInit(target, 0x00);
+        malformed[0] = 0x44;
+        FromClient(bus, malformed);
+        var answer = Next(toClient);
+        answer[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(answer).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid);
+        SdoFrames.ReadIndex(answer).Should().Be((target, (byte)0x00), "the frame names its object");
+
+        if (named == "naming another object")
+        {
+            FromClient(bus, SdoFrames.BuildSegment(SdoFrames.CcsUploadSegmentBase, toggle: false, lastSegment: false,
+                ReadOnlySpan<byte>.Empty));
+            Next(toClient)[0].Should().Be(SdoFrames.ScsUploadSegmentBase, "the open upload goes on");
+            return;
+        }
+
+        FromClient(bus, SdoFrames.BuildUploadInit(Index, 0x00));
+        Next(toClient)[0].Should().Be(SdoFrames.ScsUploadInitSegmented,
+            "the abort ended the session, so there is none left to supersede");
+    }
+
     private static BlockingCollection<byte[]> TapResponses(ControllableBus bus)
     {
         var toClient = new BlockingCollection<byte[]>();

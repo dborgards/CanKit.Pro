@@ -1829,10 +1829,27 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // initiate with reserved bits set (ccs = 2) is the one such frame that reaches here --
         // and 0000:00 otherwise, rather than reading bytes 1..3 of a frame that carries none
         // (#357 C-2).
-        bool multiplexed = (cs & 0xE0) == SdoFrames.CcsUploadInit;
-        _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), SdoFrames.BuildAbort(
-            multiplexed ? index : (ushort)0, multiplexed ? subindex : (byte)0,
-            (uint)SdoAbortCode.CommandSpecifierInvalid));
+        if ((cs & 0xE0) != SdoFrames.CcsUploadInit)
+        {
+            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+                SdoFrames.BuildAbort(0, 0, (uint)SdoAbortCode.CommandSpecifierInvalid));
+            return;
+        }
+        // An abort that names an open transfer ends it at the client, which matches aborts by
+        // object; so it ends it here too, or the session would outlive its own abort and a
+        // retry would meet a supersede abort for it first.
+        if (_sdoServer is { } named && named.Index == index && named.Subindex == subindex)
+        {
+            SendSdoServerAbort(index, subindex, SdoAbortCode.CommandSpecifierInvalid);
+            return;
+        }
+        if (_sdoBlockServer is { } namedBlock && namedBlock.Index == index && namedBlock.Subindex == subindex)
+        {
+            AbortBlockServer(namedBlock, SdoAbortCode.CommandSpecifierInvalid);
+            return;
+        }
+        _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+            SdoFrames.BuildAbort(index, subindex, (uint)SdoAbortCode.CommandSpecifierInvalid));
     }
 
     private void HandleServerUploadInit(ushort index, byte subindex, OdEntry? entry)
