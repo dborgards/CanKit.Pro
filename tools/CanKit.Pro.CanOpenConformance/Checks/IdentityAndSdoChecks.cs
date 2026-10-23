@@ -74,6 +74,19 @@ internal static class IdentityAndSdoChecks
 
             var names = new[] { "", "vendor-id", "product code", "revision number", "serial number" };
             var problems = new List<string>();
+
+            // The identity object is 1018h:01..04 and nothing else, which is also where this
+            // repository's own peer-access policy draws the line. Clamping a larger count to 4
+            // normalised the contradiction away and the check then reported "the identity object
+            // reads back whole" about a device that had declared sub-indices it has no definition
+            // for. Found in review of #388 — the same read-is-not-valid shape as the reserved
+            // mapping count and transmission type.
+            if (highest[0] > 4)
+            {
+                problems.Add($"1018h:00 says {highest[0]}; the identity object is defined as 1018h:01..04 and has no "
+                    + "sub-index above 4");
+            }
+
             for (byte sub = 1; sub <= Math.Min(highest[0], (byte)4); sub++)
             {
                 try

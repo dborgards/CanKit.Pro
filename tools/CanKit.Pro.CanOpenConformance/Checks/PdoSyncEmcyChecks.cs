@@ -71,20 +71,23 @@ internal static class PdoSyncEmcyChecks
             // report's own coverage section. Found in review of #388.
             var multiplexed = tpdos.Where(p => p.Valid && p.MultiplexedMode).ToList();
             var valid = tpdos.Where(p => p.Valid && !p.MultiplexedMode).ToList();
-            if (valid.Count == 0)
+            if (valid.Count == 0 && multiplexed.Count == 0)
             {
-                if (tpdos.Count == 0)
-                    return Outcome.NeedsSetup("PDO-01 read no TPDO parameters, so there is no COB-ID to watch.");
-
-                return multiplexed.Count > 0
-                    ? Outcome.NotApplicable(
-                        $"Every valid TPDO ({string.Join(", ", multiplexed.Select(p => "TPDO" + p.Number))}) is in "
-                        + "multiplexed mode, which this runner does not check, so there is no ordinary TPDO whose "
-                        + "payload length its mapping record predicts.")
+                return tpdos.Count == 0
+                    ? Outcome.NeedsSetup("PDO-01 read no TPDO parameters, so there is no COB-ID to watch.")
                     : Outcome.NotApplicable($"All {tpdos.Count} TPDO(s) the device declares are marked invalid (1800h:01 bit 31).");
             }
 
-            var watched = valid.Select(p => (p.CobId, p.Extended)).ToHashSet();
+            // Both kinds, because the two rules this check applies do not have the same scope.
+            // Only the mapped payload length is particular to an ordinary TPDO, and that is the
+            // one an MPDO's payload — a destination address and an index — does not answer to.
+            // "Nothing is transmitted in Stopped" applies to every PDO a device sends, and it is
+            // the failure that matters on a machine being switched off; leaving MPDOs out of the
+            // watch set threw that away along with the length rule, so a device still emitting
+            // MPDOs after Stop passed whenever its ordinary TPDOs behaved. Found in review of
+            // #388, against the fix one commit earlier that excluded them wholesale.
+            var ordinaryIds = valid.Select(p => (p.CobId, p.Extended)).ToHashSet();
+            var watched = ordinaryIds.Concat(multiplexed.Select(p => (p.CobId, p.Extended))).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             if (initialState is null)
             {
@@ -105,6 +108,8 @@ internal static class PdoSyncEmcyChecks
             TappedFrame[] inOperational;
             int inStopped;
             int settling;
+            var multiplexedInOperational = 0;
+            var multiplexedInStopped = 0;
             var stoppedConfirmed = false;
             var operationalConfirmed = false;
             double stopSentAtMs = 0;
@@ -124,7 +129,12 @@ internal static class PdoSyncEmcyChecks
                     .ConfigureAwait(false) == (byte)NmtState.Operational;
 
                 await tap.ListenAsync(session.Options.PdoWindowMs, cancellationToken).ConfigureAwait(false);
-                inOperational = Transmitted(tap).ToArray();
+
+                // The Operational verdict is drawn from ordinary TPDOs alone, so that a pass is
+                // never derived from traffic of a descriptor the report says it did not check.
+                var everything = Transmitted(tap);
+                inOperational = everything.Where(f => ordinaryIds.Contains((f.CanId, f.IsExtended))).ToArray();
+                multiplexedInOperational = everything.Count - inOperational.Length;
 
                 // Before the await, not after it: that task completes on the transmit confirmation
                 // and not at the instant the frame is handed off, so anything the device emitted
@@ -153,6 +163,8 @@ internal static class PdoSyncEmcyChecks
                 var afterStop = Transmitted(tap).Where(f => f.AtMs >= stopSentAtMs).ToList();
                 settling = afterStop.Count(f => f.AtMs < stopSentAtMs + SettleMs);
                 inStopped = afterStop.Count - settling;
+                multiplexedInStopped = afterStop
+                    .Count(f => f.AtMs >= stopSentAtMs + SettleMs && !ordinaryIds.Contains((f.CanId, f.IsExtended)));
             }
             finally
             {
@@ -173,8 +185,11 @@ internal static class PdoSyncEmcyChecks
 
             if (multiplexed.Count > 0)
             {
-                measurements["TPDOs set aside as multiplexed"] =
-                    string.Join(", ", multiplexed.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3}"));
+                measurements["TPDOs in multiplexed mode"] =
+                    string.Join(", ", multiplexed.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3}"))
+                    + " — watched for the Stopped rule, outside the mapped-length rule";
+                measurements["multiplexed frames in Operational"] =
+                    multiplexedInOperational.ToString(CultureInfo.InvariantCulture);
             }
 
             foreach (var pdo in valid)
@@ -270,8 +285,9 @@ internal static class PdoSyncEmcyChecks
             if (inStopped > 0)
             {
                 return Outcome.Fail(
-                    $"{inStopped} TPDO frame(s) were transmitted more than {SettleMs} ms after the device was Stopped. "
-                    + "CiA 301 allows process data only in Operational.", measurements);
+                    $"{inStopped} TPDO frame(s) were transmitted more than {SettleMs} ms after the device was Stopped"
+                    + (multiplexedInStopped > 0 ? $", {multiplexedInStopped} of them from a multiplexed TPDO" : string.Empty)
+                    + ". CiA 301 allows process data only in Operational.", measurements);
             }
 
             // A frame already on the wire when Stop arrived is not a violation; one the device
@@ -286,6 +302,18 @@ internal static class PdoSyncEmcyChecks
                     + "this window cannot separate the two.", Attribution.Unknown, measurements);
             }
 
+
+            if (valid.Count == 0)
+            {
+                // Reached only once the Stopped rule has been applied and found nothing, which is
+                // the half of this check an MPDO does answer to. The Operational half needs a
+                // descriptor whose mapping predicts a payload length, and there is none.
+                return Outcome.NotApplicable(
+                    $"Every valid TPDO ({string.Join(", ", multiplexed.Select(p => "TPDO" + p.Number))}) is in "
+                    + "multiplexed mode. Nothing was transmitted on their COB-IDs after Stop, which is the part of "
+                    + "this check that applies to them; what their payloads should contain is outside what this "
+                    + "runner checks.", measurements);
+            }
 
             if (inOperational.Length == 0)
             {
@@ -1154,6 +1182,31 @@ internal static class PdoSyncEmcyChecks
             // silence. Found in review of #388.
             var extended = (cobIdWord & CanOpenCobId.ExtendedFrameBit) != 0;
             var cobId = extended ? cobIdWord & 0x1FFF_FFFFu : cobIdWord & CanOpenCobId.CanIdMask;
+
+            // Masking is not validating. A base-frame word with bits 11..28 set, or one naming a
+            // CAN-ID CiA 301 §7.3.5 restricts, was masked down to something that looked valid, so
+            // the record passed and PDO-03 then watched an id the device never declared. The stack
+            // rejects exactly these words in IsUsablePdoCobIdWord, which is private, so the two
+            // conditions are spelled out here against the same public helper it uses. Found in
+            // review of #388.
+            // Both conditions are for a base frame only, as the stack's own helper is: it accepts
+            // any extended word, because bits 11..28 are part of a 29-bit identifier and the
+            // restricted list is of 11-bit ids.
+            if (!extended && (cobIdWord & 0x1FFF_F800) != 0)
+            {
+                problems.Add($"0x{comm:X4}:01 is 0x{cobIdWord:X8}: bit 29 is clear, so this is an 11-bit COB-ID, and "
+                    + "bits 11..28 are reserved and must be zero.");
+                // No descriptor: the masked id is not what the device declared, and adding it
+                // would have PDO-03 watch an identifier nobody uses.
+                continue;
+            }
+
+            if (!extended && CanOpenCobId.IsRestricted(cobId))
+            {
+                problems.Add($"0x{comm:X4}:01 names CAN-ID 0x{cobId:X3}, which CiA 301 §7.3.5 restricts to another "
+                    + "communication object; a PDO may not use it.");
+                continue;
+            }
 
             descriptors.Add(new PdoDescriptor(
                 Number: i + 1,

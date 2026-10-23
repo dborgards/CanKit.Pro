@@ -18,6 +18,22 @@ namespace CanKit.Pro.CanOpenConformance.Checks;
 /// </summary>
 internal static class NmtAndHeartbeatChecks
 {
+    /// <summary>
+    /// How much longer than one heartbeat period an observation window must be before silence in
+    /// it is charged to the device. The quantity this covers is the delay between opening the tap
+    /// and the producer's next beat — thread scheduling and driver buffering, tens of milliseconds
+    /// on a loaded host — not an allowance for the period itself being wrong.
+    /// </summary>
+    private const int WindowMarginMs = 200;
+
+    /// <summary>
+    /// The longest a single check will wait for a device's own period to elapse. Above it the
+    /// check reports that it was not measured instead of shortening the wait: a cap that silently
+    /// truncates a measurement replaces it with a different one, which is how a conforming slow
+    /// producer came to be reported as a defect in the stack.
+    /// </summary>
+    private const int MaxObservationMs = 60_000;
+
     public static async Task RunAsync(Session session, Checkbook book, CancellationToken cancellationToken)
     {
         await book.RunAsync("HBT-01", "heartbeat", "1017h producer heartbeat time", Tier.Read, "FR-CO-008", async () =>
@@ -73,6 +89,23 @@ internal static class NmtAndHeartbeatChecks
                     return Outcome.NotApplicable(
                         $"The device is configured not to produce a heartbeat (1017h = 0), so nothing on 0x{cobId:X3} "
                         + "is expected. That is an optional configuration, not a fault.");
+                }
+
+                // Before charging the silence to the device, the window has to have been able to
+                // contain a beat. A conforming 10-second producer observed for the default 4
+                // seconds is silent for the whole window, and this branch called that "not
+                // producing what it is set to". The margin is named rather than tuned: the
+                // perturbation here is the delay between opening the tap and the producer's next
+                // beat — scheduling and driver buffering, tens of milliseconds — so one period
+                // plus WindowMarginMs is the smallest window this will draw a device finding
+                // from. Found in review of #388.
+                if (configured is { } tooShort && session.Options.HeartbeatWindowMs < tooShort + WindowMarginMs)
+                {
+                    return Outcome.NeedsSetup(
+                        $"1017h says {tooShort} ms and the observation window was "
+                        + $"{session.Options.HeartbeatWindowMs} ms, which cannot contain a beat of that period. "
+                        + $"Re-run with --heartbeat-ms at least {tooShort + WindowMarginMs}; nothing is concluded "
+                        + "about the device from a window shorter than its own period.", measurements);
                 }
 
                 return Outcome.Inconclusive(
@@ -230,7 +263,30 @@ internal static class NmtAndHeartbeatChecks
                 // the stack tracks the clock.
                 var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 3 + 200));
                 session.Client.AddHeartbeatConsumer(session.Target, budget);
-                await Task.Delay((int)Math.Min(10_000, Math.Max(500, beat.MedianMs * 4)), cancellationToken).ConfigureAwait(false);
+
+                // The wait is the device's period times four, not a constant: the 10-second cap
+                // ended the check before the next beat of any producer slower than 2.5 s, and
+                // `received` was then still zero — so a conforming device was reported as a
+                // defect in the stack. A cap that silently shortens a measurement turns the
+                // measurement into a different one. Found in review of #388.
+                var needed = (int)Math.Max(500, beat.MedianMs * 4 + 300);
+                if (needed > MaxObservationMs)
+                {
+                    return Outcome.Inconclusive(
+                        $"The device's heartbeat period is {IdentityAndSdoChecks.Ms(beat.MedianMs)}, so four of them "
+                        + $"would take {IdentityAndSdoChecks.Ms(needed)} — longer than this check will hold the bus. "
+                        + "Nothing is concluded about the consumer, rather than concluding it from a window that "
+                        + "could not contain a beat.",
+                        Attribution.None,
+                        new Dictionary<string, string>
+                        {
+                            ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
+                            ["wait this check would need"] = IdentityAndSdoChecks.Ms(needed),
+                            ["limit"] = IdentityAndSdoChecks.Ms(MaxObservationMs),
+                        });
+                }
+
+                await Task.Delay(needed, cancellationToken).ConfigureAwait(false);
 
                 var measurements = new Dictionary<string, string>
                 {
@@ -304,6 +360,29 @@ internal static class NmtAndHeartbeatChecks
             }
 
             var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 2 + 100));
+
+            // Before the write, because the alternative is stopping the device's heartbeat for a
+            // measurement this check was never going to wait out. The 15-second cap did exactly
+            // that for a period above roughly 7.5 s: the delay ended before one consumer timeout
+            // was due and the absence of that timeout was then reported as a ToolFault. Found in
+            // review of #388.
+            var waitForTimeout = (int)(budget.TotalMilliseconds * 2 + 300);
+            if (waitForTimeout > MaxObservationMs)
+            {
+                return Outcome.Inconclusive(
+                    $"The device's heartbeat period is {IdentityAndSdoChecks.Ms(beat.MedianMs)}, so the consumer "
+                    + $"budget is {IdentityAndSdoChecks.Ms(budget.TotalMilliseconds)} and provoking its timeout would "
+                    + $"take {IdentityAndSdoChecks.Ms(waitForTimeout)} — longer than this check will leave the "
+                    + "device's heartbeat switched off. It is not run, so the producer is not touched.",
+                    Attribution.None,
+                    new Dictionary<string, string>
+                    {
+                        ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
+                        ["wait this check would need"] = IdentityAndSdoChecks.Ms(waitForTimeout),
+                        ["limit"] = IdentityAndSdoChecks.Ms(MaxObservationMs),
+                    });
+            }
+
             var restoredOk = true;
             var restored = "yes";
             string? lostResponse = null;
@@ -343,8 +422,9 @@ internal static class NmtAndHeartbeatChecks
                 }
 
                 // Two budgets, so a beat already in flight when the write landed cannot be
-                // mistaken for the producer still running.
-                await Task.Delay((int)Math.Min(15_000, budget.TotalMilliseconds * 2 + 300), cancellationToken).ConfigureAwait(false);
+                // mistaken for the producer still running. Not capped: the guard above decided
+                // whether this wait is affordable, and it did so before the producer was stopped.
+                await Task.Delay(waitForTimeout, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
