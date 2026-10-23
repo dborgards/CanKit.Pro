@@ -628,6 +628,49 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 
+    // #352 (R-4): a timeout CancelAfter cannot arm used to be found out only after the frame was on
+    // the wire -- the echo path arms it after Transmit, and the approximated path whenever the
+    // transmit is still pending -- so the caller was told "bad argument" about a frame that had
+    // gone out. Both paths now refuse it before the driver is called, on one bound for every
+    // target framework.
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task A_Timeout_Above_The_Bound_Is_Refused_Before_The_Driver_Call(bool echoPath, bool maxValue)
+    {
+        var timeout = maxValue
+            ? TimeSpan.MaxValue
+            : TimeSpan.FromMilliseconds(int.MaxValue) + TimeSpan.FromMilliseconds(1);
+        using var sender = echoPath
+            ? OpenEcho()
+            : ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        sender.EchoAcceptedFrames = false; // on the echo path, nothing may confirm a send that went out
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x660, new byte[] { 1 }), timeout);
+
+        (await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => send.WaitAsync(ShortTimeout)))
+            .ParamName.Should().Be("timeout");
+        sender.TransmitCount.Should().Be(0, "the argument is refused before anything reaches the driver");
+    }
+
+    // The bound itself is accepted, and armed: on the echo path the real CancelAfter runs with it
+    // after the frame is out, which is where an over-large value used to throw.
+    [Fact]
+    public async Task A_Timeout_At_The_Bound_Is_Accepted_On_The_Echo_Path()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x661, new byte[] { 1 }), TimeSpan.FromMilliseconds(int.MaxValue));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+
+        (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
+    }
+
     // FR-RAW-033: a bus-off transition while a confirmation is outstanding must resolve it
     // immediately with FailureReason = BusOff -- not leave the caller hanging until the configured
     // timeout.

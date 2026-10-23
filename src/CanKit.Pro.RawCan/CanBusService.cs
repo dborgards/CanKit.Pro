@@ -31,6 +31,9 @@ namespace CanKit.Pro.RawCan
         /// </summary>
         public static readonly TimeSpan DefaultConfirmTimeout = TimeSpan.FromSeconds(1);
 
+        // The longest delay CancellationTokenSource.CancelAfter accepts on every target framework.
+        private static readonly TimeSpan MaxConfirmTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
+
         private readonly ICanBus _bus;
 
         // Guards the mutable registry and the rebuild of _snapshot; only entered on
@@ -313,6 +316,14 @@ namespace CanKit.Pro.RawCan
             var effectiveTimeout = timeout ?? DefaultConfirmTimeout;
             if (effectiveTimeout <= TimeSpan.Zero)
                 throw new ArgumentOutOfRangeException(nameof(timeout), "Timeout must be positive.");
+            // Checked here, before anything reaches the driver (#352, R-4): the timeout is armed
+            // with CancellationTokenSource.CancelAfter only after the frame has been handed over,
+            // and that throws for a delay above int.MaxValue ms on netstandard2.0/net48 (above
+            // uint.MaxValue - 1 on .NET 6+). Unchecked, TimeSpan.MaxValue put the frame on the
+            // wire and then told the caller "bad argument". One bound for every target, so the
+            // answer does not depend on which runtime the caller happens to be on.
+            if (effectiveTimeout > MaxConfirmTimeout)
+                throw new ArgumentOutOfRangeException(nameof(timeout), $"Timeout must not exceed {MaxConfirmTimeout}.");
 
             // FR-RAW-030: one API, two internal strategies, chosen by whether the bus both
             // declares the hardware capability *and* has actually enabled it for this session --

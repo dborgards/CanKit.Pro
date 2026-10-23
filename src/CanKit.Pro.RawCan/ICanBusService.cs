@@ -204,7 +204,9 @@ namespace CanKit.Pro.RawCan
         /// which every current adapter completes immediately, so it only bites for a bus whose
         /// asynchronous transmit stalls. A frame reported as timed out may still reach the wire
         /// later (the bus is asked to cancel the transmit, but a driver that ignores that cannot
-        /// be stopped). Must be positive.
+        /// be stopped). Must be positive and at most <see cref="int.MaxValue"/> milliseconds
+        /// (about 24.8 days); either violation throws <see cref="ArgumentOutOfRangeException"/>
+        /// before anything is handed to the driver.
         /// </param>
         /// <param name="cancellationToken">
         /// Caller-supplied cancellation; cancels the returned task per standard .NET convention,
