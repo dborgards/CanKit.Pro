@@ -73,8 +73,8 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // identical too -- so the only observable of "matched FIFO" is which caller's task completes
     // when, and that is exactly what this asserts.
     //
-    // This needs ControllableBus in Deferred echo mode. With the synchronous echo a real adapter
-    // delivers, the echo re-enters CanBusService's pending-send lock on the transmitting thread
+    // This needs ControllableBus in Deferred echo mode. With the synchronous echo the Virtual
+    // adapter delivers, the echo re-enters CanBusService's pending-send lock on the transmitting thread
     // before that thread leaves Transmit, so the pending list holds exactly one entry -- that
     // thread's own -- for the entire match. Every FIFO ordering rule is then vacuously satisfied
     // and the test cannot fail however the matching code is written (see DeferredEchoQueue).
@@ -128,10 +128,11 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // their own confirmation -- no cross-matching, no crash. This is the exact class of bug the
     // review flagged for the ISO-TP prototype's deadline queue crashing on identical in-flight
     // frames. Deliberately kept on the *synchronous* echo bus: that is the reentrant
-    // register-transmit-match-remove path a real echo-mode adapter drives, and this test exists to
-    // hammer it from many threads at once. It says nothing about FIFO ordering -- with a
+    // register-transmit-match-remove path the Virtual adapter's timing drives, and this test exists
+    // to hammer it from many threads at once. It says nothing about FIFO ordering -- with a
     // synchronous echo there is never more than one pending entry to order. The test above is
-    // where ordering is proven.
+    // where ordering is proven, and the test below is the same stress with the echo arriving the
+    // way a hardware adapter's does.
     [Fact]
     public async Task Echo_Bus_Matches_Concurrent_Identical_Frames_Individually_Without_Crashing()
     {
@@ -147,6 +148,45 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         results.Should().HaveCount(n);
         results.Should().OnlyContain(r => r.Confirmed && !r.IsApproximated);
         sender.TransmitCount.Should().Be(n);
+    }
+
+    // #352 (R-8): the same 16-thread stress, with the echo delivered the way a hardware adapter
+    // delivers it -- from another thread, after Transmit has returned. Only here does the pending
+    // FIFO for one key actually hold several entries while sends keep racing into it: a releaser
+    // thread hands back one echo at a time, and only once at least two are parked, so every
+    // release but the last matches against a list of two or more. The synchronous test above
+    // cannot reach that state at all.
+    //
+    // No clock: the releaser waits on transmits having happened, and the bound below only catches
+    // a send that is never confirmed.
+    [Fact]
+    public async Task Deferred_Echo_Bus_Matches_Concurrent_Identical_Frames_Individually()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        const int n = 16;
+        var frame = CanFrame.Classic(0x500, new byte[] { 42 });
+        var hangBound = TimeSpan.FromSeconds(30);
+
+        var releaser = Task.Run(async () =>
+        {
+            for (var released = 0; released < n; released++)
+            {
+                await sender.DeferredEchoes.WaitForEnqueuedAsync(Math.Min(released + 2, n), hangBound);
+                sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+            }
+        });
+        var sends = Enumerable.Range(0, n)
+            .Select(_ => Task.Run(() => service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(60))))
+            .ToArray();
+
+        var results = await Task.WhenAll(sends).WaitAsync(hangBound);
+        await releaser.WaitAsync(hangBound);
+
+        results.Should().OnlyContain(r => r.Confirmed && !r.IsApproximated);
+        sender.TransmitCount.Should().Be(n);
+        sender.DeferredEchoes.Count.Should().Be(0, "every echo was handed back and consumed");
     }
 
     // FR-RAW-031/033: a pending send that has already been resolved -- here by cancellation, in
