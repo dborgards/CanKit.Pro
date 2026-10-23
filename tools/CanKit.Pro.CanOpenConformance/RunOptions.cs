@@ -218,6 +218,19 @@ internal sealed record RunOptions(
         if (simulate && !options.IsVirtual)
             problems.Add("--simulate needs a virtual:// endpoint; it starts a device in this process, which no hardware bus would see.");
 
+        // Here, with the other usage errors, and not after the report files exist. Program.cs
+        // rejected this combination *after* creating the .md and .json, so the run left behind a
+        // report saying "The run did not finish." and a `{}` beside it, and had already started a
+        // simulated device it then abandoned. A usage error has one place in this tool and this is
+        // it: every one of them is collected, printed together, and exits 2 having written
+        // nothing. Found in review of #388.
+        if (simulate && target is null)
+        {
+            problems.Add("--simulate needs --node: the simulated device comes up as node 17, so pass --node 17 "
+                + "to address it. (Without a node only the bus and discovery groups would run, and against a "
+                + "device this process started that measures the simulation rather than anything else.)");
+        }
+
         return problems.Count > 0 ? null : options;
     }
 

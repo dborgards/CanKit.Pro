@@ -1025,13 +1025,24 @@ internal static class PdoSyncEmcyChecks
 
     /// <summary>
     /// The COB-ID the target's 1005h says its SYNC arrives on, masked to the identifier; the
-    /// 080h default when the object is absent or the gate blocks it, and null when it answered
-    /// with something unusable. Bit 30 of that word is the device's own produce flag and says
-    /// nothing about which identifier it consumes.
+    /// 080h default when the device itself says the object is absent, and null when the gate
+    /// blocked the question or the device answered with something unusable. Bit 30 of that word
+    /// is the device's own produce flag and says nothing about which identifier it consumes.
     /// </summary>
     private static async Task<(uint CobId, bool Extended)?> TargetSyncCobIdAsync(Session session, CancellationToken cancellationToken)
     {
-        if (!session.MayTransfer(0x1005, 0x00)) return (CanOpenCobId.Sync, false);
+        // Blocked is not absent — the distinction this whole file keeps relearning. A device that
+        // aborts with "no such object" uses the default; a pair the gate refused was never asked,
+        // and the device may well consume SYNC on an identifier of its own. Returning 080h for
+        // that case sent SYNCs to an id nobody was listening on and then charged the silence to
+        // the device. The caller already has a setup path for null. Found in review of #388.
+        //
+        // Reachable only with a description bound that omits 1005h, because without one the TPDO
+        // records are blocked too and SYN-02 returns before it gets here — and such a description
+        // contradicts itself, since a device with a synchronous TPDO supports SYNC and CiA 301
+        // then makes 1005h mandatory. Setup is the right verdict for a contradiction in the run's
+        // own input.
+        if (!session.MayTransfer(0x1005, 0x00)) return null;
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1005, 0x00, cancellationToken).ConfigureAwait(false);

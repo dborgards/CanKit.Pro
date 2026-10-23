@@ -96,12 +96,11 @@ internal static class Program
                 : null;
             if (simulated is not null)
             {
+                // No --node check here any more: RunOptions.Parse rejects --simulate without one
+                // with the rest of the usage errors, before this method creates the report files.
+                // The check used to sit here, after them, so the run left a "The run did not
+                // finish." report and an empty JSON beside it. Found in review of #388.
                 Console.WriteLine($"  simulated CANopen device started as node {options.TargetNode ?? 0x11} on the same virtual session.");
-                if (options.TargetNode is null)
-                {
-                    Console.Error.WriteLine("--simulate started a device as node 17; pass --node 17 to test against it.");
-                    return 2;
-                }
             }
 
             using var session = Session.Open(options, out openError);
