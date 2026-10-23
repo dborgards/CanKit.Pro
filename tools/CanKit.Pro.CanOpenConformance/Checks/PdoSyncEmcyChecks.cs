@@ -73,6 +73,15 @@ internal static class PdoSyncEmcyChecks
 
             var watched = valid.Select(p => (p.CobId, p.Extended)).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
+            if (initialState is null)
+            {
+                return Outcome.NeedsSetup(
+                    "The device's NMT state could not be read from its heartbeat, and this check changes that state. "
+                    + "Restoring it would mean guessing pre-operational, which would leave a device that began "
+                    + "Operational out of service while this reported a successful restore — so the check is not run. "
+                    + "Enable the heartbeat (1017h) and re-run; NMT-01 refuses on the same grounds.");
+            }
+
             // An RTR frame on a TPDO's COB-ID is another master asking for it, not the target
             // sending it. Counting one as the target's traffic failed a conforming device in the
             // stopped window and made a silent one look busy in the operational one. The tap keeps
@@ -175,6 +184,25 @@ internal static class PdoSyncEmcyChecks
             {
                 return Outcome.Fail(
                     "A TPDO carried a payload of a different length than its own mapping (1A00h) declares.", measurements);
+            }
+
+            // Per descriptor, before the aggregate: a TPDO with an event timer short enough to
+            // have elapsed inside the window owes a frame regardless of what its neighbours sent.
+            // Event-driven types only (254/255). The event timer is the trigger for those; a
+            // *synchronous* TPDO with 1800h:05 set still waits for a SYNC, which this check does
+            // not send — charging it for silence would be a false FAIL of the kind this whole
+            // guard exists to prevent, and only an unread transmission type makes it unknowable.
+            var overdue = valid
+                .Where(p => p.TransmissionTypeRead && CanOpenTransmissionType.IsEventDriven(p.TransmissionType))
+                .Where(p => p.EventTimerMs > 0 && p.EventTimerMs * 2 <= session.Options.PdoWindowMs)
+                .Where(p => !inOperational.Any(f => f.CanId == p.CobId && f.IsExtended == p.Extended))
+                .ToList();
+            if (overdue.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{string.Join(", ", overdue.Select(p => $"TPDO{p.Number} (0x{p.CobId:X3}, event timer {p.EventTimerMs} ms"))} "
+                    + $"transmitted nothing in {session.Options.PdoWindowMs} ms of Operational, which is at least twice "
+                    + "its event timer. Traffic from another TPDO does not excuse it.", measurements);
             }
 
             if (inOperational.Length == 0)
@@ -299,6 +327,20 @@ internal static class PdoSyncEmcyChecks
 
             // Enough SYNCs for the slowest of them to have had two opportunities, plus a margin,
             // and bounded so that a type-240 TPDO does not turn this into a minutes-long check.
+            var unreadStarts = cyclic.Where(p => !p.SyncStartRead).ToList();
+            if (unreadStarts.Count > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{unreadStarts.Count} cyclic synchronous TPDO(s) would not return 1800h:06, so whether they wait "
+                    + "for a SYNC start value is unknown. Assuming none would shorten the SYNC burst and could fail a "
+                    + "device that is simply still waiting, so nothing was sent.",
+                    Attribution.Device,
+                    new Dictionary<string, string>
+                    {
+                        ["TPDOs with an unread SYNC start value"] = string.Join(", ", unreadStarts.Select(p => $"TPDO{p.Number}")),
+                    });
+            }
+
             var overflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
             if (overflow is not { } counterOverflow)
             {
@@ -335,6 +377,15 @@ internal static class PdoSyncEmcyChecks
             byte counter = 0;
             var watched = cyclic.Select(p => (p.CobId, p.Extended)).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
+            if (initialState is null)
+            {
+                return Outcome.NeedsSetup(
+                    "The device's NMT state could not be read from its heartbeat, and this check changes that state. "
+                    + "Restoring it would mean guessing pre-operational, which would leave a device that began "
+                    + "Operational out of service while this reported a successful restore — so the check is not run. "
+                    + "Enable the heartbeat (1017h) and re-run; NMT-01 refuses on the same grounds.");
+            }
+
             using var tap = new BusTap(session.Service, (id, extended) => watched.Contains((id, extended)));
             int quiet;
             Restoration restoration;
@@ -719,7 +770,7 @@ internal static class PdoSyncEmcyChecks
     /// <summary>One PDO as its own parameters describe it.</summary>
     private readonly record struct PdoDescriptor(
         int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, bool TransmissionTypeRead,
-        byte SyncStartValue, int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
+        byte SyncStartValue, bool SyncStartRead, int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
 
     private readonly record struct PdoSweep(List<PdoDescriptor> Descriptors, List<string> Blocked, List<string> Absent, List<string> Problems);
 
@@ -788,6 +839,7 @@ internal static class PdoSyncEmcyChecks
                 TransmissionType: transmission ?? 0xFF,
                 TransmissionTypeRead: transmission is not null,
                 SyncStartValue: syncStart ?? 0,
+                SyncStartRead: syncStart is not null || !session.MayTransfer(comm, 0x06),
                 InhibitMs: inhibit is { } inh ? inh / 10 : 0, // 1800h:03 counts 100 us units
                 EventTimerMs: eventTimer ?? 0,
                 Bytes: (bits + 7) / 8,
@@ -882,10 +934,23 @@ internal static class PdoSyncEmcyChecks
             problems.Add($"0x{index:X4}:{sub:X2} is UNSIGNED8, got {IdentityAndSdoChecks.Hex(raw)}");
             return null;
         }
+        catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                  or (uint)SdoAbortCode.SubIndexDoesNotExist)
+        {
+            // Genuinely absent. For a mandatory entry that is still a contradiction; for an
+            // optional one it is the device saying it has none, which is the CiA 301 default.
+            if (mandatory)
+                problems.Add($"0x{index:X4}:{sub:X2} is mandatory for an implemented PDO and the device says it does not exist");
+            return null;
+        }
         catch (SdoAbortException abort)
         {
-            if (mandatory)
-                problems.Add($"0x{index:X4}:{sub:X2} is mandatory for an implemented PDO and aborted {IdentityAndSdoChecks.Describe(abort)}");
+            // Not absence: the entry may well be there and simply would not come back. Recording
+            // it even when optional is the point — an unreadable 1800h:06 stored as "no start
+            // value" shortened the SYNC burst and failed a conforming TPDO for silence. Found in
+            // review of #388.
+            problems.Add($"0x{index:X4}:{sub:X2} is declared{(mandatory ? " and mandatory" : "")} and aborted "
+                + IdentityAndSdoChecks.Describe(abort));
             return null;
         }
     }
