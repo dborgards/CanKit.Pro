@@ -723,9 +723,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
-        var service = new HeldConfirmationBusService(new CanBusService(bus));
+        using var service = new HeldConfirmationBusService(new CanBusService(bus));
         using var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
-            ownsService: true, actor);
+            ownsService: false, actor);
         const byte peerSa = 0x20;
         const uint cancelledPgn = 0xFEC1u, nextPgn = 0xFEC2u;
 
@@ -768,9 +768,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
-        var service = new HeldConfirmationBusService(new CanBusService(bus));
+        using var service = new HeldConfirmationBusService(new CanBusService(bus));
         using var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
-            ownsService: true, actor);
+            ownsService: false, actor);
         var background = new List<Exception>();
         sender.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
         const byte peerSa = 0x20;
@@ -806,10 +806,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
-        var service = new HeldConfirmationBusService(new CanBusService(bus));
-        var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
-            ownsService: false, actor);
-        try
+        using var service = new HeldConfirmationBusService(new CanBusService(bus));
+        // Disposed at the end of the block, with the send's abort still parked. A borrowed actor:
+        // Dispose returns once the session cleanup has run.
+        using (var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
+            ownsService: false, actor))
         {
             using var cts = new CancellationTokenSource();
             var send = sender.SendCmAsync(0xFEC5u, 0x20, RandomPayload(14, seed: 360), cts.Token);
@@ -817,17 +818,12 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             cts.Cancel();
             await send.Invoking(t => t.WithTimeout(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
         }
-        finally
-        {
-            sender.Dispose(); // a borrowed actor: returns once the session cleanup has run
-        }
 
         service.Confirm(0); // runs the channel's confirmation continuation, which posts to the actor
         await actor.PostAsync(() => 0);
         // Deliberately a negative window: it can only let an abort pass on a slow host.
         await Task.Delay(TimeSpan.FromMilliseconds(100));
         service.HandedCount.Should().Be(1, "only the RTS was ever handed out");
-        service.Dispose();
     }
 
     // Bugbot 3596025929: MaxPacketsPerCts=0 must fail fast, not crash later in BuildCts.
