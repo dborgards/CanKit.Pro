@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
@@ -1058,8 +1057,13 @@ internal sealed partial class CanOpenNode
         var (ackseq, nextBlkSize) = SdoBlockFrames.ReadSubBlockAck(data);
         // ackseq counts cumulatively from the start of the current sub-block
         // (CiA 301 §7.2.4.3.15). More than sent is a protocol violation; less asks for
-        // retransmission from ackseq + 1 with the original seqnos.
-        if (ackseq > session.SubBlockLastSeqno)
+        // retransmission from ackseq + 1 with the original seqnos. "Sent" is what the batch has
+        // handed to the bus, not what it was given: an ack that arrives while the batch is
+        // still going cannot confirm a segment that never left (Codex on #392), and taking it
+        // would stop the batch and move on past data the client was never sent.
+        int handedOver;
+        lock (session.SendGate) handedOver = session.HighestSeqnoHandedOver;
+        if (ackseq > handedOver)
         {
             _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
                 SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)SdoAbortCode.General));
@@ -1123,6 +1127,7 @@ internal sealed partial class CanOpenNode
         if (session.ResumeSeqno == 1)
             session.SubBlockStartOffset = session.Offset;
         var seqno = session.ResumeSeqno;
+        byte firstSeqno = seqno;
         if (session.Buffer.Length == 0)
         {
             // An empty object still needs its one segment: the block encoding carries zero data
@@ -1164,15 +1169,31 @@ internal sealed partial class CanOpenNode
         // otherwise reach a client that has no session for them any more: a client that aborts
         // and starts its next transfer at once sees them interleaved with that transfer's frames.
         //
-        // The slot cannot tell this batch from the session's next one, though: an ack that
-        // arrives while the batch is still going -- a partial one asking for a retransmission,
-        // or a full one moving on -- starts the next send for the same session (#378). So the
-        // batch also stops once the session has sent anything newer, as the block client's
-        // LatestSendId decides which of its sends still counts (#197).
-        int generation = Interlocked.Increment(ref session.SendGeneration);
+        // The slot cannot tell this batch from the session's next one, though: a partial ack
+        // that arrives while the batch is still going starts the retransmission as a second
+        // batch for the same session (#378). So the batch also stops once the session has sent
+        // anything newer, as the block client's LatestSendId decides which of its sends still
+        // counts (#197). Each frame it lets go is recorded as handed over first, under the same
+        // gate as the generation, so an ack -- which can only answer a frame that left -- is
+        // judged against what was actually sent (HandleBlockUploadServerSubBlockAck).
+        int generation;
+        lock (session.SendGate)
+        {
+            generation = ++session.SendGeneration;
+            if (firstSeqno == 1) session.HighestSeqnoHandedOver = 0;
+        }
+        int next = firstSeqno;
         _ = SendOrderedControlFrames(onSendCompleted: null,
-            shouldStop: () => !ReferenceEquals(_sdoBlockServer, session)
-                || Volatile.Read(ref session.SendGeneration) != generation,
+            shouldStop: () =>
+            {
+                lock (session.SendGate)
+                {
+                    if (!ReferenceEquals(_sdoBlockServer, session) || session.SendGeneration != generation)
+                        return true;
+                    session.HighestSeqnoHandedOver = Math.Max(session.HighestSeqnoHandedOver, next++);
+                    return false;
+                }
+            },
             frames.ToArray());
     }
 
@@ -1188,8 +1209,6 @@ internal sealed partial class CanOpenNode
         var end = SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
             session.LastSegmentUnusedBytes, crc);
         session.Phase = SdoBlockServerPhase.AwaitEndResponse;
-        // The end frame is the session's newest send: a sub-block batch still going stops (#378).
-        Interlocked.Increment(ref session.SendGeneration);
         _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), end);
     }
 
@@ -1405,8 +1424,16 @@ internal sealed partial class CanOpenNode
         public byte SubBlockLastSeqno { get; set; }
         public int Retransmissions { get; set; }
 
-        /// <summary>Numbers the upload server's sends; a sub-block batch stops once a newer one
-        /// exists (#378). Written on the actor, read on the batch's sending task.</summary>
+        /// <summary>Guards <see cref="SendGeneration"/> and <see cref="HighestSeqnoHandedOver"/>,
+        /// written on the actor and on the batch's sending task.</summary>
+        public readonly object SendGate = new();
+
+        /// <summary>Numbers the upload server's sub-block batches; a batch stops once a newer one
+        /// exists (#378).</summary>
         public int SendGeneration;
+
+        /// <summary>The highest seqno of the current sub-block a batch has handed to the bus; an
+        /// ack cannot confirm more.</summary>
+        public int HighestSeqnoHandedOver;
     }
 }
