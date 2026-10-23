@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -1947,16 +1946,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
 
         AfterTeardownPosted?.Invoke();
-        try
-        {
-            if (queued.Wait(TransportTeardownTimeout)) return queued.Result;
-        }
-        catch (AggregateException failed)
-        {
-            // A teardown step that threw on the actor is this disposal's failure, as it was when
-            // it threw on this thread: thrown as itself, not wrapped by the wait.
-            ExceptionDispatchInfo.Capture(failed.GetBaseException()).Throw();
-        }
+        // WaitAny does not throw for a faulted task. A teardown step that threw on the actor is
+        // this disposal's failure, as it was when it threw on this thread, and GetResult throws
+        // it as itself rather than wrapped by the wait.
+        if (Task.WaitAny(new Task[] { queued }, TransportTeardownTimeout) == 0)
+            return queued.GetAwaiter().GetResult();
 
         // The actor is held by a callback that has not returned within its own shutdown bound.
         // The channel visible now is disposed from here, as before #375, and the queued teardown
