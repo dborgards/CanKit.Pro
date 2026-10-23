@@ -30,7 +30,11 @@ internal static class PdoSyncEmcyChecks
     /// as its traffic in either direction.
     /// </summary>
     private static List<TappedFrame> Transmitted(BusTap tap)
-        => tap.Frames.Where(f => !f.IsRemote).ToList();
+        => Transmitted(tap.Frames);
+
+    /// <summary>As above, for a snapshot already bounded to an observation window.</summary>
+    private static List<TappedFrame> Transmitted(IEnumerable<TappedFrame> frames)
+        => frames.Where(f => !f.IsRemote).ToList();
 
     /// <summary>How long after an NMT Stop a frame may still be one that was already in flight.
     /// Frames inside it are reported, not judged; frames after it are the device's fault.</summary>
@@ -137,16 +141,20 @@ internal static class PdoSyncEmcyChecks
                 // below and pass. Found in review of #388.
                 var operationalFromMs = tap.ElapsedMs;
 
-                await tap.ListenAsync(session.Options.PdoWindowMs, cancellationToken).ConfigureAwait(false);
+                var operationalUntilMs = await tap.ListenAsync(session.Options.PdoWindowMs, cancellationToken)
+                    .ConfigureAwait(false);
 
                 // The Operational verdict is drawn from ordinary TPDOs alone, so that a pass is
                 // never derived from traffic of a descriptor the report says it did not check —
                 // and only from frames that arrived after Operational was confirmed, so that it
                 // is drawn from the state it names.
-                var everything = Transmitted(tap).Where(f => f.AtMs >= operationalFromMs).ToList();
+                // Bounded at both ends: after Operational was confirmed, and not past the window
+                // the report names. The drain that makes the window complete is not part of it.
+                var inWindow = Transmitted(tap.Through(operationalUntilMs));
+                var everything = inWindow.Where(f => f.AtMs >= operationalFromMs).ToList();
                 inOperational = everything.Where(f => ordinaryIds.Contains((f.CanId, f.IsExtended))).ToArray();
                 multiplexedInOperational = everything.Count - inOperational.Length;
-                beforeOperational = Transmitted(tap).Count(f => f.AtMs < operationalFromMs);
+                beforeOperational = inWindow.Count(f => f.AtMs < operationalFromMs);
 
                 // Before the await, not after it: that task completes on the transmit confirmation
                 // and not at the instant the frame is handed off, so anything the device emitted
@@ -167,12 +175,13 @@ internal static class PdoSyncEmcyChecks
                     .ConfigureAwait(false) == (byte)NmtState.Stopped;
 
                 await Task.Delay(SettleMs, cancellationToken).ConfigureAwait(false);
-                await tap.ListenAsync(Math.Min(2000, session.Options.PdoWindowMs), cancellationToken).ConfigureAwait(false);
+                var stoppedUntilMs = await tap.ListenAsync(Math.Min(2000, session.Options.PdoWindowMs), cancellationToken)
+                    .ConfigureAwait(false);
 
                 // Classified by arrival time rather than by position in the list: a frame already
                 // on the wire when Stop landed is allowed its settling interval, and anything
                 // after that is the device still transmitting.
-                var afterStop = Transmitted(tap).Where(f => f.AtMs >= stopSentAtMs).ToList();
+                var afterStop = Transmitted(tap.Through(stoppedUntilMs)).Where(f => f.AtMs >= stopSentAtMs).ToList();
                 settling = afterStop.Count(f => f.AtMs < stopSentAtMs + SettleMs);
                 inStopped = afterStop.Count - settling;
                 multiplexedInStopped = afterStop
@@ -546,6 +555,24 @@ internal static class PdoSyncEmcyChecks
 
             // Enough SYNCs for the slowest of them to have had two opportunities, plus a margin,
             // and bounded so that a type-240 TPDO does not turn this into a minutes-long check.
+            // Before the unread guard: a value that came back and is invalid is the device's
+            // defect, and saying "unknown" about it would be the softer and wronger verdict —
+            // which is exactly what the previous commit did. The same shape as the reserved 1019h.
+            var reservedStarts = cyclic.Where(p => p.SyncStartReserved is not null).ToList();
+            if (reservedStarts.Count > 0)
+            {
+                return Outcome.Fail(
+                    string.Join("; ", reservedStarts.Select(p =>
+                        $"TPDO{p.Number} (0x{p.CobId:X3}) reports 1800h:06 = {p.SyncStartReserved}"))
+                    + ". A SYNC start value is 0..240 and 241..255 is reserved (the stack rejects a write above 240), "
+                    + "so no SYNC was sent: a burst sized from a value no device can honour would measure nothing.",
+                    new Dictionary<string, string>
+                    {
+                        ["reserved SYNC start values"] = string.Join(", ", reservedStarts.Select(p =>
+                            $"TPDO{p.Number}: {p.SyncStartReserved}")),
+                    });
+            }
+
             var unreadStarts = cyclic.Where(p => !p.SyncStartRead).ToList();
             if (unreadStarts.Count > 0)
             {
@@ -743,12 +770,14 @@ internal static class PdoSyncEmcyChecks
                 var opportunities = accepted / pdo.TransmissionType;
                 measurements[$"TPDO{pdo.Number} (0x{pdo.CobId:X3}) type {pdo.TransmissionType}"] =
                     $"{mine.Length} frame(s) for {opportunities} SYNC opportunity/opportunities";
-                // One frame is not enough for a type that owes one per N SYNCs. A type-1 TPDO
-                // that emitted once during hundreds of accepted SYNCs used to pass this. The
-                // margin is deliberately loose — half the opportunities — because the window
-                // boundary and the host's scheduling both cost frames, and this must not become a
-                // measurement of the runner. Found in review of #388.
-                var expected = Math.Max(1, opportunities / 2);
+                // The opportunities the device owes, less one frame of edge allowance — not half
+                // of them. Half forgave a device behaving as type 2 while declaring type 1, which
+                // is a contradiction of its own 1800h:02 and exactly what this check is for. The
+                // allowance is one frame and named as such: the burst already waits 200 ms after
+                // the last SYNC and the window is drained and closed at a timestamp, so the only
+                // frame still plausibly at risk is the last one. Found in review of #388, against
+                // the loose margin introduced to stop a different false FAIL.
+                var expected = Math.Max(1, opportunities - 1);
                 if (mine.Length >= expected) continue;
                 if (mine.Length > 0)
                 {
@@ -877,7 +906,7 @@ internal static class PdoSyncEmcyChecks
             int polls;
             try
             {
-                await tap.ListenAsync(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
+                var untilMs = await tap.ListenAsync(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
 
                 // One snapshot, taken at the window's edge, used for the drain *and* for the
                 // verdict. The previous version snapshotted twice: the drain waited for the
@@ -886,8 +915,9 @@ internal static class PdoSyncEmcyChecks
                 // without ever having been in the set the drain waited for, and its decode could
                 // still be queued when the handler came off. A false stack fault, from the fix
                 // for a false stack fault. Both reviewers found it. Found in review of #388.
-                frames = Transmitted(tap);
-                polls = tap.Frames.Count - frames.Count;
+                var window = tap.Through(untilMs);
+                frames = Transmitted(window);
+                polls = window.Count - frames.Count;
 
                 // The tap and the decoder do not share an instant. A frame arriving near the end
                 // of the window is in the tap's list while the node's actor has not yet raised
@@ -1329,7 +1359,12 @@ internal static class PdoSyncEmcyChecks
         // Why it is unread, not only that it is: the gate blocking 0x..02 is the run's own input
         // and the device refusing it is the device's, and SYN-02 charged both to the device.
         bool TransmissionTypeBlocked,
-        byte SyncStartValue, bool SyncStartRead, int InhibitMs, int EventTimerMs, int Bytes, bool MappingComplete,
+        byte SyncStartValue, bool SyncStartRead,
+        // The value the device returned when it is outside 0..240, or null. Kept rather than
+        // collapsed into "unread", because the two want different verdicts: an unread start value
+        // is an unresolved prerequisite, and a reserved one is a device defect.
+        byte? SyncStartReserved,
+        int InhibitMs, int EventTimerMs, int Bytes, bool MappingComplete,
         bool MultiplexedMode, int MappedEntries);
 
     private readonly record struct PdoSweep(
@@ -1394,6 +1429,8 @@ internal static class PdoSyncEmcyChecks
             // begins its cycle (CiA 301 §7.5.2.37).
             var (syncStart, syncStartOutcome) = await ByteOrDefault(session, comm, 0x06, problems, blocked, mandatory: false, cancellationToken).ConfigureAwait(false);
 
+            byte? syncStartReserved = null;
+
             // 0..240, which the stack enforces on write: CanOpenNode.Pdo.cs rejects 1800h:06 above
             // 240 with ValueRangeExceeded, and its README §"SYNC start value" documents the range.
             // A device reporting 241..255 was recorded as a successful read, so PDO-01 passed it
@@ -1411,8 +1448,14 @@ internal static class PdoSyncEmcyChecks
                 // malformed TPDO as though it had no start value. Under --groups sync the sweep's
                 // problem is not even in the verdict, so the device could pass. Found in review
                 // of #388, against the fix one commit earlier.
+                // Neither Read (which let SYN-02 walk past its guard, two commits ago) nor
+                // Unreadable (which made SYN-02 report that the object "would not return" and stay
+                // inconclusive — a spec violation exiting 0 under --groups sync, one commit ago).
+                // It was read, and what came back is invalid: the descriptor says so, and SYN-02
+                // fails on it the way it already fails on a reserved 1019h. Found in review
+                // of #388.
                 syncStart = null;
-                syncStartOutcome = ReadOutcome.Unreadable;
+                syncStartReserved = start;
             }
 
             // Read is not the same as valid. F1h..FBh is reserved for a TPDO and F1h..FDh for an
@@ -1486,6 +1529,7 @@ internal static class PdoSyncEmcyChecks
                 // Absent is resolved: the device has no start value, so 0 is the right answer.
                 // Only Unreadable leaves the prerequisite open.
                 SyncStartRead: syncStartOutcome != ReadOutcome.Unreadable,
+                SyncStartReserved: syncStartReserved,
                 InhibitMs: inhibit is { } inh ? inh / 10 : 0, // 1800h:03 counts 100 us units
                 EventTimerMs: eventTimer ?? 0,
                 Bytes: mappingComplete ? (bits + 7) / 8 : 0,

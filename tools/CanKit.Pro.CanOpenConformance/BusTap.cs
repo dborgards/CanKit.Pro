@@ -102,11 +102,27 @@ internal sealed class BusTap : IDisposable
     /// of #388, against the drain added one commit earlier.
     /// </para>
     /// </remarks>
-    public async Task ListenAsync(int milliseconds, CancellationToken cancellationToken = default)
+    /// <returns>
+    /// The instant the window closed, on this tap's own clock. Frames that arrive during the drain
+    /// are kept — they are real traffic and the report should not pretend otherwise — but they are
+    /// *after* the window, so a caller that says "in 4000 ms" must take its snapshot with <see
+    /// cref="Through"/> and this value. Without that, a heartbeat arriving in the 50 ms drain was
+    /// counted as having arrived inside --heartbeat-ms. Found in review of #388, against the drain
+    /// added two commits earlier.
+    /// </returns>
+    public async Task<double> ListenAsync(int milliseconds, CancellationToken cancellationToken = default)
     {
         await Task.Delay(milliseconds, cancellationToken).ConfigureAwait(false);
-
+        var cutoff = ElapsedMs;
         await Task.Delay(DrainMs, cancellationToken).ConfigureAwait(false);
+        return cutoff;
+    }
+
+    /// <summary>Every frame that arrived at or before <paramref name="cutoffMs"/>, oldest first —
+    /// the window a caller asked for, not the window plus the drain that made it complete.</summary>
+    public IReadOnlyList<TappedFrame> Through(double cutoffMs)
+    {
+        lock (_frames) return _frames.Where(f => f.AtMs <= cutoffMs).ToArray();
     }
 
     /// <summary>How long <see cref="ListenAsync"/> lets the delivery pump catch up. What it covers

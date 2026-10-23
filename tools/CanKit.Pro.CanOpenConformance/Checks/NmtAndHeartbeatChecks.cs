@@ -145,8 +145,13 @@ internal static class NmtAndHeartbeatChecks
         {
             var cobId = CanOpenCobId.Heartbeat(session.Target);
             using var tap = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
-            await tap.ListenAsync(session.Options.HeartbeatWindowMs, cancellationToken).ConfigureAwait(false);
-            IReadOnlyList<TappedFrame> frames = tap.Frames;
+            // Bounded at the window the report names, not the window plus the drain that makes it
+            // complete: a beat arriving in those 50 ms is real traffic, but it did not arrive
+            // inside --heartbeat-ms and the period must not be measured as though it had. Found in
+            // review of #388.
+            var untilMs = await tap.ListenAsync(session.Options.HeartbeatWindowMs, cancellationToken)
+                .ConfigureAwait(false);
+            IReadOnlyList<TappedFrame> frames = tap.Through(untilMs);
 
             var measurements = new Dictionary<string, string>
             {
@@ -339,9 +344,13 @@ internal static class NmtAndHeartbeatChecks
                 var heartbeatId = CanOpenCobId.Heartbeat(session.Target);
                 using var wire = new BusTap(session.Service, (id, extended) => id == heartbeatId && !extended);
 
-                await Task.Delay(needed, cancellationToken).ConfigureAwait(false);
+                // Through the tap's own window, so the pump is drained and the boundary is the one
+                // the verdict names. Swept for after the same defect was reported against HBT-04:
+                // a beat still queued at the end would have understated the wire and turned a
+                // stack fault into "the device stopped producing". Found in review of #388.
+                var wireUntilMs = await wire.ListenAsync(needed, cancellationToken).ConfigureAwait(false);
 
-                var onTheWire = Heartbeats(wire.Frames).Count;
+                var onTheWire = Heartbeats(wire.Through(wireUntilMs)).Count;
                 var measurements = new Dictionary<string, string>
                 {
                     ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
@@ -511,7 +520,13 @@ internal static class NmtAndHeartbeatChecks
                 var stoppedId = CanOpenCobId.Heartbeat(session.Target);
                 using (var afterStop = new BusTap(session.Service, (id, extended) => id == stoppedId && !extended))
                 {
-                    await Task.Delay(waitForTimeout, cancellationToken).ConfigureAwait(false);
+                    // Through ListenAsync, so the pump is drained and the boundary is explicit.
+                    // A plain Task.Delay plus afterStop.Frames read whatever had been delivered by
+                    // that instant: a final heartbeat from an intermittently continuing producer
+                    // could still be queued, leaving stillBeating == 0 and passing a device that
+                    // never obeyed 1017h = 0. Found in review of #388.
+                    var stoppedUntilMs = await afterStop.ListenAsync(waitForTimeout, cancellationToken)
+                        .ConfigureAwait(false);
 
                     // Classified by arrival time, not merely counted. The tap opens immediately
                     // after the write returns, so a beat already on the wire when the write landed
@@ -523,7 +538,7 @@ internal static class NmtAndHeartbeatChecks
                     // once: one for the Pass that bypassed this evidence, one for the in-flight
                     // frame that should not be charged to the device.
                     var inFlightAllowanceMs = beat.MedianMs + WindowMarginMs;
-                    var after = Heartbeats(afterStop.Frames);
+                    var after = Heartbeats(afterStop.Through(stoppedUntilMs));
                     inFlight = after.Count(f => f.AtMs < inFlightAllowanceMs);
                     stillBeating = after.Count - inFlight;
                 }
