@@ -231,6 +231,21 @@ public class ProtocolActorTests
         second.Should().BeSameAs(boom, "every subscriber hears of the exception, whatever an earlier one does");
     }
 
+    // FR-RAW-023 with nobody listening: the exception has nowhere to go and is dropped, and the loop
+    // keeps running and stops on request. ThreadPool mode, because a raise that threw would end the
+    // loop by faulting its task there -- after which this Dispose throws -- instead of taking the
+    // test host down with a dedicated loop thread.
+    [Fact]
+    public async Task A_Background_Exception_With_No_Subscriber_Is_Dropped_And_The_Loop_Keeps_Running()
+    {
+        using var actor = new ProtocolActor(ActorExecutionMode.ThreadPool);
+
+        actor.Post(() => throw new InvalidOperationException("nobody listens"));
+        (await actor.PostAsync(() => 42)).Should().Be(42);
+
+        actor.Invoking(a => a.Dispose()).Should().NotThrow("the loop survived the unheard exception and stops cleanly");
+    }
+
     [Fact]
     public async Task Schedule_Fires_Callback_After_The_Configured_Delay()
     {
