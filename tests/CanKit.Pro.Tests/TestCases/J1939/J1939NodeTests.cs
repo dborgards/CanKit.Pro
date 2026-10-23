@@ -4165,6 +4165,35 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         channels.Single().Disposed.Should().BeTrue();
     }
 
+    // Bugbot on #397: with the teardown queued behind the actor's turn, a node that owns its bus
+    // service disposed that service first, in DisposeCore, and the channel still using it lost
+    // its subscription and its sends from under it before its own teardown ran. The owned
+    // service goes after the channel on this path too, as it does off the actor.
+    [Fact]
+    public async Task A_Dispose_From_The_Actor_Disposes_An_Owned_Service_After_The_Channel()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var inner = new CanBusService(bus);
+        var service = new ParkingSendService(inner);
+        service.Release();
+        using var actor = new ProtocolActor();
+        var channels = new List<ScriptedTpChannel>();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: true, actor,
+            openTransport: sa =>
+            {
+                var channel = new ScriptedTpChannel(sa);
+                lock (channels) channels.Add(channel);
+                return channel;
+            });
+        var channelGoneFirst = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Disposed = () => { lock (channels) channelGoneFirst.TrySetResult(channels.Single().Disposed); };
+
+        await actor.PostAsync(node.Dispose);
+
+        (await channelGoneFirst.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeTrue(
+            "the channel is torn down before the service it uses");
+    }
+
     // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
     // is the node's own, so it is disposed in place.
     [Fact]
@@ -5972,7 +6001,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
         }
 
-        public void Dispose() { /* the test owns the inner service */ }
+        /// <summary>Runs when the node disposes this service (it does when it owns it).</summary>
+        public Action? Disposed { get; set; }
+
+        public void Dispose() => Disposed?.Invoke(); // the test owns the inner service
     }
 
     /// <summary>

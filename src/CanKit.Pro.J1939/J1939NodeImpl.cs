@@ -1907,7 +1907,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             if (_ownsActor) _actor.Dispose();
             _readerCts.Dispose();
-            if (_ownsService) _service.Dispose();
+            if (_ownsService && !_serviceDisposalQueued) _service.Dispose();
         }
     }
 
@@ -1933,10 +1933,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // and every later rebind sees _disposed. Returns the reader of the channel it tore down.
     private Task TearDownOnActor()
     {
+        bool behindThisTurn = _actor.IsOnCurrentActor;
+        Func<Task> teardown = behindThisTurn ? TearDownBehindTurn : TearDownOnLoop;
         Task<Task> queued;
         try
         {
-            queued = _actor.PostAsync(TearDownOnLoop);
+            queued = _actor.PostAsync(teardown);
         }
         catch (ObjectDisposedException)
         {
@@ -1946,7 +1948,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return DisposeVisibleTransport();
         }
 
-        if (_actor.IsOnCurrentActor)
+        if (behindThisTurn)
         {
             // Called from a callback of this actor, which cannot wait for its own mailbox. The
             // teardown is not run in place either: the callback may be a handler raised in the
@@ -1958,6 +1960,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // is reported where background failures go.
             _ = queued.ContinueWith(failed => RaiseBackgroundException(failed.Exception!.GetBaseException()),
                 CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            _serviceDisposalQueued = true;
             return Volatile.Read(ref _transportReaderTask);
         }
 
@@ -1973,6 +1976,25 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // still disposes whichever channel is current once the actor gets to it.
         return DisposeVisibleTransport();
     }
+
+    // The teardown of a Dispose called on the actor. An owned service goes with it, after the
+    // channel that uses it, as it does off the actor: disposed first, in DisposeCore, it took the
+    // channel's subscription and sends from under it before the channel's own teardown (Bugbot
+    // on #397).
+    private Task TearDownBehindTurn()
+    {
+        try
+        {
+            return TearDownOnLoop();
+        }
+        finally
+        {
+            if (_ownsService) _service.Dispose();
+        }
+    }
+
+    // Set when the teardown, and with it an owned service's disposal, is queued behind the turn.
+    private bool _serviceDisposalQueued;
 
     private Task DisposeVisibleTransport()
     {
