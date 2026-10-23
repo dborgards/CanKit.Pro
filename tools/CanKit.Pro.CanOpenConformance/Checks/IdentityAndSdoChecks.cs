@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Sdo;
 
@@ -182,50 +183,88 @@ internal static class IdentityAndSdoChecks
             // The one check that wants a failure. A device that answers something for an index it
             // does not have is worse than one that aborts, and an SDO server that stays silent
             // makes every client wait out its timeout for a question with a known answer.
-            // 5FFFh is in the reserved manufacturer area and no profile defines it.
+            // 5FFFh is in the manufacturer-specific area and no profile defines it.
+            //
+            // Driven on the wire rather than through ICanOpenNode, and that is the check rather
+            // than a shortcut. The peer-SDO gate refuses any pair a bound description does not
+            // declare and, with no description, everything but 1000h/1001h/1018h — and a
+            // description never declares an object the device lacks. So the gate blocks this
+            // question through the client API under *every* invocation: an earlier version
+            // reported itself setup-skipped always, including under the very re-run its own skip
+            // text recommended, which made it a check that could not run. Found in review of #388.
+            // The gate is a client-API policy, not a protocol rule; the device's SDO server
+            // answers the frame regardless of which client sent it.
             const ushort Absent = 0x5FFF;
-            if (!session.MayTransfer(Absent, 0x00))
+            var request = new byte[8];
+            request[0] = 0x40; // CiA 301 §7.2.4.3.5: initiate SDO upload
+            request[1] = unchecked((byte)Absent);
+            request[2] = (byte)(Absent >> 8);
+            // Sub-index 0 and the four reserved bytes stay zero.
+
+            var responseId = CanOpenCobId.SdoTx(session.Target);
+            using var tap = new BusTap(session.Service, id => id == responseId);
+
+            var accepted = session.Bus.Transmit(CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), request));
+            if (accepted <= 0)
             {
-                return Outcome.NeedsSetup(
-                    $"The peer-SDO gate blocks 0x{Absent:X4}: a bound description lists only what the device has, so "
-                    + "this check cannot be run with --eds. Run the sdo group without --eds to measure it.");
+                return Outcome.TransportFault(
+                    $"The driver rejected the SDO upload request frame (Transmit returned {accepted}), so the device "
+                    + "was never asked.");
             }
 
-            try
-            {
-                var raw = await session.Client.SdoUploadAsync(session.Target, Absent, 0x00, cancellationToken)
-                    .ConfigureAwait(false);
-                return Outcome.Fail(
-                    $"The device returned {Hex(raw)} for 0x{Absent:X4}:00 instead of aborting. A client cannot tell "
-                    + "an implemented object from an unimplemented one on this device.");
-            }
-            catch (SdoAbortException abort)
-            {
-                var measurements = new Dictionary<string, string>
-                {
-                    ["abort code"] = $"0x{abort.AbortCode:X8}",
-                    ["meaning"] = Enum.IsDefined(typeof(SdoAbortCode), abort.AbortCode)
-                        ? ((SdoAbortCode)abort.AbortCode).ToString()
-                        : "not a CiA 301 abort code",
-                    ["origin"] = abort.Origin.ToString(),
-                };
+            await tap.WaitForAsync(frames => frames.Count > 0, session.Options.SdoTimeoutMs, cancellationToken)
+                .ConfigureAwait(false);
 
-                if (abort.Origin == SdoAbortOrigin.Local)
-                    return Outcome.Inconclusive("The abort came from this client, not from the device: nothing was asked of it.",
-                        Attribution.Tool, measurements);
-
-                return abort.AbortCode == (uint)SdoAbortCode.ObjectDoesNotExist
-                    ? Outcome.Pass("Aborted 0x06020000 ObjectDoesNotExist, as CiA 301 requires.", measurements)
-                    : Outcome.Fail(
-                        $"Aborted 0x{abort.AbortCode:X8} where CiA 301 asks for 0x06020000 (object does not exist).",
-                        measurements);
-            }
-            catch (OperationCanceledException)
+            var answer = tap.Frames.FirstOrDefault(f => f.Data.Length >= 8);
+            if (tap.Frames.Count == 0)
             {
                 return Outcome.Fail(
-                    $"The device neither answered nor aborted 0x{Absent:X4}:00 within {session.Options.SdoTimeoutMs} ms. "
-                    + "A client has no way to distinguish this from a dead node.");
+                    $"The device neither answered nor aborted an upload of 0x{Absent:X4}:00 within "
+                    + $"{session.Options.SdoTimeoutMs} ms. A client has no way to distinguish that from a dead node.");
             }
+
+            if (answer.Data is null || answer.Data.Length < 8)
+            {
+                return Outcome.Fail(
+                    $"The device answered on 0x{responseId:X3} with {answer.Data?.Length ?? 0} byte(s); an SDO server "
+                    + "response is always 8.");
+            }
+
+            var measurements = new Dictionary<string, string>
+            {
+                ["request"] = $"0x{CanOpenCobId.SdoRx(session.Target):X3} {Hex(request)}",
+                ["response"] = $"0x{responseId:X3} {Hex(answer.Data)}",
+            };
+
+            // 80h is "abort transfer"; the index and sub-index are echoed in bytes 1..3 and the
+            // abort code is the last four, little-endian.
+            if (answer.Data[0] != 0x80)
+            {
+                return Outcome.Fail(
+                    $"The device responded with command specifier 0x{answer.Data[0]:X2} instead of aborting an upload "
+                    + $"of 0x{Absent:X4}:00. A client cannot tell an implemented object from an unimplemented one on "
+                    + "this device.", measurements);
+            }
+
+            var echoed = (ushort)(answer.Data[1] | (answer.Data[2] << 8));
+            if (echoed != Absent || answer.Data[3] != 0x00)
+            {
+                measurements["echoed index"] = $"0x{echoed:X4}:{answer.Data[3]:X2}";
+                return Outcome.Fail(
+                    $"The abort echoes 0x{echoed:X4}:{answer.Data[3]:X2}, not the 0x{Absent:X4}:00 that was asked for.",
+                    measurements);
+            }
+
+            var code = BitConverter.ToUInt32(answer.Data, 4);
+            measurements["abort code"] = $"0x{code:X8}";
+            measurements["meaning"] = Enum.IsDefined(typeof(SdoAbortCode), code)
+                ? ((SdoAbortCode)code).ToString()
+                : "not a CiA 301 abort code";
+
+            return code == (uint)SdoAbortCode.ObjectDoesNotExist
+                ? Outcome.Pass("Aborted 0x06020000 ObjectDoesNotExist, as CiA 301 requires.", measurements)
+                : Outcome.Fail(
+                    $"Aborted 0x{code:X8} where CiA 301 asks for 0x06020000 (object does not exist).", measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("SDO-03", "sdo", "Write is refused on a read-only object", Tier.Write, "FR-CO-002", async () =>

@@ -123,6 +123,15 @@ internal sealed class Checkbook
 
     public IReadOnlyList<Incident> Incidents => _incidents;
 
+    /// <summary>
+    /// Whether the run was interrupted. Once it is, no further check is attempted: each records
+    /// itself as not run. An earlier version let the cancellation surface through every remaining
+    /// check's own catch, where it was classified as the device failing to answer — so one Ctrl+C
+    /// produced a page of device findings about a device nobody had asked anything. Found in
+    /// review of #388.
+    /// </summary>
+    public bool Interrupted { get; private set; }
+
     /// <summary>Whether any finding is a <see cref="Verdict.Fail"/>; the exit code follows this.</summary>
     public bool AnyFailure => _findings.Any(f => f.Verdict == Verdict.Fail);
 
@@ -159,11 +168,27 @@ internal sealed class Checkbook
                 $"Needs --tier {tier.ToString().ToLowerInvariant()}; this run allows {_options.Tier.ToString().ToLowerInvariant()}."));
         }
 
+        if (Interrupted)
+        {
+            return Record(new Finding(id, group, title, tier, requirement, Verdict.NotRun, Attribution.Setup,
+                "The run was interrupted before this check started."));
+        }
+
         var clock = Stopwatch.StartNew();
         Outcome outcome;
         try
         {
             outcome = await check().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The operator stopped the run. Nothing was measured and nothing about the device
+            // follows, so this is not an inconclusive finding about it.
+            Interrupted = true;
+            clock.Stop();
+            return Record(new Finding(id, group, title, tier, requirement, Verdict.NotRun, Attribution.Setup,
+                "The run was interrupted while this check was running; whatever it had observed is not reported.",
+                clock.Elapsed.TotalMilliseconds));
         }
         catch (Exception ex)
         {
@@ -196,7 +221,10 @@ internal sealed class Checkbook
         SdoAbortException => Attribution.Device,
         LssTimeoutException => Attribution.Device,
         CanOpenTransportException => Attribution.Transport,
-        OperationCanceledException or TimeoutException => Attribution.Device,
+        // OperationCanceledException never reaches here from a check — RunAsync handles the
+        // interruption itself — so this arm is for one wrapped in an incident note.
+        OperationCanceledException => Attribution.Setup,
+        TimeoutException => Attribution.Device,
         CanKitException => Attribution.Transport,
         _ => Attribution.Tool,
     };

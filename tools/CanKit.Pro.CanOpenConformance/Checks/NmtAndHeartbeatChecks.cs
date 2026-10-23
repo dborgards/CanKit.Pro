@@ -359,8 +359,13 @@ internal static class NmtAndHeartbeatChecks
             }
             finally
             {
-                // Back to where it was found, whatever happened above.
-                if (initial is { } restore && restore != (byte)NmtState.PreOperational)
+                // Back to where it was found, whatever happened above — including when that was
+                // pre-operational. An earlier version skipped the restore in exactly that case, on
+                // the reasoning that the last step above ends there anyway; but a cancel or a
+                // failure after Start or Stop never reaches the last step, so the commonest
+                // power-up state was the one state the check could walk away from. Found in review
+                // of #388.
+                if (initial is { } restore)
                 {
                     var command = restore == (byte)NmtState.Operational ? NmtCommand.Start
                         : restore == (byte)NmtState.Stopped ? NmtCommand.Stop

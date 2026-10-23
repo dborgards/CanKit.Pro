@@ -20,7 +20,6 @@ namespace CanKit.Pro.CanOpenConformance;
 /// </summary>
 internal sealed class Session : IDisposable
 {
-    private readonly List<IDisposable> _owned = new();
     private ILssMaster? _lss;
 
     private Session(RunOptions options, ICanBus bus, ICanBusService service, ICanOpenNode client)
@@ -71,10 +70,10 @@ internal sealed class Session : IDisposable
 
     /// <summary>The LSS master, opened on first use. Opening it is not itself a bus action —
     /// an LSS master sends nothing until a service is called.</summary>
-    public ILssMaster Lss => _lss ??= Track(CanOpenLss.OpenMaster(Service, new LssMasterOptions
+    public ILssMaster Lss => _lss ??= CanOpenLss.OpenMaster(Service, new LssMasterOptions
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(Math.Max(100, Options.SdoTimeoutMs)),
-    }, leaveOpen: true));
+    }, leaveOpen: true);
 
     /// <summary>
     /// Opens the bus and the tool's node. The adapter assemblies are loaded first: CanKit resolves
@@ -97,9 +96,6 @@ internal sealed class Session : IDisposable
             }, leaveOpen: true);
 
             var session = new Session(options, bus, service, client);
-            session._owned.Add(client);
-            session._owned.Add(service);
-            session._owned.Add(bus);
             error = null;
             return session;
         }
@@ -164,12 +160,6 @@ internal sealed class Session : IDisposable
             ? $"0x{index:X4}:{subindex:X2} needs --eds: with no device description the stack transfers only 1000h:00, 1001h:00 and 1018h:00-04."
             : $"0x{index:X4}:{subindex:X2} is not declared by {System.IO.Path.GetFileName(Options.EdsPath)}; the device may still have it, but this run may not ask.";
 
-    private T Track<T>(T disposable) where T : IDisposable
-    {
-        _owned.Add(disposable);
-        return disposable;
-    }
-
     private static void Configure(IBusInitOptionsConfigurator cfg, RunOptions options)
     {
         if (options.UseFd)
@@ -200,19 +190,37 @@ internal sealed class Session : IDisposable
         }
     }
 
+    /// <summary>
+    /// Releases what the run owns from the top of the stack down: the LSS master and the node
+    /// first, then the demultiplexer they read through, then the bus underneath it. The order is
+    /// the point. An earlier version walked the ownership list backwards, which closed the bus
+    /// while the node and the CanBusService still held it — teardown could then throw or hang
+    /// after everything had been measured but before the report was written. Found in review
+    /// of #388.
+    /// </summary>
     public void Dispose()
     {
-        for (var i = _owned.Count - 1; i >= 0; i--)
+        foreach (var disposable in Layers())
         {
             try
             {
-                _owned[i].Dispose();
+                disposable.Dispose();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  note: disposing {_owned[i].GetType().Name} threw {ex.GetType().Name}: {ex.Message}");
+                // Teardown must not lose a finished run's report.
+                Console.WriteLine($"  note: disposing {disposable.GetType().Name} threw {ex.GetType().Name}: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>What the run owns, outermost first.</summary>
+    private IEnumerable<IDisposable> Layers()
+    {
+        if (_lss is { } lss) yield return lss;
+        yield return Client;
+        yield return Service;
+        yield return Bus;
     }
 }
 

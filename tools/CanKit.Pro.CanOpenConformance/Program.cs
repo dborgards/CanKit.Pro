@@ -87,15 +87,16 @@ internal static class Program
         string? openError = null;
         var background = new List<string>();
 
-        SimulatedDevice? simulated = null;
         try
         {
-            if (options.Simulate)
+            // A `using` rather than a field released in a finally: the device's lifetime is this
+            // block, which is exactly what the construct says (CodeQL cs/missed-using-statement).
+            using var simulated = options.Simulate
+                ? SimulatedDevice.Start(options.Endpoint, options.TargetNode ?? 0x11, options.Bitrate)
+                : null;
+            if (simulated is not null)
             {
-                // The simulated device needs a node-id, and the run needs to be pointed at it.
-                var deviceNode = options.TargetNode ?? (byte)0x11;
-                simulated = SimulatedDevice.Start(options.Endpoint, deviceNode, options.Bitrate);
-                Console.WriteLine($"  simulated CANopen device started as node {deviceNode} on the same virtual session.");
+                Console.WriteLine($"  simulated CANopen device started as node {options.TargetNode ?? 0x11} on the same virtual session.");
                 if (options.TargetNode is null)
                 {
                     Console.Error.WriteLine("--simulate started a device as node 17; pass --node 17 to test against it.");
@@ -128,10 +129,6 @@ internal static class Program
         catch (OperationCanceledException)
         {
             book.Note("run", "OperationCanceledException", "The run was interrupted.", Attribution.Setup);
-        }
-        finally
-        {
-            simulated?.Dispose();
         }
 
         clock.Stop();

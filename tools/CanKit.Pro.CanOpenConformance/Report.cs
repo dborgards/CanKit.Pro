@@ -181,15 +181,32 @@ internal static class ReportRenderer
         text.AppendLine();
         text.AppendLine("| | |");
         text.AppendLine("| --- | --- |");
-        foreach (var key in new[] { "vendor-id", "product code", "revision number", "serial number" })
-            if (identity.TryGetValue(key, out var value)) Row(text, key, $"`{value}`");
-        foreach (var key in new[] { "device profile number", "additional information" })
-            if (deviceType.TryGetValue(key, out var value)) Row(text, $"1000h {key}", value);
-        foreach (var key in new[] { "manufacturer device name", "manufacturer hardware version", "manufacturer software version" })
-            if (strings.TryGetValue(key, out var value)) Row(text, key, value);
-        foreach (var key in new[] { "product name", "vendor name", "objects declared", "LSS supported", "TPDOs declared", "RPDOs declared" })
-            if (file.TryGetValue(key, out var value)) Row(text, $"EDS: {key}", value);
+        // The filtering is explicit rather than an `if` inside the loop: CodeQL's
+        // cs/linq/missed-where, which this repository takes rather than dismisses.
+        Rows(text, identity, new[] { "vendor-id", "product code", "revision number", "serial number" },
+            key => key, value => $"`{value}`");
+        Rows(text, deviceType, new[] { "device profile number", "additional information" },
+            key => $"1000h {key}", value => value);
+        Rows(text, strings,
+            new[] { "manufacturer device name", "manufacturer hardware version", "manufacturer software version" },
+            key => key, value => value);
+        Rows(text, file,
+            new[] { "product name", "vendor name", "objects declared", "LSS supported", "TPDOs declared", "RPDOs declared" },
+            key => $"EDS: {key}", value => value);
         text.AppendLine();
+    }
+
+    /// <summary>Writes a row for each of <paramref name="keys"/> the measurements carry, in the
+    /// order given, naming and formatting them through the two selectors.</summary>
+    private static void Rows(
+        StringBuilder text,
+        IReadOnlyDictionary<string, string> measurements,
+        IEnumerable<string> keys,
+        Func<string, string> name,
+        Func<string, string> format)
+    {
+        foreach (var key in keys.Where(measurements.ContainsKey))
+            Row(text, name(key), format(measurements[key]));
     }
 
     private static void Failures(StringBuilder text, Report report)
