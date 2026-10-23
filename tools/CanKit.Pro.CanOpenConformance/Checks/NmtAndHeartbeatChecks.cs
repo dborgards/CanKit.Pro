@@ -34,6 +34,63 @@ internal static class NmtAndHeartbeatChecks
     /// </summary>
     private const int MaxObservationMs = 60_000;
 
+    /// <summary>
+    /// The verdict for "no heartbeat was observed", wherever that is concluded: no frame at all, or
+    /// frames that turned out to be boot-up messages or another master's node-guarding responses.
+    /// </summary>
+    /// <remarks>
+    /// One place, because two were one too many. Both questions this asks — is 1017h zero, and
+    /// could the window have held a beat — were written on the no-frames-at-all branch and then had
+    /// to be rediscovered on the heartbeat-candidate branch, once per review round: first the
+    /// 1017h lookup, which a reboot during the window bypassed, and then the window guard, which
+    /// the same single boot-up frame bypassed in exactly the same way. Patching the second
+    /// instance would have left the shape that produced both. Found in review of #388.
+    /// </remarks>
+    private static async Task<Outcome> NoHeartbeatAsync(
+        Session session, uint cobId, Dictionary<string, string> measurements, int bootUps,
+        CancellationToken cancellationToken)
+    {
+        // HBT-01 has already read 1017h, so this does not have to hedge: a verified zero is the
+        // device configured not to produce a heartbeat, which CiA 301 permits and which is not an
+        // unresolved device problem.
+        var configured = await ProducerHeartbeatTimeAsync(session, cancellationToken).ConfigureAwait(false);
+        if (configured == 0)
+        {
+            measurements["1017h producer heartbeat time"] = "0 ms (heartbeat switched off)";
+            return Outcome.NotApplicable(
+                $"The device is configured not to produce a heartbeat (1017h = 0), so nothing on 0x{cobId:X3} "
+                + "is expected"
+                + (bootUps > 0 ? $"; the {bootUps} frame(s) seen are boot-up messages." : ".")
+                + " That is an optional configuration, not a fault.", measurements);
+        }
+
+        // Before charging the silence to the device, the window has to have been able to contain a
+        // beat. A conforming 10-second producer observed for the default 4 seconds is silent for
+        // the whole window, and calling that "not producing what it is set to" is a device finding
+        // drawn from the run's own input. The margin is named rather than tuned: the perturbation
+        // is the delay between opening the tap and the producer's next beat — scheduling and
+        // driver buffering, tens of milliseconds — so one period plus WindowMarginMs is the
+        // smallest window this will draw a device finding from.
+        if (configured is { } tooShort && session.Options.HeartbeatWindowMs < tooShort + WindowMarginMs)
+        {
+            return Outcome.NeedsSetup(
+                $"1017h says {tooShort} ms and the observation window was "
+                + $"{session.Options.HeartbeatWindowMs} ms, which cannot contain a beat of that period"
+                + (bootUps > 0 ? $" (the {bootUps} frame(s) seen are boot-up messages)" : string.Empty)
+                + $". Re-run with --heartbeat-ms at least {tooShort + WindowMarginMs}; nothing is concluded "
+                + "about the device from a window shorter than its own period.", measurements);
+        }
+
+        return Outcome.Inconclusive(
+            (bootUps > 0
+                ? $"No heartbeat on 0x{cobId:X3}: the {bootUps} frame(s) seen are boot-up messages (00h), which "
+                  + "CiA 301 does not report in a heartbeat. The device rebooted during the window and is not "
+                  + "producing one"
+                : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms")
+            + (configured is { } ms ? $", although 1017h says {ms} ms." : "."),
+            Attribution.Device, measurements);
+    }
+
     public static async Task RunAsync(Session session, Checkbook book, CancellationToken cancellationToken)
     {
         await book.RunAsync("HBT-01", "heartbeat", "1017h producer heartbeat time", Tier.Read, "FR-CO-008", async () =>
@@ -78,42 +135,7 @@ internal static class NmtAndHeartbeatChecks
             };
 
             if (frames.Count == 0)
-            {
-                // HBT-01 has already read 1017h, so this does not have to hedge: a verified zero
-                // is the device configured not to produce a heartbeat, which CiA 301 permits and
-                // which is not an unresolved device problem. Found in review of #388.
-                var configured = await ProducerHeartbeatTimeAsync(session, cancellationToken).ConfigureAwait(false);
-                if (configured == 0)
-                {
-                    measurements["1017h producer heartbeat time"] = "0 ms (heartbeat switched off)";
-                    return Outcome.NotApplicable(
-                        $"The device is configured not to produce a heartbeat (1017h = 0), so nothing on 0x{cobId:X3} "
-                        + "is expected. That is an optional configuration, not a fault.");
-                }
-
-                // Before charging the silence to the device, the window has to have been able to
-                // contain a beat. A conforming 10-second producer observed for the default 4
-                // seconds is silent for the whole window, and this branch called that "not
-                // producing what it is set to". The margin is named rather than tuned: the
-                // perturbation here is the delay between opening the tap and the producer's next
-                // beat — scheduling and driver buffering, tens of milliseconds — so one period
-                // plus WindowMarginMs is the smallest window this will draw a device finding
-                // from. Found in review of #388.
-                if (configured is { } tooShort && session.Options.HeartbeatWindowMs < tooShort + WindowMarginMs)
-                {
-                    return Outcome.NeedsSetup(
-                        $"1017h says {tooShort} ms and the observation window was "
-                        + $"{session.Options.HeartbeatWindowMs} ms, which cannot contain a beat of that period. "
-                        + $"Re-run with --heartbeat-ms at least {tooShort + WindowMarginMs}; nothing is concluded "
-                        + "about the device from a window shorter than its own period.", measurements);
-                }
-
-                return Outcome.Inconclusive(
-                    $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms"
-                    + (configured is { } ms ? $", although 1017h says {ms} ms" : string.Empty)
-                    + ": the device is not producing what it is set to.",
-                    Attribution.Device, measurements);
-            }
+                return await NoHeartbeatAsync(session, cobId, measurements, bootUps: 0, cancellationToken).ConfigureAwait(false);
 
             // Another master's node-guarding poll uses this same COB-ID as a remote frame
             // (CanOpenNode.NodeGuarding.cs), and its empty payload is not a malformed heartbeat —
@@ -184,30 +206,7 @@ internal static class NmtAndHeartbeatChecks
             }
 
             if (heartbeats <= 0)
-            {
-                // The 1017h lookup belongs here, not only on the no-frames-at-all path: a reboot
-                // during the window makes the frame count nonzero, which bypassed it and turned a
-                // verified zero into a device-attributed finding. Found in review of #388.
-                var producer = await ProducerHeartbeatTimeAsync(session, cancellationToken).ConfigureAwait(false);
-                if (producer == 0)
-                {
-                    measurements["1017h producer heartbeat time"] = "0 ms (heartbeat switched off)";
-                    return Outcome.NotApplicable(
-                        $"The device is configured not to produce a heartbeat (1017h = 0), so nothing on 0x{cobId:X3} "
-                        + "is expected"
-                        + (bootUps > 0 ? $"; the {bootUps} frame(s) seen are boot-up messages." : ".")
-                        + " That is an optional configuration, not a fault.");
-                }
-
-                return Outcome.Inconclusive(
-                    (bootUps > 0
-                        ? $"No heartbeat on 0x{cobId:X3}: the {bootUps} frame(s) seen are boot-up messages (00h), which "
-                          + "CiA 301 does not report in a heartbeat. The device rebooted during the window and is not "
-                          + "producing one"
-                        : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms")
-                    + (producer is { } ms ? $", although 1017h says {ms} ms." : "."),
-                    Attribution.Device, measurements);
-            }
+                return await NoHeartbeatAsync(session, cobId, measurements, bootUps, cancellationToken).ConfigureAwait(false);
 
             // Only now. A toggle-zero guarding response carries the bare state and is
             // byte-for-byte a heartbeat, so the two cannot be separated — but a multi-byte frame

@@ -353,7 +353,42 @@ internal static class PdoSyncEmcyChecks
                 if (raw.Length != 4)
                     return Outcome.Fail($"1005h:00 is UNSIGNED32, the device returned {IdentityAndSdoChecks.Hex(raw)}.");
 
-                var cobId = BitConverter.ToUInt32(raw, 0);
+                var cobIdWord = BitConverter.ToUInt32(raw, 0);
+
+                // The same check the PDO communication records got, one object along, and reached
+                // by sweeping for it rather than by being told: a 1005h word with bit 29 set,
+                // reserved bits 11..28 set, or a restricted base id was masked into a frame
+                // identifier, so SYN-01 reported malformed parameters as read and SYN-02 sent
+                // SYNCs on the normalised id and could pass. The stack's IsUsableCobIdWord rejects
+                // exactly these, and unlike the PDO case it rejects an extended word outright:
+                // CiA 301 §7.5.2.6 gives SYNC an 11-bit COB-ID. Bit 30 is the generate flag and
+                // bit 31 is reserved here, so neither is part of the mask. Found in review of
+                // #388 — the fourth object in this family.
+                if ((cobIdWord & CanOpenCobId.ExtendedFrameBit) != 0)
+                {
+                    return Outcome.Fail(
+                        $"1005h:00 is 0x{cobIdWord:X8} with bit 29 set, which asks for a 29-bit SYNC identifier. "
+                        + "CiA 301 §7.5.2.6 defines SYNC on an 11-bit COB-ID.",
+                        new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
+                }
+
+                if ((cobIdWord & 0x1FFF_F800) != 0)
+                {
+                    return Outcome.Fail(
+                        $"1005h:00 is 0x{cobIdWord:X8}: bits 11..28 are reserved in an 11-bit COB-ID entry and must "
+                        + "be zero.",
+                        new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
+                }
+
+                var cobId = cobIdWord;
+                if (CanOpenCobId.IsRestricted(cobId & CanOpenCobId.CanIdMask))
+                {
+                    return Outcome.Fail(
+                        $"1005h:00 names CAN-ID 0x{cobId & CanOpenCobId.CanIdMask:X3}, which CiA 301 §7.3.5 restricts "
+                        + "to another communication object; SYNC may not use it.",
+                        new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
+                }
+
                 var generates = (cobId & CanOpenCobId.SyncGenerateBit) != 0;
                 var measurements = new Dictionary<string, string>
                 {
@@ -786,6 +821,14 @@ internal static class PdoSyncEmcyChecks
             void OnEmcy(object? sender, EmcyReceivedEventArgs e)
             {
                 var m = e.Message;
+
+                // The tap is restricted to --node, so the decode count has to be too. It was not:
+                // on a multi-node bus another producer's emergency made decoded.Count nonzero, and
+                // a well-formed frame from the *target* that the stack failed to decode was then
+                // covered by it — the decoder failure this check exists to surface, masked by a
+                // neighbour. Found in review of #388.
+                if (session.Options.TargetNode is { } only && m.ProducerNodeId != only) return;
+
                 lock (decoded)
                 {
                     decoded.Add($"node {m.ProducerNodeId}: error 0x{m.ErrorCode:X4}, register 0x{m.ErrorRegister:X2}, "
@@ -1192,7 +1235,15 @@ internal static class PdoSyncEmcyChecks
             // Both conditions are for a base frame only, as the stack's own helper is: it accepts
             // any extended word, because bits 11..28 are part of a 29-bit identifier and the
             // restricted list is of 11-bit ids.
-            if (!extended && (cobIdWord & 0x1FFF_F800) != 0)
+            //
+            // And both are for an *enabled* PDO only. Bit 31 of the word disables the PDO, and a
+            // disabled one is not a communication object on the bus: devices routinely park one
+            // at 000h, or leave the whole word at FFFFFFFFh, and the previous commit's version of
+            // this check failed those conforming devices and recorded no descriptor for the slot.
+            // The id is reported as what it is instead. Found in review of #388, against the fix
+            // one commit earlier that added the validation without looking at bit 31.
+            var enabled = (cobIdWord & CanOpenCobId.InvalidBit) == 0;
+            if (enabled && !extended && (cobIdWord & 0x1FFF_F800) != 0)
             {
                 problems.Add($"0x{comm:X4}:01 is 0x{cobIdWord:X8}: bit 29 is clear, so this is an 11-bit COB-ID, and "
                     + "bits 11..28 are reserved and must be zero.");
@@ -1201,7 +1252,7 @@ internal static class PdoSyncEmcyChecks
                 continue;
             }
 
-            if (!extended && CanOpenCobId.IsRestricted(cobId))
+            if (enabled && !extended && CanOpenCobId.IsRestricted(cobId))
             {
                 problems.Add($"0x{comm:X4}:01 names CAN-ID 0x{cobId:X3}, which CiA 301 §7.3.5 restricts to another "
                     + "communication object; a PDO may not use it.");
@@ -1212,7 +1263,7 @@ internal static class PdoSyncEmcyChecks
                 Number: i + 1,
                 CobId: cobId,
                 Extended: extended,
-                Valid: (cobIdWord & CanOpenCobId.InvalidBit) == 0,
+                Valid: enabled,
                 TransmissionType: transmission ?? 0xFF,
                 TransmissionTypeRead: transmissionOutcome == ReadOutcome.Read,
                 TransmissionTypeBlocked: transmissionBlocked,
