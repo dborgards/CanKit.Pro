@@ -357,6 +357,9 @@ public interface ICanOpenNode : IDisposable
     /// One transfer per server is in flight at a time: with one in flight — a safety transaction
     /// with that server counts as one for its whole length — the call fails with
     /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
+    /// <remarks>The client is not gated by this node's NMT state: it transfers in Stopped too,
+    /// as <see cref="SendSyncAsync"/> sends (#254). What CiA 301 Table 37 rules out in Stopped is
+    /// applied to this node's SDO server.</remarks>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
         CancellationToken cancellationToken = default);
@@ -382,6 +385,8 @@ public interface ICanOpenNode : IDisposable
     /// One transfer per server is in flight at a time: with one in flight — a safety transaction
     /// with that server counts as one for its whole length — the call fails with
     /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
+    /// <remarks>Not gated by this node's NMT state, as
+    /// <see cref="SdoUploadAsync(byte, ushort, byte, SdoTransferMode, CancellationToken)"/>.</remarks>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,
