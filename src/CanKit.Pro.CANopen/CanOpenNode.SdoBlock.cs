@@ -711,18 +711,11 @@ internal sealed partial class CanOpenNode
         // Block upload start (0xA3), sub-block ack (0xA2), end response (0xA1). Each is taken in
         // its own phase only: a start repeated once the sub-block is out used to re-run the
         // sender and reset the phase, so after the end frame the end response no longer matched
-        // and the session only ended in its timeout (#341). CiA 301 defines no repeat of the
-        // start -- a sub-block is re-requested through the ack's ackseq -- so outside its phase
-        // it is a command specifier the open session does not expect, and the session is
-        // aborted with 0504 0001h as the client side aborts its own (AbortBlockClient in the
-        // phase handlers' default arms). Not left to the classic server's abort: a 0xA3 frame
-        // carries no multiplexer, so that abort would name 0000:00 -- not this transfer, in the
-        // eyes of a client that matches aborts by object -- and the session would stay in the
-        // slot until its timeout aborted it a second time.
-        if (cs == SdoBlockFrames.CcsBlockUploadStart && _sdoBlockServer is { InDownload: false } up)
+        // and the session only ended in its timeout (#341).
+        if (cs == SdoBlockFrames.CcsBlockUploadStart
+            && _sdoBlockServer is { InDownload: false, Phase: SdoBlockServerPhase.AwaitStart } up)
         {
-            if (up.Phase == SdoBlockServerPhase.AwaitStart) HandleBlockUploadServerStart(up);
-            else AbortBlockServer(up, SdoAbortCode.CommandSpecifierInvalid);
+            HandleBlockUploadServerStart(up);
             return true;
         }
         if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck
@@ -738,8 +731,33 @@ internal sealed partial class CanOpenNode
             upEndResp.Deadline?.Dispose();
             return true;
         }
+        // Any other block follow-up frame while a block session is open -- a start, ack or end
+        // response outside its phase, or one of them during a block download, or a download end
+        // during an upload -- is a command specifier the open session does not expect. CiA 301
+        // defines no repeat of the start (a sub-block is re-requested through the ack's ackseq),
+        // so the session is aborted with 0504 0001h, as the client side aborts its own
+        // (AbortBlockClient in the phase handlers' default arms). Not left to the classic
+        // server: these frames carry no multiplexer, so its abort could only name 0000:00 --
+        // not this transfer, in the eyes of a client that matches aborts by object -- and the
+        // session would stay in the slot until its timeout aborted it a second time (#341, #378).
+        if (_sdoBlockServer is { } open && IsBlockFollowUpSpecifier(cs))
+        {
+            AbortBlockServer(open, SdoAbortCode.CommandSpecifierInvalid);
+            return true;
+        }
         return false;
     }
+
+    /// <summary>
+    /// A client-to-server block-transfer frame that belongs to a session already open: the upload
+    /// start (0xA3), the upload sub-block ack (0xA2), the upload end response (0xA1), and the
+    /// download end (ccs = 6, cs = 1, with n in bits 2..4).
+    /// </summary>
+    private static bool IsBlockFollowUpSpecifier(byte cs) =>
+        cs is SdoBlockFrames.CcsBlockUploadStart
+            or SdoBlockFrames.CcsBlockUploadSubBlockAck
+            or SdoBlockFrames.CcsBlockUploadEndResponse
+        || (cs & 0xE3) == CcsBlockDownloadEndMask;
 
     private void HandleBlockDownloadServerInit(byte[] data, byte cs)
     {
