@@ -1872,7 +1872,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try
         {
             DisposeCore();
-            _disposalDone.TrySetResult(true);
+            CompleteDisposal();
             return true;
         }
         catch (Exception ex)
@@ -1882,6 +1882,34 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _disposalDone.TrySetException(ex);
             throw;
         }
+    }
+
+    // The disposal is over when its teardown is: at once off the actor, which waited for it, and
+    // once the queued teardown has run when the Dispose came from the actor and could not wait
+    // (Codex on #397). A DisposeAsync from elsewhere meanwhile waits on this completion, and a
+    // teardown that threw is reported to it -- and through BackgroundExceptionOccurred, since the
+    // caller on the actor never sees it.
+    private void CompleteDisposal()
+    {
+        if (_teardownBehindTurn is not { } queued)
+        {
+            _disposalDone.TrySetResult(true);
+            return;
+        }
+        _ = queued.ContinueWith(static (teardown, state) =>
+        {
+            var node = (J1939NodeImpl)state!;
+            if (teardown.Exception is { } failed)
+            {
+                var error = failed.GetBaseException();
+                node.RaiseBackgroundException(error);
+                node._disposalDone.TrySetException(error);
+            }
+            else
+            {
+                node._disposalDone.TrySetResult(true);
+            }
+        }, this, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     private void DisposeCore()
@@ -1907,7 +1935,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             if (_ownsActor) _actor.Dispose();
             _readerCts.Dispose();
-            if (_ownsService && !_serviceDisposalQueued) _service.Dispose();
+            if (_ownsService && _teardownBehindTurn is null) _service.Dispose();
         }
     }
 
@@ -1956,11 +1984,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // registered its claim -- and what the rest of that turn publishes has to be torn
             // down too, or a claim registered after the teardown is never answered (Codex on
             // #397). Queued, it runs once the turn is over: on the next turn of an injected
-            // actor, in the final drain of the node's own. Nobody waits for it, so a failure
-            // is reported where background failures go.
-            _ = queued.ContinueWith(failed => RaiseBackgroundException(failed.Exception!.GetBaseException()),
-                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-            _serviceDisposalQueued = true;
+            // actor, in the final drain of the node's own; CompleteDisposal ends the disposal
+            // there, and reports a failure where nobody is waiting.
+            _teardownBehindTurn = queued;
             return Volatile.Read(ref _transportReaderTask);
         }
 
@@ -1993,8 +2019,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
-    // Set when the teardown, and with it an owned service's disposal, is queued behind the turn.
-    private bool _serviceDisposalQueued;
+    // The teardown a Dispose on the actor queued behind its turn -- and with it an owned
+    // service's disposal. Null otherwise.
+    private Task<Task>? _teardownBehindTurn;
 
     private Task DisposeVisibleTransport()
     {

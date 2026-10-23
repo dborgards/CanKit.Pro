@@ -4194,6 +4194,37 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the channel is torn down before the service it uses");
     }
 
+    // Codex on #397: the disposal started on the actor returns before its queued teardown has
+    // run, but the disposal is not over until it has. A DisposeAsync from elsewhere meanwhile
+    // waits for that teardown -- it used to complete at once, the channel still running.
+    // Forced: the turn that disposed holds the actor, so the teardown cannot run until released.
+    [Fact]
+    public async Task A_DisposeAsync_During_A_Teardown_Queued_On_The_Actor_Waits_For_It()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        using var hold = new ManualResetEventSlim();
+        var disposedOnActor = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            node.Dispose();
+            disposedOnActor.TrySetResult(true);
+            hold.Wait();
+        });
+        await disposedOnActor.Task.AsTaskWithTimeout(ShortTimeout);
+
+        var later = node.DisposeAsync().AsTask();
+        later.IsCompleted.Should().BeFalse("the teardown is queued behind the turn still holding the actor");
+        channels.Single().Disposed.Should().BeFalse();
+
+        hold.Set();
+        await later.WithTimeout(ShortTimeout);
+        channels.Single().Disposed.Should().BeTrue("the disposal completed once the teardown had run");
+    }
+
     // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
     // is the node's own, so it is disposed in place.
     [Fact]
