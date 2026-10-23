@@ -169,7 +169,10 @@ Deliberate omissions, each checked against the norm text:
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
-with such an entry instead of ignoring it.
+with such an entry instead of ignoring it. The same holds for the pre-defined error field
+(`1003h`), the EMCY inhibit time (`1015h`) and the error behaviour object (`1029h`): the node
+neither maintains nor reads them, and a description that declares one gets it created as data
+and reported `NotImplemented`.
 
 ## The object dictionary is the configuration
 
@@ -612,8 +615,9 @@ may be written in any order, so a slot not yet overwritten does not count agains
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
 other. `1017h` ≠ 0 runs the producer. Each sub-index of `1016h` with a node-id in 1..127 and a
 non-zero time is a consumer whose timeout is armed immediately, so a producer that never
-appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
-`0x700 + id`.
+appears is reported too. `HeartbeatReceived` reports a heartbeat or boot-up on `0x700 + id`
+whose state byte names an NMT state; a frame with a reserved state byte or with bit 7 set is
+not reported (#255, #266), and still counts as a sign of life for the consumer.
 
 For every node, periodic producer ticks are coalesced while a heartbeat send is outstanding;
 transmission recovery sends no catch-up burst, including when LSS is disabled.
@@ -1567,9 +1571,14 @@ requirement over the `CanKit.Adapter.Virtual` loopback bus.
 CanKit.Pro.CANopen/
   CanOpen.cs                          // factory
   ICanOpenNode.cs                     // public contract
-  CanOpenNode.cs                      // node core: subscription, dispatch, SDO client + server, NMT, heartbeat
+  CanOpenNodeExtensions.cs            // DisposeAsync for ICanOpenNode
+  CanOpenNodeProfile.cs               // the role a node is opened as (device or tool)
+  CanOpenNode.cs                      // node core: subscription, dispatch, SDO client + server, NMT, heartbeat, EMCY
   CanOpenNode.CommunicationProfile.cs // partial: the CiA 301 objects, their validation, power-on values, resets
+  CanOpenNode.DeviceDescription.cs    // partial: applying an EDS/DCF to the dictionary, with its findings
   CanOpenNode.Pdo.cs                  // partial: PDO engine — transmission types, inhibit time, event timer, RTR, mapping
+  CanOpenNode.PdoTiming.cs            // partial: SYNC counter, cycle period, synchronous window, PDO deadline indications
+  CanOpenNode.Mpdo.cs                 // partial: multiplexed PDOs, SAM/DAM, scanner and dispatcher lists
   CanOpenNode.SdoBlock.cs             // partial: SDO block transfer (client + server)
   CanOpenNode.NodeGuarding.cs         // partial: node-guarding consumer + producer, life guarding
   CanOpenNode.FlyingMaster.cs         // partial: NMT flying-master election
@@ -1579,15 +1588,24 @@ CanKit.Pro.CANopen/
   CanOpenNode.Safety.cs               // partial: CiA 304 objects, their validation, ICanOpenSafety, the SRDO send chain
   CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2, as the CiA 319 configuration entity) and verifying (step D) a peer's safety parameters
   CanOpenNode.ForeignSrdo.cs          // partial: splitting a peer's SRDO pair
+  CanOpenNode.Lss.cs                  // partial: the CiA 305 LSS slave and the transmit gate it holds
+  CanOpenDeviceDescription.cs         // a CiA 306 EDS/DCF, read with EdsDcfNet
   CanOpenDiscovery.cs                 // listen-only discovery and the scan on request
+  ForeignPdo.cs                       // a peer's decoded PDO and its direction
   CanOpenNodeOptions.cs
   CanOpenCobId.cs                     // pre-defined connection set, COB-ID control bits, restricted CAN-IDs
   CanOpenEvents.cs                    // event argument types
+  CanOpenTransportException.cs        // a frame could not be handed to the bus
+  PeerSdoAccessException.cs           // an SDO client transfer refused locally by the peer gate
   ObjectDictionary.cs, OdEntry.cs
   Nmt/NmtState.cs                     // NMT enum + command specifier
   Nmt/FlyingMaster.cs                 // flying-master role and signal
+  Heartbeat/                          // HeartbeatProducer and HeartbeatConsumer, independent of each other
   Sdo/                                // codec, abort codes, exception, block-transfer codec + mode enum
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
+  Pdo/PdoBits.cs                      // bit packing of mapped objects, least significant bit first
+  Pdo/ICanOpenPdo.cs                  // MPDO configuration and PDO monitoring contracts
+  Pdo/ICanOpenPdoMonitoring.cs
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
   Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
   Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan;
@@ -1705,7 +1723,7 @@ dotnet add package CanKit.Pro.CANopen
 dotnet add package CanKit.Adapter.Virtual   # loopback, no hardware
 ```
 
-Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
+Dependencies: `CanKit.Abstractions`, `EdsDcfNet`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 
 Part of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro) — higher CAN protocol layers
 built **on top of** [CanKit](https://github.com/pkuyo/CanKit), which is consumed as a NuGet
