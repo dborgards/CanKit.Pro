@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -662,6 +663,143 @@ public class LssMasterBoundaryTests
                 await rig.Service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             }
         }
+    }
+
+    /// <summary>
+    /// Records every frame the master sends and every host switch, by command specifier and the
+    /// virtual millisecond, and cancels <paramref name="cancelAfterActivation"/> once the
+    /// activation's confirmation has returned.
+    /// </summary>
+    private static System.Collections.Generic.List<string> RecordWire(ClockedLssRig rig,
+        CancellationTokenSource cancelAfterActivation, out Func<int, CancellationToken, Task> retune)
+    {
+        var events = new System.Collections.Generic.List<string>();
+        string Now() => "@" + (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).TotalMilliseconds
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        retune = (_, _) =>
+        {
+            lock (events) events.Add("retune" + Now());
+            return Task.CompletedTask;
+        };
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame =>
+        {
+            byte command = frame.Data.Span[0];
+            lock (events) events.Add($"{command:X2}" + Now());
+            var confirmation = await send(frame);
+            if (command == LssCommand.ActivateBitTiming) cancelAfterActivation.Cancel();
+            return confirmation;
+        };
+        return events;
+    }
+
+    [Fact]
+    public async Task A_Caller_Cancelling_After_The_Activation_Still_Has_The_Host_Follow_The_Switch()
+    {
+        // Review of #393: the slaves switch after the first period whatever this call does. A
+        // caller that gives up after the activation went out must not leave the host on the old
+        // rate with nobody returning the slaves to waiting (CiA 305 §6.4.4).
+        using var cancel = new CancellationTokenSource();
+        Func<int, CancellationToken, Task>? retune = null;
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (rate, token) => retune!(rate, token),
+        });
+        var events = RecordWire(rig, cancel, out retune);
+        var slave = rig.Add(new LssAddress(1, 1, 1, 1), nodeId: 5);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true, cancel.Token);
+        var abandoned = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
+        await abandoned.Should().ThrowAsync<OperationCanceledException>("the caller's wait returns promptly");
+
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        // A later command waits for the follow-through, so its frame comes after that one.
+        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(LssTestTiming.SchedulingBudget);
+
+        string waiting = $"{LssCommand.SwitchStateGlobal:X2}";
+        events.Should().Equal(
+            $"{waiting}@0", $"{LssCommand.ActivateBitTiming:X2}@0", "retune@100", $"{waiting}@200", $"{waiting}@200");
+        slave.State.Should().Be(LssState.Waiting);
+    }
+
+    [Fact]
+    public async Task A_Later_Command_Waits_For_A_Slow_Host_Switch_The_Abandoned_Activation_Started()
+    {
+        // The reservation ends after the second period, but a host switch still running then has
+        // not retuned the channel: a frame sent now would go out at the old rate.
+        using var cancel = new CancellationTokenSource();
+        var retuning = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retuned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Func<int, CancellationToken, Task>? record = null;
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = async (rate, token) =>
+            {
+                retuning.TrySetResult(true);
+                await retuned.Task;
+                await record!(rate, token);
+            },
+        });
+        var events = RecordWire(rig, cancel, out record);
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true, cancel.Token);
+        var abandoned = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
+        await abandoned.Should().ThrowAsync<OperationCanceledException>();
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await retuning.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+
+        var next = rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        // Nothing can complete this call before the switch returns. The wall clock only bounds how
+        // long a send that should not happen is given to show up; it cannot make the test fail.
+        (await Task.WhenAny(next, Task.Delay(TimeSpan.FromMilliseconds(200)))).Should().NotBeSameAs(next);
+        events.Should().ContainSingle(e => e.StartsWith($"{LssCommand.ActivateBitTiming:X2}@", StringComparison.Ordinal))
+            .And.HaveCount(1, "no frame may go out while the host is still switching");
+
+        retuned.TrySetResult(true);
+        await next.WaitAsync(LssTestTiming.SchedulingBudget);
+        string waiting = $"{LssCommand.SwitchStateGlobal:X2}@200";
+        events.Should().Equal($"{LssCommand.ActivateBitTiming:X2}@0", "retune@200", waiting, waiting);
+    }
+
+    [Fact]
+    public async Task A_Cancelled_Commissioning_Releases_The_Slave_Only_After_The_Host_Followed_The_Switch()
+    {
+        // The review's scenario: LssCommissioning's release after a cancelled activation waits out
+        // the reservation. It must then go out on the rate the slave switched to.
+        using var cancel = new CancellationTokenSource();
+        Func<int, CancellationToken, Task>? retune = null;
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (rate, token) => retune!(rate, token),
+        });
+        var address = new LssAddress(1, 1, 1, 1);
+        var slave = rig.Add(address, nodeId: 5);
+        var events = RecordWire(rig, cancel, out retune);
+
+        var configure = new LssCommissioning(rig.Master).ConfigureSlaveAsync(address, new LssSlaveConfiguration
+        {
+            BitTimingSelector = LssBitTiming.Cia301Table,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 100,
+            ActivateBitRate = 250_000,
+        }, cancel.Token);
+        var cancelled = async () => await rig.RunAsync(configure);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        // Selection and configuration take virtual time first; the periods count from the activation.
+        string activation = events.Single(e => e.StartsWith($"{LssCommand.ActivateBitTiming:X2}@", StringComparison.Ordinal));
+        double at = double.Parse(activation.Substring(activation.IndexOf('@') + 1), System.Globalization.CultureInfo.InvariantCulture);
+        string After(double ms) => (at + ms).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string waiting = $"{LssCommand.SwitchStateGlobal:X2}@" + After(200);
+        events.Skip(events.IndexOf(activation) + 1).Should().Equal("retune@" + After(100), waiting, waiting);
+        slave.State.Should().Be(LssState.Waiting);
     }
 
     [Theory]

@@ -83,6 +83,9 @@ internal sealed partial class LssMaster : ILssMaster
     // Guarded by _gate. Interrupted requests retain response-window/silence reservations.
     private long _nextCommandAt;
     private Exception? _indeterminateSend;
+    // Guarded by _gate. A host switch and waiting frame an activation follows through after its
+    // caller stopped waiting; never faults, so a later command only waits for it.
+    private Task _pendingFollow = Task.CompletedTask;
 
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService, ProtocolActor? timers = null)
     {
@@ -181,18 +184,31 @@ internal sealed partial class LssMaster : ILssMaster
             long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
             Reserve(resumeAt);
             // CiA 305 §6.4.4 and Figure 15: nothing is sent during either switch_delay period. A
-            // host that switches with the slaves sends waiting after both, on the new rate. A
-            // host that cannot switch would be left talking at the old rate, so it keeps the
-            // documented departure: waiting goes out before the first period ends (L-5, #359).
+            // host that switches with the slaves sends waiting after both, on the new rate (L-5,
+            // #359). The slaves switch whatever happens to this call, so from here on that is
+            // followed through on the master's lifetime, not the caller's token: a caller that
+            // gives up must not leave the host on a rate the slaves have left, with nobody
+            // returning them to waiting. Later commands wait for it.
+            if (returnToWaiting && delay > TimeSpan.Zero && bitsPerSecond is int followRate)
+            {
+                var follow = FollowSwitchAsync(switchAt, resumeAt, followRate, _lifetime.Token);
+                _pendingFollow = follow.ContinueWith(static completed => _ = completed.Exception,
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                await WaitOrCancelAsync(follow, ct).ConfigureAwait(false);
+                return;
+            }
+            // A host that cannot switch would be left talking at the old rate, so it keeps the
+            // documented departure: waiting goes out before the first period ends.
             var waiting = !returnToWaiting ? WaitingPhase.None
                 : delay == TimeSpan.Zero ? WaitingPhase.AfterSwitch
-                : bitsPerSecond is not null || time.GetTimestamp() >= switchAt ? WaitingPhase.AfterResume
+                : time.GetTimestamp() >= switchAt ? WaitingPhase.AfterResume
                 : WaitingPhase.BeforeDelay;
 
             async Task SendWaitingAtAsync(WaitingPhase phase)
             {
                 if (waiting != phase) return;
-                if (phase == WaitingPhase.AfterResume && bitsPerSecond is null)
+                // Reached only without a host switch: with one, the follow-through above sends it.
+                if (phase == WaitingPhase.AfterResume)
                     throw new CanOpenTransportException(
                         "The waiting frame could not be verified before the old-rate deadline. Both switch-delay periods have elapsed; a host bit-rate switch is required to return the slaves to waiting.");
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
@@ -213,6 +229,29 @@ internal sealed partial class LssMaster : ILssMaster
                 await DelayUntilAsync(resumeAt, ct).ConfigureAwait(false);
             await SendWaitingAtAsync(WaitingPhase.AfterResume).ConfigureAwait(false);
         }, cancellationToken);
+    }
+
+    private async Task FollowSwitchAsync(long switchAt, long resumeAt, int rate, CancellationToken lifetime)
+    {
+        await DelayUntilAsync(switchAt, lifetime).ConfigureAwait(false);
+        await Options.BitRateSwitch!(rate, lifetime).ConfigureAwait(false);
+        await DelayUntilAsync(resumeAt, lifetime).ConfigureAwait(false);
+        await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), lifetime).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Awaits <paramref name="task"/>, or stops waiting when <paramref name="cancellationToken"/>
+    /// is cancelled, which leaves the task running. <c>Task.WaitAsync</c> is not on net48.
+    /// </summary>
+    private static async Task WaitOrCancelAsync(Task task, CancellationToken cancellationToken)
+    {
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), cancelled))
+        {
+            if (await Task.WhenAny(task, cancelled.Task).ConfigureAwait(false) != task)
+                cancellationToken.ThrowIfCancellationRequested();
+        }
+        await task.ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -399,6 +438,7 @@ internal sealed partial class LssMaster : ILssMaster
                     throw new CanOpenTransportException(
                         "The LSS master cannot continue after an indeterminate transmission. Reset the transport and re-establish a quiescent network before opening another master.", failure);
                 await DelayUntilAsync(_nextCommandAt, linked.Token).ConfigureAwait(false);
+                await WaitOrCancelAsync(_pendingFollow, linked.Token).ConfigureAwait(false);
                 return await body(linked.Token).ConfigureAwait(false);
             }
             finally

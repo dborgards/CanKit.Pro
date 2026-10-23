@@ -92,8 +92,13 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// dispose this master after the call returns, and send switch state global from a new
     /// master on the new bus.
     /// Cancellation or failure after a confirmed send returns to the caller promptly;
-    /// subsequent commands still wait for the activation's two periods. An indeterminate
-    /// send makes the master unusable as described in the interface remarks.
+    /// subsequent commands still wait for the activation's two periods. With
+    /// <paramref name="returnToWaiting"/>, a positive delay and a host switch, the slaves switch
+    /// whatever the caller does, so once the activation is confirmed the master follows through
+    /// on its own: it switches after the first period and sends waiting after the second, even
+    /// when the caller has stopped waiting, and subsequent commands also wait for that. Its
+    /// failure reaches only a caller still waiting. Disposing the master ends it. An
+    /// indeterminate send makes the master unusable as described in the interface remarks.
     /// </summary>
     /// <exception cref="ArgumentException">A bit rate requires a switch callback. A zero delay with returnToWaiting requires both.</exception>
     /// <exception cref="CanOpenTransportException">The old-rate waiting window was missed and no host bit-rate switch is available.</exception>

@@ -171,11 +171,15 @@ Deliberate omissions, each checked against the norm text:
 * **Switch state global (waiting) inside the first switch delay** — CiA 305 §6.4.4 and Figure 15
   keep the master and every slave silent until the second `switch_delay` has elapsed. With a
   host switch (`bitsPerSecond` and `BitRateSwitch`) `returnToWaiting` keeps to that: waiting goes
-  out after both periods, on the new rate. Without one, the master would be left on the old
-  rate, so a positive delay sends waiting before the first period ends instead — a deliberate
-  departure from §6.4.4. If its confirmation comes back at or after the first deadline, the
-  call fails after both periods. 2.0 is planned to require a host switch for `returnToWaiting`
-  with a delay; the conforming alternative today is the one in the previous item.
+  out after both periods, on the new rate. The slaves switch whatever the caller does, so once
+  the activation is confirmed the master follows through on its own lifetime: a caller that
+  cancels gets control back at once, the host still switches and sends waiting, and later
+  commands, the commissioning release among them, wait for that. Without a host switch the
+  master would be left on the old rate, so a positive delay sends waiting before the first
+  period ends instead — a deliberate departure from §6.4.4. If its confirmation comes back at or
+  after the first deadline, the call fails after both periods. 2.0 is planned to require a host
+  switch for `returnToWaiting` with a delay; the conforming alternative today is the one in the
+  previous item.
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
