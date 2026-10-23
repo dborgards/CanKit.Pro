@@ -4184,6 +4184,31 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(failure);
         channels.Single().Disposed.Should().BeTrue();
+        // Bugbot on #397: the failure is the disposal's, also for a caller who asks later.
+        (await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask())).Should().BeSameAs(failure);
+        service.SubscriptionCount.Should().Be(0, "the rest of the queued disposal ran all the same");
+    }
+
+    // A Dispose on the actor of an injected actor its owner has just disposed -- the owner's
+    // Dispose ran inside this turn. Nothing can be queued on it any more, so the disposal runs in
+    // place, and the channel is not left running.
+    [Fact]
+    public async Task A_Dispose_On_An_Actor_Already_Disposed_Runs_In_Place()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+
+        await actor.PostAsync(() =>
+        {
+            actor.Dispose(); // reentrant: the loop ends after this turn
+            node.Dispose();
+        });
+
+        channels.Single().Disposed.Should().BeTrue();
+        await node.DisposeAsync(); // complete, and not failed
     }
 
     // Bugbot on #397: with the teardown queued behind the actor's turn, a node that owns its bus

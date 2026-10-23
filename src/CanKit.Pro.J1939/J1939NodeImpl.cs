@@ -1871,10 +1871,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private bool TryDispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+        if (_actor.IsOnCurrentActor && TryQueueDisposal()) return true;
         try
         {
             DisposeCore();
-            CompleteDisposal();
+            _disposalDone.TrySetResult(true);
             return true;
         }
         catch (Exception ex)
@@ -1886,32 +1887,45 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
-    // The disposal is over when its teardown is: at once off the actor, which waited for it, and
-    // once the queued teardown has run when the Dispose came from the actor and could not wait
-    // (Codex on #397). A DisposeAsync from elsewhere meanwhile waits on this completion, and a
-    // teardown that threw is reported to it -- and through BackgroundExceptionOccurred, since the
-    // caller on the actor never sees it.
-    private void CompleteDisposal()
+    // A Dispose called from a callback of the node's actor. That callback may be a handler raised
+    // in the middle of a transition -- AddressClaimChanged for Claiming, before the round has
+    // registered its claim -- so the disposal does not run inside the turn: what the rest of the
+    // turn publishes would outlive the teardown, a claim registered after it never answered
+    // (Codex on #397). The whole disposal is queued behind the turn instead, as one unit, so its
+    // order is the one it has everywhere else (channel before an owned service, Bugbot on #397);
+    // in that clean turn the teardown runs in place. The caller cannot wait for its own actor,
+    // so it returns at once; the disposal completion follows the queued disposal, which a
+    // DisposeAsync from elsewhere then waits for (Codex on #397), and a failure is reported
+    // where background failures go as well, since the caller on the actor never sees it. False
+    // when the actor -- an injected one -- is already gone: then the disposal runs in place.
+    private bool TryQueueDisposal()
     {
-        if (_teardownBehindTurn is not { } queued)
+        Task queued;
+        try
+        {
+            queued = _actor.PostAsync(DisposeCore);
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+        _ = queued.ContinueWith(static (disposal, state) => ((J1939NodeImpl)state!).CompleteQueuedDisposal(disposal),
+            this, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        return true;
+    }
+
+    private void CompleteQueuedDisposal(Task disposal)
+    {
+        if (disposal.Exception is { } failed)
+        {
+            var error = failed.GetBaseException();
+            RaiseBackgroundException(error);
+            _disposalDone.TrySetException(error);
+        }
+        else
         {
             _disposalDone.TrySetResult(true);
-            return;
         }
-        _ = queued.ContinueWith(static (teardown, state) =>
-        {
-            var node = (J1939NodeImpl)state!;
-            if (teardown.Exception is { } failed)
-            {
-                var error = failed.GetBaseException();
-                node.RaiseBackgroundException(error);
-                node._disposalDone.TrySetException(error);
-            }
-            else
-            {
-                node._disposalDone.TrySetResult(true);
-            }
-        }, this, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     private void DisposeCore()
@@ -1937,7 +1951,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             if (_ownsActor) _actor.Dispose();
             _readerCts.Dispose();
-            if (_ownsService && _teardownBehindTurn is null) _service.Dispose();
+            if (_ownsService) _service.Dispose();
         }
     }
 
@@ -1963,12 +1977,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // and every later rebind sees _disposed. Returns the reader of the channel it tore down.
     private Task TearDownOnActor()
     {
-        bool behindThisTurn = _actor.IsOnCurrentActor;
-        Func<Task> teardown = behindThisTurn ? TearDownBehindTurn : TearDownOnLoop;
+        // On the actor nothing else can be rebinding: this is the actor, in a turn of the
+        // disposal's own (TryQueueDisposal), or one that is past its callbacks already.
+        if (_actor.IsOnCurrentActor) return TearDownOnLoop();
+
         Task<Task> queued;
         try
         {
-            queued = _actor.PostAsync(teardown);
+            queued = _actor.PostAsync(TearDownOnLoop);
         }
         catch (ObjectDisposedException)
         {
@@ -1976,20 +1992,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // claim state went with that actor -- it is actor state, and its loop may still be
             // draining -- but the channel is the node's own and is not left running.
             return DisposeVisibleTransport();
-        }
-
-        if (behindThisTurn)
-        {
-            // Called from a callback of this actor, which cannot wait for its own mailbox. The
-            // teardown is not run in place either: the callback may be a handler raised in the
-            // middle of a transition -- AddressClaimChanged for Claiming, before the round has
-            // registered its claim -- and what the rest of that turn publishes has to be torn
-            // down too, or a claim registered after the teardown is never answered (Codex on
-            // #397). Queued, it runs once the turn is over: on the next turn of an injected
-            // actor, in the final drain of the node's own; CompleteDisposal ends the disposal
-            // there, and reports a failure where nobody is waiting.
-            _teardownBehindTurn = queued;
-            return Volatile.Read(ref _transportReaderTask);
         }
 
         AfterTeardownPosted?.Invoke();
@@ -2004,26 +2006,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // still disposes whichever channel is current once the actor gets to it.
         return DisposeVisibleTransport();
     }
-
-    // The teardown of a Dispose called on the actor. An owned service goes with it, after the
-    // channel that uses it, as it does off the actor: disposed first, in DisposeCore, it took the
-    // channel's subscription and sends from under it before the channel's own teardown (Bugbot
-    // on #397).
-    private Task TearDownBehindTurn()
-    {
-        try
-        {
-            return TearDownOnLoop();
-        }
-        finally
-        {
-            if (_ownsService) _service.Dispose();
-        }
-    }
-
-    // The teardown a Dispose on the actor queued behind its turn -- and with it an owned
-    // service's disposal. Null otherwise.
-    private Task<Task>? _teardownBehindTurn;
 
     private Task DisposeVisibleTransport()
     {
@@ -2067,9 +2049,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        // On the actor (a callback of this node) the disposal runs in place: the actor is what
-        // the blocking waits would be waiting on from another thread. Anywhere else it runs on
-        // the thread pool, so the caller's thread is not held for the joins Dispose makes.
+        // On the actor (a callback of this node) the disposal is queued behind the current turn
+        // and not waited for (TryQueueDisposal): the actor cannot wait for itself. Anywhere else
+        // it runs on the thread pool, so the caller's thread is not held for the joins Dispose
+        // makes.
         if (_actor.IsOnCurrentActor)
         {
             var won = TryDispose();
