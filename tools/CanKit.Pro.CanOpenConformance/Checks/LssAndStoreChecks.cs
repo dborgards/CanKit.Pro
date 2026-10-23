@@ -354,7 +354,53 @@ internal static class LssAndStoreChecks
             // "save" in ASCII, little-endian as CiA 301 specifies the signature. Nothing else is
             // accepted, and that is the point of the signature: a stray write cannot store.
             var save = new byte[] { 0x73, 0x61, 0x76, 0x65 };
-            await session.Client.SdoDownloadAsync(session.Target, 0x1010, 0x01, save, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await session.Client.SdoDownloadAsync(session.Target, 0x1010, 0x01, save, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (SdoAbortException abort) when (abort.Origin == SdoAbortOrigin.Peer)
+            {
+                // The device said it saves on command — bit 0 of 1010h:01 is what this check read
+                // a moment ago — and then refused the one signature CiA 301 §7.5.2.17 defines for
+                // it. That is the device contradicting its own capability word, which is a defect
+                // and not an unclear measurement: without this the abort left the check through
+                // Checkbook's exception arm as an inconclusive, and a device that refuses to store
+                // what it advertises exited 0. Found in review of #388.
+                return Outcome.Fail(
+                    "1010h:01 reports save-on-command, and the device then refused the 'save' signature: "
+                    + IdentityAndSdoChecks.Describe(abort)
+                    + ". CiA 301 §7.5.2.17 defines that signature and no other, so a device advertising bit 0 has "
+                    + "to accept it.",
+                    new Dictionary<string, string>
+                    {
+                        ["1010h:01 capability"] = $"0x{capability:X8}",
+                        ["signature written"] = "73 61 76 65 ('save')",
+                        ["abort"] = IdentityAndSdoChecks.Describe(abort),
+                    });
+            }
+            catch (SdoAbortException abort) when (abort.AbortCode == (uint)SdoAbortCode.SdoProtocolTimedOut)
+            {
+                // Not a refusal: CiA 301 puts no bound on how long a store may take, and a local
+                // timeout is this client giving up rather than the device answering. The write may
+                // also have landed — the device could be storing right now — so the state after
+                // this run is not what it was before it, and the report has to say that rather
+                // than claim either outcome.
+                return Outcome.Inconclusive(
+                    $"The 'save' signature was written to 1010h:01 and no response came back within "
+                    + $"{session.Options.SdoTimeoutMs} ms. CiA 301 sets no limit on how long a store may take, so "
+                    + "this is not a refusal — but it is not a confirmed store either, and the write may have been "
+                    + "executed after this check stopped waiting. Treat the device's stored parameters as changed "
+                    + "and re-read them before relying on either answer.",
+                    Attribution.Device,
+                    new Dictionary<string, string>
+                    {
+                        ["1010h:01 capability"] = $"0x{capability:X8}",
+                        ["signature written"] = "73 61 76 65 ('save')",
+                        ["SDO timeout"] = IdentityAndSdoChecks.Ms(session.Options.SdoTimeoutMs),
+                    });
+            }
+
             return Outcome.Pass(
                 "The device accepted the 'save' signature on 1010h:01. Whatever its parameters were at this moment "
                 + "is now what it will come up with after a power cycle.",

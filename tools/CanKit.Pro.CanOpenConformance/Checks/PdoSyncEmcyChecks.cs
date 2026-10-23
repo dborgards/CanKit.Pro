@@ -603,6 +603,35 @@ internal static class PdoSyncEmcyChecks
                     });
             }
 
+            // A reserved transmission type is in neither set below: F1h..FBh is above the cyclic
+            // range and is not zero, so the classification dropped such a descriptor silently.
+            // SYN-02 could then report that no cyclic synchronous TPDO exists, or pass on the
+            // traffic of a neighbour whose type *is* valid, while the device's invalid 1800h:02
+            // went unreported — in a --groups sync run, where PDO-01 is not there to report it
+            // either. The sweep records it as a problem; this is the check that has to refuse on
+            // it, the way it already refuses on a reserved 1019h. Found in review of #388.
+            var reservedTypes = known
+                .Where(p => p.Valid && p.TransmissionTypeRead
+                            && CanOpenTransmissionType.IsReservedForTpdo(p.TransmissionType))
+                .ToList();
+            if (reservedTypes.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{reservedTypes.Count} valid TPDO(s) report a transmission type CiA 301 Table 72 reserves: "
+                    + string.Join(", ", reservedTypes.Select(p => $"TPDO{p.Number} 0x{p.TransmissionType:X2}"))
+                    + ". A reserved value is not a transmission type, so whether those TPDOs are synchronous cannot "
+                    + "be decided — and a verdict about every cyclic synchronous TPDO will not be drawn from the "
+                    + "ones whose type happens to be valid.",
+                    new Dictionary<string, string>
+                    {
+                        ["TPDOs with a reserved transmission type"] = string.Join(", ",
+                            reservedTypes.Select(p => $"TPDO{p.Number} (0x{p.CobId:X3}) 1800h:02 = 0x{p.TransmissionType:X2}")),
+                        ["prerequisite problems"] = prerequisiteProblems.Count > 0
+                            ? string.Join("; ", prerequisiteProblems)
+                            : "(none reported)",
+                    });
+            }
+
             // Only PDOs whose transmission type was actually read: a default standing in for a
             // failed mandatory read must not decide which ones are synchronous.
             var cyclic = known

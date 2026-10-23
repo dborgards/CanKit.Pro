@@ -102,13 +102,37 @@ internal static class NmtAndHeartbeatChecks
                 Attribution.Setup, measurements);
         }
 
+        // Silence is the device's only when the window could have held a beat, and that comparison
+        // needs 1017h. Without it the guard above cannot run, and every silent device was charged
+        // for it — including the conforming slow producer the guard exists for, and including
+        // every run without --eds, where the peer-SDO gate refuses 1017h outright and the period
+        // was therefore never in hand. Which of the two it is, is known locally: the gate is this
+        // run's own policy, a failed read is not. Found in review of #388.
+        if (configured is null)
+        {
+            var why = !session.MayTransfer(0x1017, 0x00)
+                ? session.GateReason(0x1017, 0x00)
+                : "1017h did not come back (see HBT-01), so the device's own period is unknown.";
+            return Outcome.Inconclusive(
+                $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms"
+                + (bootUps > 0 ? $"; the {bootUps} frame(s) seen are boot-up messages (00h), which CiA 301 does not "
+                    + "report in a heartbeat" : string.Empty)
+                + ". Whether that window could have contained a beat cannot be said, because the producer heartbeat "
+                + "time was not available: " + why
+                + " CiA 301 sets no upper bound on the period, so the silence is not charged to the device on a "
+                + "window that may be shorter than it. Bind a description that declares 1017h, or raise "
+                + "--heartbeat-ms past the period the device is set to.",
+                !session.MayTransfer(0x1017, 0x00) ? Attribution.Setup : Attribution.Unknown,
+                measurements);
+        }
+
         return Outcome.Inconclusive(
             (bootUps > 0
                 ? $"No heartbeat on 0x{cobId:X3}: the {bootUps} frame(s) seen are boot-up messages (00h), which "
                   + "CiA 301 does not report in a heartbeat. The device rebooted during the window and is not "
                   + "producing one"
                 : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms")
-            + (configured is { } ms ? $", although 1017h says {ms} ms." : "."),
+            + $", although 1017h says {configured.Value} ms.",
             Attribution.Device, measurements);
     }
 

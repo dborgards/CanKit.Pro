@@ -276,16 +276,28 @@ internal static class IdentityAndSdoChecks
             // judges the whole set — so without this the rule could only ever see a second reply
             // that had already been pumped, and a server sending one a few milliseconds behind
             // the first would be reported as conforming. Found in review of #388.
+            //
+            // The settle is a window, so it closes at an instant on each tap's own clock and both
+            // are read through it after one drain. Snapshotting them as they stood when the delay
+            // ended made the two observations race each other: another client's reply could be
+            // through the response tap while its request was still in the request tap's queue, so
+            // `foreign` came back empty and the exactly-one-response rule below failed a
+            // conforming server on a window it did not have to itself — the very verdict the
+            // request tap was added to prevent. Found in review of #388, against the guard of the
+            // commit before it.
             await Task.Delay(SdoReplySettleMs, cancellationToken).ConfigureAwait(false);
+            var replyCutoff = tap.ElapsedMs;
+            var requestCutoff = requests.ElapsedMs;
+            await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
 
-            var responses = tap.Frames.Where(f => !f.IsRemote).ToList();
+            var responses = tap.Through(replyCutoff).Where(f => !f.IsRemote).ToList();
 
             // Before any verdict on the set: a window another client shared cannot be read as one
             // transaction, and this check does not get to decide whose frame is whose. Reported
             // as the run's own condition rather than the device's — an SDO channel is a
             // point-to-point relationship between one client and one server, so two clients on it
             // is a property of the bus this run was pointed at. Found in review of #388.
-            var foreign = requests.Frames.Where(f => !f.IsRemote).ToList();
+            var foreign = requests.Through(requestCutoff).Where(f => !f.IsRemote).ToList();
             if (foreign.Count > 0)
             {
                 return Outcome.Inconclusive(
