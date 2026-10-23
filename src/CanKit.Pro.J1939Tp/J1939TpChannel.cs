@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
@@ -93,6 +94,18 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     // Null unless a J1939 node owns the channel; see the constructor.
     private readonly Func<bool>? _sourceAddressHeld;
+
+    /// <summary>
+    /// How long <see cref="Dispose"/> waits for a borrowed actor to run the session cleanup
+    /// before it returns without it. Two seconds; a test seam, not an option (#362).
+    /// </summary>
+    /// <remarks>
+    /// A test that asserts Dispose <em>waits</em> for a busy borrowed actor needs the actor to
+    /// get round to the cleanup inside this budget, and on a loaded runner a fixed two seconds is
+    /// a margin the host can eat. Setting it to <see cref="Timeout.InfiniteTimeSpan"/> takes the
+    /// budget out of that assertion; the budget's own behaviour keeps its own test.
+    /// </remarks>
+    internal TimeSpan CleanupBudget { get; init; } = TimeSpan.FromSeconds(2);
 
     /// <inheritdoc />
     public byte SourceAddress => _sourceAddress;
@@ -440,7 +453,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             _actor.Dispose();
             DisposeOwnedService();
         }
-        else if (cleanup.Wait(TimeSpan.FromSeconds(2)))
+        else if (cleanup.Wait(CleanupBudget))
         {
             // A borrowed actor keeps running, possibly busy with the caller's other work, so the
             // cleanup is waited for: no session is left using the service (Codex on #183).
@@ -452,7 +465,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // and says so where background faults go, as the actor's own Dispose does; the
             // service outlives the cleanup rather than being torn down under it (Codex on #183).
             RaiseBackgroundException(new TimeoutException(
-                "The injected actor did not run the channel's session cleanup within 2 s. Dispose returned; the sends still in flight fail, and an owned service is disposed, once the actor gets to it."));
+                $"The injected actor did not run the channel's session cleanup within {CleanupBudget.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} s. Dispose returned; the sends still in flight fail, and an owned service is disposed, once the actor gets to it."));
             _ = cleanup.ContinueWith(static (_, state) => ((J1939TpChannel)state!).DisposeOwnedService(), this,
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }

@@ -237,7 +237,12 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Disposing the handle from inside onNext must not join the pump that is currently
-    // invoking that callback: a self-wait can only finish via the two-second timeout.
+    // invoking that callback: a self-wait can only finish via the join's timeout.
+    //
+    // #362: this told the two apart by time -- done within 500 ms against the 2 s join -- and a
+    // host slow to start the pump crossed the 500 ms with nothing wrong. The join is made
+    // unbounded instead, so a self-join is a hang rather than a delay, and the bound below only
+    // has to catch the hang; how long the pump takes to start is no longer what decides.
     [Fact]
     public async Task Callback_Subscribe_Dispose_From_Inside_Handler_Does_Not_Hang()
     {
@@ -253,10 +258,10 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
             subscription!.Dispose();
             disposed.TrySetResult(true);
         });
+        ((CanBusServiceExtensions.CallbackSubscription)subscription).JoinTimeout = Timeout.InfiniteTimeSpan;
 
         sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
-        // The pump join timeout is 2s; completing well under that proves the self-wait was skipped.
-        await disposed.Task.WaitAsync(TimeSpan.FromMilliseconds(500));
+        await disposed.Task.WaitAsync(TimeSpan.FromSeconds(30));
     }
 
     // Completing the channel writer does not drop items already queued. Disposing from inside

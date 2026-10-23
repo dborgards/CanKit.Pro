@@ -160,10 +160,15 @@ public class DeadlineTests
         deadline.IsExpired.Should().BeTrue();
     }
 
+    // #362: on the wall clock a test thread stalled for 500 ms between Arm and Complete let the
+    // deadline expire first, and Complete returned false for a reason the test was not about.
+    // On a clock nobody moves the first two deadlines cannot expire, and the third expires
+    // because the test advances past it, not because enough real time went by.
     [Fact]
     public async Task Rearm_After_The_Deadline_Already_Resolved_Returns_False()
     {
-        using var actor = new ProtocolActor();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var scheduler = new DeadlineScheduler(actor);
 
         var completed = scheduler.Arm(TimeSpan.FromMilliseconds(500), () => { });
@@ -175,8 +180,11 @@ public class DeadlineTests
         cancelled.Rearm(TimeSpan.FromMilliseconds(500)).Should().BeFalse("a cancelled deadline cannot be re-armed");
 
         var expiredFired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var expired = scheduler.Arm(TimeSpan.FromMilliseconds(30), () => expiredFired.TrySetResult(true));
-        (await Task.WhenAny(expiredFired.Task, Task.Delay(Bounded))).Should().Be(expiredFired.Task);
+        var timeout = TimeSpan.FromMilliseconds(30);
+        using var expired = scheduler.Arm(timeout, () => expiredFired.TrySetResult(true));
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, Bounded);
+        await clock.AdvanceAsync(timeout);
+        await expiredFired.Task.WaitAsync(Bounded);
         expired.Rearm(TimeSpan.FromMilliseconds(100)).Should().BeFalse("an expired deadline cannot be re-armed");
     }
 
