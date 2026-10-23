@@ -297,13 +297,19 @@ internal static class NmtAndHeartbeatChecks
             if (period is not { } beat)
                 return Outcome.NeedsSetup("The device produces no heartbeat to consume (see HBT-02).");
 
-            // The timestamps of the decoded beats, not a bare counter. The handler goes on before
-            // the wire tap exists and comes off after the drain, so a counter also catches events
-            // from outside the window the raw snapshot covers — and one such event offsets a
-            // genuinely dropped in-window one, making the two counts agree and passing the very
-            // loss the comparison exists to surface. HeartbeatReceivedEventArgs carries the
-            // instant the frame was processed (CanOpenEvents.cs), so both sides can be bounded by
-            // the same interval. Found in review of #388.
+            // Counted in arrival order, and bounded by how many had arrived at each boundary
+            // rather than by what their timestamps say. The handler goes on before the wire tap
+            // exists and comes off after the drain, so the window has to be cut out of the middle
+            // of what it collects — a bare total also catches events from outside it, and one
+            // such event offsets a genuinely dropped in-window one, making the two counts agree
+            // and passing the very loss the comparison exists to surface.
+            //
+            // The cut used to be the event's own timestamp against DateTime.UtcNow, and that is a
+            // wall clock: an NTP step or an operator moving the clock back mid-window puts valid
+            // events before the boundary and reports the shortfall as a defect in the stack,
+            // while a forward step admits events from outside the interval. The raw side is on
+            // Stopwatch and cannot be moved. A position in the list cannot be moved either, and
+            // it needs no clock at all. Found in review of #388.
             var beats = new List<DateTime>();
             var timedOut = 0;
             void OnBeat(object? sender, HeartbeatReceivedEventArgs e)
@@ -386,7 +392,8 @@ internal static class NmtAndHeartbeatChecks
                 // trailing-edge accounting of the commit before it.
                 await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
                 var windowFromMs = wire.ElapsedMs;
-                var windowFromUtc = DateTime.UtcNow;
+                int beatsBeforeWindow;
+                lock (beats) beatsBeforeWindow = beats.Count;
                 List<TappedFrame> SinceWindowOpened(IReadOnlyList<TappedFrame> frames)
                     => frames.Where(f => f.AtMs > windowFromMs).ToList();
 
@@ -400,15 +407,12 @@ internal static class NmtAndHeartbeatChecks
                 // the wall clock from the tap's creation to the end of the window for the decoded
                 // events. Two clocks, one interval — the bounds are what has to match, not the
                 // units.
-                // The decoded side's end is the window plus the drain, not the window. The event
-                // carries the instant the frame was *processed on the actor loop*, which is always
-                // later than its arrival — so bounding both sides at the same instant
-                // systematically under-counts the decoded side at the window's edge and reports a
-                // loss that did not happen. A false [tool] verdict, from the fix that aligned the
-                // two counts one commit earlier. The drain exists precisely so an in-window
-                // frame's event has landed by then. Found in review of #388.
-                var windowUntilUtc = windowFromUtc.AddMilliseconds(
-                    wireUntilMs - windowFromMs + BusTap.DrainAllowanceMs);
+                // The decoded side's end is the window plus the drain, not the window: an event
+                // carries the frame through the actor loop, which is always later than its
+                // arrival, so cutting both sides at the same moment systematically under-counts
+                // the decoded side at the window's edge and reports a loss that did not happen.
+                // ListenAsync has already waited the drain by the time it returns, so the count
+                // read here is the count at the end of it. Found in review of #388.
                 var onTheWire = Heartbeats(SinceWindowOpened(wire.Through(wireUntilMs))).Count;
 
                 // What arrived inside the drain allowance but outside the compared window. The
@@ -420,7 +424,7 @@ internal static class NmtAndHeartbeatChecks
                 // allowance one commit earlier.
                 var inDrainBand = Heartbeats(SinceWindowOpened(wire.Frames)).Count - onTheWire;
                 int received;
-                lock (beats) received = beats.Count(t => t >= windowFromUtc && t <= windowUntilUtc);
+                lock (beats) received = beats.Count - beatsBeforeWindow;
                 var measurements = new Dictionary<string, string>
                 {
                     ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),

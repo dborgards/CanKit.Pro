@@ -1238,14 +1238,32 @@ internal static class PdoSyncEmcyChecks
             {
                 await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
                 var windowFromMs = tap.ElapsedMs;
-                var windowFromUtc = DateTime.UtcNow;
+
+                // How many events had been raised when the window opened, rather than the instant
+                // it opened at. The decoded side used the event's own timestamp against
+                // DateTime.UtcNow, and that is a wall clock: an NTP step or an operator moving it
+                // back mid-window puts valid events before the boundary — reported here as
+                // payloads the stack never decoded, which is a defect charged to it — and a
+                // forward step admits events from outside the interval. The raw side is on
+                // Stopwatch and cannot be moved; a position in the list cannot be moved either.
+                // Found in review of #388.
+                int eventsBeforeWindow;
+                lock (events) eventsBeforeWindow = events.Count;
 
                 List<(DateTime At, string Text, string Payload)> InWindow()
                 {
-                    lock (events) return events.Where(d => d.At >= windowFromUtc).ToList();
+                    lock (events) return events.Skip(eventsBeforeWindow).ToList();
                 }
 
-                var untilMs = await tap.ListenAsync(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
+                // ListenAsync's two phases, written out, because the count has to be read between
+                // them: the window closes at `untilMs`, and the drain after it is what lets an
+                // in-window frame's decode land. Reading the count only after both would make the
+                // span below include the decodes the drain was waiting for.
+                await Task.Delay(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
+                var untilMs = tap.ElapsedMs;
+                int eventsAtCutoff;
+                lock (events) eventsAtCutoff = events.Count;
+                await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
 
                 // One snapshot, taken at the window's edge, used for the drain *and* for the
                 // verdict. The previous version snapshotted twice: the drain waited for the
@@ -1293,14 +1311,22 @@ internal static class PdoSyncEmcyChecks
                 // payload, from the frames the tap holds past the cutoff, so the ordinary case —
                 // no repeat after the window — stays exact. Found in review of #388, against the
                 // boundary of the commit before.
-                var windowUntilUtc = windowFromUtc.AddMilliseconds(untilMs - windowFromMs);
                 var repeatedAfterCutoff = Transmitted(tap.Frames.Where(f => f.AtMs > untilMs).ToList())
                     .Select(f => Convert.ToHexString(f.Data))
                     .Where(pending.Contains)
                     .ToHashSet(StringComparer.Ordinal);
+                HashSet<string> decodedWithinTheWindow;
+                lock (events)
+                {
+                    decodedWithinTheWindow = events
+                        .Take(eventsAtCutoff)
+                        .Skip(eventsBeforeWindow)
+                        .Select(d => d.Payload)
+                        .ToHashSet(StringComparer.Ordinal);
+                }
+
                 clearedOnlyByALateDuplicate = pending
-                    .Where(h => repeatedAfterCutoff.Contains(h)
-                                && !inWindow.Any(d => d.Payload == h && d.At <= windowUntilUtc))
+                    .Where(h => repeatedAfterCutoff.Contains(h) && !decodedWithinTheWindow.Contains(h))
                     .ToList();
             }
             finally
