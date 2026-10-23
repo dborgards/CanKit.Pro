@@ -256,6 +256,17 @@ internal static class IdentityAndSdoChecks
             // this identifier is someone else's traffic. Found in review of #388.
             using var requests = new BusTap(session.Service, (id, extended) => id == requestId && !extended);
 
+            // A drained quiet boundary before the question is asked. Another client's request can
+            // have gone out before either tap existed, and its answer then lands on this same
+            // COB-ID a few milliseconds later — inside the window, with nothing on the request
+            // side to pair it with, because that request is already past. Counted as a reply to
+            // this probe it made the exactly-one-response rule fail a conforming server. Waiting
+            // the pump's allowance and starting the reply window at the instant this check
+            // transmits puts such a frame before the boundary instead. What arrives earlier still
+            // on the request side is kept: a request from another client is evidence about the
+            // channel whenever it was sent. Found in review of #388.
+            await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
+            var askedFrom = tap.ElapsedMs;
             var accepted = session.Bus.Transmit(CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), request));
             if (accepted <= 0)
             {
@@ -290,7 +301,8 @@ internal static class IdentityAndSdoChecks
             var requestCutoff = requests.ElapsedMs;
             await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
 
-            var responses = tap.Through(replyCutoff).Where(f => !f.IsRemote).ToList();
+            var beforeAsking = tap.Through(askedFrom).Where(f => !f.IsRemote).ToList();
+            var responses = tap.Through(replyCutoff).Where(f => f.AtMs > askedFrom && !f.IsRemote).ToList();
 
             // Before any verdict on the set: a window another client shared cannot be read as one
             // transaction, and this check does not get to decide whose frame is whose. Reported
@@ -298,6 +310,25 @@ internal static class IdentityAndSdoChecks
             // point-to-point relationship between one client and one server, so two clients on it
             // is a property of the bus this run was pointed at. Found in review of #388.
             var foreign = requests.Through(requestCutoff).Where(f => !f.IsRemote).ToList();
+            if (beforeAsking.Count > 0 && foreign.Count == 0)
+            {
+                // A reply with no question of this check's to answer, and no request of another
+                // client's in the window either: the only thing left that explains it is a
+                // transaction that began before this check was watching. Said rather than
+                // counted — and rather than charged to the device, which did answer somebody.
+                return Outcome.Inconclusive(
+                    $"{beforeAsking.Count} frame(s) arrived on 0x{responseId:X3} before this check asked anything, so "
+                    + "another client's transaction was in flight on this node's SDO channel when the check began. "
+                    + "Its reply cannot be told from a second reply to this probe, and the device answered whoever "
+                    + "asked. Nothing is concluded about it until the channel is quiet.",
+                    Attribution.Setup,
+                    new Dictionary<string, string>
+                    {
+                        ["frames before this check asked"] =
+                            string.Join(" / ", beforeAsking.Take(3).Select(f => Hex(f.Data))),
+                    });
+            }
+
             if (foreign.Count > 0)
             {
                 return Outcome.Inconclusive(
