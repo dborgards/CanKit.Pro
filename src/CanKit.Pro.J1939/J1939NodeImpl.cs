@@ -1993,7 +1993,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     private void OnActorBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
-    private void OnTransportBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
+    // The channel raises a fault -- a reassembly abort, a T1 timeout -- on its own actor. Raised
+    // from there, a handler that disposed the node made that thread wait for the node's actor
+    // to tear the channel down, and tearing it down joins the channel's actor: the thread doing
+    // the waiting (#375). From the node's actor a Dispose tears down in place. A node whose
+    // injected actor is already gone reports it where it arrived.
+    private void OnTransportBackgroundException(object? sender, Exception ex)
+    {
+        try { _actor.Post(() => RaiseBackgroundException(ex)); }
+        catch (ObjectDisposedException) { RaiseBackgroundException(ex); }
+    }
 
     private void ThrowIfDisposed()
     {

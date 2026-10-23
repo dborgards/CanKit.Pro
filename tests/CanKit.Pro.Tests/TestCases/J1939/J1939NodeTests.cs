@@ -3975,6 +3975,72 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #375, a consequence of the fix above: the teardown now waits for the node's actor, and the
+    // TP channel raises a transport fault -- a reassembly abort -- on its own actor. Forwarded
+    // from there as it was, a handler that disposed the node made the channel's actor wait for
+    // the node's, which was disposing the channel and so joining the very thread waiting for it:
+    // Dispose stalled for the actors' shutdown bound. The node forwards transport faults from its
+    // own actor, where a Dispose tears down in place and waits on nothing.
+    [Fact]
+    public async Task Disposing_The_Node_From_A_Transport_Fault_Handler_Tears_Down_In_Place()
+    {
+        const byte peerSa = 0x77;
+        var session = NewSession();
+        using var busNode = Open(session, 0);
+        using var busPeer = Open(session, 1);
+        var node = new J1939NodeImpl(new CanBusService(busNode), new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: true);
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        int posted = 0;
+        node.AfterTeardownPosted = () => Interlocked.Increment(ref posted);
+        var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is not J1939TpAbortException) return;
+            node.Dispose();
+            disposed.TrySetResult(true);
+        };
+
+        // A BAM whose first TP.DT carries sequence number 2: aborted on the channel's actor.
+        var payload = new byte[12];
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa)),
+            J1939TpFrames.BuildBam(payload.Length, J1939TpFrames.TotalPackets(payload.Length), 0xFED3u), isExtendedFrame: true));
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa)),
+            J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+
+        await disposed.Task.AsTaskWithTimeout(ShortTimeout + ShortTimeout);
+        Volatile.Read(ref posted).Should().Be(0,
+            "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
+    }
+
+    // The same forwarding with an injected actor its owner has already disposed: there is no
+    // loop to hand the fault to, and it is still reported, from where it arrived.
+    [Fact]
+    public async Task A_Transport_Fault_Is_Still_Reported_Once_The_Injected_Actor_Is_Gone()
+    {
+        const byte peerSa = 0x77;
+        var session = NewSession();
+        using var busNode = Open(session, 0);
+        using var busPeer = Open(session, 1);
+        using var service = new CanBusService(busNode);
+        var actor = new ProtocolActor();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+        actor.Dispose();
+
+        var payload = new byte[12];
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa)),
+            J1939TpFrames.BuildBam(payload.Length, J1939TpFrames.TotalPackets(payload.Length), 0xFED3u), isExtendedFrame: true));
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa)),
+            J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeOfType<J1939TpAbortException>();
+    }
+
     // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
     // is the node's own, so it is disposed in place.
     [Fact]
