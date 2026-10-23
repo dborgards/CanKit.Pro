@@ -40,11 +40,17 @@ internal static class PdoSyncEmcyChecks
     {
         var tpdos = new List<PdoDescriptor>();
         var rpdos = new List<PdoDescriptor>();
+        // PDO-01's problems have to reach SYN-02's prerequisite guard. Copying them only on
+        // SYN-02's own sweep meant that whenever the pdo group *had* run, an unread mandatory
+        // 1800h:02 was dropped and read as "no cyclic synchronous TPDO exists". Found in review
+        // of #388.
+        var tpdoProblems = new List<string>();
 
         await book.RunAsync("PDO-01", "pdo", "TPDO communication and mapping parameters (1800h/1A00h)", Tier.Read, "FR-CO-005", async () =>
         {
             var found = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
             tpdos.AddRange(found.Descriptors);
+            tpdoProblems.AddRange(found.Problems);
             return Summarise("TPDO", found, session);
         }).ConfigureAwait(false);
 
@@ -233,14 +239,11 @@ internal static class PdoSyncEmcyChecks
             // so the prerequisite is read here rather than reported as a setup skip under every
             // sync-only invocation. Found in review of #388.
             var known = tpdos;
-            var prerequisiteProblems = new List<string>();
+            var prerequisiteProblems = new List<string>(tpdoProblems);
             if (known.Count == 0)
             {
                 var sweep = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
                 known = sweep.Descriptors;
-                // The sweep's problems have to travel with it. Dropping them turned an unread
-                // mandatory 1800h:02 into "no cyclic synchronous TPDO exists", which reads as a
-                // clean not-applicable. Found in review of #388.
                 prerequisiteProblems.AddRange(sweep.Problems);
             }
 
@@ -299,7 +302,15 @@ internal static class PdoSyncEmcyChecks
                     + "TPDOs are waiting on. See SYN-01.");
             }
 
-            var counterOverflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            var overflow = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            if (overflow is not { } counterOverflow)
+            {
+                return Outcome.Inconclusive(
+                    "1019h is readable in principle but did not come back usable, so whether this device's SYNC carries "
+                    + "a counter is unknown. Sending the wrong form would fail it for silence, so nothing was sent.",
+                    Attribution.Device);
+            }
+
             byte counter = 0;
             var watched = cyclic.Select(p => p.CobId).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
@@ -525,14 +536,6 @@ internal static class PdoSyncEmcyChecks
         // and only the background-exception event hears about it — and an earlier version returned
         // Ok on exactly that. The state is verified against the heartbeat instead. Found in review
         // of #388.
-        var reached = await ObservedNmtStateAsync(session, CancellationToken.None).ConfigureAwait(false);
-        if (reached is null)
-        {
-            // No heartbeat means no way to observe the NMT state from outside. That is a real
-            // limit, not a pass: it is reported as unverified rather than claimed as restored.
-            return Restoration.Ok($"{name} (commanded, not verified — the device produces no heartbeat to confirm it)");
-        }
-
         var expected = command switch
         {
             NmtCommand.Start => (byte)NmtState.Operational,
@@ -540,11 +543,23 @@ internal static class PdoSyncEmcyChecks
             _ => (byte)NmtState.PreOperational,
         };
 
+        // Wait for the *latest* heartbeat to carry the commanded state, not merely for one to
+        // arrive: a beat already on the wire when the command landed still reports the state
+        // before it, and taking that as the answer turned a good restore into a failed check.
+        // Found in review of #388.
+        var reached = await LatestNmtStateAsync(session, expected, CancellationToken.None).ConfigureAwait(false);
+        if (reached is null)
+        {
+            // No heartbeat means no way to observe the NMT state from outside. That is a real
+            // limit, not a pass: it is reported as unverified rather than claimed as restored.
+            return Restoration.Ok($"{name} (commanded, not verified — the device produces no heartbeat to confirm it)");
+        }
+
         return reached == expected
             ? Restoration.Ok(name)
             : Restoration.Broke(
-                $"the device reports {NmtAndHeartbeatChecks.DescribeState(reached.Value)} after being commanded back to {name}; the restore "
-                + "did not take effect");
+                $"the device still reports {NmtAndHeartbeatChecks.DescribeState(reached.Value)} after being commanded "
+                + $"back to {name}; the restore did not take effect");
     }
 
     /// <summary>
@@ -604,20 +619,51 @@ internal static class PdoSyncEmcyChecks
     }
 
     /// <summary>
+    /// Waits for the newest heartbeat to report <paramref name="expected"/> and returns the state
+    /// it ends on, or null when the device produced no heartbeat at all. Distinct from
+    /// <see cref="ObservedNmtStateAsync"/>, which takes the first frame it sees: that is right for
+    /// reading the state *before* a check and wrong for confirming a command, because the frame in
+    /// flight when the command arrived still carries the old state.
+    /// </summary>
+    private static async Task<byte?> LatestNmtStateAsync(Session session, byte expected, CancellationToken cancellationToken)
+    {
+        var cobId = CanOpenCobId.Heartbeat(session.Target);
+        using var probe = new BusTap(session.Service, id => id == cobId);
+        await probe.WaitForAsync(
+            frames => frames.LastOrDefault(f => f.Data.Length == 1) is { Data.Length: 1 } last && last.Data[0] == expected,
+            Math.Max(1000, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
+
+        var frames = probe.Frames;
+        for (var i = frames.Count - 1; i >= 0; i--)
+            if (frames[i].Data.Length == 1) return frames[i].Data[0];
+        return null;
+    }
+
+    /// <summary>
     /// 1019h, the SYNC counter overflow. A value of 2..240 means the device's SYNC carries a
     /// one-byte counter that rolls 1..value; 0 or 1 (and an absent object) mean no counter.
     /// </summary>
-    private static async Task<byte> TargetSyncOverflowAsync(Session session, CancellationToken cancellationToken)
+    private static async Task<byte?> TargetSyncOverflowAsync(Session session, CancellationToken cancellationToken)
     {
+        // No 1019h to read means no counter, which is the CiA 301 default.
         if (!session.MayTransfer(0x1019, 0x00)) return 0;
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1019, 0x00, cancellationToken).ConfigureAwait(false);
-            return raw.Length == 1 ? raw[0] : (byte)0;
+            // A wrong length is the device contradicting itself about an UNSIGNED8, not a zero.
+            return raw.Length == 1 ? raw[0] : null;
+        }
+        catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                  or (uint)SdoAbortCode.SubIndexDoesNotExist)
+        {
+            return 0;
         }
         catch (SdoAbortException)
         {
-            return 0;
+            // Anything else leaves it unknown, and guessing "no counter" would send DLC 0 to a
+            // device that rejects it and then fail that device for silence. Found in review of
+            // #388 — the same mistake as defaulting 1005h, one object along.
+            return null;
         }
     }
 
