@@ -165,6 +165,12 @@ public class CanOpenSdoBlockUploadServerTests
         bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
             new byte[] { (byte)NmtCommand.EnterPreOperational, ServerNodeId }), isEcho: false);
         await nmtSeen.Task.WithTimeoutAsync(ShortTimeout);
+        // The answer to the ack is on the bus before the window opens -- the retransmission's
+        // first segment, or the abort -- while the first batch still waits for segment 1's
+        // confirmation, so the fourth transmit can be nothing else. Waited for, not given time:
+        // within the window below a slow host could leave it unsent, and the assertions that
+        // need it would fail for want of scheduling.
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
 
         // Let both sends run. The first batch, still sending, would go on with segment 2 at
         // once and one more segment at every later release. No signal says "nothing more is
