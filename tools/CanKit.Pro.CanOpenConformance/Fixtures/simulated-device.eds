@@ -115,7 +115,7 @@ DefaultValue=0x0000002A
 PDOMapping=0
 
 [OptionalObjects]
-SupportedObjects=16
+SupportedObjects=17
 1=0x1005
 2=0x1006
 3=0x1008
@@ -132,6 +132,15 @@ SupportedObjects=16
 14=0x1801
 15=0x1A00
 16=0x1A01
+17=0x1019
+
+[1019]
+ParameterName=Synchronous counter overflow value
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
 
 [1005]
 ParameterName=COB-ID SYNC

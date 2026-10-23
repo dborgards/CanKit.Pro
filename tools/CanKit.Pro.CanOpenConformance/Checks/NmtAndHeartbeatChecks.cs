@@ -1087,18 +1087,19 @@ internal static class NmtAndHeartbeatChecks
     /// and the callers refuse rather than guess it. Found in review of #388, against the
     /// substitution of the commit before.
     /// </remarks>
-    internal static async Task<double?> ObservedPeriodForConfirmationAsync(Session session, CancellationToken cancellationToken)
+    internal static async Task<double?> ObservedPeriodForConfirmationAsync(Session session, int boundMs,
+        CancellationToken cancellationToken)
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
         using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
-        // Twice the window the other observations get, because an interval needs two beats where
-        // a state needs one: at --heartbeat-ms the probe would come back empty-handed for any
-        // producer slower than half of it and refuse a device well inside the range the rest of
-        // the run accepts. It returns as soon as the second beat is in, so a fast producer pays
-        // nothing for the larger bound.
+        // The bound is the caller's, because the two questions it asks are different sizes: "does
+        // this device produce at the rate it declares" needs only the time that rate implies,
+        // while "what rate does it produce at" needs twice the observation window, since an
+        // interval needs two beats where a state needs one. It returns as soon as the second beat
+        // is in, so neither question costs more than the device makes it cost.
         await probe.WaitForAsync(
                 frames => Heartbeats(frames).Count >= 2,
-                2 * Math.Max(500, session.Options.HeartbeatWindowMs),
+                Math.Max(200, boundMs),
                 cancellationToken)
             .ConfigureAwait(false);
         var frames = probe.Frames;

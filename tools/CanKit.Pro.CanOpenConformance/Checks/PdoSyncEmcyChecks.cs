@@ -567,6 +567,42 @@ internal static class PdoSyncEmcyChecks
 
             // A descriptor whose transmission type could not be read cannot be classified, so the
             // prerequisite is unresolved rather than the feature absent.
+            // A reserved transmission type is in neither set below: F1h..FBh is above the cyclic
+            // range and is not zero, so the classification dropped such a descriptor silently.
+            // SYN-02 could then report that no cyclic synchronous TPDO exists, or pass on the
+            // traffic of a neighbour whose type *is* valid, while the device's invalid 1800h:02
+            // went unreported — in a --groups sync run, where PDO-01 is not there to report it
+            // either. The sweep records it as a problem; this is the check that has to refuse on
+            // it, the way it already refuses on a reserved 1019h.
+            //
+            // Before the unread and blocked returns, not after them: a reserved value is a
+            // finished measurement of a device defect, and one *other* TPDO whose 1800h:02 the
+            // gate blocks or the device withholds used to carry the whole check away into a setup
+            // or inconclusive verdict that never named it — under --groups sync, the only place it
+            // is named at all. A defect that is known does not wait behind one that is unknown.
+            // Found in review of #388, against the placement of the commit before.
+            var reservedTypes = known
+                .Where(p => p.Valid && p.TransmissionTypeRead
+                            && CanOpenTransmissionType.IsReservedForTpdo(p.TransmissionType))
+                .ToList();
+            if (reservedTypes.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{reservedTypes.Count} valid TPDO(s) report a transmission type CiA 301 Table 72 reserves: "
+                    + string.Join(", ", reservedTypes.Select(p => $"TPDO{p.Number} 0x{p.TransmissionType:X2}"))
+                    + ". A reserved value is not a transmission type, so whether those TPDOs are synchronous cannot "
+                    + "be decided — and a verdict about every cyclic synchronous TPDO will not be drawn from the "
+                    + "ones whose type happens to be valid.",
+                    new Dictionary<string, string>
+                    {
+                        ["TPDOs with a reserved transmission type"] = string.Join(", ",
+                            reservedTypes.Select(p => $"TPDO{p.Number} (0x{p.CobId:X3}) 1800h:02 = 0x{p.TransmissionType:X2}")),
+                        ["prerequisite problems"] = prerequisiteProblems.Count > 0
+                            ? string.Join("; ", prerequisiteProblems)
+                            : "(none reported)",
+                    });
+            }
+
             // Any unread transmission type, not only all of them: a descriptor whose 1800h:02 did
             // not come back is filtered out of the classification below, so SYN-02 would otherwise
             // pass having tested the readable TPDOs while an omitted one may be cyclic and silent.
@@ -600,35 +636,6 @@ internal static class PdoSyncEmcyChecks
                     {
                         ["TPDOs with an unread transmission type"] = string.Join(", ", unreadTypes.Select(p => $"TPDO{p.Number}")),
                         ["prerequisite problems"] = prerequisiteProblems.Count > 0 ? string.Join("; ", prerequisiteProblems) : "(none reported)",
-                    });
-            }
-
-            // A reserved transmission type is in neither set below: F1h..FBh is above the cyclic
-            // range and is not zero, so the classification dropped such a descriptor silently.
-            // SYN-02 could then report that no cyclic synchronous TPDO exists, or pass on the
-            // traffic of a neighbour whose type *is* valid, while the device's invalid 1800h:02
-            // went unreported — in a --groups sync run, where PDO-01 is not there to report it
-            // either. The sweep records it as a problem; this is the check that has to refuse on
-            // it, the way it already refuses on a reserved 1019h. Found in review of #388.
-            var reservedTypes = known
-                .Where(p => p.Valid && p.TransmissionTypeRead
-                            && CanOpenTransmissionType.IsReservedForTpdo(p.TransmissionType))
-                .ToList();
-            if (reservedTypes.Count > 0)
-            {
-                return Outcome.Fail(
-                    $"{reservedTypes.Count} valid TPDO(s) report a transmission type CiA 301 Table 72 reserves: "
-                    + string.Join(", ", reservedTypes.Select(p => $"TPDO{p.Number} 0x{p.TransmissionType:X2}"))
-                    + ". A reserved value is not a transmission type, so whether those TPDOs are synchronous cannot "
-                    + "be decided — and a verdict about every cyclic synchronous TPDO will not be drawn from the "
-                    + "ones whose type happens to be valid.",
-                    new Dictionary<string, string>
-                    {
-                        ["TPDOs with a reserved transmission type"] = string.Join(", ",
-                            reservedTypes.Select(p => $"TPDO{p.Number} (0x{p.CobId:X3}) 1800h:02 = 0x{p.TransmissionType:X2}")),
-                        ["prerequisite problems"] = prerequisiteProblems.Count > 0
-                            ? string.Join("; ", prerequisiteProblems)
-                            : "(none reported)",
                     });
             }
 
@@ -692,7 +699,18 @@ internal static class PdoSyncEmcyChecks
                     });
             }
 
-            var (overflow, overflowProblem) = await TargetSyncOverflowAsync(session, cancellationToken).ConfigureAwait(false);
+            var (overflow, overflowProblem, overflowBlocked) = await TargetSyncOverflowAsync(session, cancellationToken)
+                .ConfigureAwait(false);
+            if (overflowBlocked)
+            {
+                return Outcome.NeedsSetup(
+                    "Whether this device's SYNC carries a counter cannot be asked: "
+                    + session.GateReason(0x1019, 0x00)
+                    + " Both forms of SYNC are wrong for a device that wants the other one — a counter-enabled "
+                    + "consumer rejects a DLC-0 SYNC outright — so nothing was sent rather than have the silence "
+                    + "that followed charged to the device. Bind a description that declares 1019h and re-run.");
+            }
+
             if (overflowProblem is { } reservedOverflow)
             {
                 return Outcome.Fail(reservedOverflow + " Nothing was sent, because either form of SYNC would be the "
@@ -1174,6 +1192,7 @@ internal static class PdoSyncEmcyChecks
             int polls;
             List<string> decoded;
             HashSet<string> decodedPayloads;
+            List<string> clearedOnlyByALateDuplicate;
             try
             {
                 await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
@@ -1223,6 +1242,25 @@ internal static class PdoSyncEmcyChecks
                 var inWindow = InWindow();
                 decoded = inWindow.Select(d => d.Text).ToList();
                 decodedPayloads = inWindow.Select(d => d.Payload).ToHashSet(StringComparer.Ordinal);
+
+                // The upper edge, which the lower bound alone left open. The grace has to admit a
+                // decode that lands after the cutoff, because that is what it is for — but if the
+                // target repeated a payload *after* the cutoff, a late event carrying it may
+                // belong to that repeat rather than to the frame inside the window, and the set
+                // comparison cannot tell which. Where that is the case the clearance is not
+                // evidence: an in-window event the stack lost looks exactly the same. Decided per
+                // payload, from the frames the tap holds past the cutoff, so the ordinary case —
+                // no repeat after the window — stays exact. Found in review of #388, against the
+                // boundary of the commit before.
+                var windowUntilUtc = windowFromUtc.AddMilliseconds(untilMs - windowFromMs);
+                var repeatedAfterCutoff = Transmitted(tap.Frames.Where(f => f.AtMs > untilMs).ToList())
+                    .Select(f => Convert.ToHexString(f.Data))
+                    .Where(pending.Contains)
+                    .ToHashSet(StringComparer.Ordinal);
+                clearedOnlyByALateDuplicate = pending
+                    .Where(h => repeatedAfterCutoff.Contains(h)
+                                && !inWindow.Any(d => d.Payload == h && d.At <= windowUntilUtc))
+                    .ToList();
             }
             finally
             {
@@ -1291,6 +1329,19 @@ internal static class PdoSyncEmcyChecks
             measurements["distinct payloads"] = rawPayloads.Count.ToString(CultureInfo.InvariantCulture);
             measurements["distinct payloads decoded"] = seen.Intersect(rawPayloads, StringComparer.Ordinal).Count()
                 .ToString(CultureInfo.InvariantCulture);
+
+            if (missed.Count == 0 && clearedOnlyByALateDuplicate.Count > 0)
+            {
+                measurements["payloads cleared only after the window closed"] =
+                    string.Join(", ", clearedOnlyByALateDuplicate.Take(5));
+                return Outcome.Inconclusive(
+                    $"{clearedOnlyByALateDuplicate.Count} payload(s) the window carried were raised as an event only "
+                    + "after it had closed, and the target put the same payload on the bus again in that time — so "
+                    + "whether the event belongs to the frame inside the window or to the repeat after it cannot be "
+                    + "told apart here, and neither can a decode the stack lost inside the window. Nothing is "
+                    + "concluded about the decoder from a payload that only a late duplicate accounts for.",
+                    Attribution.Unknown, measurements);
+            }
 
             if (missed.Count == 0)
                 return Outcome.Pass(
@@ -1612,6 +1663,8 @@ internal static class PdoSyncEmcyChecks
     /// </remarks>
     internal static async Task<int?> NmtConfirmationBudgetMsAsync(Session session, CancellationToken cancellationToken)
     {
+        if (session.ConfirmationBudgetKnown) return session.ConfirmationBudgetMs;
+
         var declared = await NmtAndHeartbeatChecks.ProducerHeartbeatTimeForConfirmationAsync(session, cancellationToken)
             .ConfigureAwait(false);
 
@@ -1624,17 +1677,48 @@ internal static class PdoSyncEmcyChecks
         // the fix of one commit earlier, does nothing for a device that was already there. The
         // heartbeat is produced in every state these checks run in, so the period is observable
         // without asking for it. Found in review of #388.
-        double? periodMs = declared is { } ms && ms > 0
-            ? ms
-            : await NmtAndHeartbeatChecks.ObservedPeriodForConfirmationAsync(session, cancellationToken)
+        // 1017h is a claim about the device, not a measurement of it, and the budget rests on
+        // what the device actually does. Taking the declaration whenever it came back meant a
+        // device declaring 100 ms and emitting every 10 s got a budget from the declaration — the
+        // state probe catches a beat of such a device by phase, and the confirmations then had
+        // four seconds for a ten-second answer, which is the false restoration failure the
+        // observation was added to prevent, reached through the other input. Found in review
+        // of #388.
+        //
+        // So the declaration is verified rather than trusted: two beats should arrive inside the
+        // time it implies. When they do, that interval is the period and the check paid two of
+        // the device's own periods for it. When they do not, the declaration is not evidence of
+        // anything and the longer observation decides — and refuses, below, when even that cannot
+        // measure an interval.
+        double? observed = null;
+        if (declared is { } claimed && claimed > 0)
+        {
+            observed = await NmtAndHeartbeatChecks
+                .ObservedPeriodForConfirmationAsync(session, claimed * 2 + 200, cancellationToken)
                 .ConfigureAwait(false);
+        }
+
+        observed ??= await NmtAndHeartbeatChecks
+            .ObservedPeriodForConfirmationAsync(session, 2 * Math.Max(500, session.Options.HeartbeatWindowMs),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var periodMs = observed ?? 0;
 
         // Unknown is returned as unknown. Standing the observation window in for a period that
         // was not measured gave a 10 s producer an 8.2 s budget from a 4 s window and reported a
         // target that had gone back as one that had not — the false FAIL this budget exists to
         // prevent, reached through the fallback meant to prevent it. Found in review of #388.
-        if (periodMs is not { } period || period <= 0) return null;
-        return (int)Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), period * 2 + 200);
+        session.ConfirmationBudgetKnown = true;
+        if (periodMs <= 0)
+        {
+            session.ConfirmationBudgetMs = null;
+            return null;
+        }
+
+        session.ConfirmationBudgetMs =
+            (int)Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), periodMs * 2 + 200);
+        return session.ConfirmationBudgetMs;
     }
 
     /// <summary>
@@ -1642,16 +1726,16 @@ internal static class PdoSyncEmcyChecks
     /// established. One text for the three checks that need the budget, so the three cannot drift.
     /// </summary>
     internal static string NoConfirmationBudgetReason(Session session)
-        => "No heartbeat period could be established, and this check changes the device's NMT state. Neither route "
-        + "to it gave a value this run, and which one it was this check does not claim to know: 1017h returns "
-        + "nothing when a node is already Stopped (CiA 301 Table 37 gives Stopped no SDO server), when the bound "
-        + "description does not declare the object, or when the read is refused or aborted; and no interval could "
-        + $"be measured from the heartbeat either, in the {2 * Math.Max(500, session.Options.HeartbeatWindowMs)} ms "
-        + "allowed for one — either fewer than two beats arrived, or node-guarding traffic shares the COB-ID, where "
-        + "a toggle response is byte-for-byte a heartbeat and an interval would be measured over a mixture. HBT-02 "
-        + "reports which of those the bus shows. A confirmation needs a bound drawn from the period, and a bound "
-        + "guessed from the observation window reports a device that went back as one that did not — so this check "
-        + "does not run rather than conclude from it.";
+        => "No heartbeat period could be measured, and this check changes the device's NMT state. The period is the "
+        + "bound a confirmation needs, and neither route to it produced one: no interval could be measured from the "
+        + $"heartbeat in the {2 * Math.Max(500, session.Options.HeartbeatWindowMs)} ms allowed for one — fewer than "
+        + "two beats arrived, or node-guarding traffic shares the COB-ID, where a toggle response is byte-for-byte a "
+        + "heartbeat and an interval would be measured over a mixture — and 1017h was no help either, whether "
+        + "because it returned nothing (a node already Stopped has no SDO server, CiA 301 Table 37; a description "
+        + "may not declare the object; a read may be refused) or because the device does not produce at the rate it "
+        + "declares, which is checked rather than assumed. HBT-02 reports what the bus shows. A bound guessed from "
+        + "the observation window reports a device that went back as one that did not, so this check does not run "
+        + "rather than conclude from it.";
 
     /// <summary>
     /// 1019h, the SYNC counter overflow. CiA 301 §7.5.2.40 defines 0 as "SYNC without a counter"
@@ -1659,10 +1743,16 @@ internal static class PdoSyncEmcyChecks
     /// the value, or a problem for a value that is neither — reporting a reserved one rather than
     /// rounding it into the nearest usable behaviour, which is what hid it.
     /// </summary>
-    private static async Task<(byte? Value, string? Problem)> TargetSyncOverflowAsync(Session session, CancellationToken cancellationToken)
+    private static async Task<(byte? Value, string? Problem, bool Blocked)> TargetSyncOverflowAsync(
+        Session session, CancellationToken cancellationToken)
     {
-        // No 1019h to read means no counter, which is the CiA 301 default.
-        if (!session.MayTransfer(0x1019, 0x00)) return ((byte)0, null);
+        // Blocked is not absent, the same distinction the 1005h path above keeps. A description
+        // that omits optional 1019h says nothing about whether the device has a counter — and
+        // treating the gate's refusal as "no counter" made SYN-02 send DLC-0 SYNCs, which a
+        // conforming counter-enabled consumer rejects (the stack's own TryAcceptSync enforces the
+        // DLC rule), after which the device was failed for the silence that followed. The device
+        // was never asked. Found in review of #388.
+        if (!session.MayTransfer(0x1019, 0x00)) return (null, null, true);
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1019, 0x00, cancellationToken).ConfigureAwait(false);
@@ -1675,7 +1765,7 @@ internal static class PdoSyncEmcyChecks
             if (raw.Length != 1)
             {
                 return (null, $"1019h:00 is UNSIGNED8 and the device returned {raw.Length} byte(s) "
-                    + $"({IdentityAndSdoChecks.Hex(raw)}).");
+                    + $"({IdentityAndSdoChecks.Hex(raw)}).", false);
             }
 
             // Read is not the same as valid, the third instance of that in this file. Treating 1
@@ -1684,20 +1774,21 @@ internal static class PdoSyncEmcyChecks
             // in review of #388.
             return raw[0] == 1 || raw[0] > CanOpenTransmissionType.SynchronousCyclicMax
                 ? (null, $"1019h:00 is 0x{raw[0]:X2}; CiA 301 §7.5.2.40 defines 0 and 2..240 and reserves the rest, "
-                    + "so what this device's SYNC carries cannot be derived from it.")
-                : (raw[0], null);
+                    + "so what this device's SYNC carries cannot be derived from it.", false)
+                : (raw[0], null, false);
         }
         catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
                                                   or (uint)SdoAbortCode.SubIndexDoesNotExist)
         {
-            return ((byte)0, null);
+            // The device itself says it has no 1019h, which is the CiA 301 default and an answer.
+            return ((byte)0, null, false);
         }
         catch (SdoAbortException)
         {
             // Anything else leaves it unknown, and guessing "no counter" would send DLC 0 to a
             // device that rejects it and then fail that device for silence. Found in review of
             // #388 — the same mistake as defaulting 1005h, one object along.
-            return (null, null);
+            return (null, null, false);
         }
     }
 

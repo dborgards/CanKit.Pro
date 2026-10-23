@@ -63,6 +63,19 @@ internal sealed class Session : IDisposable
 
     public List<string> BackgroundExceptions { get; }
 
+    /// <summary>
+    /// The confirmation budget once it has been established, and whether it has been: the three
+    /// checks that change the NMT state all size their waits from it, and it is measured from the
+    /// heartbeat, so measuring it once — in whichever of them runs first, before any of them has
+    /// touched the device — costs the run one observation instead of three and makes the three
+    /// agree by construction. A null value with <see cref="ConfirmationBudgetKnown"/> set means
+    /// no period could be established, which is a refusal and is remembered as one.
+    /// </summary>
+    public int? ConfirmationBudgetMs { get; set; }
+
+    /// <inheritdoc cref="ConfirmationBudgetMs"/>
+    public bool ConfirmationBudgetKnown { get; set; }
+
     /// <summary>The node under test. Checks that need it are only reached once <see
     /// cref="RunOptions.TargetNode"/> is set, which <see cref="Program"/> enforces per group.</summary>
     public byte Target => Options.TargetNode
