@@ -301,19 +301,36 @@ internal static class IdentityAndSdoChecks
             var requestCutoff = requests.ElapsedMs;
             await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
 
-            // The client's half of the protocol, done before any verdict rather than inside one.
-            // A response that opens a segmented upload of this pair leaves the server holding the
-            // session, and the next check's transfer then collects its stale abort on the same
-            // COB-ID — so SDO-03 fails for what SDO-02 left behind. The abort used to be sent
-            // only in the branch that judges a non-abort answer, which every early return skips:
-            // the shared-channel returns added in the last two rounds, the one for a reply set
-            // that is not one frame of eight bytes, and the one for no reply at all. It is sent
-            // here, once, for any frame the tap holds that opened such a session — command
-            // specifier 2 with the expedited bit clear, echoing 5FFFh:00 — and the branch below
-            // reads the result rather than repeating the send. Found in review of #388.
-            var openedSegmented = tap.Frames.FirstOrDefault(f => !f.IsRemote && f.Data.Length == 8
-                && (f.Data[0] & 0xE0) == 0x40 && (f.Data[0] & 0x02) == 0
-                && (f.Data[1] | (f.Data[2] << 8)) == Absent && f.Data[3] == 0x00);
+            var beforeAsking = tap.Through(askedFrom).Where(f => !f.IsRemote).ToList();
+            var responses = tap.Through(replyCutoff).Where(f => f.AtMs > askedFrom && !f.IsRemote).ToList();
+
+            // Before any verdict on the set: a window another client shared cannot be read as one
+            // transaction, and this check does not get to decide whose frame is whose. Reported
+            // as the run's own condition rather than the device's — an SDO channel is a
+            // point-to-point relationship between one client and one server, so two clients on it
+            // is a property of the bus this run was pointed at. Found in review of #388.
+            var foreign = requests.Through(requestCutoff).Where(f => !f.IsRemote).ToList();
+            // The client's half of the protocol, done before any verdict rather than inside one:
+            // a response that opens a segmented upload leaves the server holding the session, and
+            // the next check's transfer then collects its stale abort on the same COB-ID, so
+            // SDO-03 fails for what SDO-02 left behind. The abort used to be sent only in the
+            // branch that judges a non-abort answer, which every early return skips.
+            //
+            // Only for a session this probe can be said to have opened: in its own window, and
+            // only when nothing else was using the channel. Searching every frame the tap held
+            // and sending before the shared-channel guards below meant that another client's
+            // segmented upload of the same object — in flight before this check began, or still
+            // running after its window — was aborted by this runner, which then reported the
+            // channel as inconclusive and said nothing about having terminated someone else's
+            // transfer. A conformance tool does not get to do that. Where the channel is shared
+            // the session is left alone, and the verdict says the probe may have left one open.
+            // Found in review of #388, against the hoist of the commit before.
+            var attributable = beforeAsking.Count == 0 && foreign.Count == 0;
+            var openedSegmented = attributable
+                ? responses.FirstOrDefault(f => f.Data.Length == 8
+                    && (f.Data[0] & 0xE0) == 0x40 && (f.Data[0] & 0x02) == 0
+                    && (f.Data[1] | (f.Data[2] << 8)) == Absent && f.Data[3] == 0x00)
+                : default;
             int? segmentedAbortRejected = null;
             if (openedSegmented.Data is not null)
             {
@@ -327,7 +344,6 @@ internal static class IdentityAndSdoChecks
                 if (sentAbort <= 0)
                 {
                     segmentedAbortRejected = sentAbort;
-
                     book.Note("SDO-02 segmented cleanup", "TransmitRejected",
                         $"The client abort for the 0x{Absent:X4} upload was rejected by the driver (Transmit "
                         + "returned " + sentAbort + "). The device may still hold that SDO session, and later SDO "
@@ -335,15 +351,6 @@ internal static class IdentityAndSdoChecks
                 }
             }
 
-            var beforeAsking = tap.Through(askedFrom).Where(f => !f.IsRemote).ToList();
-            var responses = tap.Through(replyCutoff).Where(f => f.AtMs > askedFrom && !f.IsRemote).ToList();
-
-            // Before any verdict on the set: a window another client shared cannot be read as one
-            // transaction, and this check does not get to decide whose frame is whose. Reported
-            // as the run's own condition rather than the device's — an SDO channel is a
-            // point-to-point relationship between one client and one server, so two clients on it
-            // is a property of the bus this run was pointed at. Found in review of #388.
-            var foreign = requests.Through(requestCutoff).Where(f => !f.IsRemote).ToList();
             if (beforeAsking.Count > 0 && foreign.Count == 0)
             {
                 // A reply with no question of this check's to answer, and no request of another
@@ -354,7 +361,9 @@ internal static class IdentityAndSdoChecks
                     $"{beforeAsking.Count} frame(s) arrived on 0x{responseId:X3} before this check asked anything, so "
                     + "another client's transaction was in flight on this node's SDO channel when the check began. "
                     + "Its reply cannot be told from a second reply to this probe, and the device answered whoever "
-                    + "asked. Nothing is concluded about it until the channel is quiet.",
+                    + "asked. Nothing is concluded about it until the channel is quiet. No client abort was sent "
+                    + "either: if this probe opened a segmented upload, it is left open, because the abort that "
+                    + "would close it could just as well end the other client's transfer.",
                     Attribution.Setup,
                     new Dictionary<string, string>
                     {
@@ -370,7 +379,9 @@ internal static class IdentityAndSdoChecks
                     + $"check was waiting for its own answer on 0x{responseId:X3}, so the {responses.Count} frame(s) "
                     + "that came back cannot be read as the answer to one question. CiA 301 §7.2.4 makes an SDO "
                     + "channel a relationship between one client and one server; nothing is concluded about the "
-                    + "device until it has this one to itself.",
+                    + "device until it has this one to itself. No client abort was sent either: if this probe "
+                    + "opened a segmented upload, it is left open, because the abort that would close it could just "
+                    + "as well end the other client's transfer.",
                     Attribution.Setup,
                     new Dictionary<string, string>
                     {

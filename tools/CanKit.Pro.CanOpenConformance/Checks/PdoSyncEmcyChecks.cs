@@ -275,7 +275,13 @@ internal static class PdoSyncEmcyChecks
                     ? $"{s}; type {DescribeTransmission(pdo.TransmissionType)}{expected}"
                     : $"{mine.Length} frame(s), {pdo.Bytes} B mapped; type {DescribeTransmission(pdo.TransmissionType)}{expected}";
 
-                var wrongLength = mine.Where(f => pdo.Bytes > 0 && f.Data.Length != pdo.Bytes).ToArray();
+                // Enforceable when the mapping was read whole, not when it adds up to more than
+                // zero. A 1A00h:00 of zero entries is a complete mapping predicting an empty
+                // payload, and `Bytes > 0` turned exactly that case off — so a TPDO mapping
+                // nothing could carry any payload at all and still pass, while the case the guard
+                // exists for, a mapping this run could not read in full, is MappingComplete's to
+                // report. Found in review of #388.
+                var wrongLength = mine.Where(f => pdo.MappingComplete && f.Data.Length != pdo.Bytes).ToArray();
                 if (wrongLength.Length > 0)
                 {
                     measurements[$"TPDO{pdo.Number} length"] =
@@ -318,7 +324,7 @@ internal static class PdoSyncEmcyChecks
             }
 
             var mismatched = separable.Any(p => inOperational.Any(
-                f => f.CanId == p.CobId && f.IsExtended == p.Extended && p.Bytes > 0 && f.Data.Length != p.Bytes));
+                f => f.CanId == p.CobId && f.IsExtended == p.Extended && p.MappingComplete && f.Data.Length != p.Bytes));
             if (mismatched)
             {
                 return Outcome.Fail(
