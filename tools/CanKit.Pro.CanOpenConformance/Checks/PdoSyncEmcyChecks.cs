@@ -1258,6 +1258,17 @@ internal static class PdoSyncEmcyChecks
             _ => "pre-operational (the state before the check could not be read)",
         };
 
+        // A failed restore is recorded here, in the cleanup path, and not only returned for the
+        // caller to put in its verdict. Every caller runs this from a finally, so an
+        // OperationCanceledException raised in the try is still in flight: the restore evaluation
+        // below the finally never runs, Checkbook.RunAsync replaces the whole finding with NotRun
+        // and discards the measurements with it, and a device left in a state it was not found in
+        // then appears nowhere in the report — indistinguishable from a cancelled run that put it
+        // back. The incident outlives the outcome, which is the point of recording it here.
+        // Found in review of #388 by the maintainer, who reproduced it against the virtual device.
+        void Record(string what) => book.Note(
+            $"{checkId} restore of the NMT state", "restore", what, Attribution.Unknown);
+
         try
         {
             await session.Client.SendNmtCommandAsync(command, session.Target, CancellationToken.None).ConfigureAwait(false);
@@ -1293,16 +1304,18 @@ internal static class PdoSyncEmcyChecks
             // here means the heartbeat stopped while the check ran — and then nothing confirms the
             // device went back, which is exactly the claim the write tier must not make on faith.
             // Found in review of #388.
-            return Restoration.Broke(
-                $"UNKNOWN — {name} was commanded and no heartbeat came back to confirm it. The device's state after "
-                + "this run is unobserved.");
+            var unconfirmed = $"UNKNOWN — {name} was commanded and no heartbeat came back to confirm it. The device's "
+                + "state after this run is unobserved.";
+            Record(unconfirmed);
+            return Restoration.Broke(unconfirmed);
         }
 
-        return reached == expected
-            ? Restoration.Ok(name)
-            : Restoration.Broke(
-                $"the device still reports {NmtAndHeartbeatChecks.DescribeState(reached.Value)} after being commanded "
-                + $"back to {name}; the restore did not take effect");
+        if (reached == expected) return Restoration.Ok(name);
+
+        var ineffective = $"the device still reports {NmtAndHeartbeatChecks.DescribeState(reached.Value)} after being "
+            + $"commanded back to {name}; the restore did not take effect";
+        Record(ineffective);
+        return Restoration.Broke(ineffective);
     }
 
     /// <summary>
