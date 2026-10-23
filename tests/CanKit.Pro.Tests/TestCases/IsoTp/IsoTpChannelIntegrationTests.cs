@@ -2169,11 +2169,18 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             sourceAddress: 0xBB, targetAddress: 0xAA);
 
         var flowControls = new List<(uint CanId, byte AddressExtension)>();
+        var bothSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         snifferBus.FrameObserved += (_, e) =>
         {
             var payload = e.CanFrame.Data.ToArray();
             if (payload.Length >= 2 && (payload[1] >> 4) == 0x3)
-                lock (flowControls) flowControls.Add(((uint)e.CanFrame.ID, payload[0]));
+            {
+                lock (flowControls)
+                {
+                    flowControls.Add(((uint)e.CanFrame.ID, payload[0]));
+                    if (flowControls.Count >= 2) bothSeen.TrySetResult(true);
+                }
+            }
         };
 
         using var aliceChannel = IsoTpFactory.Open(busA, alice, FastOptions());
@@ -2193,16 +2200,13 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await recvOnAlice).Should().Equal(b2a);
 
         // Bob's FC addresses Alice (AE = Alice's source address, Bob's target); Alice's FC
-        // addresses Bob. The sniffer is one more hub delivery, ordered against nothing above, so
-        // its second frame is waited for rather than assumed.
-        var deadline = Stopwatch.StartNew();
-        while (deadline.Elapsed < ShortTimeout)
-        {
-            lock (flowControls) if (flowControls.Count >= 2) break;
-            await Task.Delay(5);
-        }
+        // addresses Bob. The sniffer is one more hub delivery, ordered against nothing above: its
+        // second frame is waited for rather than assumed, and the two are compared as a set --
+        // the sniffer has recorded them in either order (#362). Each pair still ties the byte to
+        // the identifier that carried it, so a swapped address extension is caught either way.
+        await bothSeen.Task.WaitAsync(ShortTimeout);
         lock (flowControls)
-            flowControls.Should().Equal((0x311u, (byte)0xAA), (0x310u, (byte)0xBB));
+            flowControls.Should().BeEquivalentTo(new[] { (0x311u, (byte)0xAA), (0x310u, (byte)0xBB) });
     }
 
     // --------------------------------------------------------------------------------
