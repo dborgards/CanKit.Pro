@@ -69,8 +69,9 @@ public enum OdDataType : byte
     /// <summary>Variable-length UTF-16LE string (CiA 301 <c>UNICODE_STRING</c>).</summary>
     UnicodeString = 0x0B,
 
-    /// <summary>Variable-length byte string (CiA 301 <c>DOMAIN</c>). Always exchanged via SDO
-    /// segmented transfer regardless of length.</summary>
+    /// <summary>Variable-length byte string (CiA 301 <c>DOMAIN</c>). Exchanged by SDO according
+    /// to its length, as any value: 1..4 bytes expedited, an empty or longer one segmented (or
+    /// by block transfer).</summary>
     Domain = 0x0F,
 
     /// <summary>8-byte IEEE 754 double (CiA 301 <c>REAL64</c>), little-endian.</summary>
