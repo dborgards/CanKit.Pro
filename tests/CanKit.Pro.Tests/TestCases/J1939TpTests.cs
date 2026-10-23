@@ -1705,7 +1705,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // The same hold in the middle of a block has nothing to hold yet: the block runs on, and the
-    // timer after it is T3 as usual.
+    // timer after it is T3 as usual. The block is two of the message's three packets, so it ends
+    // waiting for a CTS -- where a remembered hold would arm T4 -- and not for the EndOfMsgAck,
+    // which runs under T3 whatever was remembered (#356 T-4: with the whole message in one block
+    // this test could not tell "ignored" from "remembered").
     [Fact]
     public async Task A_Cts_Hold_In_The_Middle_Of_A_Block_Is_Ignored()
     {
@@ -1713,7 +1716,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC5u;
-        var payload = RandomPayload(21, seed: 9); // three packets, granted in one block
+        var payload = RandomPayload(21, seed: 9); // three packets, two granted in the first block
         var options = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
         using var clock = new VirtualClock();
@@ -1727,7 +1730,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         bus.RaiseObserved(PeerCm(peerSa, subjectSa,
-            J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+            J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
 
         var hold = new byte[8];
@@ -1744,15 +1747,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         bus.DeferredEchoes.ReleaseNext(); // DT 1
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
-        bus.DeferredEchoes.ReleaseNext(); // DT 2
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
-        bus.DeferredEchoes.ReleaseNext(); // DT 3: the last packet, so T3 for the EndOfMsgAck
+        bus.DeferredEchoes.ReleaseNext(); // DT 2: the block ends, packet 3 still to be cleared
         await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
         await clock.AdvanceAsync(options.T3);
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        ex.Message.Should().Contain("EndOfMsgAck");
+        ex.Message.Should().Contain("T3 expired waiting for CTS");
     }
 
     // #356 T-3: a non-conforming peer clears the next block early and then holds, both while the
