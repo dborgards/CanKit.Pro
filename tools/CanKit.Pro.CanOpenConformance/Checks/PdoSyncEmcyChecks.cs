@@ -767,9 +767,28 @@ internal static class PdoSyncEmcyChecks
             foreach (var pdo in cyclic)
             {
                 var mine = after.Where(f => f.CanId == pdo.CobId && f.IsExtended == pdo.Extended).ToArray();
-                var opportunities = accepted / pdo.TransmissionType;
+
+                // The opportunities this TPDO actually had, which is not the whole burst. With a
+                // start value in 1800h:06 the TPDO is correctly silent until the SYNC counter
+                // first reaches it, so the SYNCs before that gate are not opportunities it
+                // declined — they are SYNCs it was not allowed to answer. Counting them required
+                // 481 responses from a device whose 243 were conforming, i.e. the threshold
+                // tightened one commit earlier became a false FAIL generator for exactly the
+                // devices 1800h:06 exists for. Found in review of #388.
+                //
+                // The counter runs 1..overflow and starts at 1, so the first SYNC carrying the
+                // start value is the (start)th of the burst and the gate skips start - 1 of them.
+                // Without a counter a start value has nothing to start on, which the measurements
+                // above already say, and the gate is then zero.
+                var gated = counterOverflow >= 2 && pdo.SyncStartValue >= 2 ? pdo.SyncStartValue - 1 : 0;
+                var usable = Math.Max(0, accepted - gated);
+                var opportunities = usable / pdo.TransmissionType;
                 measurements[$"TPDO{pdo.Number} (0x{pdo.CobId:X3}) type {pdo.TransmissionType}"] =
-                    $"{mine.Length} frame(s) for {opportunities} SYNC opportunity/opportunities";
+                    $"{mine.Length} frame(s) for {opportunities} SYNC opportunity/opportunities"
+                    + (gated > 0
+                        ? $" ({gated} SYNC(s) before its 1800h:06 start value of {pdo.SyncStartValue} are not "
+                          + "opportunities)"
+                        : string.Empty);
                 // The opportunities the device owes, less one frame of edge allowance — not half
                 // of them. Half forgave a device behaving as type 2 while declaring type 1, which
                 // is a contradiction of its own 1800h:02 and exactly what this check is for. The
@@ -777,6 +796,18 @@ internal static class PdoSyncEmcyChecks
                 // the last SYNC and the window is drained and closed at a timestamp, so the only
                 // frame still plausibly at risk is the last one. Found in review of #388, against
                 // the loose margin introduced to stop a different false FAIL.
+                // No opportunity, nothing owed. Math.Max(1, …) would otherwise claim one frame is
+                // due from a TPDO whose start gate the burst never reached — which the
+                // startUnreached guard above already catches for the cases that occur, so this is
+                // the belt to its braces rather than a live defect. Reported as unmeasured, not
+                // passed: a TPDO that was never given a chance has told us nothing.
+                if (opportunities == 0)
+                {
+                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: the burst had no "
+                        + "SYNC at or after its start value, so it was never due)");
+                    continue;
+                }
+
                 var expected = Math.Max(1, opportunities - 1);
                 if (mine.Length >= expected) continue;
                 if (mine.Length > 0)

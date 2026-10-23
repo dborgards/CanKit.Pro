@@ -570,6 +570,33 @@ internal static class NmtAndHeartbeatChecks
                                 + $"{IdentityAndSdoChecks.Hex(original)}; the device accepted the write and did not "
                                 + "apply it, so its heartbeat is not what this run found";
                         }
+                        else if (BitConverter.ToUInt16(original, 0) > 0)
+                        {
+                            // And a beat on the wire, because the object is not the producer. I
+                            // declined this one round earlier on the reasoning that the read-back
+                            // was decisive and watching the producer would be "a weaker claim" —
+                            // which was backwards. The tier's promise is about the device's
+                            // behaviour, not its dictionary, and firmware that stores the value
+                            // without restarting its timer leaves the bus silent while the report
+                            // says restored. Found in review of #388.
+                            //
+                            // Bounded by the period the device itself declares, plus the margin
+                            // this file already names for the gap between opening a tap and the
+                            // next beat.
+                            var resumedId = CanOpenCobId.Heartbeat(session.Target);
+                            using var resumed = new BusTap(session.Service, (id, extended) => id == resumedId && !extended);
+                            var budgetMs = BitConverter.ToUInt16(original, 0) + WindowMarginMs;
+                            var sawBeat = await resumed.WaitForAsync(
+                                frames => Heartbeats(frames).Count > 0, budgetMs, CancellationToken.None)
+                                .ConfigureAwait(false);
+                            if (!sawBeat)
+                            {
+                                restoredOk = false;
+                                restored = $"FAILED — 1017h reads back as {BitConverter.ToUInt16(original, 0)} ms and "
+                                    + $"no heartbeat reached the bus in {budgetMs} ms after the write. The value was "
+                                    + "stored and the producer did not restart, so the device is left silent";
+                            }
+                        }
                     }
                     catch (Exception ex)
                     {
