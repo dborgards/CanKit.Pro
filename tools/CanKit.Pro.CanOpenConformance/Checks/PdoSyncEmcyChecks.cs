@@ -941,9 +941,14 @@ internal static class PdoSyncEmcyChecks
     private readonly record struct PdoDescriptor(
         int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, bool TransmissionTypeRead,
         byte SyncStartValue, bool SyncStartRead, int InhibitMs, int EventTimerMs, int Bytes, bool MappingComplete,
-        int MappedEntries);
+        bool MultiplexedMode, int MappedEntries);
 
-    private readonly record struct PdoSweep(List<PdoDescriptor> Descriptors, List<string> Blocked, List<string> Absent, List<string> Problems);
+    private readonly record struct PdoSweep(
+        List<PdoDescriptor> Descriptors,
+        List<string> Blocked,
+        List<string> Absent,
+        List<string> Problems,
+        List<string> NotAddressed);
 
     /// <summary>
     /// Reads the communication and mapping parameters of up to <see cref="PdoCount"/> PDOs. The
@@ -956,6 +961,9 @@ internal static class PdoSyncEmcyChecks
         var blocked = new List<string>();
         var absent = new List<string>();
         var problems = new List<string>();
+        // What this runner does not check, as distinct from what the gate refused and from what
+        // the device got wrong. Neither the operator nor the firmware owner can act on it.
+        var notAddressed = new List<string>();
 
         for (var i = 0; i < PdoCount; i++)
         {
@@ -986,14 +994,14 @@ internal static class PdoSyncEmcyChecks
             }
 
             // 1800h:02 / 1400h:02 is mandatory once the record exists; 03 and 05 are optional.
-            var (transmission, transmissionOutcome) = await ByteOrDefault(session, comm, 0x02, problems, mandatory: true, cancellationToken).ConfigureAwait(false);
+            var (transmission, transmissionOutcome) = await ByteOrDefault(session, comm, 0x02, problems, blocked, mandatory: true, cancellationToken).ConfigureAwait(false);
             var inhibit = await UShortOrDefault(session, comm, 0x03, problems, cancellationToken).ConfigureAwait(false);
             var eventTimer = await UShortOrDefault(session, comm, 0x05, problems, cancellationToken).ConfigureAwait(false);
             // 1800h:06 is the SYNC start value, optional: the counter value at which this TPDO
             // begins its cycle (CiA 301 §7.5.2.37).
-            var (syncStart, syncStartOutcome) = await ByteOrDefault(session, comm, 0x06, problems, mandatory: false, cancellationToken).ConfigureAwait(false);
+            var (syncStart, syncStartOutcome) = await ByteOrDefault(session, comm, 0x06, problems, blocked, mandatory: false, cancellationToken).ConfigureAwait(false);
 
-            var (bits, entries, mappingComplete) = await ReadMappingAsync(session, map, problems, blocked, cancellationToken).ConfigureAwait(false);
+            var (bits, entries, mappingComplete, multiplexed) = await ReadMappingAsync(session, map, problems, blocked, notAddressed, cancellationToken).ConfigureAwait(false);
 
             // Bit 29 of the COB-ID word selects the 29-bit frame format (CiA 301 §7.5.2.37).
             // Masking with the 11-bit CanIdMask regardless threw most of an extended identifier
@@ -1017,14 +1025,16 @@ internal static class PdoSyncEmcyChecks
                 EventTimerMs: eventTimer ?? 0,
                 Bytes: mappingComplete ? (bits + 7) / 8 : 0,
                 MappingComplete: mappingComplete,
+                MultiplexedMode: multiplexed,
                 MappedEntries: entries));
         }
 
-        return new PdoSweep(descriptors, blocked, absent, problems);
+        return new PdoSweep(descriptors, blocked, absent, problems, notAddressed);
     }
 
-    private static async Task<(int Bits, int Entries, bool Complete)> ReadMappingAsync(
-        Session session, ushort map, List<string> problems, List<string> blocked, CancellationToken cancellationToken)
+    private static async Task<(int Bits, int Entries, bool Complete, bool Multiplexed)> ReadMappingAsync(
+        Session session, ushort map, List<string> problems, List<string> blocked, List<string> notAddressed,
+        CancellationToken cancellationToken)
     {
         var anyEntryBlocked = false;
         if (!session.MayTransfer(map, 0x00))
@@ -1035,7 +1045,7 @@ internal static class PdoSyncEmcyChecks
             // bound description omits into a device conformance failure. Found in review of #388.
             blocked.Add($"0x{map:X4} (the mandatory mapping record of a PDO whose communication record exists): "
                 + session.GateReason(map, 0x00));
-            return (0, 0, false);
+            return (0, 0, false, false);
         }
 
         try
@@ -1044,7 +1054,7 @@ internal static class PdoSyncEmcyChecks
             if (count.Length != 1)
             {
                 problems.Add($"0x{map:X4}:00 is UNSIGNED8, got {IdentityAndSdoChecks.Hex(count)}");
-                return (0, 0, false);
+                return (0, 0, false, false);
             }
 
             if (count[0] is (byte)MpdoAddressMode.Source or (byte)MpdoAddressMode.Destination)
@@ -1053,10 +1063,10 @@ internal static class PdoSyncEmcyChecks
                 // this runner states it does not address. Treated as an unmeasured mapping so the
                 // observation checks withhold payload-length validation instead of comparing
                 // frames against a length derived from sub-indices that do not exist.
-                blocked.Add($"0x{map:X4}:00 is 0x{count[0]:X2}, which selects "
+                notAddressed.Add($"0x{map:X4}:00 is 0x{count[0]:X2}, which selects "
                     + $"{(count[0] == (byte)MpdoAddressMode.Source ? "source" : "destination")}-addressed MPDO rather "
                     + "than declaring mapping entries. Multiplexed PDOs are outside what this runner checks.");
-                return (0, 0, false);
+                return (0, 0, false, true);
             }
 
 
@@ -1100,7 +1110,7 @@ internal static class PdoSyncEmcyChecks
                 bits += entry[0]; // the low byte of a mapping entry is its bit length
             }
 
-            return (bits, count[0], !anyEntryBlocked);
+            return (bits, count[0], !anyEntryBlocked, false);
         }
         catch (SdoAbortException abort)
         {
@@ -1113,7 +1123,7 @@ internal static class PdoSyncEmcyChecks
             // Found in review of #388.
             problems.Add($"0x{map:X4} is the mapping record of a PDO whose communication record exists, and it aborted "
                 + IdentityAndSdoChecks.Describe(abort));
-            return (0, 0, false);
+            return (0, 0, false, false);
         }
     }
 
@@ -1125,7 +1135,8 @@ internal static class PdoSyncEmcyChecks
     /// gate blocks it" or "the device returned the wrong length", both of which are recorded too.
     /// </summary>
     private static async Task<(byte? Value, ReadOutcome Outcome)> ByteOrDefault(
-        Session session, ushort index, byte sub, List<string> problems, bool mandatory, CancellationToken cancellationToken)
+        Session session, ushort index, byte sub, List<string> problems, List<string> blocked, bool mandatory,
+        CancellationToken cancellationToken)
     {
         if (!session.MayTransfer(index, sub))
         {
@@ -1135,7 +1146,10 @@ internal static class PdoSyncEmcyChecks
             // reporting the value as "not read". Found in review of #388.
             if (mandatory)
             {
-                problems.Add($"0x{index:X4}:{sub:X2} is mandatory for an implemented PDO and "
+                // Setup, not firmware: the device was never asked. Recorded on `blocked` so
+                // Summarise reports it as the description's own contradiction, and returned as
+                // Unreadable so nothing downstream treats the missing value as a default.
+                blocked.Add($"0x{index:X4}:{sub:X2} is mandatory for an implemented PDO and "
                     + session.GateReason(index, sub));
                 return (null, ReadOutcome.Unreadable);
             }
@@ -1212,6 +1226,7 @@ internal static class PdoSyncEmcyChecks
         }
 
         if (sweep.Blocked.Count > 0) measurements["blocked by the peer-SDO gate"] = string.Join(", ", sweep.Blocked);
+        if (sweep.NotAddressed.Count > 0) measurements["not addressed by this runner"] = string.Join(", ", sweep.NotAddressed);
         if (sweep.Absent.Count > 0) measurements["not implemented"] = string.Join(", ", sweep.Absent);
         foreach (var (problem, i) in sweep.Problems.Take(10).Select((p, i) => (p, i)))
             measurements[$"problem {i + 1}"] = problem;
@@ -1224,14 +1239,27 @@ internal static class PdoSyncEmcyChecks
         }
 
         // A pair the gate blocked is the run's own input, not a device defect: the device was
-        // never asked. Every other gate block in this runner is NeedsSetup and this one was the
-        // exception, which made it a false device FAIL. Found in review of #388.
-        if (sweep.Blocked.Count > 0 && sweep.Descriptors.Any(d => !d.MappingComplete))
+        // never asked. Reported only when it actually left a mapping unmeasured, and only for
+        // descriptors the gate is responsible for — an MPDO is on its own list now, because
+        // telling the operator to bind a description they have already bound is worse than
+        // saying nothing. Found in review of #388.
+        var gateLeftIncomplete = sweep.Blocked.Count > 0
+            && sweep.Descriptors.Any(d => !d.MappingComplete && !d.MultiplexedMode);
+        if (gateLeftIncomplete)
         {
             return Outcome.NeedsSetup(
                 $"{sweep.Descriptors.Count} {kind}(s) read, but the peer-SDO gate blocked {sweep.Blocked.Count} pair(s) "
-                + "that belong to their mandatory mapping records, so the mapped payload length is unknown and PDO-03 "
-                + "cannot validate it. Bind a description that declares them.");
+                + "that belong to their mandatory records, so the mapped payload length is unknown and PDO-03 cannot "
+                + "validate it: " + string.Join("; ", sweep.Blocked.Take(5)));
+        }
+
+        // A multiplexed PDO is neither the operator's problem nor the device's. The other
+        // descriptors are still measured; only this one is set aside.
+        if (sweep.NotAddressed.Count > 0 && sweep.Descriptors.All(d => d.MultiplexedMode || !d.Valid))
+        {
+            return Outcome.NotApplicable(
+                $"Every valid {kind} is in multiplexed mode, which this runner does not check: "
+                + string.Join("; ", sweep.NotAddressed));
         }
 
         if (sweep.Descriptors.Count == 0)
@@ -1242,7 +1270,10 @@ internal static class PdoSyncEmcyChecks
         }
 
         var valid = sweep.Descriptors.Count(p => p.Valid);
-        return Outcome.Pass($"{sweep.Descriptors.Count} {kind}(s) read, {valid} valid.", measurements);
+        var multiplexed = sweep.Descriptors.Count(p => p.MultiplexedMode);
+        return Outcome.Pass(
+            $"{sweep.Descriptors.Count} {kind}(s) read, {valid} valid"
+            + (multiplexed > 0 ? $", {multiplexed} set aside as multiplexed." : "."), measurements);
     }
 
     private static string DescribeTransmission(byte type) => type switch
