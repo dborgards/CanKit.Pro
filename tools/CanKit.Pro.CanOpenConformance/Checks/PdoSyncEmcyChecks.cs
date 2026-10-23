@@ -1404,7 +1404,15 @@ internal static class PdoSyncEmcyChecks
             if (syncStart is { } start && start > CanOpenTransmissionType.SynchronousCyclicMax)
             {
                 problems.Add($"0x{comm:X4}:06 is {start}; a SYNC start value is 0..240 and 241..255 is reserved.");
+
+                // The outcome goes with the value. Clearing syncStart alone left the outcome at
+                // Read, so the descriptor came out with SyncStartValue = 0 and SyncStartRead =
+                // true — and SYN-02 then walked past its own unread-start guard and measured the
+                // malformed TPDO as though it had no start value. Under --groups sync the sweep's
+                // problem is not even in the verdict, so the device could pass. Found in review
+                // of #388, against the fix one commit earlier.
                 syncStart = null;
+                syncStartOutcome = ReadOutcome.Unreadable;
             }
 
             // Read is not the same as valid. F1h..FBh is reserved for a TPDO and F1h..FDh for an

@@ -272,7 +272,16 @@ internal static class NmtAndHeartbeatChecks
             var timedOut = 0;
             void OnBeat(object? sender, HeartbeatReceivedEventArgs e)
             {
-                if (e.ProducerNodeId == session.Target) Interlocked.Increment(ref received);
+                // The three run states only. The stack reports the 00h boot-up through this same
+                // event as NmtState.Initializing (CanOpenEvents.cs), so counting every event
+                // credited a reboot as a consumed heartbeat — while Heartbeats(wire.Frames) on the
+                // raw side correctly excluded it. A boot-up that rearms the consumer before its
+                // timeout then left received > 0 and timedOut == 0, and the check passed with no
+                // heartbeat in its own window at all. The same "a boot-up is not a heartbeat" rule
+                // HBT-02 already applies to the wire, missing from the decoded path. Found in
+                // review of #388.
+                if (e.ProducerNodeId == session.Target && IsDefinedRunState((byte)e.State))
+                    Interlocked.Increment(ref received);
             }
 
             void OnTimeout(object? sender, HeartbeatTimeoutEventArgs e)
@@ -528,6 +537,24 @@ internal static class NmtAndHeartbeatChecks
                     {
                         await session.Client.SdoDownloadAsync(session.Target, 0x1017, 0x00, original, CancellationToken.None)
                             .ConfigureAwait(false);
+
+                        // Read back, because an acknowledgement is not an application — which is
+                        // the argument this check already makes about the *stop* and did not make
+                        // about the restore. A device that accepts the write and keeps 1017h at
+                        // zero leaves the run having switched its heartbeat off for good, while
+                        // "restored: yes" and a Pass say the write tier's promise was kept. This
+                        // check deliberately exercises devices that mishandle 1017h, so its own
+                        // cleanup is the last place to take their word for it. Found in review
+                        // of #388.
+                        var back = await session.Client
+                            .SdoUploadAsync(session.Target, 0x1017, 0x00, CancellationToken.None).ConfigureAwait(false);
+                        if (back.Length != 2 || BitConverter.ToUInt16(back, 0) != BitConverter.ToUInt16(original, 0))
+                        {
+                            restoredOk = false;
+                            restored = $"FAILED — 1017h reads back as {IdentityAndSdoChecks.Hex(back)} after writing "
+                                + $"{IdentityAndSdoChecks.Hex(original)}; the device accepted the write and did not "
+                                + "apply it, so its heartbeat is not what this run found";
+                        }
                     }
                     catch (Exception ex)
                     {
