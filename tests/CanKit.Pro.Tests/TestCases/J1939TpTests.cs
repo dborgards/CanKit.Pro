@@ -1874,6 +1874,81 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #356 (j1939tp-M3 of the 2026-10-21 review): every CTS the receiver sends starts T2 for the
+    // first DT of the block it grants, the follow-up CTS after a block as much as the first one.
+    // Without it the only timer left after a block is the T1 its last DT re-armed, so a slow but
+    // conforming originator would be aborted at T1 (750 ms) rather than T2 (1250 ms) on every
+    // block after the first. T1 and T2 are set far apart, and on the receiver's own virtual
+    // clock the T2 armed after the second CTS is waited for before the clock moves.
+    [Fact]
+    public async Task Cm_Receiver_Arms_T2_Again_After_A_Follow_Up_Cts()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte receiverSa = 0x98;
+        const byte peerSa = 0x99;
+        const uint pgn = 0xFE98u;
+        var pdu = RandomPayload(21, seed: 17); // 3 packets, 2 per CTS
+
+        var options = new J1939TpOptions().With(
+            t1: TimeSpan.FromSeconds(5),
+            t2: TimeSpan.FromMilliseconds(80));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var receiver = new J1939TpChannel(new CanBusService(receiverBus), sourceAddress: receiverSa,
+            options, ownsService: true, actor);
+
+        var firstCts = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCts = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peerBus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != receiverSa || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            var data = e.CanFrame.Data.ToArray();
+            if (data.Length < 8 || J1939TpFrames.ReadDataPgn(data) != pgn) return;
+            if (data[0] == J1939TpFrames.ControlCts)
+            {
+                if (data[2] == 1) firstCts.TrySetResult(null);
+                else if (data[2] == 3) secondCts.TrySetResult(data);
+            }
+            else if (data[0] == J1939TpFrames.ControlAbort)
+            {
+                abortSeen.TrySetResult(data);
+            }
+        };
+
+        var recvTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+
+        peerBus.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa),
+            J1939TpFrames.BuildRts(pdu.Length, totalPackets: 3, maxPacketsPerCts: 2, dataPgn: pgn),
+            isExtendedFrame: true));
+        await firstCts.Task.AsTaskWithTimeout(ShortTimeout);
+
+        var dtId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa);
+        peerBus.Transmit(CanFrame.Classic(dtId, J1939TpFrames.BuildDt(1, pdu, 0), isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic(dtId, J1939TpFrames.BuildDt(2, pdu, 7), isExtendedFrame: true));
+        var cts = await secondCts.Task.AsTaskWithTimeout(ShortTimeout);
+        cts[1].Should().Be(1, "the block after the first is the one packet left");
+
+        // The originator goes silent. The CTS on the wire is not proof T2 is armed: the receiver
+        // arms it after handing the CTS to the pool.
+        await clock.WaitUntilTimerArmedAsync(actor, options.T2, ShortTimeout);
+        await clock.AdvanceAsync(options.T2);
+
+        var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        abort[1].Should().Be((byte)J1939TpAbortReason.Timeout);
+
+        Func<Task> act = () => recvTask;
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
+        ex.Message.Should().Contain("T2");
+    }
+
     // -----------------------------------------------------------------------------------------
     // #30 -- TP.CM control frames carry a destination, and only a BAM's is the global address.
     // The reader admits frames addressed to us or to 0xFF; HandleRxTpCm decides which of the two
