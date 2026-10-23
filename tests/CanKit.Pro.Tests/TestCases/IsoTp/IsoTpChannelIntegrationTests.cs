@@ -746,22 +746,34 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
     // The boundary from the other side: one byte more than a Single Frame carries is a First
     // Frame, answered with Flow Control and reassembled.
+    //
+    // #362: this went red on a loaded host for two reasons that had nothing to do with the
+    // boundary. The Flow Control is sent from the thread pool, not from the actor, so a round
+    // trip on the actor said nothing about whether it had reached the double yet; and N_Cr ran
+    // on the wall clock, so a stall past its 500 ms withdrew the reception before the second
+    // count. The FC is now awaited on the double's own signal, and N_Cr is armed on a clock
+    // nobody moves, so the reception can only be withdrawn by the actor refusing the frame.
     [Fact]
     public async Task A_First_Frame_One_Byte_Over_Single_Frame_Capacity_Is_Accepted()
     {
         var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
         using var service = new StarvedReaderBusService();
-        using var actor = new ProtocolActor();
+        var flowControlSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.OnSendConfirmed = () => flowControlSent.TrySetResult(true);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
 
         byte[] ff = { 0x10, 0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
         channel.GetReceptionsInProgress().Should().HaveCount(1);
-        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        await clock.SettleAsync().WaitAsync(ShortTimeout);
+        await flowControlSent.Task.WaitAsync(ShortTimeout);
 
         lock (service.Sent)
             service.Sent.Should().ContainSingle().Which[0].Should().Be(0x30, "FC.CTS");
-        channel.GetReceptionsInProgress().Should().HaveCount(1);
+        channel.GetReceptionsInProgress().Should().HaveCount(1,
+            "the actor accepted the First Frame, and N_Cr cannot have run out on a clock that has not moved");
     }
 
     // --------------------------------------------------------------------------------
@@ -1440,9 +1452,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x321,
             new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None));
 
-        // A caller pumps: it takes the frame and is held before it posts it.
+        // A caller pumps: it takes the frame and is held before it posts it. Awaited on the
+        // double's signal, not on a delay (#362): with Task.Delay(100) a pump the thread pool had
+        // not started yet let the subscription end first, the loss was posted ahead of the
+        // frame, and the receive threw it -- a red that said nothing about the code.
         var pump = Task.Run(() => channel.GetReceptionsInProgress());
-        await Task.Delay(100);
+        await service.FrameHeldAtGate.WaitAsync(ShortTimeout);
         service.WakeReader(); // the subscription ends
         // No signal says "the reader reached the post and waited for the lock", so this is a
         // negative window: it can only pass falsely on a slow host.

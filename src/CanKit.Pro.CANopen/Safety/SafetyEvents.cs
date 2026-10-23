@@ -46,8 +46,8 @@ public sealed class SrdoStateChangedEventArgs : EventArgs
     public DateTime Timestamp { get; }
 }
 
-/// <summary>A global failsafe command (COB-ID 001h, DLC 0) was received while 1300h is 1
-/// (CiA DSP 304 V1.0 §8.2). On a bus that echoes, the node's own GFC arrives here too.</summary>
+/// <summary>A global failsafe command (COB-ID 001h, DLC 0) was received while Operational
+/// (CiA DSP 304 V1.0 §8.2; EN 50325-5:2010 §7.2.1 — 1300h is set to 1, not consulted). On a bus that echoes, the node's own GFC arrives here too.</summary>
 public sealed class GlobalFailsafeCommandReceivedEventArgs : EventArgs
 {
     /// <summary>Constructs the event.</summary>

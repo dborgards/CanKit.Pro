@@ -4,13 +4,13 @@ using System.Collections.Generic;
 namespace CanKit.Pro.CANopen.Safety;
 
 /// <summary>
-/// The safety configuration checksum of object 13FFh (CiA DSP 304 V1.0 §8.4.2.2). The norm
-/// gives the generator polynomial x^16 + x^12 + x^5 + 1 and the order of the fields; it names
-/// no initial value and no byte order. This implementation uses CRC-16/XMODEM (initial value
-/// 0000h, no reflection, no final XOR — the algorithm CiA 301 §7.2.4.3.16 prescribes for the
-/// SDO block transfer) and feeds multi-byte fields MSB-first, the order in which D(x) lists
-/// their bits (b15 … b0). Both choices are recorded in
-/// docs/reviews/2026-10-09-canopen-safety-scope.md and are reconciled against EN 50325-5 in #289.
+/// The safety configuration checksum of object 13FFh (CiA DSP 304 V1.0 §8.4.2.2; EN 50325-5:2010
+/// §6.4.1.5, Table 9). Both texts give the generator polynomial x^16 + x^12 + x^5 + 1, the order
+/// of the fields and the seed 0000h (EN 50325-5); neither names the byte order of a multi-byte
+/// field — Table 9 only lists each field's bits from the most significant down (b15 … b0). This
+/// implementation uses CRC-16/XMODEM (initial value 0000h, no reflection, no final XOR — the
+/// algorithm CiA 301 §7.2.4.3.16 prescribes for the SDO block transfer) and feeds multi-byte
+/// fields little-endian, the CANopen byte image, as CANopenNode's CO_SRDOcalcCrc does (#289).
 /// </summary>
 public static class SrdoCrc
 {
@@ -70,18 +70,18 @@ public static class SrdoCrc
     /// <summary>§8.4.2.2 "The order for data which are checked by the CRC": a) direction (1),
     /// b) refresh time / SCT (2), c) SRVT (1), d) COB-ID 1 (4), e) COB-ID 2 (4), f) mapping
     /// sub-index 0 (1), then per mapping slot g) its sub-index (1) and h) its value (4) — every
-    /// field as given, multi-byte fields MSB-first. The one serializer of the 13FFh layout: the
-    /// tool side (<see cref="Compute"/>, over a configuration being written) and the device side
-    /// (<see cref="SrdoRecords.RecordChecksum"/>, over a record as the dictionary holds it) both
-    /// feed it, so the byte order #289 may change is decided here once and cannot drift between
+    /// field as given, multi-byte fields little-endian (#289). The one serializer of the 13FFh
+    /// layout: the tool side (<see cref="Compute"/>, over a configuration being written) and the
+    /// device side (<see cref="SrdoRecords.RecordChecksum"/>, over a record as the dictionary
+    /// holds it) both feed it, so the byte order is decided here once and cannot drift between
     /// the two.</summary>
     internal static byte[] CanonicalBytes(byte direction, ushort cycleMs, byte validationMs, uint cobId1, uint cobId2,
         byte mappingCount, IReadOnlyList<(byte Subindex, uint Value)> slots)
     {
         var bytes = new List<byte>(13 + 5 * slots.Count);
         bytes.Add(direction);
-        bytes.Add((byte)(cycleMs >> 8));
         bytes.Add((byte)cycleMs);
+        bytes.Add((byte)(cycleMs >> 8));
         bytes.Add(validationMs);
         AddU32(bytes, cobId1);
         AddU32(bytes, cobId2);
@@ -106,9 +106,9 @@ public static class SrdoCrc
 
     private static void AddU32(List<byte> bytes, uint value)
     {
-        bytes.Add((byte)(value >> 24));
-        bytes.Add((byte)(value >> 16));
-        bytes.Add((byte)(value >> 8));
         bytes.Add((byte)value);
+        bytes.Add((byte)(value >> 8));
+        bytes.Add((byte)(value >> 16));
+        bytes.Add((byte)(value >> 24));
     }
 }
