@@ -487,6 +487,17 @@ internal static class PdoSyncEmcyChecks
                 restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
             }
 
+            // Before anything else, as in PDO-03: Start has been sent and the finally has already
+            // run the restore, so a restore that did not take must decide the verdict rather than
+            // being overtaken by a return about the Start.
+            if (!restoration.Succeeded)
+            {
+                return Outcome.Failed(Attribution.Unknown,
+                    "The device could not be put back into the state it was found in: " + restoration.State
+                    + ". A write-tier run promises the device is unchanged afterwards, so this fails whatever else was "
+                    + "measured — the device needs looking at before it is trusted again.");
+            }
+
             if (!operationalConfirmed)
             {
                 return Outcome.Inconclusive(
@@ -519,15 +530,6 @@ internal static class PdoSyncEmcyChecks
             {
                 measurements["acyclic TPDOs not concluded on"] = string.Join(", ",
                     acyclic.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3} type 0"));
-            }
-
-            if (!restoration.Succeeded)
-            {
-                return Outcome.Failed(Attribution.Unknown,
-                    "The check itself completed, but the device could not be put back into the state it was found in: "
-                    + restoration.State + ". A write-tier run promises the device is unchanged afterwards, so this "
-                    + "fails whatever the measurements say — the device needs looking at before it is trusted again.",
-                    measurements);
             }
 
             var silent = new List<string>();
