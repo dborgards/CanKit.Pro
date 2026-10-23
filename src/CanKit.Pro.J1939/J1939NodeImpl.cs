@@ -1860,17 +1860,26 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try { _readerCts.Cancel(); } catch { }
         _rxInbox.Writer.TryComplete();
 
-        var transportReader = TearDownOnActor();
+        var transportReader = Volatile.Read(ref _transportReaderTask);
+        try
+        {
+            transportReader = TearDownOnActor();
+        }
+        finally
+        {
+            // A channel that throws on Dispose is this disposal's failure, not a reason to leave
+            // the rest running: the subscription, the actor and an owned service are released
+            // all the same before it propagates (Codex and Bugbot on #397).
+            try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* the reader reports its own faults */ }
+            try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* likewise */ }
 
-        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch { }
-
-        _subscription.Dispose();
-        // An injected actor is not ours to dispose; the handler is, either way.
-        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
-        if (_ownsActor) _actor.Dispose();
-        _readerCts.Dispose();
-        if (_ownsService) _service.Dispose();
+            _subscription.Dispose();
+            // An injected actor is not ours to dispose; the handler is, either way.
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
+            _readerCts.Dispose();
+            if (_ownsService) _service.Dispose();
+        }
     }
 
     /// <summary>

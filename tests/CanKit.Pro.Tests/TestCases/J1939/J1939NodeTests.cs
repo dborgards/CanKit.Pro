@@ -4101,13 +4101,18 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(bus);
         using var actor = new ProtocolActor();
         var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
         var failure = new InvalidOperationException("the channel would not close");
         channels.Single().DisposeFailure = failure;
+        service.SubscriptionCount.Should().Be(1, "the node's own subscription; the scripted channel holds none");
 
         Action dispose = node.Dispose;
         dispose.Should().Throw<InvalidOperationException>().Which.Should().BeSameAs(failure);
         var reported = await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask());
         reported.Should().BeSameAs(failure);
+        // Codex and Bugbot on #397: the rest of the teardown still ran. The node is marked
+        // disposed either way, so nothing could release the subscription later.
+        service.SubscriptionCount.Should().Be(0, "the failed channel does not keep the node's subscription alive");
     }
 
     // ---------------------------------------------------------------------------------------
