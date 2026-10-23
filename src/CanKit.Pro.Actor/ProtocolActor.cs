@@ -174,6 +174,9 @@ namespace CanKit.Pro.Actor
         // through BackgroundExceptionOccurred once rather than once per caller (see Dispose).
         private int _shutdownTimeoutReported;
 
+        // The same, for the fault of a loop task that ended by throwing (see WaitForLoopTask).
+        private int _loopFaultReported;
+
         // The actors whose shutdown-timeout reports the *current thread* is inside, outermost
         // first. A BackgroundExceptionOccurred subscriber that answers the TimeoutException by
         // disposing the actor -- an ordinary cleanup reflex -- is off-loop, so without this mark
@@ -644,10 +647,20 @@ namespace CanKit.Pro.Actor
             {
                 return _loopTask.Wait(_shutdownTimeout);
             }
-            catch (AggregateException)
+            catch (AggregateException faulted)
             {
-                // Expected: the loop observed cancellation and exited via OperationCanceledException.
-                // It *did* finish, which is all this return value reports.
+                // Not a shutdown path: the loop catches its own OperationCanceledException and
+                // ends normally, and every user callback runs under RunSafely. A faulted loop
+                // task means something outside every callback threw -- the ITimeSource, or the
+                // primitives the loop waits on. The loop did end, which is what the return value
+                // reports, but the fault is a defect and goes through the one background channel
+                // (FR-RAW-023) instead of being dropped, or thrown out of a Dispose that must stay
+                // safe in a finally. Once: every caller joins and would find the same fault.
+                if (Interlocked.Exchange(ref _loopFaultReported, 1) == 0)
+                {
+                    foreach (var inner in faulted.Flatten().InnerExceptions)
+                        RaiseBackgroundException(inner);
+                }
                 return true;
             }
         }
@@ -677,14 +690,23 @@ namespace CanKit.Pro.Actor
             }
             finally
             {
-                FinalDrain();
-                // Disposed here, by the loop itself, only once it has actually stopped running --
-                // never by Dispose() directly (see its comment) -- so these objects are never
-                // touched again after this point regardless of how long a stuck callback delayed
-                // getting here.
-                _stopCts.Dispose();
-                _signal.Dispose();
-                ExitLoopCount();
+                // FinalDrain runs user callbacks under RunSafely, but reads the clock outside it;
+                // a throw there must not skip the release below, or the loop count stays taken
+                // for good and the two disposables leak.
+                try
+                {
+                    FinalDrain();
+                }
+                finally
+                {
+                    // Disposed here, by the loop itself, only once it has actually stopped running --
+                    // never by Dispose() directly (see its comment) -- so these objects are never
+                    // touched again after this point regardless of how long a stuck callback delayed
+                    // getting here.
+                    _stopCts.Dispose();
+                    _signal.Dispose();
+                    ExitLoopCount();
+                }
             }
         }
 
@@ -713,10 +735,17 @@ namespace CanKit.Pro.Actor
             }
             finally
             {
-                FinalDrain();
-                _stopCts.Dispose();
-                _signal.Dispose();
-                ExitLoopCount();
+                // As in RunLoopBlocking: a fault in FinalDrain must not skip the release.
+                try
+                {
+                    FinalDrain();
+                }
+                finally
+                {
+                    _stopCts.Dispose();
+                    _signal.Dispose();
+                    ExitLoopCount();
+                }
             }
         }
 

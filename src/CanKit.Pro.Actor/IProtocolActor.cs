@@ -75,8 +75,9 @@ namespace CanKit.Pro.Actor
         /// the actor's own shutdown is the exception: <see cref="ProtocolActor"/> reports a
         /// <see cref="IDisposable.Dispose"/> that gave up waiting for the loop
         /// (<see cref="TimeoutException"/>) on the thread that called <c>Dispose</c>, while the
-        /// loop is still inside the callback that would not finish. A subscriber that mutates
-        /// loop-owned state must not do so from that report.
+        /// loop is still inside the callback that would not finish; in the task-based execution
+        /// modes it reports a loop that failed outside every callback on that thread too. A
+        /// subscriber that mutates loop-owned state must not do so from those reports.
         /// </para>
         /// </summary>
         event EventHandler<Exception> BackgroundExceptionOccurred;
