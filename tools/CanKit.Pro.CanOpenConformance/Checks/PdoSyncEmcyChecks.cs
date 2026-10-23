@@ -949,6 +949,7 @@ internal static class PdoSyncEmcyChecks
 
             var silent = new List<string>();
             var short_ = new List<string>();
+            var tooMany = new List<string>();
             // Two reasons a TPDO cannot be measured, kept apart. They were one list, and the
             // "none of them had an opportunity" verdict below spoke for all of it: a device whose
             // every cyclic TPDO shares an identifier was told its transmission types exceeded the
@@ -1033,7 +1034,23 @@ internal static class PdoSyncEmcyChecks
                     continue;
                 }
 
+                // Both ends of the rule, not just the floor. Transmission type N is "one
+                // transmission per N SYNCs" (CiA 301 §7.5.2.37), so a type-2 TPDO answering every
+                // SYNC breaks it exactly as a silent one does — and only the floor was checked,
+                // so the device that ignores its own divisor was the one case this check could
+                // not fail. The ceiling carries the same one-frame allowance as the floor and for
+                // the same reason: the burst's edges. A synchronous TPDO transmits on SYNC and on
+                // nothing else, so there is no other traffic on its COB-ID to account for.
+                // Found in review of #388.
                 var expected = Math.Max(1, opportunities - 1);
+                var ceiling = opportunities + 1;
+                if (mine.Length > ceiling)
+                {
+                    tooMany.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: {mine.Length} "
+                        + $"frame(s) for {opportunities} opportunity/opportunities)");
+                    continue;
+                }
+
                 if (mine.Length >= expected) continue;
                 if (mine.Length > 0)
                 {
@@ -1102,6 +1119,16 @@ internal static class PdoSyncEmcyChecks
                     $"{string.Join(", ", silent)} transmitted nothing, but the driver rejected {rejected} of {syncs} "
                     + "SYNC frames, so how many the device actually saw is uncertain and its silence cannot be charged "
                     + "to it. Re-run on an interface that accepts every frame.", Attribution.Transport, measurements);
+            }
+
+            if (tooMany.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{string.Join(", ", tooMany)} transmitted more often than its transmission type allows. Type N "
+                    + "means one transmission per N SYNCs (CiA 301 §7.5.2.37), so a TPDO answering more SYNCs than "
+                    + "its divisor gives it is ignoring its own 1800h:02 — and a consumer that expects the declared "
+                    + "rate gets data it did not ask for, at a rate it did not agree to.",
+                    measurements);
             }
 
             if (silent.Count > 0)
@@ -1690,17 +1717,23 @@ internal static class PdoSyncEmcyChecks
         // the device's own periods for it. When they do not, the declaration is not evidence of
         // anything and the longer observation decides — and refuses, below, when even that cannot
         // measure an interval.
-        double? observed = null;
-        if (declared is { } claimed && claimed > 0)
-        {
-            observed = await NmtAndHeartbeatChecks
-                .ObservedPeriodForConfirmationAsync(session, claimed * 2 + 200, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        observed ??= await NmtAndHeartbeatChecks
-            .ObservedPeriodForConfirmationAsync(session, 2 * Math.Max(500, session.Options.HeartbeatWindowMs),
-                cancellationToken)
+        // One observation, bounded by whichever of the two questions needs longer. The first
+        // version asked them in order — two beats inside the time the declaration implies, then a
+        // retry bounded by two observation windows — and for a slow declaration the retry was
+        // *shorter* than the attempt that had just failed: a device honestly declaring 10 s got
+        // 20.2 s, missed two beats by phase or pump lag, and was then re-measured against 8 s,
+        // which cannot hold two of its periods. The miss is remembered for the run, so all three
+        // checks skipped on it. A single bound cannot be shorter than itself. Found in review
+        // of #388.
+        //
+        // It is capped where HBT-03 caps its own waiting: a period that needs longer than that to
+        // measure is one this tool will not hold the bus for, and the refusal below says so.
+        var declaredBound = declared is { } claimed && claimed > 0 ? claimed * 2 + 200 : 0;
+        var windowBound = 2 * Math.Max(500, session.Options.HeartbeatWindowMs);
+        var bound = Math.Min(NmtAndHeartbeatChecks.MaxObservationMs, Math.Max(declaredBound, windowBound));
+        session.ConfirmationObservationBoundMs = bound;
+        var observed = await NmtAndHeartbeatChecks
+            .ObservedPeriodForConfirmationAsync(session, bound, cancellationToken)
             .ConfigureAwait(false);
 
         var periodMs = observed ?? 0;
@@ -1728,7 +1761,7 @@ internal static class PdoSyncEmcyChecks
     internal static string NoConfirmationBudgetReason(Session session)
         => "No heartbeat period could be measured, and this check changes the device's NMT state. The period is the "
         + "bound a confirmation needs, and neither route to it produced one: no interval could be measured from the "
-        + $"heartbeat in the {2 * Math.Max(500, session.Options.HeartbeatWindowMs)} ms allowed for one — fewer than "
+        + $"heartbeat in the {session.ConfirmationObservationBoundMs} ms allowed for one — fewer than "
         + "two beats arrived, or node-guarding traffic shares the COB-ID, where a toggle response is byte-for-byte a "
         + "heartbeat and an interval would be measured over a mixture — and 1017h was no help either, whether "
         + "because it returned nothing (a node already Stopped has no SDO server, CiA 301 Table 37; a description "

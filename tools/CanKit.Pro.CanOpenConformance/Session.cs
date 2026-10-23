@@ -76,6 +76,10 @@ internal sealed class Session : IDisposable
     /// <inheritdoc cref="ConfirmationBudgetMs"/>
     public bool ConfirmationBudgetKnown { get; set; }
 
+    /// <summary>How long the run was prepared to watch the heartbeat for an interval, kept so the
+    /// refusal that follows a failed measurement can state the figure it actually used.</summary>
+    public int ConfirmationObservationBoundMs { get; set; }
+
     /// <summary>The node under test. Checks that need it are only reached once <see
     /// cref="RunOptions.TargetNode"/> is set, which <see cref="Program"/> enforces per group.</summary>
     public byte Target => Options.TargetNode

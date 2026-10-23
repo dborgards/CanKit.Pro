@@ -32,7 +32,7 @@ internal static class NmtAndHeartbeatChecks
     /// truncates a measurement replaces it with a different one, which is how a conforming slow
     /// producer came to be reported as a defect in the stack.
     /// </summary>
-    private const int MaxObservationMs = 60_000;
+    internal const int MaxObservationMs = 60_000;
 
     /// <summary>
     /// The verdict for "no heartbeat was observed", wherever that is concluded: no frame at all, or
