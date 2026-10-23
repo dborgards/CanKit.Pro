@@ -916,8 +916,11 @@ internal static class NmtAndHeartbeatChecks
 
             // Read before the first command, for the reason the helper's own remarks give: in
             // Stopped the SDO server is silent and the read would fall back to the short window.
-            var confirmBudgetMs = await PdoSyncEmcyChecks.NmtConfirmationBudgetMsAsync(session, cancellationToken)
-                .ConfigureAwait(false);
+            if (await PdoSyncEmcyChecks.NmtConfirmationBudgetMsAsync(session, cancellationToken)
+                    .ConfigureAwait(false) is not { } confirmBudgetMs)
+            {
+                return Outcome.NeedsSetup(PdoSyncEmcyChecks.NoConfirmationBudgetReason(session));
+            }
             var problems = new List<string>();
             var restoreFailed = false;
             try
@@ -1047,25 +1050,37 @@ internal static class NmtAndHeartbeatChecks
     /// that was restoring correctly.
     /// </summary>
     /// <returns>
-    /// The interval between the last two beats, or the window when fewer than two arrived — a
-    /// producer slower than the window is one whose period is <em>at least</em> that long, which
-    /// is the bound a confirmation needs, and returning zero there would send the caller straight
-    /// back to the window it already has. Zero when no beat arrived at all, where there is
-    /// nothing to confirm against anyway. Guarding traffic on the COB-ID is byte-for-byte a
-    /// heartbeat, so an interval measured through it would be measured over a mixture; the window
-    /// stands in for it instead. Found in review of #388.
+    /// The interval between the last two beats, or null when it could not be measured: fewer than
+    /// two beats inside the window, or guarding traffic on the COB-ID, whose toggle-zero response
+    /// is byte-for-byte a heartbeat and would make the interval a measurement over a mixture.
     /// </returns>
-    internal static async Task<double> ObservedPeriodForConfirmationAsync(Session session, CancellationToken cancellationToken)
+    /// <remarks>
+    /// The first version of this returned the window when fewer than two beats arrived, on the
+    /// reasoning that a producer slower than the window has a period of at least that long. It
+    /// does — but the budget is built from the period, and a window of 4 s stood in for a 10 s
+    /// producer, so a confirmation got 8.2 s where it needed upwards of 20: the same false
+    /// restoration failure, one step further along. A period that was not measured is unknown,
+    /// and the callers refuse rather than guess it. Found in review of #388, against the
+    /// substitution of the commit before.
+    /// </remarks>
+    internal static async Task<double?> ObservedPeriodForConfirmationAsync(Session session, CancellationToken cancellationToken)
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
         using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
-        var window = Math.Max(500, session.Options.HeartbeatWindowMs);
-        await probe.WaitForAsync(frames => Heartbeats(frames).Count >= 2, window, cancellationToken)
+        // Twice the window the other observations get, because an interval needs two beats where
+        // a state needs one: at --heartbeat-ms the probe would come back empty-handed for any
+        // producer slower than half of it and refuse a device well inside the range the rest of
+        // the run accepts. It returns as soon as the second beat is in, so a fast producer pays
+        // nothing for the larger bound.
+        await probe.WaitForAsync(
+                frames => Heartbeats(frames).Count >= 2,
+                2 * Math.Max(500, session.Options.HeartbeatWindowMs),
+                cancellationToken)
             .ConfigureAwait(false);
         var frames = probe.Frames;
-        if (HasGuardingTraffic(frames)) return window;
+        if (HasGuardingTraffic(frames)) return null;
         var beats = Heartbeats(frames);
-        return beats.Count >= 2 ? beats[^1].AtMs - beats[^2].AtMs : beats.Count == 1 ? window : 0;
+        return beats.Count >= 2 ? beats[^1].AtMs - beats[^2].AtMs : null;
     }
 
     /// <summary>The producer heartbeat time for a confirmation budget; null when it cannot be

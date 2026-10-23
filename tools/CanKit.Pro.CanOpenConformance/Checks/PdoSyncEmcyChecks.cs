@@ -130,7 +130,12 @@ internal static class PdoSyncEmcyChecks
             // reading 1017h to size a confirmation times out there and falls back to the short
             // window the budget exists to replace — and adds that timeout to every confirmation
             // besides. Found in review of #388, against the budget added one commit earlier.
-            var confirmBudgetMs = await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false);
+            if (await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false)
+                is not { } confirmBudgetMs)
+            {
+                return Outcome.NeedsSetup(NoConfirmationBudgetReason(session));
+            }
+
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             if (initialState is null)
             {
@@ -732,7 +737,12 @@ internal static class PdoSyncEmcyChecks
 
             byte counter = 0;
             var watched = cyclic.Select(p => (p.CobId, p.Extended)).ToHashSet();
-            var confirmBudgetMs = await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false);
+            if (await NmtConfirmationBudgetMsAsync(session, cancellationToken).ConfigureAwait(false)
+                is not { } confirmBudgetMs)
+            {
+                return Outcome.NeedsSetup(NoConfirmationBudgetReason(session));
+            }
+
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             if (initialState is null)
             {
@@ -1549,7 +1559,7 @@ internal static class PdoSyncEmcyChecks
     /// very window this budget exists to replace — and added a full SDO timeout to every
     /// confirmation besides. Found in review of #388, against the budget added one commit earlier.
     /// </remarks>
-    internal static async Task<int> NmtConfirmationBudgetMsAsync(Session session, CancellationToken cancellationToken)
+    internal static async Task<int?> NmtConfirmationBudgetMsAsync(Session session, CancellationToken cancellationToken)
     {
         var declared = await NmtAndHeartbeatChecks.ProducerHeartbeatTimeForConfirmationAsync(session, cancellationToken)
             .ConfigureAwait(false);
@@ -1563,13 +1573,34 @@ internal static class PdoSyncEmcyChecks
         // the fix of one commit earlier, does nothing for a device that was already there. The
         // heartbeat is produced in every state these checks run in, so the period is observable
         // without asking for it. Found in review of #388.
-        var periodMs = declared is { } ms && ms > 0
+        double? periodMs = declared is { } ms && ms > 0
             ? ms
             : await NmtAndHeartbeatChecks.ObservedPeriodForConfirmationAsync(session, cancellationToken)
                 .ConfigureAwait(false);
-        var fromPeriod = periodMs > 0 ? periodMs * 2 + 200 : 0;
-        return (int)Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), fromPeriod);
+
+        // Unknown is returned as unknown. Standing the observation window in for a period that
+        // was not measured gave a 10 s producer an 8.2 s budget from a 4 s window and reported a
+        // target that had gone back as one that had not — the false FAIL this budget exists to
+        // prevent, reached through the fallback meant to prevent it. Found in review of #388.
+        if (periodMs is not { } period || period <= 0) return null;
+        return (int)Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), period * 2 + 200);
     }
+
+    /// <summary>
+    /// Why a check that changes the NMT state will not run when no heartbeat period could be
+    /// established. One text for the three checks that need the budget, so the three cannot drift.
+    /// </summary>
+    internal static string NoConfirmationBudgetReason(Session session)
+        => "No heartbeat period could be established, and this check changes the device's NMT state. Neither route "
+        + "to it gave a value this run, and which one it was this check does not claim to know: 1017h returns "
+        + "nothing when a node is already Stopped (CiA 301 Table 37 gives Stopped no SDO server), when the bound "
+        + "description does not declare the object, or when the read is refused or aborted; and no interval could "
+        + $"be measured from the heartbeat either, in the {2 * Math.Max(500, session.Options.HeartbeatWindowMs)} ms "
+        + "allowed for one — either fewer than two beats arrived, or node-guarding traffic shares the COB-ID, where "
+        + "a toggle response is byte-for-byte a heartbeat and an interval would be measured over a mixture. HBT-02 "
+        + "reports which of those the bus shows. A confirmation needs a bound drawn from the period, and a bound "
+        + "guessed from the observation window reports a device that went back as one that did not — so this check "
+        + "does not run rather than conclude from it.";
 
     /// <summary>
     /// 1019h, the SYNC counter overflow. CiA 301 §7.5.2.40 defines 0 as "SYNC without a counter"
