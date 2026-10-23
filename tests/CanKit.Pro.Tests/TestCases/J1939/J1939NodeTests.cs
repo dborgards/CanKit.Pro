@@ -2631,7 +2631,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(busA);
 
         // A NAME whose §4.4.4.3 backoff is zero (the bytes sum to 256, low byte 0): the scan
-        // pays the backoff before every one of its 240 rounds, and this test's subject is the
+        // pays the backoff before every one of its 120 rounds, and this test's subject is the
         // exhaustion, not the delay -- with a 56 ms backoff it took 13 s more (#153). On the
         // frozen clock a non-zero backoff would never elapse at all.
         var nodeName = Name(0x00005F);
@@ -2644,12 +2644,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var node = new J1939NodeImpl(service, opts, ownsService: false, clock.NewActor());
 
         var cannotClaimSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var claimsPerAddress = new int[256];
         busC.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == J1939Pgn.NullAddress)
                 cannotClaimSeen.TrySetResult(null);
+            else if (e.CanFrame.Data.ToArray().SequenceEqual(nodeName.ToBytes()))
+                Interlocked.Increment(ref claimsPerAddress[fields.SourceAddress]);
         };
 
         // Fake peer: contest EVERY address in the arbitrary field the node tries.
@@ -2677,6 +2681,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.Address.Should().BeNull();
 
         await cannotClaimSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        // #355 (J-6): one claim per address of the field, the lost 0x80 included -- the scan
+        // starts from the address it lost and does not wrap round to claim it a second time.
+        // The spectator saw the Cannot Claim, sent after the last round's claim, so every claim
+        // has been counted.
+        Enumerable.Range(0x80, 0xF7 - 0x80 + 1).Select(sa => Volatile.Read(ref claimsPerAddress[sa]))
+            .Should().OnlyContain(n => n == 1, "the scan tries each of the 120 field addresses exactly once");
     }
 
     // ---------------------------------------------------------------------------------------

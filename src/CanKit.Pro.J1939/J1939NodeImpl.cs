@@ -597,19 +597,26 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     // Advances the arbitrary-address scan to the next candidate, wrapping once through the
     // whole field. Records the scan start on first use (via <paramref name="scanStart"/>) and
-    // returns false when the scan would wrap past it again — meaning every address in the
-    // field was contested and FR-J1939-004's Cannot-Claim applies.
+    // returns false when the scan would come back to it — meaning every address in the field
+    // was contested and FR-J1939-004's Cannot-Claim applies. The start is the address just lost
+    // when that lies in the field, since it has already been tried: recording the next
+    // candidate instead had the scan wrap all the way round and claim the lost address a second
+    // time, 121 rounds for a field of 120 (#355, J-6). One outside the field starts the scan at
+    // the first candidate, and every field address is tried once.
     private static bool TryGetNextArbitraryCandidate(byte preferredAddress, ref byte? scanStart,
         out byte next)
     {
         next = NextArbitraryAddress(preferredAddress);
         if (scanStart is null)
         {
-            scanStart = next;
+            scanStart = IsArbitraryAddress(preferredAddress) ? preferredAddress : next;
             return true;
         }
         return next != scanStart.Value;
     }
+
+    private static bool IsArbitraryAddress(byte address)
+        => address >= ArbitraryAddressRangeStart && address <= ArbitraryAddressRangeEnd;
 
     private static byte NextArbitraryAddress(byte current)
     {
@@ -1016,7 +1023,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Called directly rather than through Task.Run: SendConfirmedAsync's synchronous part is
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
-        // address scan is 240 of them (#58).
+        // address scan is up to 121 of them, the preferred address and the 120 of the field (#58).
         _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, echo);
     }
 
@@ -2034,9 +2041,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         public IDeadline? Deadline { get; set; }
         public CancellationTokenRegistration CtRegistration { get; }
 
-        /// <summary>First candidate of the ongoing arbitrary-address scan (FR-J1939-004);
-        /// null while no fallback round has run yet. Carried across retries via
-        /// <c>BeginClaimRound</c>.</summary>
+        /// <summary>Where the ongoing arbitrary-address scan started (FR-J1939-004): the lost
+        /// address when it lies in the field, the first candidate otherwise; the scan ends when
+        /// it comes back to it. Null while no fallback round has run yet. Carried across
+        /// retries via <c>BeginClaimRound</c>.</summary>
         public byte? ArbitraryScanStart { get; set; }
         /// <summary>
         /// The round waits the §4.4.4.3 backoff and has announced nothing yet; <see cref="Deadline"/>
