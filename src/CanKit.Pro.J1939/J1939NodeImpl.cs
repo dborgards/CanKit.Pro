@@ -578,11 +578,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // pending. Their NAME is not lower than ours, so §4.4.3.3 does not have them
         // retransmit it — this round would otherwise finish uncontested. The announce above
         // is what unseats them; the loss here is ours. A value still stored is this address:
-        // one heard on any other address was cleared before the announce.
+        // one heard on any other address was cleared before the announce. Only a recent one,
+        // though: a claim queued behind that frame reaches this line within one announce
+        // window, and an observation older than that is a CA that may long have gone -- it
+        // used to make a claim an hour later lose at once (#355, J-7).
         if (_equalNameHeardOn is not null)
         {
             _equalNameHeardOn = null;
-            LoseEqualNameContest(preferredAddress, _name);
+            if (_time.GetTimestamp() - _equalNameHeardAt <= TickMath.ToTicks(_options.ClaimAnnounceTimeout, _time.Frequency))
+                LoseEqualNameContest(preferredAddress, _name);
         }
     }
 
@@ -778,6 +782,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // be queued behind this frame (#168). Remember the address so that claim loses
                 // too; §4.4.3.3 will not make the other CA retransmit an equal NAME for us.
                 _equalNameHeardOn = peerSa;
+                _equalNameHeardAt = _time.GetTimestamp();
             }
             return;
         }
@@ -916,7 +921,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // retransmit an equal NAME. Actor-only. It belongs to that queued race: an unrelated round
     // drops it on the way in, and any round that ends drops whatever arrived during it, so a
     // later claim of the remembered address is not lost to a contender who has gone (#180).
+    // Nor is one that starts more than an announce window after the frame (J-7): the time it
+    // was heard, on the actor's clock, is kept beside it.
     private byte? _equalNameHeardOn;
+    private long _equalNameHeardAt;
 
     // WorkMode.Echo is what makes the adapter deliver our own transmit (VirtualBusHub).
     // Without it there is no echo to filter, and an identical frame is the other CA.

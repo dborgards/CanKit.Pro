@@ -1023,32 +1023,77 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
     // The equal NAME arrived before this claim was pending. It is the same address, so the
     // announce does not finish uncontested: §4.4.3.3 will not make the other CA retransmit.
+    //
+    // #355 (J-7): the observation counts for one announce window. On a clock the test holds,
+    // so a slow host between the barrier and the claim cannot outlast it; the NAME's backoff is
+    // zero, so the loss completes without the clock moving.
     [Fact]
     public async Task An_Equal_Name_Already_Heard_On_That_Address_Cannot_Claim()
     {
-        var session = NewSession();
-        using var busA = Open(session, 0);
-        using var busB = Open(session, 1);
-        var name = Name(1);
-        using var node = J1939Node.Open(busA, new J1939NodeOptions(name)
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
-            EnableArbitraryAddressClaiming = true,
-        });
-
-        const uint barrierPgn = 0xFEF4u;
-        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
-        busB.Transmit(AddressClaim(sourceAddress: 0x11, name.ToBytes()));
-        busB.Transmit(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
-            new byte[] { 1 }, isExtendedFrame: true));
-        await barrier;
+        var (clock, actor, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        await HearOurNameOnAsync(node, busB, name, 0x11);
 
         Func<Task> claim = () => node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
         var thrown = await claim.Should().ThrowAsync<J1939CannotClaimException>();
         thrown.Which.PreferredAddress.Should().Be((byte)0x11);
         node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
         node.Address.Should().BeNull();
+    }
+
+    // #355 (J-7): heard while no claim ran, the observation used to persist until the next claim
+    // of that address, however much later: an hour on, the claim announced and lost at once to
+    // a CA that may long have gone. It belongs to a claim queued behind the frame, which starts
+    // within one announce window; one that starts after it claims normally.
+    [Fact]
+    public async Task An_Equal_Name_Heard_Longer_Ago_Than_The_Announce_Window_Does_Not_Lose_A_Claim()
+    {
+        var (clock, actor, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        await HearOurNameOnAsync(node, busB, name, 0x11);
+
+        await clock.AdvanceAsync(node.Options.ClaimAnnounceTimeout + TimeSpan.FromMilliseconds(1));
+        await ClaimOnClockAsync(node, clock, actor, 0x11, node.Options.ClaimAnnounceTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
+    private static (VirtualClock Clock, ProtocolActor Actor, J1939NodeImpl Node, ICanBus PeerBus) NodeOnClockWithPeer(
+        out J1939Name name, out CompositeDisposable disposables)
+    {
+        var clock = new VirtualClock();
+        var session = NewSession();
+        var busA = Open(session, 0);
+        var busB = Open(session, 1);
+        var service = new CanBusService(busA);
+        name = Name(0x00005F); // backoff 0: a loss completes without the clock moving
+        var actor = clock.NewActor();
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        disposables = new CompositeDisposable(node, service, busB, busA);
+        return (clock, actor, node, busB);
+    }
+
+    private static async Task HearOurNameOnAsync(IJ1939Node node, ICanBus peerBus, J1939Name name, byte address)
+    {
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        peerBus.Transmit(AddressClaim(sourceAddress: address, name.ToBytes()));
+        peerBus.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true));
+        await barrier;
+    }
+
+    private sealed class CompositeDisposable : IDisposable
+    {
+        private readonly IDisposable[] _items;
+        public CompositeDisposable(params IDisposable[] items) => _items = items;
+        public void Dispose() { foreach (var item in _items) item.Dispose(); }
     }
 
     // Our NAME was remembered on 0x81 while we still hold 0x80. An equal NAME on 0x80 is the
