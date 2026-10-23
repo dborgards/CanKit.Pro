@@ -260,6 +260,7 @@ internal static class LssAndStoreChecks
                     return Outcome.Fail($"1010h:01 is UNSIGNED32, the device returned {IdentityAndSdoChecks.Hex(raw)}.");
 
                 var capability = BitConverter.ToUInt32(raw, 0);
+                string? restoreUnusable = null;
                 var measurements = new Dictionary<string, string>
                 {
                     ["1010h:01"] = $"0x{capability:X8}",
@@ -284,18 +285,29 @@ internal static class LssAndStoreChecks
                         else
                         {
                             measurements["1011h:01"] = $"UNSIGNED32 expected, {restore.Length} byte(s) returned";
+                            restoreUnusable = $"the declared 1011h:01 came back as {restore.Length} byte(s), not UNSIGNED32";
                         }
                     }
                     catch (SdoAbortException abort)
                     {
-                        measurements["1011h:01"] = abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
-                            or (uint)SdoAbortCode.SubIndexDoesNotExist
+                        var absent = abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                            or (uint)SdoAbortCode.SubIndexDoesNotExist;
+                        measurements["1011h:01"] = absent
                             ? "absent; restoring defaults is optional in CiA 301"
                             : $"aborted {IdentityAndSdoChecks.Describe(abort)}";
+                        if (!absent)
+                            restoreUnusable = $"the declared 1011h:01 aborted {IdentityAndSdoChecks.Describe(abort)}";
                     }
                 }
 
-                return Outcome.Pass("Storage capability read.", measurements);
+                // Only genuine absence is optional. A declared 1011h the device will not return
+                // as UNSIGNED32 left the check listed under "What works" claiming the save and
+                // restore capability had been read. Found in review of #388.
+                return restoreUnusable is null
+                    ? Outcome.Pass("Storage capability read.", measurements)
+                    : Outcome.Inconclusive(
+                        $"1010h was read, but {restoreUnusable}, so the restore half of the storage capability is "
+                        + "unknown.", Attribution.Device, measurements);
             }
             catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist)
             {

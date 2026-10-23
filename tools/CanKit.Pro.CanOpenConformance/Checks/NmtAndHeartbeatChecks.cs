@@ -73,9 +73,16 @@ internal static class NmtAndHeartbeatChecks
             // (CanOpenNode.NodeGuarding.cs), and its empty payload is not a malformed heartbeat —
             // it is not the target's traffic at all. Found in review of #388.
             var guardPolls = frames.Count(f => f.IsRemote);
+            var guardResponses = frames.Count(f => !f.IsRemote && f.Data.Length == 1 && IsGuardingResponse(f.Data[0]));
             if (guardPolls > 0) measurements["node-guarding RTR polls (another master)"] = guardPolls.ToString(CultureInfo.InvariantCulture);
-            frames = frames.Where(f => !f.IsRemote).ToArray();
-            measurements["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
+            if (guardResponses > 0)
+            {
+                measurements["node-guarding responses (toggle bit set)"] =
+                    guardResponses.ToString(CultureInfo.InvariantCulture);
+            }
+
+            frames = frames.Where(f => !f.IsRemote && !(f.Data.Length == 1 && IsGuardingResponse(f.Data[0]))).ToArray();
+            measurements["frames (heartbeat candidates)"] = frames.Count.ToString(CultureInfo.InvariantCulture);
 
             // The state byte is the whole payload of a heartbeat. A device sending anything else
             // is not sending a heartbeat, whatever the COB-ID says.
@@ -516,7 +523,7 @@ internal static class NmtAndHeartbeatChecks
     /// measurement of a reboot, not of a producer.
     /// </summary>
     private static List<TappedFrame> Heartbeats(IReadOnlyList<TappedFrame> frames)
-        => frames.Where(f => !f.IsRemote && f.Data.Length == 1 && f.Data[0] != (byte)NmtState.Initializing).ToList();
+        => frames.Where(f => !f.IsRemote && f.Data.Length == 1 && IsDefinedRunState(f.Data[0])).ToList();
 
     /// <summary>
     /// The newest NMT state a heartbeat reported, or null when none did. Only 04h, 05h and 7Fh
@@ -537,6 +544,15 @@ internal static class NmtAndHeartbeatChecks
     /// <summary>The three states a heartbeat may report while the node is running.</summary>
     private static bool IsDefinedRunState(byte state)
         => state is (byte)NmtState.Stopped or (byte)NmtState.Operational or (byte)NmtState.PreOperational;
+
+    /// <summary>
+    /// A node-guarding response, which shares the heartbeat's COB-ID and carries the toggle bit in
+    /// the high bit on alternating replies — 84h/85h/FFh for the three run states. It is another
+    /// master's conversation with the target, legitimate traffic, and not a malformed heartbeat;
+    /// calling it one failed a conforming device. Found in review of #388.
+    /// </summary>
+    private static bool IsGuardingResponse(byte payload)
+        => (payload & 0x80) != 0 && IsDefinedRunState((byte)(payload & 0x7F));
 
     internal static string DescribeState(byte state) => state switch
     {

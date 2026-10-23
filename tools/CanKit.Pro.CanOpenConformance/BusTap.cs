@@ -52,6 +52,10 @@ internal sealed class BusTap : IDisposable
             bufferCapacity: 4096);
     }
 
+    /// <summary>The tap's own clock, in the same units as <see cref="TappedFrame.AtMs"/>. A check
+    /// that has to say "after this moment" reads it when the moment happens.</summary>
+    public double ElapsedMs => _clock.Elapsed.TotalMilliseconds;
+
     /// <summary>Every frame seen so far, oldest first.</summary>
     public IReadOnlyList<TappedFrame> Frames
     {

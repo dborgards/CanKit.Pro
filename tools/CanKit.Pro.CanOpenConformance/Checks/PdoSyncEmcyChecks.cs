@@ -94,6 +94,7 @@ internal static class PdoSyncEmcyChecks
             int settling;
             var stoppedConfirmed = false;
             var operationalConfirmed = false;
+            double stopSentAtMs = 0;
             Restoration restoration;
             try
             {
@@ -114,20 +115,29 @@ internal static class PdoSyncEmcyChecks
 
                 await session.Client.SendNmtCommandAsync(NmtCommand.Stop, session.Target, cancellationToken).ConfigureAwait(false);
 
-                // Confirm it landed before judging the window that follows. SendNmtCommandAsync
-                // hands out a Task and discards the transmit result, so a frame the adapter
-                // rejected completes the await normally — the device then stays Operational, its
-                // TPDOs fall into the stopped window, and PDO-03 reports a device conformance
-                // failure for what is a transport failure. The restore path already verified;
-                // this one did not. Found in review of #388.
+                // The baseline is the moment Stop is sent, not the moment it is confirmed. Taking
+                // it after the confirming wait left everything in that gap — up to a whole
+                // heartbeat window — in no bucket at all, so a device that kept transmitting and
+                // only then reported 04h passed the check that exists to catch exactly that.
+                // Found in review of #388.
+                stopSentAtMs = tap.ElapsedMs;
+
+                // Confirm it landed before judging. SendNmtCommandAsync hands out a Task and
+                // discards the transmit result, so a frame the adapter rejected completes the
+                // await normally — the device then stays Operational and its TPDOs would be read
+                // as a conformance failure instead of a transport one.
                 stoppedConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Stopped, cancellationToken)
                     .ConfigureAwait(false) == (byte)NmtState.Stopped;
 
-                var atStop = Transmitted(tap).Count;
                 await Task.Delay(SettleMs, cancellationToken).ConfigureAwait(false);
-                settling = Transmitted(tap).Count - atStop;
                 await tap.ListenAsync(Math.Min(2000, session.Options.PdoWindowMs), cancellationToken).ConfigureAwait(false);
-                inStopped = Transmitted(tap).Count - atStop - settling;
+
+                // Classified by arrival time rather than by position in the list: a frame already
+                // on the wire when Stop landed is allowed its settling interval, and anything
+                // after that is the device still transmitting.
+                var afterStop = Transmitted(tap).Where(f => f.AtMs >= stopSentAtMs).ToList();
+                settling = afterStop.Count(f => f.AtMs < stopSentAtMs + SettleMs);
+                inStopped = afterStop.Count - settling;
             }
             finally
             {
@@ -191,12 +201,48 @@ internal static class PdoSyncEmcyChecks
                     Attribution.Transport, measurements);
             }
 
+            // The device's own findings from the Operational window reach a verdict here,
+            // before anything about Stop can return. They are already measured and they are
+            // the device's; an earlier version evaluated them after the Stop branches, so an
+            // unconfirmed Stop returned inconclusive first and a real failure sat behind exit
+            // 0. Found in review of #388.
+            var mismatched = valid.Any(p => inOperational.Any(
+                f => f.CanId == p.CobId && f.IsExtended == p.Extended && p.Bytes > 0 && f.Data.Length != p.Bytes));
+            if (mismatched)
+            {
+                return Outcome.Fail(
+                    "A TPDO carried a payload of a different length than its own mapping (1A00h) declares.", measurements);
+            }
+
+            // Per descriptor, before the aggregate: a TPDO with an event timer short enough to
+            // have elapsed inside the window owes a frame regardless of what its neighbours sent.
+            // Event-driven types only (254/255). The event timer is the trigger for those; a
+            // *synchronous* TPDO with 1800h:05 set still waits for a SYNC, which this check does
+            // not send — charging it for silence would be a false FAIL of the kind this whole
+            // guard exists to prevent, and only an unread transmission type makes it unknowable.
+            var overdue = valid
+                .Where(p => p.TransmissionTypeRead && CanOpenTransmissionType.IsEventDriven(p.TransmissionType))
+                // The window has to cover the inhibit budget too: 1800h:03 may legitimately defer
+                // an event-timer expiry, and declaring the TPDO overdue on the timer alone failed
+                // a conforming producer that had just entered its inhibit interval. Found in
+                // review of #388.
+                .Where(p => p.EventTimerMs > 0 && p.EventTimerMs * 2 + p.InhibitMs <= session.Options.PdoWindowMs)
+                .Where(p => !inOperational.Any(f => f.CanId == p.CobId && f.IsExtended == p.Extended))
+                .ToList();
+            if (overdue.Count > 0)
+            {
+                return Outcome.Fail(
+                    $"{string.Join(", ", overdue.Select(p => $"TPDO{p.Number} (0x{p.CobId:X3}, event timer {p.EventTimerMs} ms"))} "
+                    + $"transmitted nothing in {session.Options.PdoWindowMs} ms of Operational, which is at least twice "
+                    + "its event timer. Traffic from another TPDO does not excuse it.", measurements);
+            }
+
             if (!stoppedConfirmed)
             {
                 return Outcome.Inconclusive(
                     $"The device did not report Stopped after the NMT Stop command, so the {inStopped} frame(s) in the "
                     + "window that followed cannot be charged to it — an adapter that drops the command produces "
-                    + "exactly this picture. What was measured in Operational still stands.",
+                    + "exactly this picture. Nothing in Operational was found wrong, which the findings above report.",
                     Attribution.Transport, measurements);
             }
 
@@ -219,32 +265,6 @@ internal static class PdoSyncEmcyChecks
                     + "this window cannot separate the two.", Attribution.Unknown, measurements);
             }
 
-            var mismatched = valid.Any(p => inOperational.Any(
-                f => f.CanId == p.CobId && f.IsExtended == p.Extended && p.Bytes > 0 && f.Data.Length != p.Bytes));
-            if (mismatched)
-            {
-                return Outcome.Fail(
-                    "A TPDO carried a payload of a different length than its own mapping (1A00h) declares.", measurements);
-            }
-
-            // Per descriptor, before the aggregate: a TPDO with an event timer short enough to
-            // have elapsed inside the window owes a frame regardless of what its neighbours sent.
-            // Event-driven types only (254/255). The event timer is the trigger for those; a
-            // *synchronous* TPDO with 1800h:05 set still waits for a SYNC, which this check does
-            // not send — charging it for silence would be a false FAIL of the kind this whole
-            // guard exists to prevent, and only an unread transmission type makes it unknowable.
-            var overdue = valid
-                .Where(p => p.TransmissionTypeRead && CanOpenTransmissionType.IsEventDriven(p.TransmissionType))
-                .Where(p => p.EventTimerMs > 0 && p.EventTimerMs * 2 <= session.Options.PdoWindowMs)
-                .Where(p => !inOperational.Any(f => f.CanId == p.CobId && f.IsExtended == p.Extended))
-                .ToList();
-            if (overdue.Count > 0)
-            {
-                return Outcome.Fail(
-                    $"{string.Join(", ", overdue.Select(p => $"TPDO{p.Number} (0x{p.CobId:X3}, event timer {p.EventTimerMs} ms"))} "
-                    + $"transmitted nothing in {session.Options.PdoWindowMs} ms of Operational, which is at least twice "
-                    + "its event timer. Traffic from another TPDO does not excuse it.", measurements);
-            }
 
             if (inOperational.Length == 0)
             {
@@ -431,10 +451,17 @@ internal static class PdoSyncEmcyChecks
             int quiet;
             Restoration restoration;
             var rejected = 0;
+            var operationalConfirmed = false;
             try
             {
                 await session.Client.SendNmtCommandAsync(NmtCommand.Start, session.Target, cancellationToken).ConfigureAwait(false);
-                await Task.Delay(300, cancellationToken).ConfigureAwait(false);
+
+                // Same reason PDO-03 confirms since 155c602: a Start the adapter rejected
+                // completes the await normally, the target never enters Operational, and its
+                // synchronous TPDOs are then failed for not answering SYNCs they were never due
+                // to answer. Found in review of #388.
+                operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, cancellationToken)
+                    .ConfigureAwait(false) == (byte)NmtState.Operational;
 
                 quiet = Transmitted(tap).Count;
                 for (var i = 0; i < syncs; i++)
@@ -458,6 +485,13 @@ internal static class PdoSyncEmcyChecks
             finally
             {
                 restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
+            }
+
+            if (!operationalConfirmed)
+            {
+                return Outcome.Inconclusive(
+                    "The device did not report Operational after the NMT Start command, so its synchronous TPDOs were "
+                    + "never due and their silence says nothing about it.", Attribution.Transport);
             }
 
             var accepted = syncs - rejected;
@@ -723,7 +757,17 @@ internal static class PdoSyncEmcyChecks
             cancellationToken).ConfigureAwait(false);
         var frames = probe.Frames;
         for (var i = frames.Count - 1; i >= 0; i--)
-            if (frames[i].Data.Length == 1) return frames[i].Data[0];
+        {
+            // Only the three run states. A boot-up (00h) or a node-guarding response (toggle bit,
+            // 85h for Operational) is not a state this check may restore to, and accepting one
+            // meant cleanup mapped it to EnterPreOperational. The same correction NMT-01's helper
+            // got in 155c602, which I had applied to one of the two. Found in review of #388.
+            if (frames[i].IsRemote || frames[i].Data.Length != 1) continue;
+            var value = frames[i].Data[0];
+            if (value is (byte)NmtState.Stopped or (byte)NmtState.Operational or (byte)NmtState.PreOperational)
+                return value;
+        }
+
         return null;
     }
 
@@ -780,7 +824,17 @@ internal static class PdoSyncEmcyChecks
 
         var frames = probe.Frames;
         for (var i = frames.Count - 1; i >= 0; i--)
-            if (frames[i].Data.Length == 1) return frames[i].Data[0];
+        {
+            // Only the three run states. A boot-up (00h) or a node-guarding response (toggle bit,
+            // 85h for Operational) is not a state this check may restore to, and accepting one
+            // meant cleanup mapped it to EnterPreOperational. The same correction NMT-01's helper
+            // got in 155c602, which I had applied to one of the two. Found in review of #388.
+            if (frames[i].IsRemote || frames[i].Data.Length != 1) continue;
+            var value = frames[i].Data[0];
+            if (value is (byte)NmtState.Stopped or (byte)NmtState.Operational or (byte)NmtState.PreOperational)
+                return value;
+        }
+
         return null;
     }
 
@@ -945,12 +999,16 @@ internal static class PdoSyncEmcyChecks
                     // device is responsible for — not a reason to report a shorter mapping.
                     problems.Add($"0x{map:X4}:{sub:X2} is within the {count[0]} entries 0x{map:X4}:00 declares and aborted "
                         + IdentityAndSdoChecks.Describe(abort));
+                    anyEntryBlocked = true;
                     continue;
                 }
 
                 if (entry.Length != 4)
                 {
                     problems.Add($"0x{map:X4}:{sub:X2} is UNSIGNED32, got {IdentityAndSdoChecks.Hex(entry)}");
+                    // Incomplete, not merely noted: the byte total below would otherwise be the
+                    // sum of the readable entries and PDO-03 would validate payloads against it.
+                    anyEntryBlocked = true;
                     continue;
                 }
 
