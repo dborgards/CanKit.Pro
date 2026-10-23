@@ -696,7 +696,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     SendTpCm(cts, destinationAddress: sa);
                     // T2 covers the gap from CTS → first DT of the block (§5.10.2.4, #31). Not
                     // Tr: that is the 200 ms a node has to *send* its response, not the 1250 ms
-                    // the receiver waits for one.
+                    // the receiver waits for one. Armed as the CTS is handed to the pool, not on
+                    // its TX confirmation, as T3 after an RTS is: a fast originator may answer
+                    // before the confirmation continuation runs. The window therefore includes
+                    // this side's own transmit latency, which can only shorten it.
                     session.ArmT2();
                     break;
                 }
@@ -832,7 +835,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 match.BlockRemaining = block;
                 SendTpCm(J1939TpFrames.BuildCts(block, match.NextExpectedSn, match.Pgn),
                     destinationAddress: sa);
-                // Fresh T2 for the next block's first DT (T1 only runs inside a block).
+                // Fresh T2 for the next block's first DT (T1 only runs inside a block); armed
+                // before the CTS is confirmed, as after the RTS above.
                 match.ArmT2();
             }
         }
