@@ -284,13 +284,21 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("lss-cancel");
         using var bus = VirtualAdapterFixture.Open(session, 0);
-        await using var master = CanOpenLss.OpenMaster(bus, new LssMasterOptions
+        var service = new SendNotifyingService(new CanBusService(bus));
+        await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
         {
             ResponseTimeout = LssTestTiming.SchedulingBudget,
-        });
+        }, leaveOpen: false);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(40));
-        var cancel = async () => await master.InquireVendorIdAsync(cts.Token);
+        // Cancelled once the request is on the bus, i.e. while the master waits for the answer
+        // (#362). A timer of its own could fire while the send is still in the driver, which is
+        // an indeterminate send: the master is then unusable and the second command below would
+        // throw CanOpenTransportException instead of ObjectDisposedException.
+        using var cts = new CancellationTokenSource();
+        var waiting = master.InquireVendorIdAsync(cts.Token);
+        await service.Sent.WaitAsync(LssTestTiming.SchedulingBudget);
+        cts.Cancel();
+        var cancel = async () => await waiting;
         await cancel.Should().ThrowAsync<OperationCanceledException>();
 
         var hanging = master.InquireProductCodeAsync();
@@ -898,6 +906,44 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             Slave.Dispose();
             MasterBus.Dispose();
         }
+    }
+
+    /// <summary>Passes everything through and completes <see cref="Sent"/> once a send has come back.</summary>
+    private sealed class SendNotifyingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly TaskCompletionSource<bool> _sent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public SendNotifyingService(ICanBusService inner) => _inner = inner;
+
+        public Task Sent => _sent.Task;
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+            _sent.TrySetResult(true);
+            return confirmation;
+        }
+
+        public void Dispose() => _inner.Dispose();
     }
 
     private sealed class RejectingSendService : ICanBusService
