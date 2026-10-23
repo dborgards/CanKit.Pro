@@ -60,4 +60,21 @@ public class SuppressedResponseWindowsTests
         windows.TryGetDeadline(Sid, out until).Should().BeTrue();
         until.Should().Be(3600);
     }
+
+    // Codex and Bugbot on #395: a note undone by Restore -- the send the channel refused before
+    // transmitting -- puts the window back with the count it had, not a fresh one.
+    [Fact]
+    public void A_Restored_Window_Keeps_The_Count_Of_The_Pending_Answers_That_Moved_It()
+    {
+        var windows = new SuppressedResponseWindows(maxExtensions: 1);
+        windows.Note(Sid, 1000, P2, Hz);          // open until 1300
+        windows.ExtendIfOpenAt(Sid, 1100, 2600);  // the one 0x78 allowed
+
+        windows.Note(Sid, 1200, P2, Hz);          // a send noted ...
+        windows.Restore(Sid, had: true, until: 2600); // ... and refused before transmission
+        windows.ExtendIfOpenAt(Sid, 1300, 2800);  // still one too many for the window put back
+
+        windows.TryGetDeadline(Sid, out var until).Should().BeTrue();
+        until.Should().Be(2600);
+    }
 }

@@ -22,6 +22,10 @@ internal sealed class SuppressedResponseWindows
     private readonly Dictionary<byte, long> _until = new();
     private readonly Dictionary<byte, TimeSpan> _pendingExtension = new();
     private readonly Dictionary<byte, int> _extensions = new();
+    // The count as it stood before the last note, for a Restore that undoes the note: a send
+    // refused before transmission must not hand the window it puts back a fresh count (Codex
+    // and Bugbot on #395).
+    private readonly Dictionary<byte, int> _extensionsBeforeNote = new();
     private readonly int _maxExtensions;
     private readonly object _gate = new();
 
@@ -55,6 +59,8 @@ internal sealed class SuppressedResponseWindows
         {
             Extend(sid, sentTimestamp + Ticks(window, ticksPerSecond));
             // A request went out: the 0x78s that may answer it are counted afresh.
+            if (_extensions.TryGetValue(sid, out var counted)) _extensionsBeforeNote[sid] = counted;
+            else _extensionsBeforeNote.Remove(sid);
             _extensions.Remove(sid);
         }
     }
@@ -135,19 +141,24 @@ internal sealed class SuppressedResponseWindows
     /// <summary>
     /// Puts the window for <paramref name="sid"/> back to what <see cref="TryGetDeadline"/>
     /// reported before a note that turned out to be for nothing -- a send the channel refused
-    /// before transmitting.
+    /// before transmitting -- with the count of the 0x78s that had moved it out by then.
     /// </summary>
     public void Restore(byte sid, bool had, long until)
     {
         lock (_gate)
         {
-            if (had) _until[sid] = until;
+            if (had)
+            {
+                _until[sid] = until;
+                if (_extensionsBeforeNote.TryGetValue(sid, out var counted)) _extensions[sid] = counted;
+            }
             else
             {
                 _until.Remove(sid);
                 _pendingExtension.Remove(sid);
                 _extensions.Remove(sid);
             }
+            _extensionsBeforeNote.Remove(sid);
         }
     }
 
@@ -179,6 +190,7 @@ internal sealed class SuppressedResponseWindows
             _until.Remove(sid);
             _pendingExtension.Remove(sid);
             _extensions.Remove(sid);
+            _extensionsBeforeNote.Remove(sid);
         }
     }
 
