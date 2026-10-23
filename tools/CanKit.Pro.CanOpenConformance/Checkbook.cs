@@ -162,7 +162,20 @@ internal sealed class Checkbook
     /// review of #388.
     /// </remarks>
     public bool AnyToolFinding => _findings.Any(f => f.Attribution == Attribution.Tool
-                                                     && f.Verdict is Verdict.Fail or Verdict.Inconclusive);
+                                                     && f.Verdict is Verdict.Fail or Verdict.Inconclusive)
+                                  || AnyToolIncident;
+
+    /// <summary>
+    /// Whether any *incident* points at this repository. The third door on one hole: background
+    /// exceptions were first, caught check exceptions second, and these are the ones a cleanup
+    /// path swallows — HBT-03's RemoveHeartbeatConsumer failing, say, which calls Note and lets
+    /// the check return Pass. They lived only in the incident list, so the report's error section
+    /// named a tool fault while the process exited 0. Found in review of #388.
+    /// </summary>
+    public bool AnyToolIncident
+    {
+        get { lock (_incidents) return _incidents.Any(i => i.Attribution == Attribution.Tool); }
+    }
 
     /// <summary>Whether the group was selected for this run.</summary>
     public bool Wants(string group) => _options.Groups.Contains(group, StringComparer.OrdinalIgnoreCase);

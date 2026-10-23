@@ -27,7 +27,7 @@ internal readonly record struct TappedFrame(uint CanId, bool IsExtended, byte[] 
 internal sealed class BusTap : IDisposable
 {
     private readonly List<TappedFrame> _frames = new();
-    private readonly Stopwatch _clock = Stopwatch.StartNew();
+    private readonly long _startedAt = Stopwatch.GetTimestamp();
     private readonly IDisposable _subscription;
 
     public BusTap(ICanBusService service, Func<uint, bool, bool> wanted)
@@ -40,10 +40,23 @@ internal sealed class BusTap : IDisposable
                 // CanOpenCobId is unsigned throughout.
                 var canId = unchecked((uint)frame.ID);
                 if (!wanted(canId, frame.IsExtendedFrame)) return;
+                // Stamped when the frame reached the demultiplexer, not when this callback ran.
+                // Subscribe delivers on its own asynchronous pump, so the callback's own clock
+                // records when that pump happened to be scheduled — and on a busy host a frame
+                // received *before* a check's boundary could be given an AtMs after it and be
+                // charged to the device as traffic in the state it had just left. Every boundary
+                // in this tool rests on AtMs, so this is the foundation under PDO-03's Stop
+                // baseline, its Operational boundary and HBT-04's in-flight allowance.
+                //
+                // The > 0 guard and the fallback are the handling this repository already uses for
+                // the same field (IsoTpChannel.cs): an event built outside the demux carries no
+                // stamp, and treating a zero as an arrival would place it at the tap's own start.
+                // Found in review of #388.
+                var arrival = e.HostArrivalTimestamp > 0 ? e.HostArrivalTimestamp : Stopwatch.GetTimestamp();
                 lock (_frames)
                 {
                     _frames.Add(new TappedFrame(canId, frame.IsExtendedFrame, frame.Data.ToArray(), frame.IsRemoteFrame,
-                        _clock.Elapsed.TotalMilliseconds));
+                        ToMs(arrival - _startedAt)));
                 }
             },
             // Echoes of this tool's own transmits are not bus traffic from the device, and on an
@@ -54,7 +67,11 @@ internal sealed class BusTap : IDisposable
 
     /// <summary>The tap's own clock, in the same units as <see cref="TappedFrame.AtMs"/>. A check
     /// that has to say "after this moment" reads it when the moment happens.</summary>
-    public double ElapsedMs => _clock.Elapsed.TotalMilliseconds;
+    public double ElapsedMs => ToMs(Stopwatch.GetTimestamp() - _startedAt);
+
+    /// <summary>Stopwatch ticks as milliseconds, so the arrival stamps and <see cref="ElapsedMs"/>
+    /// share one baseline — a boundary compared against a different clock is not a boundary.</summary>
+    private static double ToMs(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
 
     /// <summary>Every frame seen so far, oldest first.</summary>
     public IReadOnlyList<TappedFrame> Frames
@@ -65,9 +82,38 @@ internal sealed class BusTap : IDisposable
     public IReadOnlyList<TappedFrame> WithId(uint canId, bool extended)
         => Frames.Where(f => f.CanId == canId && f.IsExtended == extended).ToArray();
 
-    /// <summary>Waits out a window; nothing is polled, the subscription fills in the background.</summary>
-    public Task ListenAsync(int milliseconds, CancellationToken cancellationToken = default)
-        => Task.Delay(milliseconds, cancellationToken);
+    /// <summary>
+    /// Waits out a window, then lets the delivery pump catch up before the caller looks.
+    /// </summary>
+    /// <remarks>
+    /// The second part is not politeness. Frames are stamped at arrival now, so one that reached
+    /// the demultiplexer inside the window carries an AtMs inside it — but if the pump has not
+    /// delivered it yet, a snapshot taken the instant the delay returns leaves it out of the list
+    /// altogether, and the check concludes over fewer frames than the window actually held. The
+    /// drain waits for the list to stop growing, bounded, so a steady talker cannot hold a check
+    /// open: it is one pump hop for frames already received in this process. Found in review
+    /// of #388.
+    /// </remarks>
+    public async Task ListenAsync(int milliseconds, CancellationToken cancellationToken = default)
+    {
+        await Task.Delay(milliseconds, cancellationToken).ConfigureAwait(false);
+
+        var settled = Stopwatch.StartNew();
+        var seen = -1;
+        while (settled.Elapsed.TotalMilliseconds < DrainMs)
+        {
+            int now;
+            lock (_frames) now = _frames.Count;
+            if (now == seen) return;
+            seen = now;
+            await Task.Delay(5, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>How long <see cref="ListenAsync"/> lets the delivery pump catch up. What it covers
+    /// is one hop for frames already received in this process, plus whatever the host's scheduler
+    /// puts in front of it — not an allowance for the device being late.</summary>
+    private const int DrainMs = 50;
 
     /// <summary>
     /// Waits until <paramref name="predicate"/> holds for the frames collected, or the deadline

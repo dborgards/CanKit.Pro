@@ -95,6 +95,13 @@ internal static class Program
         string? openError = null;
         var background = new List<string>();
 
+        // Declared out here and released in the finally below, because the teardown has to happen
+        // *before* the background exceptions are collected and still happen on every path. My
+        // first attempt at that moved the dispose into the try and dropped the `using`, which
+        // leaked the session — and the device with it — whenever a check cancelled or threw.
+        // Found while building the fix, not by review.
+        Session? session = null;
+
         try
         {
             // A `using` rather than a field released in a finally: the device's lifetime is this
@@ -111,7 +118,7 @@ internal static class Program
                 Console.WriteLine($"  simulated CANopen device started as node {options.TargetNode ?? 0x11} on the same virtual session.");
             }
 
-            using var session = Session.Open(options, out openError);
+            session = Session.Open(options, out openError);
 
             // After the open, not inside it: a malformed --eds is the run's own input and must not
             // be reported as an adapter or driver failure. The run continues without the file,
@@ -124,7 +131,6 @@ internal static class Program
             }
 
             await RunGroupsAsync(session, book, options, cancellation.Token).ConfigureAwait(false);
-            lock (session.BackgroundExceptions) background.AddRange(session.BackgroundExceptions);
         }
         catch (OpenFailedException ex)
         {
@@ -136,6 +142,27 @@ internal static class Program
         catch (OperationCanceledException)
         {
             book.Note("run", "OperationCanceledException", "The run was interrupted.", Attribution.Setup);
+        }
+        finally
+        {
+            // Teardown first, then the snapshot. The node, the service and their pumps were still
+            // alive when the background exceptions used to be copied, so a failure raised while
+            // they shut down landed in the session's list *after* the copy — missed by the report
+            // and by the exit-code guard that reads it, letting a run with a teardown failure end
+            // in success. On every path, including a cancelled one. Found in review of #388.
+            if (session is not null)
+            {
+                try
+                {
+                    session.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    book.Note("session teardown", ex);
+                }
+
+                lock (session.BackgroundExceptions) background.AddRange(session.BackgroundExceptions);
+            }
         }
 
         clock.Stop();
