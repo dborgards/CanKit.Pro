@@ -28,8 +28,10 @@ internal static class TickMath
     /// <paramref name="now"/>: saturates the sum, not the span.</summary>
     internal static long DueAt(long now, TimeSpan span, long frequency)
     {
-        var ticks = Math.Ceiling((decimal)span.Ticks * frequency / TimeSpan.TicksPerSecond);
-        return ticks >= long.MaxValue - now ? long.MaxValue : now + (long)ticks;
+        // Summed in decimal, which holds every reading plus every span: comparing against
+        // long.MaxValue - now instead overflows for a negative now and saturated every delay.
+        var due = now + Math.Ceiling((decimal)span.Ticks * frequency / TimeSpan.TicksPerSecond);
+        return due >= long.MaxValue ? long.MaxValue : (long)due;
     }
 
     /// <summary>The span <paramref name="sourceTicks"/> of a source covers, rounded up: a time
