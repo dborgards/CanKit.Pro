@@ -243,6 +243,14 @@ public sealed class LssCommissioning
         _sequence = Sequences.GetValue(master, static _ => new SemaphoreSlim(1, 1));
     }
 
+    /// <summary>
+    /// Test seam (#362): the wall-clock budget of the cleanup that returns the slaves to waiting.
+    /// A test whose master runs on a manual clock sets it to <see cref="Timeout.InfiniteTimeSpan"/>,
+    /// because the master's own wait there is measured on that clock and a wall-clock budget would
+    /// let a slow host skip the release. Production keeps two seconds.
+    /// </summary>
+    internal TimeSpan ReleaseBudgetForTests { get; set; } = TimeSpan.FromSeconds(2);
+
     /// <summary>The master this tool drives.</summary>
     public ILssMaster Master => _master;
 
@@ -646,7 +654,7 @@ public sealed class LssCommissioning
     /// </summary>
     private async Task ReleaseToWaitingAsync()
     {
-        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cleanup = new CancellationTokenSource(ReleaseBudgetForTests);
         try
         {
             await _master.SwitchStateGlobalAsync(LssState.Waiting, cleanup.Token).ConfigureAwait(false);
