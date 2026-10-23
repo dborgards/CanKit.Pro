@@ -487,31 +487,11 @@ internal static class PdoSyncEmcyChecks
                 restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
             }
 
-            // Before anything else, as in PDO-03: Start has been sent and the finally has already
-            // run the restore, so a restore that did not take must decide the verdict rather than
-            // being overtaken by a return about the Start.
-            if (!restoration.Succeeded)
-            {
-                return Outcome.Failed(Attribution.Unknown,
-                    "The device could not be put back into the state it was found in: " + restoration.State
-                    + ". A write-tier run promises the device is unchanged afterwards, so this fails whatever else was "
-                    + "measured — the device needs looking at before it is trusted again.");
-            }
-
-            if (!operationalConfirmed)
-            {
-                return Outcome.Inconclusive(
-                    "The device did not report Operational after the NMT Start command, so its synchronous TPDOs were "
-                    + "never due and their silence says nothing about it.", Attribution.Transport);
-            }
-
+            // The observations are assembled before any verdict can return, so each early return
+            // carries what was collected. Hoisting the restore guard in beea974 put it ahead of
+            // this dictionary and stripped the SYNC count, the COB-ID and the per-TPDO traffic
+            // from exactly the verdict that most needs them. Found in review of #388.
             var accepted = syncs - rejected;
-            if (accepted == 0)
-            {
-                return Outcome.TransportFault(
-                    $"The driver rejected all {syncs} SYNC frames on 0x{sync.CobId:X3}, so the device was never synchronised.");
-            }
-
             var after = Transmitted(tap).Skip(quiet).ToArray();
             var measurements = new Dictionary<string, string>
             {
@@ -530,6 +510,31 @@ internal static class PdoSyncEmcyChecks
             {
                 measurements["acyclic TPDOs not concluded on"] = string.Join(", ",
                     acyclic.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3} type 0"));
+            }
+
+            // Before anything else, as in PDO-03: Start has been sent and the finally has already
+            // run the restore, so a restore that did not take decides the verdict rather than
+            // being overtaken by a return about the Start.
+            if (!restoration.Succeeded)
+            {
+                return Outcome.Failed(Attribution.Unknown,
+                    "The device could not be put back into the state it was found in: " + restoration.State
+                    + ". A write-tier run promises the device is unchanged afterwards, so this fails whatever else was "
+                    + "measured — the device needs looking at before it is trusted again.", measurements);
+            }
+
+            if (!operationalConfirmed)
+            {
+                return Outcome.Inconclusive(
+                    "The device did not report Operational after the NMT Start command, so its synchronous TPDOs were "
+                    + "never due and their silence says nothing about it.", Attribution.Transport, measurements);
+            }
+
+            if (accepted == 0)
+            {
+                return Outcome.TransportFault(
+                    $"The driver rejected all {syncs} SYNC frames on 0x{sync.CobId:X3}, so the device was never synchronised.",
+                    measurements);
             }
 
             var silent = new List<string>();
