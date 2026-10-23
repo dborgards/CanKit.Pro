@@ -521,6 +521,19 @@ public class SrdoEngineConsumerTests : IDisposable
         _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "and nothing is recorded");
     }
 
+    /// <summary>A remote frame on 001h is no GFC (§8.1: RTR is not possible): consumed, nothing
+    /// signalled, nothing recorded.</summary>
+    [Fact]
+    public void A_Remote_Frame_On_001h_Is_No_Gfc()
+    {
+        StartConsumer();
+        bool consumed = false;
+        OnActor(() => consumed = _engine.TryHandleFrame(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>(), isRtr: true));
+        consumed.Should().BeTrue();
+        _host.Gfcs.Should().Be(0);
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u);
+    }
+
     /// <summary>A second GFC finds 1300h at 1 already: it is signalled again and nothing is rewritten.</summary>
     [Fact]
     public void A_Second_Gfc_Is_Signalled_With_1300h_Already_1()

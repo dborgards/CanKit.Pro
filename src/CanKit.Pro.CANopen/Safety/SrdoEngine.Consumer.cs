@@ -68,7 +68,7 @@ internal sealed partial class SrdoEngine
     {
         if (!_od.TryReadUnsigned(SrdoRecords.GfcParameter, 0x00, out var current) || current == 1) return;
         try { _od.WriteRaw(SrdoRecords.GfcParameter, 0x00, new byte[] { 1 }); }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or System.Collections.Generic.KeyNotFoundException)
+        catch (ArgumentException ex) // the entry exists (read above); WriteRaw refuses a value by this exception
         {
             _host.ReportBackgroundException(new InvalidOperationException($"1300h could not be set to 01: {ex.Message}", ex));
         }
