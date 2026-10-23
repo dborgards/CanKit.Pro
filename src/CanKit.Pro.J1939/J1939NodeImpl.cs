@@ -497,7 +497,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _lostClaim = null;
         _cannotClaimsAwaitingHandoff.RemoveAll(waiting => ReferenceEquals(waiting, lost));
         lost.CtRegistration.Dispose();
-        lost.Tcs.TrySetException(new J1939CannotClaimException(lost.PreferredAddress));
+        lost.Tcs.TrySetException(new J1939CannotClaimException(lost.RequestedAddress));
     }
 
     private IDeadline? AfterClaimBackoff(Action onLoop)
@@ -518,7 +518,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             retry.StartRound = null;
             retry.Deadline?.Dispose();
             retry.Deadline = null;
-            BeginClaimRound(candidate, retry.Tcs, retry.CtRegistration, scanStart);
+            BeginClaimRound(candidate, retry.Tcs, retry.CtRegistration, scanStart, retry.RequestedAddress);
         }
         retry.StartRound = Start;
         retry.Deadline = AfterClaimBackoff(Start);
@@ -528,7 +528,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // `preferredAddress` on the actor loop. Unlike BeginClaim it does not cancel the caller's
     // pending claim — the same TCS (and the scan state) is carried across retries.
     private void BeginClaimRound(byte preferredAddress, TaskCompletionSource<object?> tcs,
-        CancellationTokenRegistration ctr, byte? scanStart = null)
+        CancellationTokenRegistration ctr, byte? scanStart = null, byte? requestedAddress = null)
     {
         if (_disposed != 0)
         {
@@ -570,6 +570,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         _pendingClaim = new PendingClaim(preferredAddress, tcs, deadline: null, ctr)
         {
             ArbitraryScanStart = scanStart,
+            RequestedAddress = requestedAddress ?? preferredAddress,
         };
         TransmitAddressClaimConfirmed(sourceAddress: preferredAddress);
 
@@ -803,6 +804,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     var retry = new PendingClaim(nextCandidate, pending.Tcs, deadline: null, pending.CtRegistration)
                     {
                         ArbitraryScanStart = scanStart,
+                        RequestedAddress = pending.RequestedAddress,
                     };
                     BeginClaimRoundAfterBackoff(retry, nextCandidate, scanStart);
                     return;
@@ -858,7 +860,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     WriteAddress(null);
                     RebindTransportOnLoop(J1939Pgn.NullAddress);
                     SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
-                    var unseated = new PendingClaim(nextCandidate, tcs, deadline: null, default) { ArbitraryScanStart = scanStart };
+                    var unseated = new PendingClaim(nextCandidate, tcs, deadline: null, default)
+                    {
+                        ArbitraryScanStart = scanStart,
+                        RequestedAddress = nextCandidate,
+                    };
                     BeginClaimRoundAfterBackoff(unseated, nextCandidate, scanStart);
                     return;
                 }
@@ -2016,6 +2022,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
 
         public byte PreferredAddress { get; }
+
+        /// <summary>
+        /// The address the claim set out for -- the caller's preferred address, or the first
+        /// candidate of an automatic move -- which <see cref="PreferredAddress"/> stops being
+        /// once an arbitrary-address scan moves on. <see cref="J1939CannotClaimException"/>
+        /// reports this one: it documents the address the caller originally requested.
+        /// </summary>
+        public byte RequestedAddress { get; init; }
         public TaskCompletionSource<object?> Tcs { get; }
         public IDeadline? Deadline { get; set; }
         public CancellationTokenRegistration CtRegistration { get; }

@@ -2670,6 +2670,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => node.ClaimAddressAsync(0x80).WithTimeout(TimeSpan.FromSeconds(15));
         var ex = (await act.Should().ThrowAsync<J1939CannotClaimException>()).Which;
+        // The address the caller asked for, not the last candidate the scan tried (0xF7): it
+        // read 0x80 before #355 only because the scan wrapped round and lost 0x80 a second time.
         ex.PreferredAddress.Should().Be((byte)0x80);
         node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
         node.Address.Should().BeNull();
