@@ -46,8 +46,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         t2: TimeSpan.FromSeconds(30),
         t3: TimeSpan.FromSeconds(30));
 
-    // RoundtripOptions for a paced BAM: Th is 5 ms so a transfer costs milliseconds, not the
-    // default 50 ms per packet. The mandatory pacing of a 15-packet transfer is 70 ms against
+    // RoundtripOptions for a paced BAM: BamPacketSpacing (named Th before #144) is 5 ms so a
+    // transfer costs milliseconds, not the default 50 ms per packet. The mandatory pacing of a 15-packet transfer is 70 ms against
     // ShortTimeout.
     private static J1939TpOptions PacedRoundtripOptions() => RoundtripOptions().With(
         bamPacketSpacing: TimeSpan.FromMilliseconds(5));

@@ -36,12 +36,12 @@ namespace CanKit.Pro.J1939Tp;
 /// <c>(source address, kind)</c>: at most one BAM and one CM RX session per peer at any time.
 /// </para>
 /// <para>
-/// TX sessions are keyed by <c>(destination address, PGN)</c>: we are the initiator, so we
-/// only allow one outbound TP.CM per (dst, PGN) but do not restrict *ourselves* from opening
-/// two TP.CM sessions to two different destinations -- the peer at each destination sees only
-/// one connection from us and remains within its own §5.10.3 quota. Any number of concurrent
-/// TX sessions with distinct (dst, PGN) tuples therefore runs in parallel without interfering
-/// (FR-TP-034/035).
+/// TX sessions are keyed by <c>(destination address, PGN)</c>, and at most one runs per
+/// destination at a time: TP.DT carries no PGN, so a receiver could not tell two sessions from us
+/// apart, and §5.10.3 allows one CM connection per (SA, DA) pair and one BAM per source (#32).
+/// A send to a busy destination waits in <see cref="_txQueues"/>; a second send for a key already
+/// pending is refused. Sessions to different destinations -- and with them TP.CM to several
+/// peers alongside one BAM -- run in parallel without interfering (FR-TP-034/035).
 /// </para>
 /// </summary>
 internal sealed class J1939TpChannel : IJ1939TpChannel

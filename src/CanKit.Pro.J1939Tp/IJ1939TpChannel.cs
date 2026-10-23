@@ -53,11 +53,33 @@ public interface IJ1939TpChannel : IDisposable
     /// <param name="pgn">Data PGN of the multi-packet message being announced.</param>
     /// <param name="payload">User payload; 9..1785 bytes.</param>
     /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Thrown by the call itself: <paramref name="pgn"/> does not fit in 18 bits or is a PDU1 PGN
+    /// with a low byte other than 0, or the payload length is outside [9, 1785].
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">
+    /// Thrown by the call itself when the channel is already disposed; reported through the
+    /// returned task when it is disposed while the send is pending, or when a J1939 node that owns
+    /// the channel no longer holds its source address by the time the session would start.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// Reported through the returned task, already faulted when the call returns, when a send for
+    /// the same PGN is still pending.
+    /// </exception>
     /// <exception cref="J1939TpSendRejectedException">
     /// Reported through the returned task, already faulted when the call returns, when the
     /// destination has its one send on the wire and
     /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> more pending (waiting or handed
-    /// to the channel and not yet started).
+    /// to the channel and not yet started); later, when the CAN driver rejects one of the
+    /// session's frames.
+    /// </exception>
+    /// <exception cref="J1939TpException">
+    /// Reported through the returned task when a frame's transmit confirmation fails otherwise
+    /// (bus-off, confirmation timeout).
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// Reported through the returned task when <paramref name="cancellationToken"/> is cancelled
+    /// before the last TP.DT is confirmed.
     /// </exception>
     Task SendBamAsync(uint pgn, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default);
 
@@ -70,11 +92,39 @@ public interface IJ1939TpChannel : IDisposable
     /// <param name="destinationAddress">Target node's source address (must not be 0xFF nor this channel's own <see cref="SourceAddress"/>).</param>
     /// <param name="payload">User payload; 9..1785 bytes.</param>
     /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Thrown by the call itself: <paramref name="destinationAddress"/> is 0xFF or this channel's
+    /// own <see cref="SourceAddress"/>, <paramref name="pgn"/> does not fit in 18 bits or is a
+    /// PDU1 PGN with a low byte other than 0, or the payload length is outside [9, 1785].
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">
+    /// Thrown by the call itself when the channel is already disposed; reported through the
+    /// returned task when it is disposed while the send is pending, or when a J1939 node that owns
+    /// the channel no longer holds its source address by the time the session would start.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// Reported through the returned task, already faulted when the call returns, when a send to
+    /// the same destination with the same PGN is still pending.
+    /// </exception>
     /// <exception cref="J1939TpSendRejectedException">
     /// Reported through the returned task, already faulted when the call returns, when the
     /// destination has its one send on the wire and
     /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> more pending (waiting or handed
-    /// to the channel and not yet started).
+    /// to the channel and not yet started); later, when the CAN driver rejects one of the
+    /// session's frames.
+    /// </exception>
+    /// <exception cref="J1939TpAbortException">
+    /// Reported through the returned task when the session is aborted: by the peer's Connection
+    /// Abort, by T3 or T4 expiring, or by this side on a protocol error in the peer's answers.
+    /// </exception>
+    /// <exception cref="J1939TpException">
+    /// Reported through the returned task when a frame's transmit confirmation fails otherwise
+    /// (bus-off, confirmation timeout).
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// Reported through the returned task when <paramref name="cancellationToken"/> is cancelled
+    /// before the EndOfMsgAck arrives; a session already opened with the peer is aborted on the
+    /// wire.
     /// </exception>
     Task SendCmAsync(uint pgn, byte destinationAddress, ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken = default);
