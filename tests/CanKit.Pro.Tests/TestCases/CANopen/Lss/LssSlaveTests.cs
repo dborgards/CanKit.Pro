@@ -1028,6 +1028,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         using var bench = NewBench();
         var slave = bench.Slave(1, 5, new LssSlaveOptions(), srdoCount: 1);
         var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x1301, 1, 0); // inactive: SRDO 1 of a node-id 1..32 produces at power-on (Table 5, #289)
         od.WriteUnsigned(0x13FE, 0, 0xA5);
         slave.StoreParameters();
         var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
