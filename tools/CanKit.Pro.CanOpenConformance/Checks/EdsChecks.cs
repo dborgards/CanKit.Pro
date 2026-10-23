@@ -341,6 +341,14 @@ internal static class EdsChecks
         EdsDcfNet.CanOpenDataType.Integer56 or EdsDcfNet.CanOpenDataType.Unsigned56 => 7,
         EdsDcfNet.CanOpenDataType.Integer64 or EdsDcfNet.CanOpenDataType.Unsigned64 => 8,
         EdsDcfNet.CanOpenDataType.Real64 => 8,
+
+        // TIME_OF_DAY and TIME_DIFFERENCE are 48 bits each — 28 bits of milliseconds after
+        // midnight and 16 bits of days, with the rest reserved (CiA 301 §7.1.6.5, §7.1.6.6) — so
+        // both are as fixed as an UNSIGNED48 and as contradictable. They fell to the default,
+        // which means "variable, do not compare", and EDS-03 then counted such an object as
+        // matching its declared length without looking at what came back. Found in review
+        // of #388.
+        EdsDcfNet.CanOpenDataType.TimeOfDay or EdsDcfNet.CanOpenDataType.TimeDifference => 6,
         _ => 0,
     };
 

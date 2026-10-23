@@ -844,8 +844,22 @@ internal static class NmtAndHeartbeatChecks
 
         await book.RunAsync("GRD-01", "guarding", "100Ch/100Dh node guarding parameters", Tier.Read, "FR-CO-009", async () =>
         {
-            if (!session.MayTransfer(0x100C, 0x00) || !session.MayTransfer(0x100D, 0x00))
-                return Outcome.NeedsSetup(session.GateReason(0x100C, 0x00));
+            // The reason for whichever one is blocked, and for both when both are. A description
+            // that declares 100Ch and omits 100Dh entered this branch and was told that 100Ch is
+            // not declared — so the operator was sent to fix the half that was already there,
+            // while the missing half was never named. Found in review of #388.
+            var guardBlocked = !session.MayTransfer(0x100C, 0x00);
+            var lifeBlocked = !session.MayTransfer(0x100D, 0x00);
+            if (guardBlocked || lifeBlocked)
+            {
+                var reasons = new List<string>();
+                if (guardBlocked) reasons.Add(session.GateReason(0x100C, 0x00));
+                if (lifeBlocked) reasons.Add(session.GateReason(0x100D, 0x00));
+                return Outcome.NeedsSetup(
+                    "Node guarding is a pair, and this run may not ask for "
+                    + (guardBlocked && lifeBlocked ? "either half" : guardBlocked ? "100Ch" : "100Dh")
+                    + ": " + string.Join(" ", reasons));
+            }
 
             // One try per object: they shared a catch, so an absent 100Dh reported that the device
             // has no 100Ch. The same shape as STO-01's 1011h and SYN-01's 1006h — swept for here
