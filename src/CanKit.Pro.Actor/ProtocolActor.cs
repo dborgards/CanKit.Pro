@@ -643,26 +643,45 @@ namespace CanKit.Pro.Actor
         private bool WaitForLoopTask()
         {
             if (_loopTask is null) return true;
+            bool finished;
             try
             {
-                return _loopTask.Wait(_shutdownTimeout);
+                finished = _loopTask.Wait(_shutdownTimeout);
             }
             catch (AggregateException faulted)
             {
-                // Not a shutdown path: the loop catches its own OperationCanceledException and
-                // ends normally, and every user callback runs under RunSafely. A faulted loop
-                // task means something outside every callback threw -- the ITimeSource, or the
-                // primitives the loop waits on. The loop did end, which is what the return value
-                // reports, but the fault is a defect and goes through the one background channel
-                // (FR-RAW-023) instead of being dropped, or thrown out of a Dispose that must stay
-                // safe in a finally. Once: every caller joins and would find the same fault.
-                if (Interlocked.Exchange(ref _loopFaultReported, 1) == 0)
-                {
-                    foreach (var inner in faulted.Flatten().InnerExceptions)
-                        RaiseBackgroundException(inner);
-                }
+                // The loop did end, which is what the return value reports; see ReportLoopFault
+                // for why it ended by throwing and where that goes.
+                ReportLoopFault(faulted);
                 return true;
             }
+
+            // Gave up joining a loop that is still inside a callback. Should that loop fault once
+            // the callback returns, nobody would be waiting on it any more: the fault is observed
+            // where it happens instead, on the thread the loop ends on.
+            if (!finished)
+            {
+                _ = _loopTask.ContinueWith(
+                    static (loop, state) => ((ProtocolActor)state!).ReportLoopFault(loop.Exception!),
+                    this,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+            return finished;
+        }
+
+        // Not a shutdown path: the loop catches its own OperationCanceledException and ends
+        // normally, and every user callback runs under RunSafely. A faulted loop task means
+        // something outside every callback threw -- the ITimeSource, or the primitives the loop
+        // waits on. That is a defect, and it goes through the one background channel (FR-RAW-023)
+        // instead of being dropped, or thrown out of a Dispose that must stay safe in a finally.
+        // Once: every caller joins and would find the same fault.
+        private void ReportLoopFault(AggregateException faulted)
+        {
+            if (Interlocked.Exchange(ref _loopFaultReported, 1) != 0) return;
+            foreach (var inner in faulted.Flatten().InnerExceptions)
+                RaiseBackgroundException(inner);
         }
 
         private void RunLoopBlocking()

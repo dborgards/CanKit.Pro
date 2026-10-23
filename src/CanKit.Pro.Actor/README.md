@@ -89,8 +89,10 @@ do not wait: the reentrant one from inside a callback, which would otherwise dea
 loop, and one a `BackgroundExceptionOccurred` subscriber makes from inside that
 `TimeoutException` report — also when another actor's report has nested inside it since — which
 would otherwise stretch the reporting `Dispose` to twice the timeout. `Dispose` makes one other
-report, on the same thread and also once: in the two task-based modes, a loop that ended by
-throwing outside every callback — a defect, not a shutdown path — is reported instead of dropped.
+report, also once and also off the loop's callbacks: in the two task-based modes, a loop that ended
+by throwing outside every callback — a defect, not a shutdown path — is reported instead of
+dropped, on the thread calling `Dispose`, or, if the loop only fails after `Dispose` gave up on
+it, on the thread the loop ends on.
 
 `IsOnCurrentActor` answers "is *this thread* currently running one of my callbacks?", which is
 what makes a public sync API able to run inline instead of dead-locking on its own loop. It is

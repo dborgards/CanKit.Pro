@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.Actor;
 using Xunit;
@@ -84,6 +85,43 @@ public class ProtocolActorLoopCountTests
                 .Which.Should().BeSameAs(failure);
         }
         ProtocolActor.RunningLoopCount.Should().Be(loopsBefore, "a loop that threw out of FinalDrain still ends its count");
+    }
+
+    // Codex on #389: a loop still inside a callback when Dispose gives up joining it, and faulting
+    // only once that callback returns, was observed by nobody -- Wait had already returned false
+    // and no caller was waiting any more. The join is shortened and the callback held on a gate,
+    // so the join cannot succeed (deterministic: it times out by construction); the fault then has
+    // to be reported on its own once the gate opens. The 10 s bound is a hang guard only.
+    [Fact]
+    public async Task A_Loop_That_Faults_After_Dispose_Gave_Up_On_It_Is_Still_Reported()
+    {
+        var clock = new FailingTimeSource();
+        using var actor = new ProtocolActor(ActorExecutionMode.ThreadPool, null, clock, shutdownTimeout: TimeSpan.FromMilliseconds(100));
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        Exception? timeout = null;
+        var fault = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is TimeoutException) timeout = ex;
+            else fault.TrySetResult(ex);
+        };
+
+        actor.Post(() =>
+        {
+            started.Set();
+            release.Wait();
+        });
+        started.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+        var failure = new InvalidOperationException("the clock failed");
+        clock.Failure = failure;
+
+        actor.Dispose();
+        timeout.Should().BeOfType<TimeoutException>("the join gave up while the callback was held");
+
+        release.Set();
+        (await fault.Task.WaitAsync(TimeSpan.FromSeconds(10))).Should().BeSameAs(failure,
+            "the loop faulted after Dispose had returned, and that fault is reported all the same");
     }
 
     private sealed class FailingTimeSource : ITimeSource
