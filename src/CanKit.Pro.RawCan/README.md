@@ -11,9 +11,9 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** Demultiplexing and subscriptions, filter overlap, TX confirmation and concurrency, by the test suite in `tests/CanKit.Pro.Tests`, over `CanKit.Adapter.Virtual` and in-repository bus doubles.
+**Validated:** Demultiplexing and subscriptions, filter overlap, TX confirmation and concurrency, by the test suite in `tests/CanKit.Pro.Tests`, over `CanKit.Adapter.Virtual` and in-repository bus doubles. `SendConfirmedAsync` has also been run on two hardware adapters, PCAN and Kvaser, in Normal and in Echo mode, with a second adapter as peer; what each returned is recorded in the [echo measurements](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-10-06-echo-hardware-measurements.md), and *TX-Confirm* below says what follows from them.
 
-**Not validated:** The behaviour of real adapters. TX echo as SocketCAN, Kvaser and Vector deliver it is modelled by a test double (`ControllableBus.EchoCapable`), not observed on those adapters; the "accepted by the driver" approximation for adapters without echo has not been checked against a real driver. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+**Not validated:** SocketCAN and Vector: what they do with an echo is read from the adapter source, not measured. The echo-matching path is tested on a double (`ControllableBus`) that hands every sent frame back flagged as an echo, which neither measured adapter does in Echo mode. Nothing in this package has run against a conformance tester or a third-party implementation, and the test project references `CanKit.Adapter.Virtual` and no hardware adapter: the hardware runs are a dated record made with `tools/CanKit.Pro.EchoProbe`, not part of the suite.
 
 One `ICanBusService` wraps one `ICanBus` and turns its single `FrameObserved` RX stream into
 N independent, filtered, read-only `ISubscription`s — so several protocol instances (ISO-TP,
@@ -112,6 +112,14 @@ else
     // result.FailureReason: Timeout, BusOff, or Rejected -- never an indefinite hang.
 }
 ```
+
+**Which adapters can take the echo path.** It needs an adapter that hands each sent frame back
+*flagged* as an echo (`IsEcho`). Measured against CanKit 0.5.6, PCAN in Echo mode hands its own
+frames back unflagged and Kvaser hands back none on a quiet bus, so with either of them every
+confirmation ends as `Timeout` although the frame was on the wire; Vector is not measured and is
+read from its source as delivering none in Echo mode either. Use `ChannelWorkMode.Normal` with
+those adapters: the approximated confirmation is what they support. The measurements are in
+[`docs/reviews/2026-10-06-echo-hardware-measurements.md`](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-10-06-echo-hardware-measurements.md).
 
 `BusOff` is produced when the adapter raises `ICanBus.FaultOccurred` while `ICanBus.BusState` reads
 `BusOff`. No CanKit 0.5.6 adapter does that — they surface a bus-off through `BusState` and error
