@@ -521,6 +521,18 @@ public class SrdoEngineConsumerTests : IDisposable
         _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "and nothing is recorded");
     }
 
+    /// <summary>A second GFC finds 1300h at 1 already: it is signalled again and nothing is rewritten.</summary>
+    [Fact]
+    public void A_Second_Gfc_Is_Signalled_With_1300h_Already_1()
+    {
+        StartConsumer();
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(2);
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(1u);
+        _host.Exceptions.Should().BeEmpty();
+    }
+
     /// <summary>1300h is an optional object (EN 50325-5:2010 §6.4.2.1): a node whose description
     /// leaves it out has nothing to record, and the GFC still goes both ways.</summary>
     [Fact]

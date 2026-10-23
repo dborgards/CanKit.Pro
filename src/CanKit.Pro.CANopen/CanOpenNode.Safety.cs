@@ -54,7 +54,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// <summary>EN 50325-5:2010 Table 5, object 1301h:01 default: node-id 1..32 produces, 33..64
     /// consumes, any other node-id (65..127, or 255 before LSS assigns one) has no SRDO 1 (#289).</summary>
     internal static SrdoDirection DefaultDirectionOfSrdo1(byte nodeId)
-        => nodeId is < 1 or > 64 ? SrdoDirection.None
+        => (uint)(nodeId - 1) > 63 ? SrdoDirection.None // node-ids are 1..127 or 255: this folds "below 1" into "above 64"
             : nodeId <= 32 ? SrdoDirection.Transmit : SrdoDirection.Receive;
 
     /// <summary>Static, as every rule of this file down to the mapping entry, so that

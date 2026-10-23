@@ -1042,8 +1042,8 @@ internal sealed partial class CanOpenNode : ILssSlave
         // behind a configuration somebody signed.
         var fromDirection = DefaultDirectionOfSrdo1(from);
         var toDirection = DefaultDirectionOfSrdo1(to);
-        if (!wasValid && fromDirection != toDirection
-            && _od.TryReadUnsigned(comm, 0x01, out var direction) && direction == (byte)fromDirection)
+        // The record is always present when this runs (see above).
+        if (!wasValid && fromDirection != toDirection && _od.ReadUnsigned(comm, 0x01) == (byte)fromDirection)
             _od.WriteRawUnchecked(comm, 0x01, new[] { (byte)toDirection });
         bool changed = RetargetCobId(comm, 0x05, from1, to1);
         changed |= RetargetCobId(comm, 0x06, from2, to2);
