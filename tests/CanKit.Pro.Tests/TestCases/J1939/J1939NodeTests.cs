@@ -1132,7 +1132,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task An_Equal_Name_Already_Heard_On_That_Address_Cannot_Claim()
     {
-        var (clock, actor, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        var (clock, _, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
         using var _clock = clock;
         using var _disposables = disposables;
         await HearOurNameOnAsync(node, busB, name, 0x11);
@@ -1504,7 +1504,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var backoff = TimeSpan.FromMilliseconds(150);
         const byte contended = 0x40;
 
-        var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
         {
             ClaimAnnounceTimeout = announce,
             EnableArbitraryAddressClaiming = true,
@@ -3907,7 +3907,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var _node = node;
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
 
-        var release = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
         var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
         node.AfterTeardownPosted = release.Set;
@@ -3928,7 +3928,6 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             channels.Should().OnlyContain(c => c.Disposed,
                 "a disposed node leaves no channel running, including the one a rebind opened during the disposal");
         }
-        release.Dispose();
     }
 
     // The actor does not get to the teardown within its bound -- held here by the test, in
@@ -4059,7 +4058,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var busNode = Open(session, 0);
         using var busPeer = Open(session, 1);
         using var service = new CanBusService(busNode);
-        var actor = new ProtocolActor();
+        using var actor = new ProtocolActor(); // disposed early below, on purpose; Dispose is idempotent
         using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor);
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
@@ -4081,8 +4080,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = Open(NewSession(), 0);
         using var service = new CanBusService(bus);
-        var actor = new ProtocolActor();
+        using var actor = new ProtocolActor(); // disposed early below, on purpose; Dispose is idempotent
         var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node; // likewise
         var channel = channels.Single();
         await channel.WaitForRequestAsync(1, ShortTimeout);
 
