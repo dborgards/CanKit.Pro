@@ -64,6 +64,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// </summary>
     internal int PeriodicEmissionsCompleted => Volatile.Read(ref _periodicEmissionsCompleted);
 
+    private int _periodicEmissionsStarted;
+
+    /// <summary>
+    /// How many periodic emissions a tick has started. A seam for tests: counted on the actor,
+    /// in the tick itself, so once a test has moved the clock past a tick the count says whether
+    /// that tick started an emission or dropped it -- the emission's own effect on the bus is
+    /// asynchronous and cannot answer "none" without a guess at how long to wait.
+    /// </summary>
+    internal int PeriodicEmissionsStarted => Volatile.Read(ref _periodicEmissionsStarted);
+
     /// <summary>Ticks of <see cref="_time"/> as a <see cref="TimeSpan"/>.</summary>
     private TimeSpan TimeSpanFromTicks(long ticks)
         => TickMath.ElapsedFromTicks(ticks, _time.Frequency);
@@ -2134,6 +2144,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // dropped rather than queued.
             if (Interlocked.CompareExchange(ref _sendInFlight, 1, 0) == 0)
             {
+                Interlocked.Increment(ref _owner._periodicEmissionsStarted);
                 _sendTask = Task.Run(async () =>
                 {
                     try

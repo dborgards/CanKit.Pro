@@ -5282,6 +5282,66 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.PeriodicEmissionsCompleted.Should().Be(0, "and starts no emission");
     }
 
+    // #355 (the previous review's M1): a tick whose previous emission is still in flight is
+    // dropped, not queued -- a multi-frame PGN holds one TP session per send, and two of the same
+    // schedule must not overlap. The grid tests wait each emission out before the next slot, so
+    // none of them ever had one in flight at a tick. Here the first emission is parked in the
+    // service across the second tick; the third, after it has finished, emits again.
+    [Fact]
+    public async Task A_Periodic_Tick_While_The_Previous_Emission_Is_In_Flight_Is_Dropped()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var inner = new CanBusService(bus);
+        var parking = new ParkingSendService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(parking, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        await WaitForAnnouncesAsync(() => parking.Parked, 1); // the first emission waits on the service
+
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        node.PeriodicEmissionsStarted.Should().Be(1, "the second tick found the first emission still in flight");
+
+        parking.Release();
+        await WaitForAnnouncesAsync(() => node.PeriodicEmissionsCompleted, 1);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        node.PeriodicEmissionsStarted.Should().Be(2, "with the first emission finished, the third tick emits");
+    }
+
+    // #355 (the previous review's M2): ticks that fell behind are coalesced, not burst out -- the
+    // anchor advances by whole periods until it is in the future again. One jump of the clock
+    // over three and a half periods fires one tick, which starts one emission and arms the next
+    // tick at the next point of the grid, half a period away.
+    [Fact]
+    public async Task Periodic_Ticks_That_Fell_Behind_Are_Coalesced_Into_One()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromTicks(period.Ticks * 7 / 2));
+
+        node.PeriodicEmissionsStarted.Should().Be(1, "three slots passed in one step, and they are one tick");
+        await clock.WaitUntilTimerArmedAsync(actor, TimeSpan.FromTicks(period.Ticks / 2), ShortTimeout);
+    }
+
     // The single-frame periodic path MUST refuse to start before ClaimAddressAsync completes,
     // mirroring SendAsync's pre-flight gate (Bugbot 3600377725) so no periodic traffic leaks
     // out with an invalid SA.
@@ -5551,6 +5611,55 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the schedule must resume under the reclaimed SA so downstream ECUs continue " +
             "to observe the PGN under the new (correct) source address");
     }
+    /// <summary>
+    /// A bus service that holds every application send -- anything but an Address Claim --
+    /// until <see cref="Release"/>, so a send can be kept in flight across whatever the test
+    /// does next. Released sends, and every send after the release, go straight through.
+    /// </summary>
+    private sealed class ParkingSendService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _parked;
+
+        public ParkingSendService(ICanBusService inner) => _inner = inner;
+
+        /// <summary>How many sends have been held.</summary>
+        public int Parked => Volatile.Read(ref _parked);
+
+        public void Release() => _release.TrySetResult(true);
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (!J1939Pgn.IsAddressClaim(J1939Id.Decompose((uint)frame.ID).Pgn) && !_release.Task.IsCompleted)
+            {
+                Interlocked.Increment(ref _parked);
+                await _release.Task.ConfigureAwait(false);
+            }
+            return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
+    }
+
     /// <summary>
     /// A TP channel the test feeds by hand (#195): what <see cref="ReceiveAllAsync"/> yields,
     /// and when, is the test's to decide. It can be held after an item has arrived and before it
