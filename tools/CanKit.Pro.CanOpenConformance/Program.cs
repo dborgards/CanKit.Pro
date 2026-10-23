@@ -118,19 +118,29 @@ internal static class Program
                 Console.WriteLine($"  simulated CANopen device started as node {options.TargetNode ?? 0x11} on the same virtual session.");
             }
 
-            session = Session.Open(options, out openError);
-
-            // After the open, not inside it: a malformed --eds is the run's own input and must not
-            // be reported as an adapter or driver failure. The run continues without the file,
-            // which is the same position as not passing one, and the eds group says which it was.
-            if (session.BindDescription() is { } descriptionError)
+            // A `using` whose scope ends *inside* the try, so the layers are torn down before the
+            // finally below copies the background exceptions — which is the ordering round 34
+            // needed — while still being the construct CodeQL asks for (cs/missed-using-statement)
+            // and leaving no path that can leak the bus. The explicit dispose it replaces also
+            // needed a generic catch, which is gone with it: Session.Dispose records its own
+            // failures now. Found in review of #388.
+            using (var opened = Session.Open(options, out openError))
             {
-                book.Note("--eds", "DeviceDescription", descriptionError, Attribution.Setup);
-                Console.Error.WriteLine($"  --eds could not be used: {descriptionError}");
-                Console.Error.WriteLine("  The run continues without it; the checks it would have unlocked report themselves skipped.");
-            }
+                session = opened;
 
-            await RunGroupsAsync(session, book, options, cancellation.Token).ConfigureAwait(false);
+                // After the open, not inside it: a malformed --eds is the run's own input and must
+                // not be reported as an adapter or driver failure. The run continues without the
+                // file, which is the same position as not passing one, and the eds group says
+                // which it was.
+                if (session.BindDescription() is { } descriptionError)
+                {
+                    book.Note("--eds", "DeviceDescription", descriptionError, Attribution.Setup);
+                    Console.Error.WriteLine($"  --eds could not be used: {descriptionError}");
+                    Console.Error.WriteLine("  The run continues without it; the checks it would have unlocked report themselves skipped.");
+                }
+
+                await RunGroupsAsync(session, book, options, cancellation.Token).ConfigureAwait(false);
+            }
         }
         catch (OpenFailedException ex)
         {
@@ -150,19 +160,11 @@ internal static class Program
             // they shut down landed in the session's list *after* the copy — missed by the report
             // and by the exit-code guard that reads it, letting a run with a teardown failure end
             // in success. On every path, including a cancelled one. Found in review of #388.
+            // The using above has already disposed every layer by the time this runs, on every
+            // path out of the try — so what Session.Dispose recorded about its own failures is on
+            // the list before it is copied.
             if (session is not null)
-            {
-                try
-                {
-                    session.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    book.Note("session teardown", ex);
-                }
-
                 lock (session.BackgroundExceptions) background.AddRange(session.BackgroundExceptions);
-            }
         }
 
         clock.Stop();

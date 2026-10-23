@@ -216,8 +216,19 @@ internal sealed class Session : IDisposable
             }
             catch (Exception ex)
             {
-                // Teardown must not lose a finished run's report.
+                // Teardown must not lose a finished run's report, so the remaining layers are
+                // still disposed — but it must not lose the failure either. Printing and
+                // swallowing meant the caller could never see it: the report came out clean and
+                // the process exited 0 although the node, the service or the bus had failed to
+                // shut down. It goes on the list the run already reads for background exceptions,
+                // which is what the exit code and the report's error section are drawn from.
+                // Found in review of #388.
                 Console.WriteLine($"  note: disposing {disposable.GetType().Name} threw {ex.GetType().Name}: {ex.Message}");
+                lock (BackgroundExceptions)
+                {
+                    BackgroundExceptions.Add(
+                        $"{ex.GetType().Name} while disposing {disposable.GetType().Name}: {ex.Message}");
+                }
             }
         }
     }

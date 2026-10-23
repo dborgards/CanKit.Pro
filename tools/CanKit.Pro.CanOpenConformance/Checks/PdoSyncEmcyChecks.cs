@@ -1394,6 +1394,19 @@ internal static class PdoSyncEmcyChecks
             // begins its cycle (CiA 301 §7.5.2.37).
             var (syncStart, syncStartOutcome) = await ByteOrDefault(session, comm, 0x06, problems, blocked, mandatory: false, cancellationToken).ConfigureAwait(false);
 
+            // 0..240, which the stack enforces on write: CanOpenNode.Pdo.cs rejects 1800h:06 above
+            // 240 with ValueRangeExceeded, and its README §"SYNC start value" documents the range.
+            // A device reporting 241..255 was recorded as a successful read, so PDO-01 passed it
+            // and SYN-02 then sized its SYNC burst from a start value no device can honour —
+            // passing a device that ignores it, or reading its silence as a transmission failure.
+            // The sixth object in the read-is-not-valid family, and this one the stack settles
+            // rather than a table reading. Found in review of #388.
+            if (syncStart is { } start && start > CanOpenTransmissionType.SynchronousCyclicMax)
+            {
+                problems.Add($"0x{comm:X4}:06 is {start}; a SYNC start value is 0..240 and 241..255 is reserved.");
+                syncStart = null;
+            }
+
             // Read is not the same as valid. F1h..FBh is reserved for a TPDO and F1h..FDh for an
             // RPDO (CiA 301 Table 72), and the stack already names both ranges, so a device
             // answering with one was recorded as a successfully read transmission type and

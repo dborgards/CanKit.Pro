@@ -449,6 +449,7 @@ internal static class NmtAndHeartbeatChecks
             var mayHaveStopped = true;
             var stillBeating = 0;
             var inFlight = 0;
+            var timeoutsBeforeStop = 0;
             session.Client.HeartbeatTimeout += OnTimeout;
             try
             {
@@ -489,6 +490,15 @@ internal static class NmtAndHeartbeatChecks
                 // that was reported as a defect in this repository, which sends the operator to
                 // the wrong place and hides the device failing to apply its own configuration.
                 // Found in review of #388.
+                //
+                // The timeout count starts here, not at zero. The consumer was installed before
+                // the write, and its budget can expire while the SDO response is still
+                // outstanding — so `timedOut` could already be positive for a timeout that had
+                // nothing to do with the stop, and the Pass branch would then accept a consumer
+                // that never timed out for the stopped interval at all: the exact defect this
+                // check exists to find. Found in review of #388.
+                timeoutsBeforeStop = Volatile.Read(ref timedOut);
+
                 var stoppedId = CanOpenCobId.Heartbeat(session.Target);
                 using (var afterStop = new BusTap(session.Service, (id, extended) => id == stoppedId && !extended))
                 {
@@ -542,7 +552,8 @@ internal static class NmtAndHeartbeatChecks
                 ["1017h before"] = $"{BitConverter.ToUInt16(original, 0)} ms",
                 ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
                 ["consumer budget used"] = IdentityAndSdoChecks.Ms(budget.TotalMilliseconds),
-                ["HeartbeatTimeout events after the stop"] = timedOut.ToString(CultureInfo.InvariantCulture),
+                ["HeartbeatTimeout events after the stop"] =
+                    (timedOut - timeoutsBeforeStop).ToString(CultureInfo.InvariantCulture),
                 ["1017h restored"] = restored,
             };
 
@@ -582,16 +593,26 @@ internal static class NmtAndHeartbeatChecks
                 return Outcome.Fail(
                     $"The device acknowledged the write of 1017h = 0 and then put {stillBeating} heartbeat(s) on the "
                     + $"bus more than one period after it, so it has not applied its own configuration"
-                    + (timedOut > 0
-                        ? $". The consumer did raise {timedOut} timeout(s), which a gap in that continuing traffic "
+                    + (timedOut - timeoutsBeforeStop > 0
+                        ? $". The consumer did raise {timedOut - timeoutsBeforeStop} timeout(s), which a gap in that continuing traffic "
                           + "explains and which says nothing in the device's favour"
                         : ". The consumer raised no timeout because there was no missed beat to raise one about — "
                           + "that part is correct")
                     + ".", measurements);
             }
 
-            if (timedOut > 0)
-                return Outcome.Pass($"The producer was stopped and the consumer raised {timedOut} timeout(s).", measurements);
+            if (timeoutsBeforeStop > 0)
+            {
+                measurements["timeouts before the stop (not counted)"] =
+                    timeoutsBeforeStop.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (timedOut - timeoutsBeforeStop > 0)
+            {
+                return Outcome.Pass(
+                    $"The producer was stopped and the consumer raised {timedOut - timeoutsBeforeStop} timeout(s) "
+                    + "after it.", measurements);
+            }
 
             return Outcome.ToolFault(
                 "The producer was stopped by writing 1017h = 0, nothing reached the bus beyond the beat already in "
