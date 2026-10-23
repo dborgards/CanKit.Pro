@@ -760,6 +760,15 @@ internal static class PdoSyncEmcyChecks
             double burstUntilMs = 0;
             Restoration restoration;
             var rejected = 0;
+
+            // The counter each SYNC the adapter accepted carried, in order. A count of accepted
+            // frames is not enough to place a 1800h:06 start gate: subtracting start - 1 assumes
+            // the SYNCs before the gate were all accepted, so a rejection before it under-counts
+            // the opportunities after it, and a rejection *of* the gate-bearing frame invents
+            // opportunities for a TPDO the device never let out of the gate. Both are decidable
+            // here, where each frame's counter and the adapter's answer are known. Found in
+            // review of #388.
+            var acceptedCounters = new List<byte>();
             var operationalConfirmed = false;
             try
             {
@@ -794,6 +803,7 @@ internal static class PdoSyncEmcyChecks
                         : Array.Empty<byte>();
                     var syncFrame = CanFrame.Classic((int)sync.CobId, payload, isExtendedFrame: sync.Extended);
                     if (session.Bus.Transmit(syncFrame) <= 0) rejected++;
+                    else acceptedCounters.Add(counterOverflow >= 2 ? counter : (byte)0);
                     await Task.Delay(SyncPeriodMs, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -811,7 +821,7 @@ internal static class PdoSyncEmcyChecks
             // carries what was collected. Hoisting the restore guard in beea974 put it ahead of
             // this dictionary and stripped the SYNC count, the COB-ID and the per-TPDO traffic
             // from exactly the verdict that most needs them. Found in review of #388.
-            var accepted = syncs - rejected;
+            var accepted = acceptedCounters.Count;
             var after = Transmitted(tap.Through(burstUntilMs))
                 .Where(f => f.AtMs >= burstFromMs)
                 .ToArray();
@@ -923,19 +933,27 @@ internal static class PdoSyncEmcyChecks
                 // tightened one commit earlier became a false FAIL generator for exactly the
                 // devices 1800h:06 exists for. Found in review of #388.
                 //
-                // The counter runs 1..overflow and starts at 1, so the first SYNC carrying the
-                // start value is the (start)th of the burst and the gate skips start - 1 of them.
+                // Where the gate actually fell, read off the SYNCs that reached the bus. The
+                // counter runs 1..overflow from 1, so with nothing rejected the start value sits
+                // at index start - 1 and this is the arithmetic it replaces; with a rejection it
+                // is the measurement rather than the assumption. A gate index of -1 means no
+                // accepted SYNC carried the start value at all, so the TPDO was never due.
                 // Without a counter a start value has nothing to start on, which the measurements
-                // above already say, and the gate is then zero.
-                var gated = counterOverflow >= 2 && pdo.SyncStartValue >= 2 ? pdo.SyncStartValue - 1 : 0;
-                var usable = Math.Max(0, accepted - gated);
-                var opportunities = usable / pdo.TransmissionType;
+                // above already say, and there is then no gate.
+                var gateIndex = counterOverflow >= 2 && pdo.SyncStartValue >= 2
+                    ? acceptedCounters.IndexOf(pdo.SyncStartValue)
+                    : 0;
+                var afterGate = gateIndex < 0 ? 0 : accepted - gateIndex;
+                var opportunities = gateIndex < 0 ? 0 : afterGate / pdo.TransmissionType;
                 measurements[$"TPDO{pdo.Number} (0x{pdo.CobId:X3}) type {pdo.TransmissionType}"] =
                     $"{mine.Length} frame(s) for {opportunities} SYNC opportunity/opportunities"
-                    + (gated > 0
-                        ? $" ({gated} SYNC(s) before its 1800h:06 start value of {pdo.SyncStartValue} are not "
-                          + "opportunities)"
-                        : string.Empty);
+                    + (gateIndex > 0
+                        ? $" ({gateIndex} SYNC(s) reached the bus before its 1800h:06 start value of "
+                          + $"{pdo.SyncStartValue}, so they are not opportunities)"
+                        : gateIndex < 0
+                            ? $" (no SYNC that reached the bus carried its 1800h:06 start value of "
+                              + $"{pdo.SyncStartValue})"
+                            : string.Empty);
                 // The opportunities the device owes, less one frame of edge allowance — not half
                 // of them. Half forgave a device behaving as type 2 while declaring type 1, which
                 // is a contradiction of its own 1800h:02 and exactly what this check is for. The
@@ -950,8 +968,11 @@ internal static class PdoSyncEmcyChecks
                 // passed: a TPDO that was never given a chance has told us nothing.
                 if (opportunities == 0)
                 {
-                    unmeasuredBurst.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: the burst had no "
-                        + "SYNC at or after its start value, so it was never due)");
+                    unmeasuredBurst.Add(gateIndex < 0
+                        ? $"TPDO{pdo.Number} (0x{pdo.CobId:X3}, 1800h:06 start value {pdo.SyncStartValue}: no SYNC that "
+                          + "reached the bus carried it, so it was never due)"
+                        : $"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: {afterGate} SYNC(s) reached "
+                          + "the bus at or after its start gate, fewer than its transmission type asks for)");
                     continue;
                 }
 
@@ -969,7 +990,12 @@ internal static class PdoSyncEmcyChecks
                 // count is capped, and a transmission type above that cap would otherwise be
                 // failed for not transmitting on a SYNC that was never sent — the same false FAIL
                 // the fixed five-SYNC constant produced, re-entered through the bound.
-                var startUnreached = pdo.SyncStartValue > 0 && (counterOverflow < 2 || accepted < counterOverflow);
+                // The gate, again from what reached the bus rather than from a proxy. "Fewer
+                // SYNCs accepted than the counter's overflow" stood in for "the counter never
+                // reached the start value", which is neither necessary nor sufficient: a start
+                // value of 1 is reached by the first SYNC however short the burst, and a long
+                // burst whose gate-bearing frame the adapter rejected never reaches it at all.
+                var startUnreached = pdo.SyncStartValue >= 2 && (counterOverflow < 2 || gateIndex < 0);
                 if (startUnreached)
                 {
                     unmeasuredBurst.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, 1800h:06 start value {pdo.SyncStartValue} "

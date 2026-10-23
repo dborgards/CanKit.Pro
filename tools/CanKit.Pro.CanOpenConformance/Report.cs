@@ -384,8 +384,18 @@ internal static class ReportRenderer
         text.AppendLine("  nothing here generalises from a pass to \"the device conforms\".");
         text.AppendLine("- **Every period is measured on this host's clock**, not the device's. A loaded host widens the");
         text.AppendLine("  range without the device changing, so a period is reported with its spread and never gated on.");
-        text.AppendLine("- **An SDO abort from the device and one raised locally are different findings.** The local one");
-        text.AppendLine("  never reached the bus; it is attributed to the runner, not to the device.");
+        // What Checkbook.LocalAbort actually does, which is not what this used to say. "The local
+        // one never reached the bus; it is attributed to the runner" contradicted the attribution
+        // in the table above it — a local SdoProtocolTimedOut is the device staying silent, and
+        // the toggle/sequence/CRC codes are the client reporting the server's protocol error — so
+        // the reader was pointed at the wrong repository by the section explaining the report.
+        // Found in review of #388.
+        text.AppendLine("- **An SDO abort from the device and one raised locally are different findings**, and a local");
+        text.AppendLine("  one is attributed by its abort code, not by where it was raised. A timeout, or a protocol");
+        text.AppendLine("  error the client detected in the server's answer — a toggle bit that did not alternate, a");
+        text.AppendLine("  sequence number out of order, a block CRC that did not match — is the device's: the request");
+        text.AppendLine("  reached the bus and the client is the detector. The rest, where the client ran out of room");
+        text.AppendLine("  or refused the transfer of its own accord, is the runner's.");
         if (report.Options.EdsPath is null)
         {
             text.AppendLine("- **No device description was given.** The stack transfers only `1000h:00`, `1001h:00` and");

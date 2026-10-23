@@ -228,11 +228,18 @@ internal static class Program
     }
 
     /// <summary>
-    /// Takes both report names for this run, or the next free suffix. The markdown file is the
-    /// token: it is created with <see cref="FileMode.CreateNew"/>, which fails if it exists, so
-    /// two processes cannot both believe they own the same name. The JSON beside it then belongs
-    /// to the same run by construction.
+    /// Takes both report names for this run, or the next free suffix. Both files are the token:
+    /// each is created with <see cref="FileMode.CreateNew"/>, which fails if it exists, so two
+    /// processes cannot both believe they own the same name.
     /// </summary>
+    /// <remarks>
+    /// The markdown file alone used to be the token, on the reasoning that the JSON beside it
+    /// belongs to the same run by construction. It does when this tool wrote both — but a
+    /// candidate whose <c>.json</c> exists without its <c>.md</c>, after a hand-cleaned directory
+    /// or an interrupted run, passed the reservation and the JSON was then overwritten by the
+    /// <c>WriteAllText</c> below it. A conformance result is evidence; the one thing this function
+    /// exists to prevent is destroying one. Found in review of #388.
+    /// </remarks>
     private static string ReserveReportPath(string baseName)
     {
         for (var suffix = 0; suffix < 1000; suffix++)
@@ -243,18 +250,41 @@ internal static class Program
                 using (new FileStream(candidate + ".md", FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
                 }
-
-                return candidate;
             }
             catch (IOException) when (File.Exists(candidate + ".md"))
             {
                 // Taken, by this run's twin or by an earlier one with the same label and second.
+                continue;
+            }
+
+            try
+            {
+                using (new FileStream(candidate + ".json", FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                }
+
+                return candidate;
+            }
+            catch (IOException) when (File.Exists(candidate + ".json"))
+            {
+                // The markdown name was free and the JSON one was not. Hand the markdown file
+                // back rather than leave an empty one behind, which would take a suffix from the
+                // next run for nothing, and try the next suffix.
+                try
+                {
+                    File.Delete(candidate + ".md");
+                }
+                catch (IOException)
+                {
+                    // Another process owns it now; it will keep it and this run takes the next
+                    // suffix either way.
+                }
             }
         }
 
         // A thousand runs of one label in one second is not a case worth a cleverer scheme, and
         // failing here is better than overwriting the thousandth.
-        throw new IOException($"{baseName}.md and 999 suffixed variants of it already exist.");
+        throw new IOException($"{baseName}.md/.json and 999 suffixed variants of them already exist.");
     }
 
     /// <summary>
