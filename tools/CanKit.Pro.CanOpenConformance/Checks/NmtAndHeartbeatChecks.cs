@@ -63,9 +63,22 @@ internal static class NmtAndHeartbeatChecks
 
             if (frames.Count == 0)
             {
+                // HBT-01 has already read 1017h, so this does not have to hedge: a verified zero
+                // is the device configured not to produce a heartbeat, which CiA 301 permits and
+                // which is not an unresolved device problem. Found in review of #388.
+                var configured = await ProducerHeartbeatTimeAsync(session, cancellationToken).ConfigureAwait(false);
+                if (configured == 0)
+                {
+                    measurements["1017h producer heartbeat time"] = "0 ms (heartbeat switched off)";
+                    return Outcome.NotApplicable(
+                        $"The device is configured not to produce a heartbeat (1017h = 0), so nothing on 0x{cobId:X3} "
+                        + "is expected. That is an optional configuration, not a fault.");
+                }
+
                 return Outcome.Inconclusive(
-                    $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms. If HBT-01 read 1017h = 0 "
-                    + "this is the configuration, not a fault; otherwise the device is not producing what it is set to.",
+                    $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms"
+                    + (configured is { } ms ? $", although 1017h says {ms} ms" : string.Empty)
+                    + ": the device is not producing what it is set to.",
                     Attribution.Device, measurements);
             }
 
@@ -115,20 +128,6 @@ internal static class NmtAndHeartbeatChecks
                 measurements["period (host clock)"] = $"not measurable from {frames.Count} frame(s)";
             }
 
-            // A toggle-zero guarding response carries the bare state and is byte-for-byte a
-            // heartbeat, so it cannot be filtered. What *can* be established is that guarding
-            // traffic is present at all — a toggle-one reply or an RTR poll proves it — and a
-            // heartbeat verdict drawn from the mixture would be a guess dressed as a measurement.
-            if (guardPolls > 0 || guardResponses > 0)
-            {
-                return Outcome.Inconclusive(
-                    $"Another master is node-guarding this device on the same COB-ID ({guardPolls} RTR poll(s), "
-                    + $"{guardResponses} toggle-one response(s)). A guarding response with its toggle bit clear is "
-                    + "byte-for-byte a heartbeat, so the two cannot be separated here and no heartbeat verdict is "
-                    + "drawn. Stop the other master's guarding, or read 100Ch/100Dh instead — see GRD-01.",
-                    Attribution.Setup, measurements);
-            }
-
             var unknown = observed.Where(s => !Enum.IsDefined(typeof(NmtState), s)).ToArray();
             if (unknown.Length > 0)
             {
@@ -160,6 +159,22 @@ internal static class NmtAndHeartbeatChecks
                           + "producing one."
                         : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms.",
                     Attribution.Device, measurements);
+            }
+
+            // Only now. A toggle-zero guarding response carries the bare state and is
+            // byte-for-byte a heartbeat, so the two cannot be separated — but a multi-byte frame
+            // or an undefined state byte is neither, and those are the device's defects. An
+            // earlier version returned here first and turned them into exit 0 whenever another
+            // master happened to be polling. Found in review of #388.
+            if (guardPolls > 0 || guardResponses > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"Another master is node-guarding this device on the same COB-ID ({guardPolls} RTR poll(s), "
+                    + $"{guardResponses} toggle-one response(s)). A guarding response with its toggle bit clear is "
+                    + "byte-for-byte a heartbeat, so the two cannot be separated here and no heartbeat verdict is "
+                    + "drawn from the remaining frames. Nothing malformed or undefined was seen, which the checks "
+                    + "above would have failed. Stop the other master's guarding, or read 100Ch/100Dh — see GRD-01.",
+                    Attribution.Setup, measurements);
             }
 
             return Outcome.Pass($"{heartbeats} heartbeat(s) observed.", measurements);
@@ -419,7 +434,8 @@ internal static class NmtAndHeartbeatChecks
             // The operator's window, returning on the first state frame: a fixed 500 ms missed a
             // slower producer depending on its phase and skipped the check although HBT-02 had
             // just observed it. Found in review of #388.
-            await tap.WaitForAsync(frames => frames.Any(f => f.Data.Length == 1),
+            await tap.WaitForAsync(
+                frames => frames.Any(f => !f.IsRemote && f.Data.Length == 1 && IsDefinedRunState(f.Data[0])),
                 Math.Max(500, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
 
             // Where it was found, so it can be put back. A device left Stopped by a conformance
@@ -553,6 +569,24 @@ internal static class NmtAndHeartbeatChecks
         for (var i = frames.Count - 1; i >= 0; i--)
             if (IsDefinedRunState(frames[i].Data[0])) return frames[i].Data[0];
         return null;
+    }
+
+    /// <summary>
+    /// 1017h, the producer heartbeat time in milliseconds; null when it cannot be read. HBT-02
+    /// uses it to tell a device that is switched off from one that is failing to produce.
+    /// </summary>
+    private static async Task<ushort?> ProducerHeartbeatTimeAsync(Session session, CancellationToken cancellationToken)
+    {
+        if (!session.MayTransfer(0x1017, 0x00)) return null;
+        try
+        {
+            var raw = await session.Client.SdoUploadAsync(session.Target, 0x1017, 0x00, cancellationToken).ConfigureAwait(false);
+            return raw.Length == 2 ? BitConverter.ToUInt16(raw, 0) : null;
+        }
+        catch (SdoAbortException)
+        {
+            return null;
+        }
     }
 
     /// <summary>The three states a heartbeat may report while the node is running.</summary>

@@ -596,7 +596,19 @@ internal static class PdoSyncEmcyChecks
 
             // A partial rejection makes the count the device actually saw uncertain, so silence
             // cannot be charged to it. Found in review of #388.
-            if (short_.Count > 0 && rejected == 0)
+            // A shortfall is judged the same way silence is: chargeable to the device only when
+            // every SYNC reached the bus. An earlier version returned Fail for rejected == 0 and
+            // had no branch at all otherwise, so a short-producing TPDO fell through to Pass the
+            // moment one frame had been rejected. Found in review of #388.
+            if (short_.Count > 0 && rejected > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{string.Join(", ", short_)} produced fewer frames than its transmission type asks for, but the "
+                    + $"driver rejected {rejected} of {syncs} SYNC frames, so how many the device actually saw is "
+                    + "uncertain and the shortfall cannot be charged to it.", Attribution.Transport, measurements);
+            }
+
+            if (short_.Count > 0)
             {
                 return Outcome.Fail(
                     $"{string.Join(", ", short_)} transmitted far fewer frames than its transmission type asks for. A "
@@ -1035,6 +1047,18 @@ internal static class PdoSyncEmcyChecks
                 return (0, 0, false);
             }
 
+            if (count[0] is (byte)MpdoAddressMode.Source or (byte)MpdoAddressMode.Destination)
+            {
+                // Not an entry count: these two values put the PDO into multiplexed mode, which
+                // this runner states it does not address. Treated as an unmeasured mapping so the
+                // observation checks withhold payload-length validation instead of comparing
+                // frames against a length derived from sub-indices that do not exist.
+                blocked.Add($"0x{map:X4}:00 is 0x{count[0]:X2}, which selects "
+                    + $"{(count[0] == (byte)MpdoAddressMode.Source ? "source" : "destination")}-addressed MPDO rather "
+                    + "than declaring mapping entries. Multiplexed PDOs are outside what this runner checks.");
+                return (0, 0, false);
+            }
+
 
             var bits = 0;
             for (byte sub = 1; sub <= count[0] && sub <= 64; sub++)
@@ -1103,9 +1127,22 @@ internal static class PdoSyncEmcyChecks
     private static async Task<(byte? Value, ReadOutcome Outcome)> ByteOrDefault(
         Session session, ushort index, byte sub, List<string> problems, bool mandatory, CancellationToken cancellationToken)
     {
-        // A pair the description does not declare is one the device (per that description) does
-        // not have, which is an absence and not an unanswered question.
-        if (!session.MayTransfer(index, sub)) return (null, ReadOutcome.Absent);
+        if (!session.MayTransfer(index, sub))
+        {
+            // For an optional entry, a pair the description does not declare is an absence: the
+            // device, per that description, does not have it. For a *mandatory* one it is a
+            // contradiction in the description itself, and saying nothing let the check pass while
+            // reporting the value as "not read". Found in review of #388.
+            if (mandatory)
+            {
+                problems.Add($"0x{index:X4}:{sub:X2} is mandatory for an implemented PDO and "
+                    + session.GateReason(index, sub));
+                return (null, ReadOutcome.Unreadable);
+            }
+
+            return (null, ReadOutcome.Absent);
+        }
+
         try
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, index, sub, cancellationToken).ConfigureAwait(false);
