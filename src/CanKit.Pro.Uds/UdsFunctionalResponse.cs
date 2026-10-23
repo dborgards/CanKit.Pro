@@ -21,7 +21,10 @@ public sealed class UdsFunctionalResponse
     /// <summary>The response bytes, starting with the response SID (or 0x7F).</summary>
     public byte[] Response { get; }
 
-    /// <summary>Whether this is a negative response (SID 0x7F).</summary>
+    /// <summary>
+    /// Whether this is a negative response (SID 0x7F). Also set for NRC 0x78, which says the
+    /// ECU's final answer is still coming rather than refusing the request.
+    /// </summary>
     public bool IsNegative => Response.Length >= 1 && Response[0] == 0x7F;
 
     /// <summary>The negative response code, or <c>null</c> for a positive response.</summary>

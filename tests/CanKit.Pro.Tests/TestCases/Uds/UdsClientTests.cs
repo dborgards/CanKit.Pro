@@ -830,6 +830,37 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #354: requestSeedLevel is an odd byte up to 0x7D -- its sendKey 0x7E -- as the doc and the
+    // argument error now say; 0x7F and every even level are refused before anything is sent.
+    [Theory]
+    [InlineData(0x00)]
+    [InlineData(0x02)]
+    [InlineData(0x7F)]
+    [InlineData(0x81)]
+    public async Task SecurityAccess_Refuses_A_Seed_Level_Outside_The_Odd_Bytes_Up_To_0x7D(byte level)
+    {
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x27, _ => new byte[] { 0x01, 0x00 }));
+        using (dispose)
+        {
+            Func<Task> act = () => client.SecurityAccessAsync(level, seed => seed);
+            (await act.Should().ThrowAsync<ArgumentOutOfRangeException>())
+                .WithMessage("*odd byte in 0x01..0x7D*");
+            ecu.LastRequest.Should().BeNull("nothing was sent");
+        }
+    }
+
+    [Fact]
+    public async Task SecurityAccess_Accepts_Seed_Level_0x7D()
+    {
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x27, req => new byte[] { req[1], 0x00, 0x00 }));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SecurityAccessAsync(0x7D, seed => seed, cts.Token); // an all-zero seed: unlocked
+            ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x27, 0x7D });
+        }
+    }
+
     // The same repeat without an injected clock, where the delay is a real Task.Delay: the
     // request goes out again and succeeds. No timing is asserted -- how long the delay lasts is
     // what the clock test below proves; this only runs the wall-clock path end to end.
@@ -2628,6 +2659,95 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // FR-UDS-009 (edge) — MaxResponsePendingCount is how many 0x78s a request waits through:
+    // that many and the final answer is returned, one more and the request is given up (#354,
+    // the boundary uds-M3 left unpinned). P2 and P2* are a minute, so neither can end the wait
+    // before the ECU's unpaced 0x78s are in.
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(3, true)]
+    public async Task MaxResponsePendingCount_Is_The_Number_Of_Pending_Answers_A_Request_Waits_Through(
+        int pendingAnswers, bool givenUp)
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, _ => throw new EcuResponsePending(
+                pendingCount: pendingAnswers, finalResponse: new byte[] { 0xF1, 0x90, 0xAA })),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMinutes(1),
+                P2StarClientMax = TimeSpan.FromMinutes(1),
+                MaxResponsePendingCount = 2,
+            });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var read = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            if (givenUp)
+            {
+                Func<Task> act = () => read;
+                await act.Should().ThrowAsync<UdsProtocolException>()
+                    .WithMessage("*sent 3 consecutive NRC 0x78*MaxResponsePendingCount=2*");
+            }
+            else
+            {
+                (await read).Should().Equal(0xAA);
+            }
+        }
+    }
+
+    // #354 (U-5): a 0x78 to a suppressed send moves its window out by P2*, and the next
+    // request for the service waits the window out -- but no more often than
+    // MaxResponsePendingCount lets a request's own wait be moved. Without the bound a peer
+    // answering 0x78 for ever held the next request for as long as its token allowed. On the
+    // virtual clock: the ECU's second 0x78 goes out only when the test opens its gate.
+    [Fact]
+    public async Task The_Pending_Answers_That_Move_A_Window_Out_Are_Bounded_By_MaxResponsePendingCount()
+    {
+        var gates = new OrderedGates();
+        var p2Star = TimeSpan.FromMilliseconds(1500);
+        var gap = TimeSpan.FromMilliseconds(100);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = gates.WaitAsync;
+                e.On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenSilent(pendingCount: 2, delayBetween: gap);
+                    return new byte[] { 0x00 };
+                });
+            },
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = p2Star,
+                MaxResponsePendingCount = 1,
+            });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Task suppressed = Task.CompletedTask;
+        // The first 0x78 answers the suppressed send at once: at 0 ms.
+        await pair.DeliverAsync(
+            () => suppressed = pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token),
+            Negative(0x3E, 0x78));
+        await Within(suppressed);
+
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        // The one extension allowed: the window ends P2* from the first 0x78, not P2 from the send.
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.Clock.AdvanceAsync(gap);
+        await pair.DeliverAsync(gates.ReleaseNext, Negative(0x3E, 0x78)); // the second, at 100 ms: one too many
+        gates.ReleaseNext(); // the ECU is done with the suppressed send
+
+        // At 1500 ms the window is over and the request goes out; moved out by the second 0x78
+        // it would end at 1600, and the clock is never moved that far.
+        await pair.Clock.AdvanceAsync(p2Star - gap);
+        await Within(next);
+        pair.Ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x3E, 0x00 });
+    }
+
+    // -----------------------------------------------------------------------------------
     // FR-UDS-009 (edge) — MaxResponsePendingCount bounds the loop.
     // -----------------------------------------------------------------------------------
     [Fact]
@@ -3001,6 +3121,23 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         client.Dispose(); // a client with no keep-alive of the refused one disposes as usual
     }
 
+    // #354 (U-8): without a period the keep-alive uses the options' TesterPresentPeriod, which
+    // the constructor accepts up to a timer's reach (about 49 days) and the keep-alive can wait
+    // only up to int.MaxValue milliseconds. The refusal says that the value is the option's,
+    // not an argument that was never passed.
+    [Fact]
+    public void A_KeepAlive_Without_A_Period_Names_The_Option_Too_Long_For_It()
+    {
+        var (client, _, dispose) = BuildPair(e => { },
+            options: new UdsClientOptions { TesterPresentPeriod = TimeSpan.FromDays(30) });
+        using var teardown = dispose;
+
+        Action act = () => client.StartTesterPresentKeepAlive();
+
+        act.Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("No period was passed, and UdsClientOptions.TesterPresentPeriod*");
+    }
+
 #if NET5_0_OR_GREATER
     // An operation's cancellation callback throws when the client is disposed: Cancel surfaces an
     // AggregateException, and the disposal still ends -- the owned channel is released and the
@@ -3085,6 +3222,91 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                     if (returns == typeof(ValueTask)) return default(ValueTask);
                     return returns.IsValueType ? Activator.CreateInstance(returns) : null;
             }
+        }
+    }
+
+    // #354 (U-3): a request parked in the channel's SettleAsync -- whose actor a caller disposing
+    // from one of the channel's callbacks holds -- is reached by the disposal's cancellation.
+    // Settled without a token it was reached by nothing, and the disposal waited out its timeout
+    // for the request lock. Parked before the send (0), or in the discard on the way out of a
+    // request the caller cancelled (1), which settles under the client's lifetime. The timeout
+    // is set far beyond the hang bound, so a disposal that has to wait it out fails the test.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task A_Request_Parked_In_The_Channels_Settle_Is_Ended_By_The_Disposal(int parkFromSettle)
+    {
+        var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, SettleParkingChannel>();
+        var stub = (SettleParkingChannel)channel;
+        stub.ParkFromSettle = parkFromSettle;
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            // Never fires: the request ends by cancellation or not at all.
+            P2ClientMax = TimeSpan.FromHours(1),
+            P2StarClientMax = TimeSpan.FromHours(1),
+        });
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromHours(1);
+        using var caller = new CancellationTokenSource();
+        var request = client.ReadDataByIdentifierAsync(0xF190, caller.Token);
+        if (parkFromSettle > 0)
+        {
+            await Within(stub.ReceiveEntered.Task);
+            caller.Cancel(); // the request is abandoned; its way out settles and parks there
+        }
+        await Within(stub.SettleParked.Task);
+
+        await Within(client.DisposeAsync().AsTask());
+
+        Func<Task> wait = () => Within(request);
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
+    }
+
+    // A channel whose SettleAsync completes for the first ParkFromSettle calls and from then on
+    // only when its token is cancelled: an actor that never gets round to the settle. A send
+    // completes at once, a receive waits for its token.
+    private class SettleParkingChannel : System.Reflection.DispatchProxy
+    {
+        private int _settles;
+
+        public int ParkFromSettle { get; set; }
+
+        public TaskCompletionSource<bool> SettleParked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> ReceiveEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod?.Name)
+            {
+                case nameof(IIsoTpChannel.SettleAsync):
+                    if (Interlocked.Increment(ref _settles) <= ParkFromSettle) return Task.CompletedTask;
+                    SettleParked.TrySetResult(true);
+                    return Task.Delay(Timeout.Infinite, (CancellationToken)args![0]!);
+                case nameof(IIsoTpChannel.SendWithTransmitStampAsync):
+                    return Task.FromResult(default(IsoTpTransmitStamps));
+                case nameof(IIsoTpChannel.ReceiveWithArrivalAsync):
+                    ReceiveEntered.TrySetResult(true);
+                    return NeverAsync((CancellationToken)args![0]!);
+                case nameof(IIsoTpChannel.GetReceptionsInProgress):
+                    return Array.Empty<IsoTpReceptionInProgress>();
+                default:
+                    var parameters = targetMethod!.GetParameters();
+                    for (var i = 0; i < parameters.Length; i++)
+                    {
+                        if (parameters[i].ParameterType.IsByRef)
+                            args![i] = Activator.CreateInstance(parameters[i].ParameterType.GetElementType()!);
+                    }
+                    var returns = targetMethod.ReturnType;
+                    if (returns == typeof(Task)) return Task.CompletedTask;
+                    return returns.IsValueType ? Activator.CreateInstance(returns) : null;
+            }
+        }
+
+        private static async Task<IsoTpReceivedPdu> NeverAsync(CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            throw new OperationCanceledException(cancellationToken);
         }
     }
 #endif
