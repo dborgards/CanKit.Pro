@@ -2568,6 +2568,40 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await NextClaimAsync()).Should().Be(((byte)0x80, nodeName.Value), "a node with an address answers with its Address Claimed");
     }
 
+    // #355 (the previous review's M4): every Request above is global. SAE J1939-21 lets a Request
+    // be addressed to one CA, and a tool that saw this node's claim asks it by its address; the
+    // node answers that one the same way. Counted rather than read in order, so the arbitration's
+    // own announcement cannot be mistaken for the answer.
+    [Fact]
+    public async Task A_Request_For_Address_Claimed_Directed_At_The_Claimed_Address_Is_Answered()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // the scanning tool
+        var nodeName = Name(0x0000CC);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(nodeName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        int claimsAt80 = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 8) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == 0x80
+                && BitConverter.ToUInt64(e.CanFrame.Data.ToArray(), 0) == nodeName.Value)
+                Interlocked.Increment(ref claimsAt80);
+        };
+        await node.ClaimAddressAsync(0x80).WithTimeout(ShortTimeout);
+        await WaitForAnnouncesAsync(() => Volatile.Read(ref claimsAt80), 1); // the arbitration's announcement
+
+        var seen = WaitForMessageAsync(node, m => J1939Pgn.IsRequest(m.Pgn), ShortTimeout);
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: 0x80),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        await WaitForAnnouncesAsync(() => Volatile.Read(ref claimsAt80), 2);
+        (await seen).DestinationAddress.Should().Be((byte)0x80, "the directed request still reaches the application");
+    }
+
     // ---------------------------------------------------------------------------------------
     // #35 (SAE J1939-81 §4.5): a node that loses its address after a successful claim moves to
     // another address when it is arbitrary-address capable — the same scan a contested first
