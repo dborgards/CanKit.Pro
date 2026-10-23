@@ -733,6 +733,42 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // -----------------------------------------------------------------------------------
+    // #354 (U-4): the upload side decodes memorySize as the download side does. A 9-byte
+    // size with a nonzero leading byte read as 1 there, and the transfer closed after one
+    // block with no error; it is refused before RequestUpload instead.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task UploadAsync_Rejects_Oversized_MemorySize_Before_Decode()
+    {
+        int requestUploadCalls = 0;
+        var source = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+        var (client, _, dispose) = BuildPair(e =>
+        {
+            WireUploadEcu(e, source, maxBlockLength: 64, chunkSize: 4);
+            e.On(0x35, _ =>
+            {
+                requestUploadCalls++;
+                return new byte[] { 0x20, 0x00, 0x40 };
+            });
+        });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            // 9 bytes: 01 00 00 00 00 00 00 00 01 -- truncating to ulong would yield 1.
+            var oversized = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+            Func<Task> act = () => client.UploadAsync(
+                dataFormatIdentifier: 0x00,
+                addressAndLengthFormatIdentifier: 0x91, // size width 9, addr width 1
+                memoryAddress: new byte[] { 0x10 },
+                memorySize: oversized,
+                cancellationToken: cts.Token);
+            var ex = (await act.Should().ThrowAsync<ArgumentOutOfRangeException>()).Which;
+            ex.ParamName.Should().Be("memorySize");
+            requestUploadCalls.Should().Be(0);
+        }
+    }
+
     /// <summary>
     /// Configures <paramref name="ecu"/> as a minimal upload server (mirror of the download
     /// wiring above): 0x35 accepts and replies with a fixed max block length, 0x36 validates

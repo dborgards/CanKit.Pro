@@ -948,23 +948,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         // decode cannot let a mismatch through.
         if (dataFormatIdentifier == 0x00)
         {
-            ReadOnlySpan<byte> sizeSpan = memorySize.Span;
-            if (sizeSpan.Length > 8)
-            {
-                for (int i = 0; i < sizeSpan.Length - 8; i++)
-                {
-                    if (sizeSpan[i] != 0)
-                        throw new ArgumentOutOfRangeException(
-                            nameof(memorySize),
-                            "memorySize exceeds what a ulong can represent (nonzero high-order bytes).");
-                }
-                sizeSpan = sizeSpan.Slice(sizeSpan.Length - 8);
-            }
-
-            ulong totalBytes = 0;
-            for (int i = 0; i < sizeSpan.Length; i++)
-                totalBytes = (totalBytes << 8) | sizeSpan[i];
-
+            ulong totalBytes = DecodeMemorySize(memorySize.Span);
             if (totalBytes != (ulong)data.Length)
                 throw new ArgumentException(
                     $"memorySize ({totalBytes}) does not match data.Length ({data.Length}).",
@@ -1035,10 +1019,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        // Declared byte count to read: big-endian, same wire layout as in RequestDownload/Upload.
-        ulong totalBytes = 0;
-        for (int i = 0; i < memorySize.Length; i++)
-            totalBytes = (totalBytes << 8) | memorySize.Span[i];
+        // Declared byte count to read: big-endian, same wire layout as in RequestDownload/Upload,
+        // and decoded as DownloadAsync decodes it. Shifted into a ulong byte by byte, a nine-byte
+        // size 01 00 .. 00 01 read as 1 while the wire carried all nine bytes: one block was
+        // read, the transfer closed mid-way and the result trimmed to a byte, with no error (#354).
+        ulong totalBytes = DecodeMemorySize(memorySize.Span);
         if (totalBytes > int.MaxValue)
             throw new UdsProtocolException(
                 $"Declared memorySize {totalBytes} exceeds what a single upload can buffer.");
@@ -1082,6 +1067,29 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         {
             _requestLock.Release();
         }
+    }
+
+    // memorySize as the big-endian byte count it encodes. Wider than a ulong is accepted only
+    // where the bytes beyond eight are leading zeroes: anything else would be truncated in the
+    // decode, and the transfer sized by a count the ECU was never given.
+    private static ulong DecodeMemorySize(ReadOnlySpan<byte> memorySize)
+    {
+        if (memorySize.Length > 8)
+        {
+            for (int i = 0; i < memorySize.Length - 8; i++)
+            {
+                if (memorySize[i] != 0)
+                    throw new ArgumentOutOfRangeException(
+                        nameof(memorySize),
+                        "memorySize exceeds what a ulong can represent (nonzero high-order bytes).");
+            }
+            memorySize = memorySize.Slice(memorySize.Length - 8);
+        }
+
+        ulong totalBytes = 0;
+        for (int i = 0; i < memorySize.Length; i++)
+            totalBytes = (totalBytes << 8) | memorySize[i];
+        return totalBytes;
     }
 
     // ---------------------------------------------------------------------------------------

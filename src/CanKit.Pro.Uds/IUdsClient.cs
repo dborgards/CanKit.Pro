@@ -315,6 +315,8 @@ public interface IUdsClient : IDisposable
     /// <paramref name="memorySize"/> bytes were read, and finally calls
     /// <see cref="RequestTransferExitAsync"/>.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="memorySize"/> has nonzero
+    /// high-order bytes beyond what a <see cref="ulong"/> can represent; nothing is sent.</exception>
     /// <exception cref="UdsProtocolException">The ECU delivered an empty TransferData payload
     /// before the declared size was reached, or <paramref name="memorySize"/> exceeds what can
     /// reasonably be buffered.</exception>
