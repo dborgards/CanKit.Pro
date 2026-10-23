@@ -790,6 +790,36 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             "the release waits out the master's reservation, however long, and is never cut off inside the send");
     }
 
+    // L-4 (#359), the other half: with no budget of its own, disposing the master is what ends a
+    // release that is still waiting out the reservation. The activation is abandoned with the
+    // longest delay, and the clock is not moved afterwards, so only the disposal can end the wait;
+    // the wall-clock bound detects a hang and decides nothing.
+    [Fact]
+    public async Task Disposing_The_Master_Ends_A_Release_That_Waits_Out_The_Reservation()
+    {
+        using var bench = NewBench();
+        var slave = (CanOpenNode)Unconfigured(bench, null, First)[0];
+        var tool = Tool(bench.Undriven);
+        using var cancel = new CancellationTokenSource();
+        int generation = slave.LssActivationGeneration;
+        var configure = tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = ushort.MaxValue,
+        }, cancel.Token);
+        await bench.WaitUntilAsync(() => slave.LssActivationGeneration != generation);
+        var reached = bench.Now;
+        cancel.Cancel();
+        await bench.SettleAsync();
+        bench.Now.Should().Be(reached, "the premise: the clock stays inside the first switch delay");
+        configure.IsCompleted.Should().BeFalse("the premise: the release waits for the reservation of 2 x 65 535 ms");
+
+        bench.Master.Dispose();
+        var act = async () => await configure.WithTimeoutAsync(TimeSpan.FromSeconds(30));
+        await act.Should().ThrowAsync<OperationCanceledException>("the caller's cancellation, not the release, is reported");
+    }
+
 #if NET
     [Fact]
     public async Task ReadIdentities_Does_Not_Treat_A_Timeout_As_A_Zero()
