@@ -711,6 +711,125 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             sendRole ? (byte)0xFC : (byte)0xFF, 0xFF, 0xFF, 0x71, 0xFE, 0x00 });
     }
 
+    // #356 T-7: every frame goes to the driver from its own pool work item, so the abort of a CM
+    // send cancelled while its RTS is unconfirmed could overtake that RTS -- and a peer that sees
+    // Abort, then RTS, holds a session nobody serves for T2. The abort now waits for the RTS to be
+    // confirmed, and the destination stays taken until then, so a send queued behind it does not
+    // hand its RTS out first either. Every confirmation is held by the bus double, so "not yet"
+    // is a state of the test, not a race.
+    [Fact]
+    public async Task A_Cm_Send_Cancelled_Before_Its_Rts_Is_Confirmed_Aborts_Only_After_The_Rts()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        var service = new HeldConfirmationBusService(new CanBusService(bus));
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
+            ownsService: true, actor);
+        const byte peerSa = 0x20;
+        const uint cancelledPgn = 0xFEC1u, nextPgn = 0xFEC2u;
+
+        using var cts = new CancellationTokenSource();
+        var send = sender.SendCmAsync(cancelledPgn, peerSa, RandomPayload(14, seed: 356), cts.Token);
+        var handed = await service.WaitForHandedAsync(1, ShortTimeout);
+        handed[0][0].Should().Be(J1939TpFrames.ControlRts);
+
+        cts.Cancel();
+        await send.Invoking(t => t.WithTimeout(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+        var next = sender.SendCmAsync(nextPgn, peerSa, RandomPayload(14, seed: 357));
+        (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(1,
+            "the destination stays taken while the cancelled send's abort waits for its RTS");
+        // Deliberately a negative window: it can only let an early abort pass on a slow host,
+        // never fail one that waits -- nothing is due to be handed out until the RTS settles.
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+        service.HandedCount.Should().Be(1, "the abort waits for the RTS's confirmation");
+
+        service.Confirm(0);
+        handed = await service.WaitForHandedAsync(3, ShortTimeout);
+        // The abort and the queued send's RTS are handed out in the same actor step.
+        handed.Skip(1).Select(d => (d[0], J1939TpFrames.ReadDataPgn(d))).Should().BeEquivalentTo(new[]
+        {
+            (J1939TpFrames.ControlAbort, cancelledPgn),
+            (J1939TpFrames.ControlRts, nextPgn),
+        });
+        handed.Single(d => d[0] == J1939TpFrames.ControlAbort)[1].Should().Be((byte)J1939TpAbortReason.NoResourcesAvailable);
+        (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(0);
+        next.IsCompleted.Should().BeFalse("the queued send is on the wire now, waiting for its CTS");
+    }
+
+    // The same wait when the RTS is not confirmed: rejected by the driver, or failing inside the
+    // service. Either way it is no longer on its way to the wire, so the abort goes out then --
+    // a peer that did see the RTS is told -- and the destination is given back.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Cm_Send_Cancelled_Before_Its_Rts_Fails_Aborts_Once_The_Rts_Has_Failed(bool throws)
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        var service = new HeldConfirmationBusService(new CanBusService(bus));
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
+            ownsService: true, actor);
+        var background = new List<Exception>();
+        sender.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+        const byte peerSa = 0x20;
+        const uint cancelledPgn = 0xFEC3u, nextPgn = 0xFEC4u;
+
+        using var cts = new CancellationTokenSource();
+        var send = sender.SendCmAsync(cancelledPgn, peerSa, RandomPayload(14, seed: 358), cts.Token);
+        await service.WaitForHandedAsync(1, ShortTimeout);
+        cts.Cancel();
+        await send.Invoking(t => t.WithTimeout(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+        _ = sender.SendCmAsync(nextPgn, peerSa, RandomPayload(14, seed: 359));
+        (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(1);
+
+        if (throws) service.Throw(0, new InvalidOperationException("driver gone"));
+        else service.Reject(0);
+        var handed = await service.WaitForHandedAsync(3, ShortTimeout);
+        handed.Skip(1).Select(d => (d[0], J1939TpFrames.ReadDataPgn(d))).Should().BeEquivalentTo(new[]
+        {
+            (J1939TpFrames.ControlAbort, cancelledPgn),
+            (J1939TpFrames.ControlRts, nextPgn),
+        });
+        // The failed RTS belongs to no send any more: it is reported where background faults go.
+        lock (background)
+            background.Should().ContainSingle().Which.Should().BeOfType(
+                throws ? typeof(InvalidOperationException) : typeof(J1939TpSendRejectedException));
+    }
+
+    // A channel disposed while a cancelled send's abort still waits for its RTS sends none, as no
+    // session still in flight at Dispose gets one: the RTS settling afterwards finds nothing owed.
+    [Fact]
+    public async Task A_Channel_Disposed_While_An_Abort_Waits_For_Its_Rts_Sends_None()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        var service = new HeldConfirmationBusService(new CanBusService(bus));
+        var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
+            ownsService: false, actor);
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            var send = sender.SendCmAsync(0xFEC5u, 0x20, RandomPayload(14, seed: 360), cts.Token);
+            await service.WaitForHandedAsync(1, ShortTimeout);
+            cts.Cancel();
+            await send.Invoking(t => t.WithTimeout(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+        }
+        finally
+        {
+            sender.Dispose(); // a borrowed actor: returns once the session cleanup has run
+        }
+
+        service.Confirm(0); // runs the channel's confirmation continuation, which posts to the actor
+        await actor.PostAsync(() => 0);
+        // Deliberately a negative window: it can only let an abort pass on a slow host.
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+        service.HandedCount.Should().Be(1, "only the RTS was ever handed out");
+        service.Dispose();
+    }
+
     // Bugbot 3596025929: MaxPacketsPerCts=0 must fail fast, not crash later in BuildCts.
     [Fact]
     public void Open_MaxPacketsPerCtsZero_Throws()
@@ -4910,6 +5029,95 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
         public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => _inner.Reconfigure(predicate);
 
         public void Dispose() => _inner.Dispose();
+    }
+}
+
+/// <summary>
+/// Test double: forwards subscriptions to an inner service it owns, and holds every
+/// <see cref="SendConfirmedAsync"/> until the test settles it, recording the payloads in the order
+/// they were handed over. Nothing reaches the bus. A settle runs the caller's continuation on the
+/// settling thread, so a J1939-TP channel has posted its reaction to its actor by the time
+/// <see cref="Confirm"/>, <see cref="Reject"/> or <see cref="Throw"/> returns (#356).
+/// </summary>
+internal sealed class HeldConfirmationBusService : ICanBusService
+{
+    private readonly ICanBusService _inner;
+    private readonly object _gate = new();
+    private readonly List<(byte[] Data, TaskCompletionSource<TxConfirmation> Confirmation)> _handed = new();
+    private readonly SemaphoreSlim _signal = new(0);
+
+    public HeldConfirmationBusService(ICanBusService inner) => _inner = inner;
+
+    public int HandedCount { get { lock (_gate) return _handed.Count; } }
+
+    /// <summary>Waits until <paramref name="count"/> frames have been handed over; returns their payloads.</summary>
+    public async Task<byte[][]> WaitForHandedAsync(int count, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            lock (_gate)
+            {
+                if (_handed.Count >= count) return _handed.Select(h => h.Data).ToArray();
+            }
+            await _signal.WaitAsync(cts.Token).ConfigureAwait(false);
+        }
+    }
+
+    public void Confirm(int index) => Held(index).SetResult(new TxConfirmation
+    {
+        Confirmed = true,
+        IsApproximated = false,
+        Timestamp = DateTime.UtcNow,
+    });
+
+    public void Reject(int index) => Held(index).SetResult(new TxConfirmation
+    {
+        Confirmed = false,
+        IsApproximated = false,
+        Timestamp = DateTime.UtcNow,
+        FailureReason = TxConfirmFailureReason.Rejected,
+    });
+
+    public void Throw(int index, Exception ex) => Held(index).SetException(ex);
+
+    private TaskCompletionSource<TxConfirmation> Held(int index)
+    {
+        lock (_gate) return _handed[index].Confirmation;
+    }
+
+    public ICanBus Bus => _inner.Bus;
+    public int SubscriptionCount => _inner.SubscriptionCount;
+
+    public event EventHandler<Exception>? BackgroundExceptionOccurred
+    {
+        add => _inner.BackgroundExceptionOccurred += value;
+        remove => _inner.BackgroundExceptionOccurred -= value;
+    }
+
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+        => _inner.FindOverlappingFilterSubscriptions();
+
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        // Continuations run inline on the settling thread: see the class remarks.
+        var confirmation = new TaskCompletionSource<TxConfirmation>();
+        lock (_gate) _handed.Add((frame.Data.ToArray(), confirmation));
+        _signal.Release();
+        return confirmation.Task;
+    }
+
+    public void Dispose()
+    {
+        _inner.Dispose();
+        _signal.Dispose();
     }
 }
 
