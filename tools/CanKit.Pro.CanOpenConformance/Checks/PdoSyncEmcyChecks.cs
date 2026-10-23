@@ -621,7 +621,7 @@ internal static class PdoSyncEmcyChecks
     /// the way out of a cancelled check as much as a successful one. A failure here is recorded
     /// rather than thrown — it would otherwise replace the finding the check had just reached.
     /// </summary>
-    private static async Task<Restoration> RestoreNmtStateAsync(Session session, Checkbook book, string checkId, byte? initial)
+    internal static async Task<Restoration> RestoreNmtStateAsync(Session session, Checkbook book, string checkId, byte? initial)
     {
         // The state the device was found in, not a fixed one. An earlier version always left
         // pre-operational, so a --tier write run against a device found Operational stopped it
@@ -672,9 +672,13 @@ internal static class PdoSyncEmcyChecks
         var reached = await LatestNmtStateAsync(session, expected, CancellationToken.None).ConfigureAwait(false);
         if (reached is null)
         {
-            // No heartbeat means no way to observe the NMT state from outside. That is a real
-            // limit, not a pass: it is reported as unverified rather than claimed as restored.
-            return Restoration.Ok($"{name} (commanded, not verified — the device produces no heartbeat to confirm it)");
+            // Not Ok. These checks refuse to start unless the state could be read, so arriving
+            // here means the heartbeat stopped while the check ran — and then nothing confirms the
+            // device went back, which is exactly the claim the write tier must not make on faith.
+            // Found in review of #388.
+            return Restoration.Broke(
+                $"UNKNOWN — {name} was commanded and no heartbeat came back to confirm it. The device's state after "
+                + "this run is unobserved.");
         }
 
         return reached == expected

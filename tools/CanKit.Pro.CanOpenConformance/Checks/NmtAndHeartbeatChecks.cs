@@ -451,20 +451,14 @@ internal static class NmtAndHeartbeatChecks
                 // of #388.
                 if (initial is { } restore)
                 {
-                    var command = restore == (byte)NmtState.Operational ? NmtCommand.Start
-                        : restore == (byte)NmtState.Stopped ? NmtCommand.Stop
-                        : NmtCommand.EnterPreOperational;
-                    try
-                    {
-                        await session.Client.SendNmtCommandAsync(command, session.Target, CancellationToken.None).ConfigureAwait(false);
-                        measurements["restored to"] = DescribeState(restore);
-                    }
-                    catch (Exception ex)
-                    {
-                        book.Note("NMT-01 restore", ex);
-                        restoreFailed = true;
-                        measurements["restored to"] = $"FAILED ({ex.GetType().Name}) — the device may be left in a state it was not found in";
-                    }
+                    // Through the same verifying helper PDO-03 and SYN-02 use. This block used to
+                    // send the command and treat a normally completed Task as proof of delivery —
+                    // which it is not, since SendNmtCommandAsync discards the transmit result. One
+                    // restore path verified and this one did not. Found in review of #388.
+                    var restoration = await PdoSyncEmcyChecks.RestoreNmtStateAsync(session, book, "NMT-01", restore)
+                        .ConfigureAwait(false);
+                    measurements["restored to"] = restoration.State;
+                    restoreFailed = !restoration.Succeeded;
                 }
             }
 
