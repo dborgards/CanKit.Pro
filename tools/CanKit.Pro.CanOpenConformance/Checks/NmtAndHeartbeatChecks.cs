@@ -115,6 +115,20 @@ internal static class NmtAndHeartbeatChecks
                 measurements["period (host clock)"] = $"not measurable from {frames.Count} frame(s)";
             }
 
+            // A toggle-zero guarding response carries the bare state and is byte-for-byte a
+            // heartbeat, so it cannot be filtered. What *can* be established is that guarding
+            // traffic is present at all — a toggle-one reply or an RTR poll proves it — and a
+            // heartbeat verdict drawn from the mixture would be a guess dressed as a measurement.
+            if (guardPolls > 0 || guardResponses > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"Another master is node-guarding this device on the same COB-ID ({guardPolls} RTR poll(s), "
+                    + $"{guardResponses} toggle-one response(s)). A guarding response with its toggle bit clear is "
+                    + "byte-for-byte a heartbeat, so the two cannot be separated here and no heartbeat verdict is "
+                    + "drawn. Stop the other master's guarding, or read 100Ch/100Dh instead — see GRD-01.",
+                    Attribution.Setup, measurements);
+            }
+
             var unknown = observed.Where(s => !Enum.IsDefined(typeof(NmtState), s)).ToArray();
             if (unknown.Length > 0)
             {
