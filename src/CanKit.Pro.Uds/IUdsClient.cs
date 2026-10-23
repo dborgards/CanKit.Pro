@@ -192,6 +192,14 @@ public interface IUdsClient : IDisposable
     /// requests through the same request lock; a slow request never causes a stale keep-alive
     /// frame to interleave (SRS FR-UDS-007).
     /// </summary>
+    /// <remarks>
+    /// A TesterPresent that fails -- a timeout, a negative response, a transport error -- is
+    /// dropped and the next one goes out a period later; nothing reports it, and the channel's
+    /// <c>BackgroundExceptionOccurred</c> does not carry it either. A session the ECU has left
+    /// (after a reset, or with S3 run out) therefore shows only in the answer to the next
+    /// request, typically NRC 0x7E or 0x7F. The keep-alive ends without notice when the client
+    /// or its channel is disposed.
+    /// </remarks>
     /// <param name="period">Override for the send interval; must be positive.</param>
     /// <exception cref="InvalidOperationException">A keep-alive is already running; call
     /// <see cref="IDisposable.Dispose"/> on the previous handle first.</exception>

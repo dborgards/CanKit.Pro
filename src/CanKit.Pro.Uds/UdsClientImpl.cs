@@ -1806,9 +1806,12 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                     catch
                     {
                         // Swallow individual failures so a transient hiccup doesn't tear down
-                        // the whole keep-alive; the next tick tries again. Callers who need to
-                        // observe keep-alive failures can subscribe to the underlying channel's
-                        // BackgroundExceptionOccurred instead.
+                        // the whole keep-alive; the next tick tries again. Nothing reports them:
+                        // a UDS timeout or negative response -- 0x7F after an ECU reset, say --
+                        // is dropped here, and the channel's BackgroundExceptionOccurred, which
+                        // the comment here once pointed to, never carries one (#354, U-2). A
+                        // session that died shows only in the next request's own answer. A
+                        // channel disposed underneath ends the loop silently (the catch above).
                     }
                 }
             }
