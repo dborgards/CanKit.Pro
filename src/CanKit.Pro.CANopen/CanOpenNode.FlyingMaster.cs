@@ -53,6 +53,15 @@ internal sealed partial class CanOpenNode
     private TimeSpan? _flyingMasterHeartbeatTimeout;
     private byte? _flyingMasterInstalledWatch;
     private IDeadline? _flyingMasterDeadline;
+    // The continuation that hands the latest cold or forced reset's send outcome to the actor.
+    private Task _resetOutcome = Task.CompletedTask;
+
+    /// <summary>
+    /// Test seam (#359): the continuation that hands the latest cold or forced Reset Communication's
+    /// send outcome back to the actor. It must end without a fault even when the node was disposed
+    /// while the send was held -- the outcome then has no actor left to post to.
+    /// </summary>
+    internal Task ResetOutcomeForTests => System.Threading.Volatile.Read(ref _resetOutcome);
 
     /// <inheritdoc />
     public FlyingMasterRole FlyingMasterRole
@@ -215,11 +224,11 @@ internal sealed partial class CanOpenNode
             _flyingMasterFromPowerOn = false;
             _coldResetPending = true;
             var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
-            _ = sent.ContinueWith(
+            System.Threading.Volatile.Write(ref _resetOutcome, sent.ContinueWith(
                 PostColdResetOutcome,
                 System.Threading.CancellationToken.None,
                 System.Threading.Tasks.TaskContinuationOptions.None,
-                System.Threading.Tasks.TaskScheduler.Default);
+                System.Threading.Tasks.TaskScheduler.Default));
             return;
         }
         BeginNegotiation(transmitTrigger: true);
@@ -377,11 +386,11 @@ internal sealed partial class CanOpenNode
             _confirmingActiveMaster = false;
             _coldResetPending = true;
             var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
-            _ = sent.ContinueWith(
+            System.Threading.Volatile.Write(ref _resetOutcome, sent.ContinueWith(
                 PostForcedResetOutcome,
                 System.Threading.CancellationToken.None,
                 System.Threading.Tasks.TaskContinuationOptions.None,
-                System.Threading.Tasks.TaskScheduler.Default);
+                System.Threading.Tasks.TaskScheduler.Default));
             return;
         }
         BeginFlyingMaster();
