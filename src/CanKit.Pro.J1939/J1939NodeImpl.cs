@@ -378,8 +378,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
             if (!inFlight.Tcs.Task.IsCompleted)
             {
                 ctr.Dispose();
-                tcs.TrySetException(new InvalidOperationException(
-                    $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
+                // The automatic move after an unseat hands out no task and takes no token, so
+                // "await it, or cancel it" is advice its caller cannot follow; what it can do is
+                // wait for the move's outcome (#355, J-5).
+                tcs.TrySetException(new InvalidOperationException(ReferenceEquals(inFlight.Tcs, _unattendedClaim)
+                    ? $"The node is moving to SA 0x{inFlight.PreferredAddress:X2} on its own after losing its address; nothing awaits that claim, so wait for AddressClaimChanged to report its outcome before claiming again."
+                    : $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
                 return;
             }
             _pendingClaim = null;
@@ -843,6 +847,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     // through AddressClaimChanged like any claim's, and a failure — the field
                     // exhausted, a TX fault — is reported as a background exception.
                     var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _unattendedClaim = tcs;
                     UnattendedClaimReported = tcs.Task.ContinueWith(t => ReportUnattendedClaimFailure(t.Exception!.GetBaseException()),
                         CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
                     // The lost address is the peer's from this instant: invalidated now, so no
@@ -871,6 +876,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
             }
         }
     }
+
+    // The task of the latest automatic move, the one claim no caller holds. Compared by
+    // reference only while that claim is still in hand. Actor-only.
+    private TaskCompletionSource<object?>? _unattendedClaim;
 
     /// <summary>
     /// A seam for tests: the report of the latest automatic round's failure, which runs on the

@@ -92,7 +92,10 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     /// higher-priority NAME and no fallback was available, or to a peer with this node's
     /// own NAME (SAE J1939-81 §4.4.3).</exception>
     /// <exception cref="InvalidOperationException">A claim is still in arbitration: it is
-    /// not silently replaced -- await it, or cancel it, before claiming again (#58).</exception>
+    /// not silently replaced -- await it, or cancel it, before claiming again (#58). The move
+    /// an arbitrary-address node makes on its own after losing a claimed address is such a
+    /// claim too, but nothing awaits it and no token cancels it: wait for
+    /// <see cref="AddressClaimChanged"/> to report its outcome before claiming again.</exception>
     Task ClaimAddressAsync(byte preferredAddress, CancellationToken cancellationToken = default);
 
     /// <summary>

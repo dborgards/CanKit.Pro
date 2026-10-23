@@ -1383,6 +1383,48 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         lock (reported) reported.Should().BeEmpty("disposing the node is not a failure of the move it interrupted");
     }
 
+    // #355 (J-5): the automatic move after an unseat is registered as the claim in hand, so a
+    // ClaimAddressAsync meanwhile meets the in-flight guard -- whose advice, "await it, or cancel
+    // it", the application cannot follow: the move hands out no task and takes no token. The
+    // fault says what it can do instead, and the move completes undisturbed. The sibling below
+    // pins the user-initiated case, whose advice stands.
+    [Fact]
+    public async Task A_Claim_During_An_Automatic_Move_Faults_With_Advice_The_Caller_Can_Follow()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x40;
+
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        await ClaimOnClockAsync(owner, clock, actor, contended, announce);
+        var moved = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claimed) moved.TrySetResult(e); };
+
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+
+        Func<Task> claim = () => owner.ClaimAddressAsync(0x90).WithTimeout(ShortTimeout);
+        (await claim.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .Contain("AddressClaimChanged").And.NotContain("await it");
+
+        await clock.AdvanceAsync(backoff);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        (await moved.Task.AsTaskWithTimeout(ShortTimeout)).Address.Should().Be((byte)(0x80),
+            "the move scans the arbitrary field from the address it lost, and the refused claim did not disturb it");
+    }
+
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
     // the in-flight guard -- the claim in hand stays registered through the backoff -- and the
     // re-claim completes for its caller.

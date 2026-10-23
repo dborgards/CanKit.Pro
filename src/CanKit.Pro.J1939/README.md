@@ -31,6 +31,9 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   summed, times 0.6 ms), so two nodes colliding on an address do not answer in
   lockstep; and a second `ClaimAddressAsync` while one is in arbitration faults
   with `InvalidOperationException` rather than silently cancelling the first (#58).
+  That includes the move after a successful claim was lost: no task represents
+  it and no token cancels it, so wait for `AddressClaimChanged` to report where
+  it ended before claiming again.
 - **Request for Address Claimed** (SAE J1939-81 §4.2.2): a Request for PGN
   0xEE00 is answered by the node itself — with its Address Claimed while it
   holds or arbitrates an address, with Cannot Claim while it holds none — so
