@@ -56,6 +56,12 @@ public interface IUdsClient : IDisposable
     /// <see cref="EcuResetAsync"/>. Starts at <see cref="UdsSessionType.Default"/> because
     /// ISO 14229-1 §9.2 guarantees an ECU starts up in the default session.
     /// </summary>
+    /// <remarks>
+    /// Only those two methods move it. A DiagnosticSessionControl or ECUReset sent through
+    /// <see cref="SendRawAsync"/> -- answered, or suppressed (<c>10 83</c>, <c>11 81</c>), which
+    /// the ECU acts on without a word -- changes the ECU's session and leaves this property, and
+    /// the P2/P2* budgets the session's record would have set, as they were (#354).
+    /// </remarks>
     byte CurrentSession { get; }
 
     /// <summary>
@@ -214,6 +220,12 @@ public interface IUdsClient : IDisposable
     /// frame is confirmed, and a negative response the server may still send is not waited for
     /// (#57).
     /// </summary>
+    /// <remarks>
+    /// The request is not interpreted: a session change or reset sent here does not move
+    /// <see cref="CurrentSession"/> or the P2/P2* budgets, whether it is answered or suppressed
+    /// (#354). Use <see cref="DiagnosticSessionControlAsync(byte, CancellationToken)"/> and
+    /// <see cref="EcuResetAsync"/> where the client should follow the session.
+    /// </remarks>
     Task<byte[]> SendRawAsync(ReadOnlyMemory<byte> request,
         CancellationToken cancellationToken = default);
 
