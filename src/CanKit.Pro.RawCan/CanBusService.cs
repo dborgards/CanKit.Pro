@@ -354,7 +354,8 @@ namespace CanKit.Pro.RawCan
             // accepted the frame -- and the peer may already be answering -- before this method
             // runs again, and a reading taken there starts a caller's response deadline late
             // (Codex on #112). ExecuteSynchronously is what observes completion closest; when the
-            // runtime declines to inline it the reading is what it would have been anyway.
+            // runtime declines to inline it, the continuation is queued and the reading is taken one
+            // scheduling hop later -- still no later than resuming this method would take it.
             var stamp = new HandoffStamp(_hostTimestamp);
             var handoffStart = stamp.Now();
             //

@@ -142,9 +142,13 @@ the driver (#294). A frame the driver has been handed goes out; the CanKit 0.5.6
 the token inside their transmit, so the driver call is where a cancellation stops being able to
 hold a frame back.
 
-A confirmation carries two host-monotonic readings that bracket the driver call, taken inside
-the service's send lock: `HostHandoffTimestamp` immediately before it and `HostTransmitTimestamp`
-immediately after. A response deadline starts at the second; whether a received frame can be a
+A confirmation carries two host-monotonic readings that bracket the driver call:
+`HostHandoffTimestamp` immediately before it and `HostTransmitTimestamp` immediately after. On the
+echo path both are taken inside the service's send lock, and a `Timeout` or `BusOff` result
+carries them too, since the driver call returned before the echo wait began. The approximated path
+has no send lock, and its `Timeout` means the driver's asynchronous transmit had not completed, so
+that result carries neither. A `Rejected` result carries neither on either path; a missing reading
+is zero. A response deadline starts at the second; whether a received frame can be a
 response to this transmission at all is decided against the first — the call itself can include
 a peer's answer on an in-process bus, or a completion callback on an asynchronous adapter, so a
 fast reply can be stamped before the second reading (#146, #147).

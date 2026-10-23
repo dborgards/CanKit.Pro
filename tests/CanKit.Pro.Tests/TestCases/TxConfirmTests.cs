@@ -1031,4 +1031,96 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.RaiseObserved(sent, isEcho: true);
         (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
     }
+
+    // #352 (R-3): which results carry the two host stamps is path-dependent, and nothing in RawCan
+    // pinned it -- only UDS and LSS tests consumed the stamps. The service is given a counter as
+    // its host clock, so "before" and "after" are orderings of readings rather than durations,
+    // and the timeouts are tripped through the ArmConfirmTimeout seam rather than waited out.
+    private static CanBusService WithCountingClock(ICanBus bus)
+    {
+        long ticks = 0;
+        return new CanBusService(bus, () => Interlocked.Increment(ref ticks));
+    }
+
+    private static void ShouldBracketTheDriverCall(TxConfirmation result)
+    {
+        result.HostHandoffTimestamp.Should().BePositive("the reading before the driver call is carried");
+        result.HostTransmitTimestamp.Should().BeGreaterThan(result.HostHandoffTimestamp,
+            "the reading after the driver call is taken after the one before it");
+    }
+
+    private static void ShouldCarryNoStamps(TxConfirmation result)
+    {
+        result.HostHandoffTimestamp.Should().Be(0);
+        result.HostTransmitTimestamp.Should().Be(0);
+    }
+
+    // On the echo path the driver call has returned before the echo wait begins, so every result
+    // for an accepted frame -- confirmed, timed out, bus-off -- carries both readings.
+    [Fact]
+    public async Task The_Echo_Path_Stamps_Every_Result_For_A_Frame_The_Driver_Accepted()
+    {
+        using var sender = OpenEcho();
+        using var service = WithCountingClock(sender);
+
+        var confirmed = await service.SendConfirmedAsync(CanFrame.Classic(0x640, new byte[] { 1 }), ShortTimeout);
+        confirmed.Confirmed.Should().BeTrue();
+        ShouldBracketTheDriverCall(confirmed);
+
+        sender.EchoAcceptedFrames = false;
+        service.ArmConfirmTimeout = static (source, _) => source.Cancel();
+        var timedOut = await service.SendConfirmedAsync(CanFrame.Classic(0x641, new byte[] { 2 }), ShortTimeout)
+            .WaitAsync(ShortTimeout);
+        timedOut.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        ShouldBracketTheDriverCall(timedOut);
+
+        service.ArmConfirmTimeout = static (_, _) => { };
+        var outstanding = service.SendConfirmedAsync(CanFrame.Classic(0x642, new byte[] { 3 }), ShortTimeout);
+        sender.BusState = BusState.BusOff;
+        sender.RaiseFault(new InvalidOperationException("simulated bus-off"));
+        var busOff = await outstanding.WaitAsync(ShortTimeout);
+        busOff.FailureReason.Should().Be(TxConfirmFailureReason.BusOff);
+        ShouldBracketTheDriverCall(busOff);
+    }
+
+    [Fact]
+    public async Task The_Echo_Path_Stamps_No_Rejection()
+    {
+        using var sender = OpenEcho();
+        sender.AcceptTransmit = false;
+        using var service = WithCountingClock(sender);
+
+        var rejected = await service.SendConfirmedAsync(CanFrame.Classic(0x643, new byte[] { 1 }), ShortTimeout);
+
+        rejected.FailureReason.Should().Be(TxConfirmFailureReason.Rejected);
+        ShouldCarryNoStamps(rejected);
+    }
+
+    // On the approximated path only a confirmation is stamped: a timeout there means the driver's
+    // asynchronous transmit never completed, so there is no reading after acceptance, and a
+    // rejection carries none either.
+    [Fact]
+    public async Task The_Approximated_Path_Stamps_A_Confirmation_Only()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var service = WithCountingClock(bus);
+
+        var confirmed = await service.SendConfirmedAsync(CanFrame.Classic(0x650, new byte[] { 1 }), ShortTimeout);
+        confirmed.Confirmed.Should().BeTrue();
+        confirmed.IsApproximated.Should().BeTrue();
+        ShouldBracketTheDriverCall(confirmed);
+
+        bus.StallTransmitAsync = true;
+        service.ArmConfirmTimeout = static (source, _) => source.Cancel();
+        var timedOut = await service.SendConfirmedAsync(CanFrame.Classic(0x651, new byte[] { 2 }), ShortTimeout)
+            .WaitAsync(ShortTimeout);
+        bus.ReleaseStalledTransmits();
+        timedOut.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        ShouldCarryNoStamps(timedOut);
+
+        bus.AcceptTransmit = false;
+        var rejected = await service.SendConfirmedAsync(CanFrame.Classic(0x652, new byte[] { 3 }), ShortTimeout);
+        rejected.FailureReason.Should().Be(TxConfirmFailureReason.Rejected);
+        ShouldCarryNoStamps(rejected);
+    }
 }
