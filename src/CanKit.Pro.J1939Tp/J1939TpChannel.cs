@@ -36,12 +36,12 @@ namespace CanKit.Pro.J1939Tp;
 /// <c>(source address, kind)</c>: at most one BAM and one CM RX session per peer at any time.
 /// </para>
 /// <para>
-/// TX sessions are keyed by <c>(destination address, PGN)</c>: we are the initiator, so we
-/// only allow one outbound TP.CM per (dst, PGN) but do not restrict *ourselves* from opening
-/// two TP.CM sessions to two different destinations -- the peer at each destination sees only
-/// one connection from us and remains within its own §5.10.3 quota. Any number of concurrent
-/// TX sessions with distinct (dst, PGN) tuples therefore runs in parallel without interfering
-/// (FR-TP-034/035).
+/// TX sessions are keyed by <c>(destination address, PGN)</c>, and at most one runs per
+/// destination at a time: TP.DT carries no PGN, so a receiver could not tell two sessions from us
+/// apart, and §5.10.3 allows one CM connection per (SA, DA) pair and one BAM per source (#32).
+/// A send to a busy destination waits in <see cref="_txQueues"/>; a second send for a key already
+/// pending is refused. Sessions to different destinations -- and with them TP.CM to several
+/// peers alongside one BAM -- run in parallel without interfering (FR-TP-034/035).
 /// </para>
 /// </summary>
 internal sealed class J1939TpChannel : IJ1939TpChannel
@@ -79,6 +79,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // leaves in O(1): a list would shift every remaining entry per send drained (#204).
     private readonly Dictionary<TxCompletion, LinkedListNode<PendingTx>> _queuedNodes = new();
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
+    // CM sends cancelled while their RTS was still unconfirmed, by destination. Their Connection
+    // Abort waits for that confirmation, so it cannot overtake the RTS it ends, and the
+    // destination stays taken until the abort has been handed to the service, so the RTS of a
+    // send queued behind it cannot be handed over first (#356, T-7; Codex on #390). Actor-loop
+    // state.
+    private readonly Dictionary<byte, TxSession> _abortsAwaitingRts = new();
 
     // Sends admitted per destination and not yet completed: posted to the actor and not yet run,
     // waiting in _txQueues, or on the wire. Unlike the maps above this is touched from callers'
@@ -228,6 +234,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (destinationAddress == J1939Pgn.GlobalAddress)
             throw new ArgumentOutOfRangeException(nameof(destinationAddress),
                 "TP.CM requires a specific destination address; use SendBamAsync for broadcasts.");
+        // The reader drops every frame from this channel's own source address (RunReaderAsync),
+        // so a session with itself could never be answered and would only end on T3 (#356).
+        if (destinationAddress == _sourceAddress)
+            throw new ArgumentOutOfRangeException(nameof(destinationAddress), destinationAddress,
+                $"TP.CM to the channel's own source address 0x{_sourceAddress:X2} can never be answered.");
         ValidateSendPayload(pgn, payload.Length);
 
         var key = new TxSessionKey(destinationAddress, pgn);
@@ -347,13 +358,27 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             session.Deadline?.Dispose();
             session.Deadline = null;
+            if (session.IsCm && !session.RtsSettled)
+            {
+                // The RTS has not been confirmed yet, so it may not have reached the driver: every
+                // frame goes out from its own pool work item, and an abort queued now could
+                // overtake it -- a peer that sees Abort, then RTS, holds a session nobody serves
+                // for T2 (#356, T-7). The abort goes out from the RTS's confirmation instead
+                // (OnRtsSettled). The send is cancelled now; the destination stays taken until
+                // the abort has been handed to the service, so a queued send cannot hand its RTS
+                // over ahead of it.
+                tcs.TrySetCanceled(token);
+                _txSessions.Remove(key);
+                session.AbortAwaitingRts = true;
+                _abortsAwaitingRts[key.DestinationAddress] = session;
+                return;
+            }
             if (session.IsCm)
             {
                 // Peer already has (or is about to have) an open CM session with us — tell it to
                 // tear down. Reason 2 ("resources needed for another task") is the closest
                 // standard code for an application-initiated local cancel.
-                SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn, SentRole(J1939TpAbortRole.Originator)),
-                    destinationAddress: key.DestinationAddress);
+                SendTpCm(CancelAbort(key), destinationAddress: key.DestinationAddress);
             }
             // Complete with the caller's token (do not go through TxSession.Cancel, which would
             // TrySetCanceled() without the token and win the race against this call).
@@ -367,6 +392,32 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // MaxQueuedSendsPerDestination; cancel-then-resend cannot pile entries up.
         RemoveQueued(tcs);
         tcs.TrySetCanceled(token);
+    }
+
+    private byte[] CancelAbort(TxSessionKey key)
+        => J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn, SentRole(J1939TpAbortRole.Originator));
+
+    /// <summary>
+    /// The RTS of <paramref name="session"/> has been confirmed, or has failed: either way it is
+    /// no longer on its way to the driver. An abort that waited for it goes out now, and the
+    /// destination goes to the next send queued for it once the abort has been handed to the
+    /// service: each frame reaches the service from its own pool work item, so starting that send
+    /// in this step could hand its RTS over first (Codex on #390).
+    /// </summary>
+    private void OnRtsSettled(TxSession session)
+    {
+        session.RtsSettled = true;
+        if (!session.AbortAwaitingRts) return;
+        session.AbortAwaitingRts = false;
+        SendTpCm(CancelAbort(session.Key), destinationAddress: session.Key.DestinationAddress,
+            onHandedOff: () => ReleaseAbortedDestination(session));
+    }
+
+    private void ReleaseAbortedDestination(TxSession session)
+    {
+        byte destination = session.Key.DestinationAddress;
+        _abortsAwaitingRts.Remove(destination);
+        StartNextQueued(destination);
     }
 
     /// <inheritdoc />
@@ -489,6 +540,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
         _txQueues.Clear();
         _queuedNodes.Clear();
+        // A cancelled send whose abort still waits for its RTS sends none once the channel is
+        // going down, as no session still in flight gets one either.
+        foreach (var kv in _abortsAwaitingRts)
+            kv.Value.AbortAwaitingRts = false;
+        _abortsAwaitingRts.Clear();
         foreach (var kv in _rxSessions)
             kv.Value.Cancel();
         _rxSessions.Clear();
@@ -691,7 +747,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     SendTpCm(cts, destinationAddress: sa);
                     // T2 covers the gap from CTS → first DT of the block (§5.10.2.4, #31). Not
                     // Tr: that is the 200 ms a node has to *send* its response, not the 1250 ms
-                    // the receiver waits for one.
+                    // the receiver waits for one. Armed as the CTS is handed to the pool, not on
+                    // its TX confirmation, as T3 after an RTS is: a fast originator may answer
+                    // before the confirmation continuation runs. The window therefore includes
+                    // this side's own transmit latency, which can only shorten it.
                     session.ArmT2();
                     break;
                 }
@@ -827,7 +886,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 match.BlockRemaining = block;
                 SendTpCm(J1939TpFrames.BuildCts(block, match.NextExpectedSn, match.Pgn),
                     destinationAddress: sa);
-                // Fresh T2 for the next block's first DT (T1 only runs inside a block).
+                // Fresh T2 for the next block's first DT (T1 only runs inside a block); armed
+                // before the CTS is confirmed, as after the RTS above.
                 match.ArmT2();
             }
         }
@@ -912,7 +972,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             if (kv.Key.DestinationAddress == destinationAddress) return true;
         }
-        return false;
+        return _abortsAwaitingRts.ContainsKey(destinationAddress);
     }
 
     private bool IsQueued(TxSessionKey key)
@@ -960,10 +1020,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             ended.ReleaseSpacingTimer();
             _txSessions.Remove(key);
         }
+        StartNextQueued(key.DestinationAddress);
+    }
+
+    private void StartNextQueued(byte destinationAddress)
+    {
         // A send queued behind the session that just ended starts here, as late as any: past a
         // loss of the address it stays queued, and the retirement that follows fails it.
         if (_disposed != 0 || !SourceAddressHeld
-            || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
+            || !_txQueues.TryGetValue(destinationAddress, out var queue)) return;
         PendingTx? start = null;
         while (start is null && queue.Count > 0)
         {
@@ -975,7 +1040,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // has seen the cancellation; it must not go on the wire.
             if (!next.Tcs.Task.IsCompleted) start = next;
         }
-        if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
+        if (queue.Count == 0) _txQueues.Remove(destinationAddress);
         if (start is not null) StartTx(start.Key, start.Pdu, start.Tcs, start.IsCm);
     }
 
@@ -990,7 +1055,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             var rts = J1939TpFrames.BuildRts(pdu.Length, totalPackets, _options.MaxPacketsPerCts, key.Pgn);
             // Bind the TX session so an RTS TX rejection/timeout fails the send TCS instead of
             // only raising BackgroundExceptionOccurred while leaving the session registered.
-            SendTpCm(rts, destinationAddress: key.DestinationAddress, session);
+            SendTpCm(rts, destinationAddress: key.DestinationAddress, session,
+                onConfirmed: () => OnRtsSettled(session), onFailed: () => OnRtsSettled(session));
             // Now wait for CTS with T3 (initial), per §5.10.2.4. Armed immediately: a fast peer
             // may already have CTS'd before the RTS SendConfirmedAsync continuation runs.
             session.State = TxStage.WaitCts;
@@ -1052,6 +1118,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             return; // stray CTS/EOM for a session we don't have -- drop.
 
         if (!session.IsCm) return; // BAM has no response frames
+        // An answer proves the RTS reached the wire, whether or not its confirmation has run yet.
+        session.RtsSettled = true;
 
         byte control = payload[0];
         if (control == J1939TpFrames.ControlCts)
@@ -1317,6 +1385,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         session.HasPendingCts = false;
         session.PendingCtsIsRetransmit = false;
+        // A hold remembered behind the stashed CTS belonged to the block that just ended; the
+        // stashed grant supersedes it, so the block it starts ends under T3 like any other, not
+        // under a T4 nobody asked for at that point (#356, T-3).
+        session.HoldPending = false;
         session.State = TxStage.SendingDt;
         session.NextSn = session.PendingCtsNextSn;
         session.BlockRemaining = session.PendingCtsNumPackets;
@@ -1365,8 +1437,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         => _options.SendConnectionAbortRole ? role : J1939TpAbortRole.NotAvailable;
 
     private void SendTpCm(byte[] payload, byte destinationAddress, TxSession? session = null,
-        Action? onConfirmed = null)
-        => SendControlFrame(J1939Pgn.TpCm, payload, destinationAddress, session, onConfirmed);
+        Action? onConfirmed = null, Action? onFailed = null, Action? onHandedOff = null)
+        => SendControlFrame(J1939Pgn.TpCm, payload, destinationAddress, session, onConfirmed, onFailed, onHandedOff);
 
     private void FailOrRaiseTx(TxSession? session, Exception ex)
     {
@@ -1383,8 +1455,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
     }
 
+    // onFailed runs on the actor after FailOrRaiseTx when the frame is not confirmed: a step that
+    // must follow the frame whatever became of it. onHandedOff runs on the actor once the service
+    // has been handed the frame (or has refused it by throwing): a frame that must reach the
+    // service before another one does starts the other from there.
     private void SendControlFrame(uint pgn, byte[] payload, byte destinationAddress,
-        TxSession? session, Action? onConfirmed)
+        TxSession? session, Action? onConfirmed, Action? onFailed = null, Action? onHandedOff = null)
     {
         uint canId = J1939Id.ComposePgn(_options.Priority, pgn, _sourceAddress, destinationAddress);
         var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
@@ -1393,7 +1469,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             try
             {
-                var confirmation = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
+                Task<TxConfirmation> sending;
+                try
+                {
+                    sending = _service.SendConfirmedAsync(frame);
+                }
+                finally
+                {
+                    if (onHandedOff is not null)
+                    {
+                        try { _actor.Post(onHandedOff); } catch (ObjectDisposedException) { /* actor gone; nothing to do */ }
+                    }
+                }
+                var confirmation = await sending.ConfigureAwait(false);
                 if (!confirmation.Confirmed)
                 {
                     // TX rejection / timeout at L2 -- surface via the owning session (if any),
@@ -1406,7 +1494,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                         TxConfirmFailureReason.BusOff => new J1939TpException("CAN bus went BusOff during J1939-TP transmission."),
                         _ => new J1939TpException($"J1939-TP frame TX confirmation failed: {confirmation.FailureReason}."),
                     };
-                    _actor.Post(() => FailOrRaiseTx(session, ex));
+                    _actor.Post(() => FailedOnLoop(session, ex, onFailed));
                     return;
                 }
 
@@ -1420,10 +1508,16 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             }
             catch (Exception ex)
             {
-                try { _actor.Post(() => FailOrRaiseTx(session, ex)); }
+                try { _actor.Post(() => FailedOnLoop(session, ex, onFailed)); }
                 catch (ObjectDisposedException) { /* actor gone; nothing to do */ }
             }
         });
+    }
+
+    private void FailedOnLoop(TxSession? session, Exception ex, Action? onFailed)
+    {
+        FailOrRaiseTx(session, ex);
+        onFailed?.Invoke();
     }
 
     // =========================================================================================
@@ -1671,6 +1765,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         /// </summary>
         public bool LastDtQueued { get; set; }
         public byte PendingCtsNextSn { get; set; }
+        /// <summary>The RTS has been confirmed or has failed: it is no longer on its way to the driver.</summary>
+        public bool RtsSettled { get; set; }
+        /// <summary>Cancelled before <see cref="RtsSettled"/>: its Connection Abort goes out when it is.</summary>
+        public bool AbortAwaitingRts { get; set; }
 
         public void ReleaseSpacingTimer()
         {

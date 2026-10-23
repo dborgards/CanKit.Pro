@@ -63,6 +63,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// </summary>
     internal int PeriodicEmissionsCompleted => Volatile.Read(ref _periodicEmissionsCompleted);
 
+    private int _periodicEmissionsStarted;
+
+    /// <summary>
+    /// How many periodic emissions a tick has started. A seam for tests: counted on the actor,
+    /// in the tick itself, so once a test has moved the clock past a tick the count says whether
+    /// that tick started an emission or dropped it -- the emission's own effect on the bus is
+    /// asynchronous and cannot answer "none" without a guess at how long to wait.
+    /// </summary>
+    internal int PeriodicEmissionsStarted => Volatile.Read(ref _periodicEmissionsStarted);
+
     /// <summary>Ticks of <see cref="_time"/> as a <see cref="TimeSpan"/>.</summary>
     private TimeSpan TimeSpanFromTicks(long ticks)
         => TickMath.ElapsedFromTicks(ticks, _time.Frequency);
@@ -77,6 +87,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // after a successful claim we must re-open the channel on the claimed address (Bugbot
     // 3600377721). Mutation of these two fields only happens on the actor loop.
     private IJ1939TpChannel _transport = null!;
+    // False from the moment RebindTransportOnLoop disposes _transport until a new channel is in
+    // place. A failed reopen leaves the disposed channel in the field, still carrying its address,
+    // and the rebind's shortcut must not take it for a live one (#375). Actor loop only.
+    private bool _transportLive = true;
     // Null in production; see the constructor.
     private readonly Func<byte, IJ1939TpChannel>? _openTransport;
     private Task _transportReaderTask = null!;
@@ -106,11 +120,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // A received frame equal to one of them is this node's own echo, whatever address the
     // node holds when the echo is finally processed (#121). Bounded, oldest out: an entry
     // only matters while the echo could still arrive, and a bus that never echoes would
-    // otherwise grow it without end. Written from the send path, read and pruned on the
-    // actor loop. Address Claim / Cannot Claim do not live here: a burst of ordinary sends
+    // otherwise grow it without end. Bounded in time as well, as the claim markers are (#355,
+    // J-1): a send the driver rejected never echoes and drops its entry at once, and any other
+    // outcome lets it match for ClaimEchoGrace after the send returned, measured on the actor's
+    // clock and checked when a frame is matched -- on a bus that does not echo an entry otherwise
+    // waited for 64 newer sends, and swallowed a peer's identical frame under an address the node
+    // had since left. Written from the send path, read and pruned on the actor loop. Address Claim / Cannot Claim do not live here: a burst of ordinary sends
     // would evict one, and the next echo of our own claim would look like a peer with our
     // NAME (#180).
-    private readonly List<(uint CanId, byte[] Payload)> _ownFrames = new();
+    private readonly List<OwnFrame> _ownFrames = new();
     private readonly object _ownFramesGate = new();
     private const int OwnFramesCapacity = 64;
 
@@ -369,8 +387,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
             if (!inFlight.Tcs.Task.IsCompleted)
             {
                 ctr.Dispose();
-                tcs.TrySetException(new InvalidOperationException(
-                    $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
+                // The automatic move after an unseat hands out no task and takes no token, so
+                // "await it, or cancel it" is advice its caller cannot follow; what it can do is
+                // wait for the move's outcome (#355, J-5).
+                tcs.TrySetException(new InvalidOperationException(ReferenceEquals(inFlight.Tcs, _unattendedClaim)
+                    ? $"The node is moving to SA 0x{inFlight.PreferredAddress:X2} on its own after losing its address; nothing awaits that claim, so wait for AddressClaimChanged to report its outcome before claiming again."
+                    : $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
                 return;
             }
             _pendingClaim = null;
@@ -484,7 +506,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _lostClaim = null;
         _cannotClaimsAwaitingHandoff.RemoveAll(waiting => ReferenceEquals(waiting, lost));
         lost.CtRegistration.Dispose();
-        lost.Tcs.TrySetException(new J1939CannotClaimException(lost.PreferredAddress));
+        lost.Tcs.TrySetException(new J1939CannotClaimException(lost.RequestedAddress));
     }
 
     private IDeadline? AfterClaimBackoff(Action onLoop)
@@ -505,7 +527,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             retry.StartRound = null;
             retry.Deadline?.Dispose();
             retry.Deadline = null;
-            BeginClaimRound(candidate, retry.Tcs, retry.CtRegistration, scanStart);
+            BeginClaimRound(candidate, retry.Tcs, retry.CtRegistration, scanStart, retry.RequestedAddress);
         }
         retry.StartRound = Start;
         retry.Deadline = AfterClaimBackoff(Start);
@@ -515,7 +537,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // `preferredAddress` on the actor loop. Unlike BeginClaim it does not cancel the caller's
     // pending claim — the same TCS (and the scan state) is carried across retries.
     private void BeginClaimRound(byte preferredAddress, TaskCompletionSource<object?> tcs,
-        CancellationTokenRegistration ctr, byte? scanStart = null)
+        CancellationTokenRegistration ctr, byte? scanStart = null, byte? requestedAddress = null)
     {
         if (_disposed != 0)
         {
@@ -528,6 +550,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
             ctr.Dispose();
             return;
         }
+
+        // Whether an equal NAME remembered for this address is recent enough to be the race with
+        // this claim (J-7, below) is decided on entry: the state handlers and the transport
+        // rebind that follow run application code and join threads, and either can outlast the
+        // window by itself (Codex on #397).
+        bool equalNameIsRecent = _equalNameHeardOn == preferredAddress
+            && _time.GetTimestamp() - _equalNameHeardAt <= TickMath.ToTicks(_options.ClaimAnnounceTimeout, _time.Frequency);
 
         // Invalidate any previously-claimed address *before* announcing the new preferred SA:
         // application traffic must not race and go out on the old SA while the wire already
@@ -557,6 +586,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         _pendingClaim = new PendingClaim(preferredAddress, tcs, deadline: null, ctr)
         {
             ArbitraryScanStart = scanStart,
+            RequestedAddress = requestedAddress ?? preferredAddress,
         };
         TransmitAddressClaimConfirmed(sourceAddress: preferredAddress);
 
@@ -564,11 +594,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // pending. Their NAME is not lower than ours, so §4.4.3.3 does not have them
         // retransmit it — this round would otherwise finish uncontested. The announce above
         // is what unseats them; the loss here is ours. A value still stored is this address:
-        // one heard on any other address was cleared before the announce.
+        // one heard on any other address was cleared before the announce. Only a recent one,
+        // though: a claim queued behind that frame starts within one announce window, and an
+        // observation older than that is a CA that may long have gone -- it used to make a
+        // claim an hour later lose at once (#355, J-7).
         if (_equalNameHeardOn is not null)
         {
             _equalNameHeardOn = null;
-            LoseEqualNameContest(preferredAddress, _name);
+            if (equalNameIsRecent) LoseEqualNameContest(preferredAddress, _name);
         }
     }
 
@@ -583,19 +616,26 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     // Advances the arbitrary-address scan to the next candidate, wrapping once through the
     // whole field. Records the scan start on first use (via <paramref name="scanStart"/>) and
-    // returns false when the scan would wrap past it again — meaning every address in the
-    // field was contested and FR-J1939-004's Cannot-Claim applies.
+    // returns false when the scan would come back to it — meaning every address in the field
+    // was contested and FR-J1939-004's Cannot-Claim applies. The start is the address just lost
+    // when that lies in the field, since it has already been tried: recording the next
+    // candidate instead had the scan wrap all the way round and claim the lost address a second
+    // time, 121 rounds for a field of 120 (#355, J-6). One outside the field starts the scan at
+    // the first candidate, and every field address is tried once.
     private static bool TryGetNextArbitraryCandidate(byte preferredAddress, ref byte? scanStart,
         out byte next)
     {
         next = NextArbitraryAddress(preferredAddress);
         if (scanStart is null)
         {
-            scanStart = next;
+            scanStart = IsArbitraryAddress(preferredAddress) ? preferredAddress : next;
             return true;
         }
         return next != scanStart.Value;
     }
+
+    private static bool IsArbitraryAddress(byte address)
+        => address >= ArbitraryAddressRangeStart && address <= ArbitraryAddressRangeEnd;
 
     private static byte NextArbitraryAddress(byte current)
     {
@@ -707,7 +747,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 $"J1939 address claim TX failed for SA 0x{preferredAddress:X2}.", error));
     }
 
-    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload, bool isEcho)
+    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload, bool isEcho, long receivedAt)
     {
         if (payload.Length < 8) return; // malformed
         var peerName = J1939Name.FromBytes(payload); // the wire order, not the host's (#55)
@@ -728,7 +768,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // A frame the adapter flags as an echo is one too in Normal mode: Vector Classic delivers
         // its own TX event flagged there (#249). Such a marker is only spent by a flagged frame,
         // so a peer's identical claim, which is never flagged, is still arbitrated.
-        if (TryTakeClaimEcho(canId, payload, isEcho)) return;
+        if (TryTakeClaimEcho(canId, payload, isEcho, receivedAt)) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
         // are in the middle of claiming — in which case a Cannot-Claim cannot contest us
@@ -757,6 +797,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // be queued behind this frame (#168). Remember the address so that claim loses
                 // too; §4.4.3.3 will not make the other CA retransmit an equal NAME for us.
                 _equalNameHeardOn = peerSa;
+                // When the frame arrived, not when the actor got to it: a backlog on the actor
+                // must not make an old observation look recent (Codex on #397).
+                _equalNameHeardAt = receivedAt;
             }
             return;
         }
@@ -790,6 +833,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     var retry = new PendingClaim(nextCandidate, pending.Tcs, deadline: null, pending.CtRegistration)
                     {
                         ArbitraryScanStart = scanStart,
+                        RequestedAddress = pending.RequestedAddress,
                     };
                     BeginClaimRoundAfterBackoff(retry, nextCandidate, scanStart);
                     return;
@@ -834,7 +878,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     // through AddressClaimChanged like any claim's, and a failure — the field
                     // exhausted, a TX fault — is reported as a background exception.
                     var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    _ = tcs.Task.ContinueWith(t => RaiseBackgroundException(t.Exception!.GetBaseException()),
+                    _unattendedClaim = tcs;
+                    UnattendedClaimReported = tcs.Task.ContinueWith(t => ReportUnattendedClaimFailure(t.Exception!.GetBaseException()),
                         CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
                     // The lost address is the peer's from this instant: invalidated now, so no
                     // application traffic goes out under it during the backoff; only the next
@@ -844,7 +889,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     WriteAddress(null);
                     RebindTransportOnLoop(J1939Pgn.NullAddress);
                     SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
-                    var unseated = new PendingClaim(nextCandidate, tcs, deadline: null, default) { ArbitraryScanStart = scanStart };
+                    var unseated = new PendingClaim(nextCandidate, tcs, deadline: null, default)
+                    {
+                        ArbitraryScanStart = scanStart,
+                        RequestedAddress = nextCandidate,
+                    };
                     BeginClaimRoundAfterBackoff(unseated, nextCandidate, scanStart);
                     return;
                 }
@@ -863,12 +912,36 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
+    // The task of the latest automatic move, the one claim no caller holds. Compared by
+    // reference only while that claim is still in hand. Actor-only.
+    private TaskCompletionSource<object?>? _unattendedClaim;
+
+    /// <summary>
+    /// A seam for tests: the report of the latest automatic round's failure, which runs on the
+    /// thread pool once that round faults (and is cancelled, as a continuation, when it does not).
+    /// Awaiting it is how a test knows the report has been made, or deliberately not made.
+    /// </summary>
+    internal Task? UnattendedClaimReported { get; private set; }
+
+    // A disposal ends an automatic round as it ends any claim, with ObjectDisposedException, and
+    // that is not a failure of the round: the application disposed the node, and nothing about
+    // the bus went wrong (#355, J-3). A cancellation never faults this task -- nothing holds a
+    // token for it -- so it needs no exclusion.
+    private void ReportUnattendedClaimFailure(Exception error)
+    {
+        if (error is ObjectDisposedException) return;
+        RaiseBackgroundException(error);
+    }
+
     // Set when an Address Claimed carrying our NAME arrives for an SA we are not claiming or
     // holding, so a claim already queued behind that frame also loses — the other CA will not
     // retransmit an equal NAME. Actor-only. It belongs to that queued race: an unrelated round
     // drops it on the way in, and any round that ends drops whatever arrived during it, so a
     // later claim of the remembered address is not lost to a contender who has gone (#180).
+    // Nor is one that starts more than an announce window after the frame (J-7): the time the
+    // frame arrived, on the actor's clock, is kept beside it.
     private byte? _equalNameHeardOn;
+    private long _equalNameHeardAt;
 
     // WorkMode.Echo is what makes the adapter deliver our own transmit (VirtualBusHub).
     // Without it there is no echo to filter, and an identical frame is the other CA.
@@ -975,7 +1048,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Called directly rather than through Task.Run: SendConfirmedAsync's synchronous part is
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
-        // address scan is 240 of them (#58).
+        // address scan is up to 121 of them, the preferred address and the 120 of the field (#58).
         _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, echo);
     }
 
@@ -996,9 +1069,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 return;
             }
 
-            // Confirmed without an echo of our own to match: a flagged echo, if this adapter
-            // delivers one outside Echo mode, may still follow.
-            if (echo is { FlaggedOnly: true }) NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+            SettleConfirmedClaimEcho(echo);
             try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
@@ -1046,8 +1117,32 @@ internal sealed class J1939NodeImpl : IJ1939Node
         return echo;
     }
 
-    private bool TryTakeClaimEcho(uint canId, byte[] payload, bool isEcho)
+    // Confirmed. Outside Echo mode there was no echo of our own to match: a flagged one, if
+    // this adapter delivers one there, may still follow, and the marker lingers for the grace.
+    // In Echo mode the service has matched the echo, and the same frame normally reaches this
+    // node's subscription too -- but that is a 1024-deep DropOldest buffer, and an echo dropped
+    // there under RX overload left the marker live for ever: the next peer claim with this NAME
+    // on that address was swallowed as the echo, and a lingering sibling re-armed its grace
+    // every second (#355, J-4). It stays matchable for the grace and expires after it, read off
+    // the actor's clock where markers are matched, so a confirmation arms no timer.
+    private void SettleConfirmedClaimEcho(ClaimEcho? echo)
     {
+        if (echo is null) return;
+        if (echo.FlaggedOnly) NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+        else echo.ExpiresAt = TickMath.DueAt(_time.GetTimestamp(), ClaimEchoGrace, _time.Frequency);
+    }
+
+    private bool IsExpired(ClaimEcho echo, long now) => echo.ExpiresAt <= now;
+
+    // Expiry is judged at `receivedAt`, when the reader took the frame off the subscription: an
+    // echo that arrived inside the grace and waited on the actor behind a long handler is still
+    // this node's own, and taking it for a peer with our NAME would lose the address to
+    // ourselves (Codex on #397). Frames are read in order, so a marker expired at this frame's
+    // arrival is expired for every later one too.
+    private bool TryTakeClaimEcho(uint canId, byte[] payload, bool isEcho, long receivedAt)
+    {
+        _claimEchoes.RemoveAll(echo => IsExpired(echo, receivedAt));
+
         // A live send is still waiting for its echo. Prefer that marker over an older one
         // whose confirm already timed out: otherwise the retry's echo is spent on the
         // predecessor, and the predecessor's late echo — or the next real peer — is the
@@ -1143,8 +1238,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private bool HasLiveClaimEcho(ClaimEcho lingering)
     {
+        long now = _time.GetTimestamp();
         return _claimEchoes
-            .Where(other => !ReferenceEquals(other, lingering) && !other.Lingering)
+            .Where(other => !ReferenceEquals(other, lingering) && !other.Lingering && !IsExpired(other, now))
             .Any(other => ClaimEchoMatches(other, lingering.CanId, lingering.Payload));
     }
 
@@ -1160,29 +1256,55 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // node did not send is never mistaken for one (#121). A peer sending the identical frame
     // while ours is outstanding is swallowed once, which on a shared bus is indistinguishable
     // from the echo in any case.
-    private void RecordOwnFrame(uint canId, byte[] payload)
+    private OwnFrame RecordOwnFrame(uint canId, byte[] payload)
     {
+        var entry = new OwnFrame(canId, payload);
         lock (_ownFramesGate)
         {
             if (_ownFrames.Count >= OwnFramesCapacity) _ownFrames.RemoveAt(0);
-            _ownFrames.Add((canId, payload));
+            _ownFrames.Add(entry);
         }
+        return entry;
     }
 
-    private bool TryTakeOwnFrame(uint canId, byte[] payload)
+    // `receivedAt` is when the reader took the frame off the subscription, not when the actor
+    // got to it: an echo that arrived inside the grace is the node's own even if a long handler
+    // held the actor past it (Codex on #397).
+    private bool TryTakeOwnFrame(uint canId, byte[] payload, long receivedAt)
     {
         lock (_ownFramesGate)
         {
             for (int i = 0; i < _ownFrames.Count; i++)
             {
-                var (id, data) = _ownFrames[i];
-                if (id != canId || data.Length != payload.Length) continue;
-                if (!data.AsSpan().SequenceEqual(payload)) continue;
+                var entry = _ownFrames[i];
+                if (entry.ExpiresAt <= receivedAt)
+                {
+                    _ownFrames.RemoveAt(i--);
+                    continue;
+                }
+                if (entry.CanId != canId || entry.Payload.Length != payload.Length) continue;
+                if (!entry.Payload.AsSpan().SequenceEqual(payload)) continue;
                 _ownFrames.RemoveAt(i);
                 return true;
             }
         }
         return false;
+    }
+
+    // Rejected: nothing was handed to the driver, so nothing will echo, and the entry goes now.
+    // Anything else may still echo after SendConfirmedAsync returned -- or, on a bus that does
+    // not echo, never -- and the entry stays matchable for ClaimEchoGrace. By identity: two sends
+    // of the same frame are two entries, and the one a send settles is its own; one its echo
+    // already took is simply not found.
+    private void SettleOwnFrame(OwnFrame entry, bool mayStillEcho)
+    {
+        lock (_ownFramesGate)
+        {
+            if (mayStillEcho)
+                entry.ExpiresAt = TickMath.DueAt(_time.GetTimestamp(), ClaimEchoGrace, _time.Frequency);
+            else
+                _ownFrames.Remove(entry);
+        }
     }
 
     // =========================================================================================
@@ -1243,8 +1365,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
                 using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
                 // Recorded before it is on the wire: the echo may be back before SendConfirmedAsync returns.
-                RecordOwnFrame(canId, payload);
-                var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var entry = RecordOwnFrame(canId, payload);
+                TxConfirmation confirmation;
+                // A throw -- a cancelled wait, a driver fault -- does not say the frame stayed off
+                // the wire; only a rejection does.
+                var mayStillEcho = true;
+                try
+                {
+                    confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    mayStillEcho = ClaimEchoMayFollow(confirmation.FailureReason);
+                }
+                finally
+                {
+                    SettleOwnFrame(entry, mayStillEcho);
+                }
                 if (!confirmation.Confirmed)
                     throw new J1939NodeException(
                         $"J1939 send failed for PGN 0x{message.Pgn:X}: {confirmation.FailureReason}.");
@@ -1369,14 +1503,38 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try
         {
             schedule.Start();
+
+            // Registered once started, so every schedule the teardown finds has a tick to
+            // cancel. The teardown stops every schedule it finds registered; one registered after
+            // the teardown took its list -- a Dispose that began after the check at the top -- is
+            // refused here instead: the flag is set before the teardown is queued, so either that
+            // teardown sees this schedule or this read sees the flag (Codex on #397). Whatever
+            // fails on the way, the schedule is disposed before the failure propagates.
+            lock (_schedulesGate) _schedules.Add(schedule);
+            AfterPeriodicScheduleStarted?.Invoke();
+            if (Volatile.Read(ref _disposed) != 0)
+                throw new ObjectDisposedException(nameof(J1939NodeImpl));
+            return schedule;
         }
         catch
         {
             schedule.Dispose();
             throw;
         }
-        return schedule;
     }
+
+    // Every schedule StartPeriodicSend handed out and its caller has not disposed. The node's
+    // teardown cancels their ticks: an injected actor outlives the node, and a schedule's tick
+    // re-armed on it for ever, each emission failing on the disposed node (#355).
+    private readonly HashSet<PeriodicSchedule> _schedules = new();
+    private readonly object _schedulesGate = new();
+
+    /// <summary>
+    /// A seam for tests, null in production: runs once <see cref="StartPeriodicSend"/> has
+    /// registered and started a schedule and before it checks whether the node was disposed
+    /// meanwhile -- the instant a concurrent Dispose has to land for that check to matter.
+    /// </summary>
+    internal Action? AfterPeriodicScheduleStarted;
 
     // =========================================================================================
     // Wire helpers
@@ -1407,9 +1565,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RaiseBackgroundException(new J1939NodeException(
                     $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
             }
-            else if (echo is { FlaggedOnly: true })
+            else
             {
-                NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+                SettleConfirmedClaimEcho(echo);
             }
         }
         catch (Exception ex)
@@ -1426,6 +1584,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // =========================================================================================
     // Reader loops
     // =========================================================================================
+
+    /// <summary>
+    /// A seam for tests, null in production: runs on the reader once it has taken a frame off the
+    /// subscription and stamped it, before the frame is handed to the actor. A test moves the
+    /// clock here to model a frame that arrived in time and waited on the actor (Codex on #397).
+    /// </summary>
+    internal Action<uint>? AfterFrameRead;
 
     private async Task RunReaderAsync()
     {
@@ -1457,7 +1622,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 var isPdu1 = fields.IsPdu1;
                 var canId = (uint)frame.ID;
                 var isEcho = frameEvent.IsEcho;
-                _actor.Post(() => HandleIncomingFrame(canId, pgn, priority, sa, da, isPdu1, payload, isEcho));
+                var receivedAt = _time.GetTimestamp();
+                AfterFrameRead?.Invoke(canId);
+                _actor.Post(() => HandleIncomingFrame(canId, pgn, priority, sa, da, isPdu1, payload, isEcho, receivedAt));
             }
         }
         catch (OperationCanceledException) { /* expected on Dispose */ }
@@ -1534,7 +1701,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <summary>
     /// Re-open <see cref="_transport"/> on <paramref name="sourceAddress"/>. Must run on the
     /// actor loop (single-writer discipline for <c>_transport</c> / <c>_transportReaderTask</c>).
-    /// A no-op if the current channel already carries the requested SA.
+    /// A no-op if the current channel already carries the requested SA and is still live: one
+    /// left in place by a failed reopen is disposed, carries its old SA all the same, and is
+    /// reopened rather than reported as bound (#375).
     /// </summary>
     /// <remarks>
     /// The previous channel MUST be disposed synchronously on the actor
@@ -1542,9 +1711,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// with opening a fresh channel leaves both TP channels subscribed to the bus at the
     /// same time; broadcast TP.BAM (DA = 0xFF) is accepted by both channels and both fire
     /// reassembled datagrams, so <see cref="MessageReceived"/> sees each multi-frame BAM
-    /// once per surviving channel. Dispose itself only cancels the bus subscription (fast);
-    /// we deliberately do not <c>Wait</c> the old reader on the actor —
-    /// stale posts are filtered by channel identity instead.
+    /// once per surviving channel. The channel's Dispose cancels its bus subscription and
+    /// joins its own reader (up to 2 s) and its own actor (up to 5 s) on this loop --
+    /// milliseconds normally, but it is paid here; we deliberately do not also <c>Wait</c>
+    /// the node's transport reader on the actor -- stale posts are filtered by channel
+    /// identity instead.
     /// If <c>J1939Tp.Open</c> then fails, the exception is surfaced via
     /// <see cref="BackgroundExceptionOccurred"/> — <c>_transport</c> continues to point at
     /// the now-disposed old channel so subsequent TP sends fail loudly rather than
@@ -1559,7 +1730,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         if (Volatile.Read(ref _disposed) != 0) return false;
         var current = _transport;
-        if (current is not null && current.SourceAddress == sourceAddress) return true;
+        if (_transportLive && current.SourceAddress == sourceAddress) return true;
         BeforeTransportRebind?.Invoke();
 
         // Tear down the previous transport BEFORE opening the new one so no window exists
@@ -1569,12 +1740,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // stall the single ProtocolActor for up to ~2 s and block address-claim handling
         //. Late datagrams from the old reader are dropped via the
         // ReferenceEquals(transport, _transport) gate in RunTransportReaderAsync.
-        if (current is not null)
-        {
-            current.BackgroundExceptionOccurred -= OnTransportBackgroundException;
-            try { current.Dispose(); }
-            catch (Exception ex) { RaiseBackgroundException(ex); }
-        }
+        _transportLive = false;
+        current.BackgroundExceptionOccurred -= OnTransportBackgroundException;
+        try { current.Dispose(); }
+        catch (Exception ex) { RaiseBackgroundException(ex); }
 
         IJ1939TpChannel newTransport;
         try
@@ -1594,19 +1763,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         newTransport.BackgroundExceptionOccurred += OnTransportBackgroundException;
         _transport = newTransport;
+        _transportLive = true;
         _transportReaderTask = StartTransportReader(newTransport);
         return true;
     }
 
     private void HandleIncomingFrame(uint canId, uint pgn, byte priority, byte sa, byte da, bool isPdu1, byte[] payload,
-        bool isEcho)
+        bool isEcho, long receivedAt)
     {
         try
         {
             // Address Claim (PGN 0xEE00): drive the state machine and stop; not an application PGN.
             if (J1939Pgn.IsAddressClaim(pgn))
             {
-                HandleIncomingAddressClaim(canId, sa, payload, isEcho);
+                HandleIncomingAddressClaim(canId, sa, payload, isEcho, receivedAt);
                 return;
             }
 
@@ -1637,7 +1807,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // on #140). And the carve-out needs an address to be directed to — while the node
             // holds none, -1 cast to a byte is the global address, and a broadcast echo would
             // read as directed to us (Bugbot on #140).
-            bool ownFrame = TryTakeOwnFrame(canId, payload);
+            bool ownFrame = TryTakeOwnFrame(canId, payload, receivedAt);
             bool directedToUs = myAddr >= 0 && isPdu1 && da == (byte)myAddr;
             if (myAddr >= 0 && sa == (byte)myAddr && !directedToUs) return;
 
@@ -1701,6 +1871,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private bool TryDispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+        if (_actor.IsOnCurrentActor && TryQueueDisposal()) return true;
         try
         {
             DisposeCore();
@@ -1716,56 +1887,176 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
+    // A Dispose called from a callback of the node's actor. That callback may be a handler raised
+    // in the middle of a transition -- AddressClaimChanged for Claiming, before the round has
+    // registered its claim -- so the disposal does not run inside the turn: what the rest of the
+    // turn publishes would outlive the teardown, a claim registered after it never answered
+    // (Codex on #397). The whole disposal is queued behind the turn instead, as one unit, so its
+    // order is the one it has everywhere else (channel before an owned service, Bugbot on #397);
+    // in that clean turn the teardown runs in place. The caller cannot wait for its own actor,
+    // so it returns at once; the disposal completion follows the queued disposal, which a
+    // DisposeAsync from elsewhere then waits for (Codex on #397), and a failure is reported
+    // where background failures go as well, since the caller on the actor never sees it. False
+    // when the actor -- an injected one -- is already gone: then the disposal runs in place.
+    private bool TryQueueDisposal()
+    {
+        Task queued;
+        try
+        {
+            queued = _actor.PostAsync(DisposeCore);
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+        _ = queued.ContinueWith(static (disposal, state) => ((J1939NodeImpl)state!).CompleteQueuedDisposal(disposal),
+            this, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        return true;
+    }
+
+    private void CompleteQueuedDisposal(Task disposal)
+    {
+        if (disposal.Exception is { } failed)
+        {
+            var error = failed.GetBaseException();
+            RaiseBackgroundException(error);
+            _disposalDone.TrySetException(error);
+        }
+        else
+        {
+            _disposalDone.TrySetResult(true);
+        }
+    }
+
     private void DisposeCore()
     {
         try { _readerCts.Cancel(); } catch { }
         _rxInbox.Writer.TryComplete();
 
+        var transportReader = Volatile.Read(ref _transportReaderTask);
         try
         {
-            _actor.Post(() =>
-            {
-                // A loss whose Cannot Claim never got its backoff still answers its caller:
-                // the claim failed, and no dispose makes that less true (Codex on #153).
-                // So does every earlier loss whose send is still in flight: `_lostClaim` only
-                // holds the latest, and tearing the actor down means those handoffs never post.
-                CompleteLostClaim();
-                while (_cannotClaimsAwaitingHandoff.Count > 0)
-                    FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
-                foreach (var grace in _claimEchoGraces)
-                    grace.Dispose();
-                _claimEchoGraces.Clear();
-                _claimEchoes.Clear();
-                var pending = _pendingClaim;
-                if (pending is not null)
-                {
-                    _pendingClaim = null;
-                    pending.Deadline?.Dispose();
-                    pending.CtRegistration.Dispose();
-                    pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939NodeImpl)));
-                }
-            });
+            transportReader = TearDownOnActor();
         }
-        catch (ObjectDisposedException) { /* actor already gone */ }
+        finally
+        {
+            // A channel that throws on Dispose is this disposal's failure, not a reason to leave
+            // the rest running: the subscription, the actor and an owned service are released
+            // all the same before it propagates (Codex and Bugbot on #397).
+            try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* the reader reports its own faults */ }
+            try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* likewise */ }
 
-        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        try { _transportReaderTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            _subscription.Dispose();
+            // An injected actor is not ours to dispose; the handler is, either way.
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
+            _readerCts.Dispose();
+            if (_ownsService) _service.Dispose();
+        }
+    }
 
-        _subscription.Dispose();
+    /// <summary>
+    /// How long a Dispose off the actor waits for the actor to run the teardown: the actor's own
+    /// shutdown bound. A seam for tests of the path where the actor does not get there in time.
+    /// </summary>
+    internal TimeSpan TransportTeardownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// A seam for tests, null in production: runs on the disposing thread once the teardown has
+    /// been handed to the actor and before that thread waits for it. A test holding the actor in
+    /// a rebind (<see cref="BeforeTransportRebind"/>) lets go of it here, which is after the
+    /// teardown is queued behind the rebind (#375).
+    /// </summary>
+    internal Action? AfterTeardownPosted;
+
+    // #375 (J10): the transport is the actor's. RebindTransportOnLoop replaces it there, after
+    // checking _disposed once; a Dispose that read _transport on its own thread while a rebind
+    // that passed that check was still inside the old channel's Dispose tore down the old channel
+    // and left the one the rebind then opened -- its subscription, its reader and its actor --
+    // running for ever. Queued on the actor, the teardown runs after any rebind already there,
+    // and every later rebind sees _disposed. Returns the reader of the channel it tore down.
+    private Task TearDownOnActor()
+    {
+        // On the actor nothing else can be rebinding: this is the actor, in a turn of the
+        // disposal's own (TryQueueDisposal), or one that is past its callbacks already.
+        if (_actor.IsOnCurrentActor) return TearDownOnLoop();
+
+        Task<Task> queued;
+        try
+        {
+            queued = _actor.PostAsync(TearDownOnLoop);
+        }
+        catch (ObjectDisposedException)
+        {
+            // An injected actor its owner already disposed: no rebind can be queued any more. The
+            // claim state went with that actor -- it is actor state, and its loop may still be
+            // draining -- but the channel is the node's own and is not left running.
+            return DisposeVisibleTransport();
+        }
+
+        AfterTeardownPosted?.Invoke();
+        // WaitAny does not throw for a faulted task. A teardown step that threw on the actor is
+        // this disposal's failure, as it was when it threw on this thread, and GetResult throws
+        // it as itself rather than wrapped by the wait.
+        if (Task.WaitAny(new Task[] { queued }, TransportTeardownTimeout) == 0)
+            return queued.GetAwaiter().GetResult();
+
+        // The actor is held by a callback that has not returned within its own shutdown bound.
+        // The channel visible now is disposed from here, as before #375, and the queued teardown
+        // still disposes whichever channel is current once the actor gets to it. Nobody waits
+        // for it any more, so a channel that throws there is reported where background failures
+        // go, not left on a task nobody observes.
+        _ = queued.ContinueWith(static (late, state) => ((J1939NodeImpl)state!).RaiseBackgroundException(late.Exception!.GetBaseException()),
+            this, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        return DisposeVisibleTransport();
+    }
+
+    private Task DisposeVisibleTransport()
+    {
+        Volatile.Read(ref _transport).Dispose();
+        return Volatile.Read(ref _transportReaderTask);
+    }
+
+    // Actor loop. The claim half: a loss whose Cannot Claim never got its backoff still answers
+    // its caller -- the claim failed, and no dispose makes that less true (Codex on #153). So
+    // does every earlier loss whose send is still in flight: `_lostClaim` only holds the latest,
+    // and tearing the actor down means those handoffs never post.
+    private Task TearDownOnLoop()
+    {
+        CompleteLostClaim();
+        while (_cannotClaimsAwaitingHandoff.Count > 0)
+            FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
+        foreach (var grace in _claimEchoGraces)
+            grace.Dispose();
+        _claimEchoGraces.Clear();
+        _claimEchoes.Clear();
+        var pending = _pendingClaim;
+        if (pending is not null)
+        {
+            _pendingClaim = null;
+            pending.Deadline?.Dispose();
+            pending.CtRegistration.Dispose();
+            pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939NodeImpl)));
+        }
+
+        // On the actor, after any tick that was already running: one that re-armed is cancelled
+        // here, and none fires afterwards (Codex on #397).
+        PeriodicSchedule[] schedules;
+        lock (_schedulesGate) schedules = _schedules.ToArray();
+        foreach (var schedule in schedules)
+            schedule.StopTicking();
+
         _transport.Dispose();
-        // An injected actor is not ours to dispose; the handler is, either way.
-        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
-        if (_ownsActor) _actor.Dispose();
-        _readerCts.Dispose();
-        if (_ownsService) _service.Dispose();
+        return _transportReaderTask;
     }
 
     /// <inheritdoc />
     public ValueTask DisposeAsync()
     {
-        // On the actor (a callback of this node) the disposal runs in place: the actor is what
-        // the blocking waits would be waiting on from another thread. Anywhere else it runs on
-        // the thread pool, so the caller's thread is not held for the joins Dispose makes.
+        // On the actor (a callback of this node) the disposal is queued behind the current turn
+        // and not waited for (TryQueueDisposal): the actor cannot wait for itself. Anywhere else
+        // it runs on the thread pool, so the caller's thread is not held for the joins Dispose
+        // makes.
         if (_actor.IsOnCurrentActor)
         {
             var won = TryDispose();
@@ -1807,7 +2098,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     private void OnActorBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
-    private void OnTransportBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
+    // The channel raises a fault -- a reassembly abort, a T1 timeout -- on its own actor. Raised
+    // from there, a handler that disposed the node made that thread wait for the node's actor
+    // to tear the channel down, and tearing it down joins the channel's actor: the thread doing
+    // the waiting (#375). From the node's actor a Dispose tears down in place. A node whose
+    // injected actor is already gone reports it where it arrived.
+    private void OnTransportBackgroundException(object? sender, Exception ex)
+    {
+        try { _actor.Post(() => RaiseBackgroundException(ex)); }
+        catch (ObjectDisposedException) { RaiseBackgroundException(ex); }
+    }
 
     private void ThrowIfDisposed()
     {
@@ -1851,6 +2151,33 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Recorded outside Echo mode: only a frame the adapter flags as an echo may spend it.
         public bool FlaggedOnly { get; init; }
         public IDeadline? Grace { get; set; }
+
+        // On the actor's clock: an Echo-mode marker whose send was confirmed stops matching here
+        // (J-4). Written by the send's continuation, read on the actor.
+        public long ExpiresAt
+        {
+            get => Volatile.Read(ref _expiresAt);
+            set => Volatile.Write(ref _expiresAt, value);
+        }
+
+        private long _expiresAt = long.MaxValue;
+    }
+
+    // One application single-frame send in the ledger. Identity, as with ClaimEcho: the grace
+    // of one send retires that send's entry, not an identical later one's.
+    private sealed class OwnFrame
+    {
+        public OwnFrame(uint canId, byte[] payload)
+        {
+            CanId = canId;
+            Payload = payload;
+        }
+
+        public uint CanId { get; }
+        public byte[] Payload { get; }
+
+        // On the actor's clock; unbounded while the send is still outstanding. Under the gate.
+        public long ExpiresAt { get; set; } = long.MaxValue;
     }
 
     private sealed class PendingClaim
@@ -1865,13 +2192,22 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
 
         public byte PreferredAddress { get; }
+
+        /// <summary>
+        /// The address the claim set out for -- the caller's preferred address, or the first
+        /// candidate of an automatic move -- which <see cref="PreferredAddress"/> stops being
+        /// once an arbitrary-address scan moves on. <see cref="J1939CannotClaimException"/>
+        /// reports this one: it documents the address the caller originally requested.
+        /// </summary>
+        public byte RequestedAddress { get; init; }
         public TaskCompletionSource<object?> Tcs { get; }
         public IDeadline? Deadline { get; set; }
         public CancellationTokenRegistration CtRegistration { get; }
 
-        /// <summary>First candidate of the ongoing arbitrary-address scan (FR-J1939-004);
-        /// null while no fallback round has run yet. Carried across retries via
-        /// <c>BeginClaimRound</c>.</summary>
+        /// <summary>Where the ongoing arbitrary-address scan started (FR-J1939-004): the lost
+        /// address when it lies in the field, the first candidate otherwise; the scan ends when
+        /// it comes back to it. Null while no fallback round has run yet. Carried across
+        /// retries via <c>BeginClaimRound</c>.</summary>
         public byte? ArbitraryScanStart { get; set; }
         /// <summary>
         /// The round waits the §4.4.4.3 backoff and has announced nothing yet; <see cref="Deadline"/>
@@ -1949,6 +2285,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // dropped rather than queued.
             if (Interlocked.CompareExchange(ref _sendInFlight, 1, 0) == 0)
             {
+                Interlocked.Increment(ref _owner._periodicEmissionsStarted);
                 _sendTask = Task.Run(async () =>
                 {
                     try
@@ -1990,17 +2327,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
             } while (_nextAnchorTicks <= now);
 
             var delay = _owner.TimeSpanFromTicks(_nextAnchorTicks - now);
-            var tick = _tick;
-            if (tick is null || !tick.Rearm(delay))
-            {
-                tick?.Dispose();
-                _tick = _owner._deadlines.Arm(delay, OnTick);
-            }
+            // Called from the tick that just fired. That deadline has resolved, and Deadline.Rearm
+            // refuses one that has left Pending, so the next tick is always a new deadline: the
+            // re-arm attempt this replaced could never succeed (#355, J-8).
+            _tick = _owner._deadlines.Arm(delay, OnTick);
         }
+
+        // Actor loop, from the node's teardown: the tick goes, the handle stays the caller's. A
+        // schedule is registered only once Start has armed its first tick, so there is one.
+        public void StopTicking() => Volatile.Read(ref _tick)!.Dispose();
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            lock (_owner._schedulesGate) _owner._schedules.Remove(this);
             try { _tick?.Dispose(); } catch { }
             try { _cts.Cancel(); }
             catch (Exception ex) when (ex is AggregateException or ObjectDisposedException) { /* a callback threw, or the emission that ended first released it */ }

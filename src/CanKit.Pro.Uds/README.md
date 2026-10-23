@@ -64,12 +64,16 @@ await uds.SecurityAccessAsync(
 
 // One-shot download (FR-UDS-012): negotiate maxNumberOfBlockLength, chunk the payload,
 // walk the block-sequence counter (0x01..0xFF, wraps to 0x00), close with RequestTransferExit.
+// Uncompressed and unencrypted (DFI 0x00), memorySize must be the payload's length: a
+// mismatch is refused before RequestDownload.
+byte[] firmware = File.ReadAllBytes("app.bin");
+int size = firmware.Length;
 await uds.DownloadAsync(
     dataFormatIdentifier: 0x00,                            // no compression / no encryption
     addressAndLengthFormatIdentifier: 0x44,                // 4-byte address, 4-byte size
     memoryAddress: new byte[] { 0x00, 0x10, 0x00, 0x00 },
-    memorySize:    new byte[] { 0x00, 0x00, 0x02, 0x00 }, // 512 bytes
-    data: firmwareChunk);
+    memorySize:    new[] { (byte)(size >> 24), (byte)(size >> 16), (byte)(size >> 8), (byte)size },
+    data: firmware);
 ```
 
 ## Design notes
@@ -137,7 +141,9 @@ await uds.DownloadAsync(
   memory address and size), or a negative response naming the service; for a service whose
   positive response echoes nothing of the request (0x14, 0x23, 0x34, 0x35, 0x37, 0x84) the
   service identifier is the whole correlation, and another tester's answer to the same
-  service inside the window is not told apart. Calls run one at a time. Every send starts a listener for its service
+  service inside the window is not told apart. An NRC 0x78 in the window is returned as a
+  negative response like any other, although that ECU's final answer is still to come; filter
+  `NegativeResponseCode == 0x78` out when counting refusals. Calls run one at a time. Every send starts a listener for its service
   that stays up for the ECUs' P2 (`Create`'s `responseWindow`, default P2) and moves the
   window out by P2* (`responsePendingWindow`, default P2*) on each NRC 0x78 it hears, so
   nothing in the window goes unobserved — a suppressed send included — and a call for that
@@ -145,15 +151,21 @@ await uds.DownloadAsync(
   earlier request as its own. A read for more than one DID is refused, a Single Frame holding
   no more. The keep-alive to everyone is `TesterPresentAsync()` (`3E 80`, not collected for)
   (#57).
-* `Dispose` waits up to five seconds for a request in flight to release the request lock; a
-  holder that outlasts the wait keeps an undisposed semaphore, so its eventual release does not
-  throw into an operation that was merely slow (#57).
+* `Dispose` cancels the request in flight and the keep-alive, then waits up to five seconds for
+  the keep-alive loop to end and up to five more for the request to release the request lock —
+  ten in all where both outlast the cancellation. A holder that outlasts the wait keeps an
+  undisposed semaphore, so its eventual release does not throw into an operation that was
+  merely slow (#57). `await uds.DisposeAsync()` (`UdsClientExtensions`) does the same without
+  holding a thread while it waits (#271).
 * `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
   *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
   answer a key for that seed with NRC 0x24.
-* Transport-layer failures (ISO-TP timeout, overflow, WFTmax, etc.) are re-thrown as their
-  original `IsoTpException` subclasses so callers can distinguish "ECU said no" from "wire
-  broken".
+* Transport-layer failures are re-thrown as they are, never wrapped: the ISO-TP protocol errors
+  (timeout, overflow, WFTmax, etc.) as their `IsoTpException` subclasses, so callers can tell
+  "ECU said no" from "wire broken". A channel disposed during a send surfaces
+  `ObjectDisposedException`, one disposed during a receive `InvalidOperationException`, and a
+  failed driver call the bus layer's own exception; those are not `IsoTpException`s
+  (`UdsException` says the same).
 
 ## Documentation
 

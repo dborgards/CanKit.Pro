@@ -46,7 +46,8 @@ package is pulled in.
 
 ## Build- and test-only dependencies
 
-These never reach a consumer's application: they are `PrivateAssets`/test-project references.
+These never reach a consumer's application: they are `PrivateAssets`/test-project references,
+local dotnet tools, or part of the website and release tooling.
 
 | Package | License |
 | --- | --- |
@@ -55,7 +56,14 @@ These never reach a consumer's application: they are `PrivateAssets`/test-projec
 | [Microsoft.NET.Test.Sdk](https://github.com/microsoft/vstest) | MIT |
 | [AwesomeAssertions](https://github.com/AwesomeAssertions/AwesomeAssertions) | Apache-2.0 |
 | [coverlet.collector](https://github.com/coverlet-coverage/coverlet) | MIT |
+| [Polyfill](https://github.com/SimonCropp/Polyfill) (source-only; BCL APIs for `netstandard2.0`/`net48`) | MIT |
+| [PublicApiGenerator](https://github.com/PublicApiGenerator/PublicApiGenerator) (public-API approval tests) | MIT |
+| [CycloneDX](https://github.com/CycloneDX/cyclonedx-dotnet) (`cyclonedx`, a local dotnet tool; generates the SBOMs) | Apache-2.0 |
+| [DefaultDocumentation](https://github.com/Doraku/DefaultDocumentation) (`defaultdocumentation.console`, a local dotnet tool; renders the API reference) | MIT-0 |
 | [semantic-release](https://github.com/semantic-release/semantic-release) and plugins | MIT |
+| [MkDocs](https://github.com/mkdocs/mkdocs) | BSD-2-Clause |
+| [mkdocs-material](https://github.com/squidfunk/mkdocs-material), [mkdocs-literate-nav](https://github.com/oprypin/mkdocs-literate-nav) (the project website) | MIT |
+| [PyYAML](https://github.com/yaml/pyyaml) (label sync) | MIT |
 
 > AwesomeAssertions is used instead of FluentAssertions on purpose: from 8.0.0 FluentAssertions is
 > published under the Xceed commercial license. See the comment in `Directory.Packages.props`.

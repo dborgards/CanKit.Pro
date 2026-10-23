@@ -35,7 +35,7 @@ public sealed class UdsFunctionalClient : IDisposable
     // already share, so the same advance ends both (#171). Not disposed here.
     private readonly ProtocolActor? _clock;
     private readonly ITimeSource _time;
-    private readonly SuppressedResponseWindows _openWindows = new();
+    private readonly SuppressedResponseWindows _openWindows;
     // Per service: the standing subscription that hears the window out, and the task reading it.
     private readonly Dictionary<byte, (IsoTpFunctionalListener Ears, Task Run)> _listeners = new();
     // The services with a send in flight, with the 0x78 arrivals heard for them meanwhile:
@@ -81,9 +81,10 @@ public sealed class UdsFunctionalClient : IDisposable
     }
 
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan responseWindow,
-        TimeSpan responsePendingWindow, ProtocolActor? clock)
+        TimeSpan responsePendingWindow, ProtocolActor? clock, int maxPendingExtensions)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        _openWindows = new SuppressedResponseWindows(maxPendingExtensions);
         _clock = clock;
         _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
         // Bounded above as a collection window is: a listener collecting for longer than a
@@ -107,6 +108,9 @@ public sealed class UdsFunctionalClient : IDisposable
     /// window simply ended sooner; <paramref name="responsePendingWindow"/> is what an NRC 0x78
     /// seen in that time extends it by -- P2*. The defaults are
     /// <see cref="UdsClientOptions.DefaultP2"/> and <see cref="UdsClientOptions.DefaultP2Star"/>.
+    /// A window is moved out by at most 100 such 0x78s -- the default of
+    /// <see cref="UdsClientOptions.MaxResponsePendingCount"/> -- so a peer that answers 0x78 for
+    /// ever holds the next call for the service up for a bounded time (#354).
     /// </summary>
     public static UdsFunctionalClient Create(IsoTpFunctionalClient client, bool ownsClient = false,
         TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
@@ -119,10 +123,13 @@ public sealed class UdsFunctionalClient : IDisposable
     /// must stamp frames with its time source, or a deadline and an arrival are not comparable.
     /// The actor is not disposed with this client.
     /// </summary>
+    /// <remarks><paramref name="maxPendingExtensions"/> is a test's lever on the bound a
+    /// window's 0x78s are under.</remarks>
     internal static UdsFunctionalClient Create(IsoTpFunctionalClient client, ProtocolActor? clock,
-        bool ownsClient = false, TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
+        bool ownsClient = false, TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null,
+        int maxPendingExtensions = UdsClientOptions.DefaultMaxResponsePendingCount)
         => new(client, ownsClient, responseWindow ?? UdsClientOptions.DefaultP2,
-            responsePendingWindow ?? UdsClientOptions.DefaultP2Star, clock);
+            responsePendingWindow ?? UdsClientOptions.DefaultP2Star, clock, maxPendingExtensions);
 
     /// <summary>The underlying ISO-TP functional client.</summary>
     public IsoTpFunctionalClient Channel => _client;
@@ -143,6 +150,14 @@ public sealed class UdsFunctionalClient : IDisposable
     /// window is attributed to this call. A request with suppressPosRspMsgIndication set is
     /// sent and not collected for: an empty list comes back as soon as the frame is confirmed.
     /// </summary>
+    /// <remarks>
+    /// An NRC 0x78 (requestCorrectlyReceived-ResponsePending) names the service and is returned
+    /// as a negative response like any other: <see cref="UdsFunctionalResponse.IsNegative"/> is
+    /// set although that ECU's final answer is still to come -- after the window, where only
+    /// the listener that moves the next call's wait out hears it. A caller counting refusals
+    /// leaves out the entries whose <see cref="UdsFunctionalResponse.NegativeResponseCode"/> is
+    /// 0x78 (#354).
+    /// </remarks>
     public async Task<IReadOnlyList<UdsFunctionalResponse>> SendRawAsync(ReadOnlyMemory<byte> request,
         TimeSpan window, CancellationToken cancellationToken = default)
     {
@@ -289,7 +304,10 @@ public sealed class UdsFunctionalClient : IDisposable
             // the same frame; the earlier of the two to act moves the window, the later is
             // idle. Only a 0x78 that arrived while the window was open: a collection window
             // longer than P2 may hold one from after it, which revives nothing (Codex on #150).
-            if (IsResponsePending(data, sid) && r.HostArrivalTimestamp >= cutoff)
+            // None of them arrived before the handoff: the ISO-TP collection leaves those out
+            // (IsoTpFunctionalClient.SendAndCollectWithTransmitStampAsync), so the cutoff the
+            // listener applies to what it hears has nothing left to drop here (#354, uds-M6).
+            if (IsResponsePending(data, sid))
                 Extend(sid, r.HostArrivalTimestamp, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }

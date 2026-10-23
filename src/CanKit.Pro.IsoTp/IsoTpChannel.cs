@@ -74,23 +74,21 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // it retains into an inbox that is still open.
     private readonly Channel<RxInboxItem> _pduInbox;
     private volatile Exception? _inboxLost;
-    // Odd while a discard has taken the items it retains out of the inbox and not yet put them
-    // back: a receiver meeting an empty inbox then must not read that as "nothing more to come".
-    // Counted rather than flagged, so that a reader can tell that no discard began or ended
-    // around its own read (TryReceiveWithArrival): every discard adds two.
-    private int _discardSequence;
+    // Every read of the inbox takes this, and a discard holds it from its first read to its last
+    // write-back (#383). A receiver therefore sees the inbox either before the discard or after
+    // it: it cannot take an item the discard is about to drop, take a retained item ahead of one
+    // the discard already holds, or find the inbox empty while the retained items are out of it.
+    // A reader holds it for one TryRead and calls nothing else; the inbox's own TryRead takes a
+    // lock of its own for the same span, so readers are serialised there already.
+    private readonly object _inboxReadGate = new();
+
+    /// <summary>For tests: runs on the actor once a discard holds the inbox, before it reads the
+    /// first item.</summary>
+    internal Action? DiscardDrainStartingObserver { get; set; }
 
     /// <summary>For tests: runs between a discard taking the retained items out of the inbox and
     /// putting them back, on the actor.</summary>
     internal Action? DiscardGapObserver { get; set; }
-
-    /// <summary>For tests: runs in <see cref="TryReceiveWithArrival"/> on the calling thread,
-    /// after the discard count was taken and before the inbox is read.</summary>
-    internal Action? InboxReadStartingObserver { get; set; }
-
-    /// <summary>For tests: runs in <see cref="TryReceiveWithArrival"/> on the calling thread,
-    /// after a read found the inbox empty and before that read is judged.</summary>
-    internal Action? EmptyInboxReadObserver { get; set; }
     private readonly TaskCompletionSource<bool> _inboxLostSignal =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -439,36 +437,22 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// <inheritdoc />
     public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
     {
-        var spin = new SpinWait();
-        while (true)
+        // Under the read gate, so a discard is either wholly before this read or wholly after it
+        // (#383): an empty inbox is then empty, not a discard's retained items out for a moment
+        // (#353, I-3), and an item taken here is one no discard is dropping. A caller on the actor
+        // is not inside a discard, which runs there too, so this cannot wait for itself.
+        RxInboxItem item;
+        bool taken;
+        lock (_inboxReadGate)
+            taken = _pduInbox.Reader.TryRead(out item);
+        if (!taken)
         {
-            var before = Volatile.Read(ref _discardSequence);
-            InboxReadStartingObserver?.Invoke();
-            if (_pduInbox.Reader.TryRead(out var item))
-            {
-                pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
-                return true;
-            }
-
-            EmptyInboxReadObserver?.Invoke();
-
-            // A discard has the items it retains out of the inbox for a moment, on the actor: an
-            // empty inbox then says nothing about what is pending, and "false" would be wrong for
-            // that instant (#353, I-3). An empty read counts only if no discard was in its gap
-            // when it began and none began or ended before it was judged -- a discard that ends
-            // in between has put its items back after the read looked (Bugbot on #376). Anything
-            // else is read again. The gap is a drain and a write-back with no callback in
-            // between, so the spin is short, and it cannot be on this thread: the discard runs on
-            // the actor, and a caller on the actor is not inside it.
-            Thread.MemoryBarrier();
-            if ((before & 1) == 0 && Volatile.Read(ref _discardSequence) == before)
-            {
-                pdu = default;
-                return false;
-            }
-
-            spin.SpinOnce();
+            pdu = default;
+            return false;
         }
+
+        pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
+        return true;
     }
 
     /// <inheritdoc />
@@ -562,9 +546,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // opposite of the reset intent. Items from after it go back in their order; this runs
         // on the inbox's single writer.
         var kept = new List<RxInboxItem>();
-        Interlocked.Increment(ref _discardSequence);
-        try
+        // Held from the first read to the last write-back: a receiver on another thread waits
+        // for both, rather than taking an item from between them (#383).
+        lock (_inboxReadGate)
         {
+            DiscardDrainStartingObserver?.Invoke();
             while (_pduInbox.Reader.TryRead(out var item))
             {
                 // An error item carries the first-frame stamp of the reception it aborted, so an
@@ -579,10 +565,6 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             DiscardGapObserver?.Invoke();
             foreach (var item in kept)
                 _pduInbox.Writer.TryWrite(item);
-        }
-        finally
-        {
-            Interlocked.Increment(ref _discardSequence);
         }
         return discarded;
     }
@@ -612,23 +594,26 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var lossConfirmed = false;
         while (true)
         {
-            // Before any read: a canceled token must not consume a buffered PDU, as the wait on the
-            // token did before this loop existed (and as TryReceiveWithArrival documents).
-            cancellationToken.ThrowIfCancellationRequested();
-            if (_pduInbox.Reader.TryRead(out var item)) return (true, item);
+            // Under the read gate, as in TryReceiveWithArrival: a discard is wholly before or
+            // after this read, so an empty inbox is not a discard's retained items out for a
+            // moment, and an item taken is not one the discard is dropping (#383).
+            RxInboxItem item;
+            bool taken;
+            lock (_inboxReadGate)
+            {
+                // Before any read: a canceled token must not consume a buffered PDU, as the wait
+                // on the token did before this loop existed (and as TryReceiveWithArrival
+                // documents). Checked once the gate is held, not before it: the token can be
+                // cancelled while this waits for a discard (Codex on #394).
+                cancellationToken.ThrowIfCancellationRequested();
+                taken = _pduInbox.Reader.TryRead(out item);
+            }
+            if (taken) return (true, item);
             var lost = _inboxLost;
             if (lost is not null || _inboxClosed)
             {
-                // A discard has the retained items out of the inbox for a moment: wait it out.
-                if ((Volatile.Read(ref _discardSequence) & 1) != 0)
-                {
-                    lossConfirmed = false;
-                    await Task.Yield();
-                    continue;
-                }
-
-                // The empty inbox was read before the flag: a discard that finished in between has
-                // put its items back. Read once more, after the flag, before it counts.
+                // The empty inbox was read before the flag: an item the actor wrote in between is
+                // still ahead of the end. Read once more, after the flag, before it counts.
                 if (!lossConfirmed)
                 {
                     lossConfirmed = true;
