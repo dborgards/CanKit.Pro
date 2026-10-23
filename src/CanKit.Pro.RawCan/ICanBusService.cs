@@ -85,8 +85,15 @@ namespace CanKit.Pro.RawCan
         /// Raised when a caller-supplied subscription filter predicate throws during dispatch
         /// (FR-RAW-023-style fault channel). The failing frame is isolated to that subscription
         /// (delivery to the other subscriptions continues), and the exception is surfaced here
-        /// instead of being silently swallowed. Invoked synchronously on the bus's dispatch
-        /// thread, so handlers must return quickly and must not call back into the service.
+        /// instead of being silently swallowed. For a predicate fault it is invoked synchronously
+        /// on the bus's dispatch thread, so handlers must return quickly and must not call back
+        /// into the service.
+        /// <para>
+        /// Also raised for a failure of the callback, or of the delivery pump, of a
+        /// <see cref="CanBusServiceExtensions.Subscribe(ICanBusService, Action{CanFrameEvent}, Func{CanFrameEvent, bool}, int?, bool, Action{Exception})"/>
+        /// subscription given no <c>onError</c>. That one is invoked on the subscription's
+        /// delivery task, a thread-pool thread, not on the dispatch thread.
+        /// </para>
         /// <para>
         /// Also raised, with the adapter's own exception, whenever the bus reports a fault through
         /// <see cref="ICanBus.FaultOccurred"/>. Under the default <c>CanExceptionPolicy</c> (a lower
