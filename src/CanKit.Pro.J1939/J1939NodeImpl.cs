@@ -2171,12 +2171,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
             } while (_nextAnchorTicks <= now);
 
             var delay = _owner.TimeSpanFromTicks(_nextAnchorTicks - now);
-            var tick = _tick;
-            if (tick is null || !tick.Rearm(delay))
-            {
-                tick?.Dispose();
-                _tick = _owner._deadlines.Arm(delay, OnTick);
-            }
+            // Called from the tick that just fired. That deadline has resolved, and Deadline.Rearm
+            // refuses one that has left Pending, so the next tick is always a new deadline: the
+            // re-arm attempt this replaced could never succeed (#355, J-8).
+            _tick = _owner._deadlines.Arm(delay, OnTick);
         }
 
         public void Dispose()
