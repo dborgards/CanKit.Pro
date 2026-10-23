@@ -1178,7 +1178,10 @@ application") and the safe state a safety controller enters are the device's to 
 
 `CanOpenLss.OpenMaster` is an LSS master (FR-CO-047). It transmits on `7E5h` and receives on
 `7E4h`. Exactly one LSS master may be active in a CANopen network; this type does not police
-other processes. Commands run one at a time. A confirmed service that draws no response within
+other processes. Commands run one at a time. The master may share one `ICanBusService` with a
+node in the same process that runs the LSS slave: it receives frames the adapter flags as this
+host's echo, as the node and discovery do. It only transmits on `7E5h`, so an echo on `7E4h` is
+always a slave's reply and never its own request. A confirmed service that draws no response within
 `LssMasterOptions.ResponseTimeout` throws `LssTimeoutException`. Switch state selective, the
 identify services and the Fastscan reset step treat that silence as "no slave matched".
 

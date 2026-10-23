@@ -30,7 +30,9 @@ public static class CanOpenLss
     /// <summary>
     /// Opens a master on an existing <paramref name="service"/>, shared with other protocols on
     /// the same bus. With <paramref name="leaveOpen"/> <see langword="true"/> (the default)
-    /// disposing the master does not dispose the service.
+    /// disposing the master does not dispose the service. An LSS slave opened on the same service
+    /// with <see cref="CanOpen.OpenNode(ICanBusService, byte, CanOpenNodeOptions?, bool)"/> is heard: the master receives frames the adapter flags as
+    /// this host's echo, which is how such a slave's replies arrive.
     /// </summary>
     public static ILssMaster OpenMaster(ICanBusService service, LssMasterOptions? options = null, bool leaveOpen = true)
     {
@@ -93,12 +95,16 @@ internal sealed partial class LssMaster : ILssMaster
         _time = timers is null ? MonotonicTimeSource.Instance : timers.TimeSource;
         try
         {
+            // Echoes included (L-2, #359): a CanOpenNode LSS slave in this process on the same
+            // bus or service is on the bus too, and an adapter marks its replies as this host's
+            // echoes. The master itself only transmits on 7E5h, so an echo on 7E4h can only be
+            // a slave's reply, never one of the master's own requests.
             _subscription = service.Subscribe(frame =>
             {
                 var can = frame.Frame;
                 return can.FrameKind == CanFrameType.Can20 && !can.IsErrorFrame && !can.IsRemoteFrame
                     && !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
-            });
+            }, includeEcho: true);
         }
         catch
         {
