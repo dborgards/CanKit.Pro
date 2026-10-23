@@ -110,6 +110,11 @@ BREAKING CHANGE: `Frames` is now `Frames(CancellationToken)`. Callers using
 `await foreach (var f in sub.Frames(token))`.
 ```
 
+Make `BREAKING CHANGE:` the **last** footer. The changelog generator takes everything after it, to
+the end of the message, as the note — so a `Co-Authored-By:` or other trailer placed below it is
+printed in the release notes as part of the breaking change (the 1.3.0 entries in `CHANGELOG.md`
+show exactly that). Put such trailers above it.
+
 Types that never release on their own: `docs`, `test`, `chore`, `ci`, `style`, `refactor`. Use
 them honestly — labelling a behaviour change as `refactor` means it ships with no changelog entry
 and no version bump, which is worse than a noisy changelog.
