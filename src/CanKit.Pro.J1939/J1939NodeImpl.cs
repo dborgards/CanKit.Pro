@@ -1665,9 +1665,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// with opening a fresh channel leaves both TP channels subscribed to the bus at the
     /// same time; broadcast TP.BAM (DA = 0xFF) is accepted by both channels and both fire
     /// reassembled datagrams, so <see cref="MessageReceived"/> sees each multi-frame BAM
-    /// once per surviving channel. Dispose itself only cancels the bus subscription (fast);
-    /// we deliberately do not <c>Wait</c> the old reader on the actor —
-    /// stale posts are filtered by channel identity instead.
+    /// once per surviving channel. The channel's Dispose cancels its bus subscription and
+    /// joins its own reader (up to 2 s) and its own actor (up to 5 s) on this loop --
+    /// milliseconds normally, but it is paid here; we deliberately do not also <c>Wait</c>
+    /// the node's transport reader on the actor -- stale posts are filtered by channel
+    /// identity instead.
     /// If <c>J1939Tp.Open</c> then fails, the exception is surfaced via
     /// <see cref="BackgroundExceptionOccurred"/> — <c>_transport</c> continues to point at
     /// the now-disposed old channel so subsequent TP sends fail loudly rather than

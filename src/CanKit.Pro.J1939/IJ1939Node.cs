@@ -22,9 +22,15 @@ namespace CanKit.Pro.J1939;
 /// touches vendor-specific SDKs directly.
 /// </para>
 /// <para>
-/// <see cref="IDisposable.Dispose"/> is thread-safe and idempotent. Disposal cancels any
-/// in-flight <see cref="ClaimAddressAsync"/> or <see cref="SendAsync"/> call and unwinds the
-/// underlying subscriptions and transport channel.
+/// <see cref="IDisposable.Dispose"/> is thread-safe and idempotent. It unwinds the underlying
+/// subscriptions and transport channel and faults an in-flight <see cref="ClaimAddressAsync"/>
+/// with <see cref="ObjectDisposedException"/> -- or, for a claim that has already lost and
+/// still owes its Cannot Claim, with <see cref="J1939CannotClaimException"/>. It does not cancel
+/// an in-flight <see cref="SendAsync"/>: a single-frame send ends as its confirmation does (a
+/// node that owns its bus service disposes that service last, which cancels a confirmation
+/// still awaited there), and a multi-frame send fails with
+/// <see cref="ObjectDisposedException"/> once the transport channel is torn down.
+/// <see cref="ClaimState"/> and <see cref="Address"/> keep the last values they had.
 /// </para>
 /// </remarks>
 public interface IJ1939Node : IDisposable, IAsyncDisposable
