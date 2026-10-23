@@ -267,14 +267,31 @@ internal static class LssAndStoreChecks
                     ["saves autonomously"] = ((capability & 2) != 0).ToString(),
                 };
 
+                // 1011h gets its own try: it sat inside 1010h's catch, so an absent optional
+                // restore object was reported as "the device has no 1010h" and erased a save
+                // capability that had just been measured. Found in review of #388.
                 if (session.MayTransfer(0x1011, 0x01))
                 {
-                    var restore = await session.Client.SdoUploadAsync(session.Target, 0x1011, 0x01, cancellationToken).ConfigureAwait(false);
-                    if (restore.Length == 4)
+                    try
                     {
-                        var restoreCapability = BitConverter.ToUInt32(restore, 0);
-                        measurements["1011h:01"] = $"0x{restoreCapability:X8}";
-                        measurements["restores defaults on command"] = ((restoreCapability & 1) != 0).ToString();
+                        var restore = await session.Client.SdoUploadAsync(session.Target, 0x1011, 0x01, cancellationToken).ConfigureAwait(false);
+                        if (restore.Length == 4)
+                        {
+                            var restoreCapability = BitConverter.ToUInt32(restore, 0);
+                            measurements["1011h:01"] = $"0x{restoreCapability:X8}";
+                            measurements["restores defaults on command"] = ((restoreCapability & 1) != 0).ToString();
+                        }
+                        else
+                        {
+                            measurements["1011h:01"] = $"UNSIGNED32 expected, {restore.Length} byte(s) returned";
+                        }
+                    }
+                    catch (SdoAbortException abort)
+                    {
+                        measurements["1011h:01"] = abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                            or (uint)SdoAbortCode.SubIndexDoesNotExist
+                            ? "absent; restoring defaults is optional in CiA 301"
+                            : $"aborted {IdentityAndSdoChecks.Describe(abort)}";
                     }
                 }
 

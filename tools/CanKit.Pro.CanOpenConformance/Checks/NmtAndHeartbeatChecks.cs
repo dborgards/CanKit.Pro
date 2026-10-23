@@ -52,7 +52,7 @@ internal static class NmtAndHeartbeatChecks
             var cobId = CanOpenCobId.Heartbeat(session.Target);
             using var tap = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
             await tap.ListenAsync(session.Options.HeartbeatWindowMs, cancellationToken).ConfigureAwait(false);
-            var frames = tap.Frames;
+            IReadOnlyList<TappedFrame> frames = tap.Frames;
 
             var measurements = new Dictionary<string, string>
             {
@@ -68,6 +68,14 @@ internal static class NmtAndHeartbeatChecks
                     + "this is the configuration, not a fault; otherwise the device is not producing what it is set to.",
                     Attribution.Device, measurements);
             }
+
+            // Another master's node-guarding poll uses this same COB-ID as a remote frame
+            // (CanOpenNode.NodeGuarding.cs), and its empty payload is not a malformed heartbeat —
+            // it is not the target's traffic at all. Found in review of #388.
+            var guardPolls = frames.Count(f => f.IsRemote);
+            if (guardPolls > 0) measurements["node-guarding RTR polls (another master)"] = guardPolls.ToString(CultureInfo.InvariantCulture);
+            frames = frames.Where(f => !f.IsRemote).ToArray();
+            measurements["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
 
             // The state byte is the whole payload of a heartbeat. A device sending anything else
             // is not sending a heartbeat, whatever the COB-ID says.
@@ -508,15 +516,27 @@ internal static class NmtAndHeartbeatChecks
     /// measurement of a reboot, not of a producer.
     /// </summary>
     private static List<TappedFrame> Heartbeats(IReadOnlyList<TappedFrame> frames)
-        => frames.Where(f => f.Data.Length == 1 && f.Data[0] != (byte)NmtState.Initializing).ToList();
+        => frames.Where(f => !f.IsRemote && f.Data.Length == 1 && f.Data[0] != (byte)NmtState.Initializing).ToList();
 
+    /// <summary>
+    /// The newest NMT state a heartbeat reported, or null when none did. Only 04h, 05h and 7Fh
+    /// count: 00h is a boot-up, a node-guarding response carries the toggle bit in the high bit
+    /// (85h for Operational), and anything else is undefined. An earlier version accepted any
+    /// one-byte payload, so NMT-01 ran on 85h and its cleanup mapped that unrecognised value to
+    /// EnterPreOperational — leaving a device that began Operational out of service. Found in
+    /// review of #388.
+    /// </summary>
     private static byte? LatestState(BusTap tap)
     {
-        var frames = tap.Frames;
+        var frames = Heartbeats(tap.Frames);
         for (var i = frames.Count - 1; i >= 0; i--)
-            if (frames[i].Data.Length == 1) return frames[i].Data[0];
+            if (IsDefinedRunState(frames[i].Data[0])) return frames[i].Data[0];
         return null;
     }
+
+    /// <summary>The three states a heartbeat may report while the node is running.</summary>
+    private static bool IsDefinedRunState(byte state)
+        => state is (byte)NmtState.Stopped or (byte)NmtState.Operational or (byte)NmtState.PreOperational;
 
     internal static string DescribeState(byte state) => state switch
     {

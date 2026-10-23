@@ -93,6 +93,7 @@ internal static class PdoSyncEmcyChecks
             int inStopped;
             int settling;
             var stoppedConfirmed = false;
+            var operationalConfirmed = false;
             Restoration restoration;
             try
             {
@@ -100,6 +101,14 @@ internal static class PdoSyncEmcyChecks
                 // Checking only the first would pass a device that transmits regardless of its NMT
                 // state, which is the failure that matters on a machine being switched off.
                 await session.Client.SendNmtCommandAsync(NmtCommand.Start, session.Target, cancellationToken).ConfigureAwait(false);
+
+                // Confirm Operational before the window that judges it. Stop has been verified
+                // since 932e2d0 and Start was not, so an undelivered Start left a conforming
+                // device legitimately silent and the per-descriptor overdue rule charged it for
+                // that. Found in review of #388.
+                operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, cancellationToken)
+                    .ConfigureAwait(false) == (byte)NmtState.Operational;
+
                 await tap.ListenAsync(session.Options.PdoWindowMs, cancellationToken).ConfigureAwait(false);
                 inOperational = Transmitted(tap).ToArray();
 
@@ -170,7 +179,17 @@ internal static class PdoSyncEmcyChecks
                     measurements);
             }
 
+            measurements["Start confirmed by heartbeat"] = operationalConfirmed.ToString();
             measurements["Stop confirmed by heartbeat"] = stoppedConfirmed.ToString();
+
+            if (!operationalConfirmed)
+            {
+                return Outcome.Inconclusive(
+                    "The device did not report Operational after the NMT Start command, so nothing observed in the "
+                    + "window that followed can be charged to it — a conforming device that never received the Start "
+                    + "is legitimately silent. An adapter dropping the command produces exactly this picture.",
+                    Attribution.Transport, measurements);
+            }
 
             if (!stoppedConfirmed)
             {
