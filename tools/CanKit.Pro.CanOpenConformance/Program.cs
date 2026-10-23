@@ -163,6 +163,18 @@ internal static class Program
             return 2;
         }
 
+        // A background exception from the stack counts. It is recorded in the report and printed,
+        // and the exit code ignored it, so automation could accept a run whose own report names an
+        // internal failure of this repository's code. AnyFailure keeps meaning what its name says
+        // — a check reached Verdict.Fail — and the exit code is the disjunction, because that is
+        // the question the caller is asking: did this run come out clean. Found in review of #388.
+        if (!book.AnyFailure && background.Count > 0)
+        {
+            Console.WriteLine($"No check failed, but {background.Count} background exception(s) came from the stack: "
+                + "exit code 1 rather than 0. They are listed in the report under the errors section.");
+            return 1;
+        }
+
         return book.AnyFailure ? 1 : 0;
     }
 

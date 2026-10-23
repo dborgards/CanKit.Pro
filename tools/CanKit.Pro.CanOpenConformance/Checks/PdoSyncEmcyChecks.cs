@@ -598,10 +598,21 @@ internal static class PdoSyncEmcyChecks
                         + "No SYNC was sent: 080h is the identifier a device without SYNC support would use, and "
                         + "sending on it here would measure the default rather than the device.");
 
-                case SyncCobIdState.Unusable:
+                case SyncCobIdState.Malformed:
                     return Outcome.Fail(
                         "The target's 1005h does not name an identifier this run can send on, so no SYNC was "
                         + $"produced: {syncCobId.Detail} See SYN-01.");
+
+                // Inconclusive, not Fail: nothing was measured about the TPDOs, and the device
+                // did not answer wrongly — it did not answer. Failing it here made SYN-02 the one
+                // place in the run that turned an unresolved read into a device failure, while
+                // SYN-01 reached Inconclusive for the same abort and 1019h's unread prerequisite
+                // is Inconclusive as well. Found in review of #388.
+                case SyncCobIdState.Unresolved:
+                    return Outcome.Inconclusive(
+                        "The target's 1005h would not come back, so which COB-ID its synchronous TPDOs wait on is "
+                        + $"unknown and no SYNC was sent: {syncCobId.Detail} Nothing is concluded about the TPDOs.",
+                        Attribution.Device);
             }
 
             // Extended is constant now: an extended 1005h word is Unusable above, because CiA 301
@@ -819,6 +830,11 @@ internal static class PdoSyncEmcyChecks
                     : id == cobId));
 
             var decoded = new List<string>();
+            // The payloads themselves, reconstructed from the decoded message, so the comparison
+            // below can be between *sets* rather than counts. Byte 0..1 are the error code
+            // little-endian, byte 2 the error register and bytes 3..7 the manufacturer field
+            // (CiA 301 §7.2.7.1), which is exactly what the frame carried.
+            var decodedPayloads = new HashSet<string>(StringComparer.Ordinal);
             void OnEmcy(object? sender, EmcyReceivedEventArgs e)
             {
                 var m = e.Message;
@@ -830,17 +846,53 @@ internal static class PdoSyncEmcyChecks
                 // neighbour. Found in review of #388.
                 if (session.Options.TargetNode is { } only && m.ProducerNodeId != only) return;
 
+                var payload = new byte[8];
+                BitConverter.GetBytes(m.ErrorCode).CopyTo(payload, 0);
+                payload[2] = m.ErrorRegister;
+                m.ManufacturerSpecific.CopyTo(payload, 3);
+
                 lock (decoded)
                 {
                     decoded.Add($"node {m.ProducerNodeId}: error 0x{m.ErrorCode:X4}, register 0x{m.ErrorRegister:X2}, "
                         + $"manufacturer {IdentityAndSdoChecks.Hex(m.ManufacturerSpecific)}");
+                    decodedPayloads.Add(Convert.ToHexString(payload));
                 }
             }
 
             session.Client.EmcyReceived += OnEmcy;
             try
             {
+
                 await tap.ListenAsync(session.Options.ListenMs, cancellationToken).ConfigureAwait(false);
+
+                // The tap and the decoder do not share an instant. A frame arriving near the end
+                // of the window is in the tap's list while the node's actor has not yet raised
+                // EmcyReceived for it, and detaching here threw that decode away — after which
+                // the raw snapshot held a frame the decoder "never" decoded and EMC-01 reported a
+                // stack fault that had not happened. So the window closes for both sides at once:
+                // the handler stays attached until every payload the tap holds has been decoded,
+                // or until a bounded grace runs out.
+                //
+                // The grace is named rather than tuned. What it covers is one hop through the
+                // node's actor queue for a frame already received in this process — microseconds
+                // of work, and on a loaded host the scheduling delay in front of it, which is the
+                // same quantity SettleMs covers elsewhere in this file. Whether it was enough is
+                // recorded, so a report can never present a timeout as a decoder defect without
+                // saying so. Found in review of #388.
+                var pending = Transmitted(tap)
+                    .Select(f => Convert.ToHexString(f.Data))
+                    .ToHashSet(StringComparer.Ordinal);
+                var grace = System.Diagnostics.Stopwatch.StartNew();
+                while (grace.Elapsed.TotalMilliseconds < SettleMs)
+                {
+                    lock (decoded)
+                    {
+                        if (pending.IsSubsetOf(decodedPayloads)) break;
+                    }
+
+                    await Task.Delay(5, cancellationToken).ConfigureAwait(false);
+                }
+
             }
             finally
             {
@@ -893,35 +945,41 @@ internal static class PdoSyncEmcyChecks
                     measurements);
             }
 
-            // Against the number of *distinct* payloads, not against "at least one". One decoded
-            // event used to be enough to pass, so a second, different emergency from the same
-            // target that the stack never decoded was hidden by the first — the decoder loss this
-            // check exists to catch, masked by the evidence that the decoder works. Distinct
-            // rather than total because the stack may legitimately coalesce identical queued
-            // emergencies, and failing that would be a false fault. Found in review of #388.
-            var distinct = frames
-                .Select(f => Convert.ToHexString(f.Data))
-                .Distinct(StringComparer.Ordinal)
-                .Count();
-            measurements["distinct payloads"] = distinct.ToString(CultureInfo.InvariantCulture);
+            // Which payloads, not how many. Counting distinct payloads against the number of
+            // events still passed a run where the stack raised two events for payload A and none
+            // for B: two and two. The question is whether every payload that was on the bus came
+            // back decoded, so the sets are compared. Distinct on both sides because the stack
+            // may legitimately coalesce identical queued emergencies, and failing that would be a
+            // fault the device never caused. Found in review of #388.
+            var rawPayloads = frames.Select(f => Convert.ToHexString(f.Data)).ToHashSet(StringComparer.Ordinal);
+            HashSet<string> seen;
+            lock (decoded) seen = new HashSet<string>(decodedPayloads, StringComparer.Ordinal);
+            var missed = rawPayloads.Except(seen, StringComparer.Ordinal).ToList();
 
-            if (decoded.Count == 0)
-            {
-                return Outcome.ToolFault(
-                    $"{frames.Count} well-formed emergency frame(s) were on the bus and the stack decoded none of them.",
-                    measurements);
-            }
+            measurements["distinct payloads"] = rawPayloads.Count.ToString(CultureInfo.InvariantCulture);
+            measurements["distinct payloads decoded"] = seen.Intersect(rawPayloads, StringComparer.Ordinal).Count()
+                .ToString(CultureInfo.InvariantCulture);
 
-            if (decoded.Count < distinct)
-            {
-                return Outcome.ToolFault(
-                    $"{distinct} distinct emergency payload(s) from node {session.Options.TargetNode} were on the bus "
-                    + $"and the stack raised {decoded.Count} EmcyReceived event(s). The ones it did decode are listed "
-                    + "above; at least one it did not. That is a defect in the stack, not in the device.",
-                    measurements);
-            }
+            if (missed.Count == 0)
+                return Outcome.Pass($"{decoded.Count} emergency object(s) received, every payload decoded.", measurements);
 
-            return Outcome.Pass($"{decoded.Count} emergency object(s) received and decoded.", measurements);
+            // Reached only after the grace above has fully elapsed, because the loop leaves early
+            // exactly when nothing is missing. So this is not the decoder being slower than the
+            // tap, and there is no second verdict for "it might have been": a flag for that was
+            // the same condition as this one, which made this branch unreachable — the check's
+            // whole purpose, dead. Found while mutating the fix in review of #388.
+            //
+            // The grace is stated so the reader can judge it rather than take it: what it covers
+            // is one hop through the node's in-process actor queue for a frame the tap has
+            // already seen, which is microseconds of work plus whatever the host's scheduler adds
+            // in front of it. A frame that reached the tap reached the node's reader too, and a
+            // load spike long enough to exceed this would have delayed the tap as well.
+            measurements["payloads not decoded"] = string.Join(", ", missed.Take(5));
+            measurements["decode grace after the window"] = $"{SettleMs} ms";
+            return Outcome.ToolFault(
+                $"{rawPayloads.Count} distinct emergency payload(s) from node {session.Options.TargetNode} were on "
+                + $"the bus and {missed.Count} of them were never raised as an EmcyReceived event, within the window "
+                + $"and {SettleMs} ms after it. That is a defect in the stack, not in the device.", measurements);
         }).ConfigureAwait(false);
     }
 
@@ -1063,13 +1121,13 @@ internal static class PdoSyncEmcyChecks
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1005, 0x00, cancellationToken).ConfigureAwait(false);
             if (raw.Length != 4)
             {
-                return new SyncCobId(SyncCobIdState.Unusable, 0,
+                return new SyncCobId(SyncCobIdState.Malformed, 0,
                     $"1005h:00 is UNSIGNED32 and the device returned {IdentityAndSdoChecks.Hex(raw)}.");
             }
 
             var (canId, problem) = DecodeSyncCobId(BitConverter.ToUInt32(raw, 0));
             return problem is { } bad
-                ? new SyncCobId(SyncCobIdState.Unusable, 0, bad)
+                ? new SyncCobId(SyncCobIdState.Malformed, 0, bad)
                 : new SyncCobId(SyncCobIdState.Usable, canId, null);
         }
         catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
@@ -1089,7 +1147,7 @@ internal static class PdoSyncEmcyChecks
             // A declared 1005h that will not be read leaves the prerequisite unresolved. Guessing
             // the default here sent every SYNC to the wrong identifier and then failed the
             // device's cyclic TPDOs for silence. Found in review of #388.
-            return new SyncCobId(SyncCobIdState.Unusable, 0,
+            return new SyncCobId(SyncCobIdState.Unresolved, 0,
                 $"1005h:00 is declared and aborted {IdentityAndSdoChecks.Describe(abort)}.");
         }
     }
@@ -1107,8 +1165,17 @@ internal static class PdoSyncEmcyChecks
         /// <summary>The peer-SDO gate refused the pair, so the question was never asked.</summary>
         Blocked,
 
-        /// <summary>The device answered with something no identifier can be taken from.</summary>
-        Unusable,
+        /// <summary>The device answered, and the answer names no identifier — a wrong length, or
+        /// a word CiA 301 does not allow. The device is responsible for that.</summary>
+        Malformed,
+
+        /// <summary>The read did not complete: a timeout, or any abort other than "no such
+        /// object". Nothing is known about the identifier, and nothing is known about the device
+        /// either, so this is not a failure. SYN-01 reaches Inconclusive for the identical abort
+        /// through Checkbook's handler, and 1019h's unread prerequisite is Inconclusive too;
+        /// collapsing this into Malformed made SYN-02 the only place that failed a device for a
+        /// read that never answered. Found in review of #388.</summary>
+        Unresolved,
     }
 
     private readonly record struct SyncCobId(SyncCobIdState State, uint CanId, string? Detail);
