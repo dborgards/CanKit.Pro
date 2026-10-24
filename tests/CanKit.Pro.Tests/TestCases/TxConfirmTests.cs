@@ -902,6 +902,64 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         bus.TransmitCount.Should().Be(1);
     }
 
+    // #430 without #439's deadlock: what Dispose waits for, another send does not. A driver call
+    // that waits on the sending thread for the next frame to go out through the same service --
+    // CanKit.Adapter.Virtual delivers to its peers inside Transmit, and a peer's handler may hold
+    // that delivery -- must not be stalled by the very send it waits for. Here the first driver
+    // call starts a second send on another thread and holds until that send has reached the
+    // driver. ShortTimeout only bounds the hang a serialized hand-off would turn this into.
+    [Fact]
+    public async Task A_Send_Does_Not_Wait_For_Another_Approximated_Handoff_In_Progress()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var service = new CanBusService(bus);
+        Task<TxConfirmation>? second = null;
+        var reachedDriver = false;
+        bus.OnTransmitting = _ =>
+        {
+            bus.OnTransmitting = null;
+            var sender = new Thread(() =>
+                second = service.SendConfirmedAsync(CanFrame.Classic(0x678, new byte[] { 2 }), TimeSpan.FromMinutes(5)))
+            { IsBackground = true };
+            sender.Start();
+            var bound = Stopwatch.StartNew();
+            while (bus.TransmitCount < 2 && sender.IsAlive && bound.Elapsed < ShortTimeout)
+                Thread.Yield();
+            reachedDriver = bus.TransmitCount == 2;
+            sender.Join(ShortTimeout);
+        };
+
+        var first = await service.SendConfirmedAsync(CanFrame.Classic(0x677, new byte[] { 1 }), TimeSpan.FromMinutes(5))
+            .WaitAsync(ShortTimeout);
+
+        reachedDriver.Should().BeTrue("a second send reaches the driver while the first is still inside its driver call");
+        first.Confirmed.Should().BeTrue();
+        second.Should().NotBeNull();
+        (await second!.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
+    }
+
+    // The other half of Dispose waiting for hand-offs in progress: not for the one its own thread
+    // is inside of. A driver that disposes the service from inside its TransmitAsync -- on a
+    // fault, say -- would otherwise wait for a call that cannot return before Dispose does.
+    [Fact]
+    public async Task Dispose_From_Inside_The_Driver_Call_Does_Not_Wait_For_That_Call()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        var service = new CanBusService(bus);
+        bus.OnTransmitting = _ =>
+        {
+            bus.OnTransmitting = null;
+            service.Dispose();
+        };
+
+        var result = await Task.Run(() => service.SendConfirmedAsync(CanFrame.Classic(0x679, new byte[] { 1 }), TimeSpan.FromMinutes(5)))
+            .WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue("the frame was handed over in a driver call that began before Dispose");
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => service.SendConfirmedAsync(CanFrame.Classic(0x679, new byte[] { 2 })));
+    }
+
     // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
     // is the only thing that refuses it; on the echo path the gate check above would as well.
     [Theory]

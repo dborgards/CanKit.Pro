@@ -239,8 +239,11 @@ namespace CanKit.Pro.RawCan
         /// with respect to <see cref="IDisposable.Dispose"/>: once <c>Dispose</c> has returned, no
         /// send's frame is handed to the driver any more, and a send that loses that race fails
         /// with this exception -- on the approximated path since #430, as the echo path always
-        /// did. A send that won it has handed its frame over; if that transmit is still pending,
-        /// <c>Dispose</c> cancels the call as described under <paramref name="cancellationToken"/>.
+        /// did. A send that won it has handed its frame over -- <c>Dispose</c> does not return while
+        /// such a send is still inside the driver call, unless it is called from inside that very
+        /// call -- and if that transmit is still pending, <c>Dispose</c> cancels the call as
+        /// described under <paramref name="cancellationToken"/>. Sends do not wait for each other's
+        /// driver call on the approximated path; only <c>Dispose</c> does.
         /// </exception>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }
