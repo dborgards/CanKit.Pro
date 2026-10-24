@@ -147,6 +147,14 @@ public sealed class LssBitRateDetectionOptions
     /// rate transmits error frames. Turn this off only on a bench where that is acceptable, or
     /// for an adapter that is silent in normal mode and does not report the listen-only mode.
     /// </summary>
+    /// <remarks>
+    /// The check reads the work mode the bus reports, which is the mode the factory asked for;
+    /// whether the controller is actually silent is the adapter's doing. A bus of an adapter
+    /// known to report listen-only without applying it fails as well — on CanKit 0.5.6 that is
+    /// the Kvaser adapter, which never sets the silent output mode (#345). For such an adapter
+    /// CiA 801 §5.2.4 prescribes external hardware that holds the transmit line recessive; with
+    /// it, turning this off makes the search non-reactive again.
+    /// </remarks>
     public bool RequireListenOnly { get; init; } = true;
 
     private static readonly TimeSpan MaxListenWindow = TimeSpan.FromMilliseconds(int.MaxValue);
@@ -226,8 +234,8 @@ public static class LssBitRateDetection
     /// <param name="cancellationToken">Ends the detection with
     /// <see cref="OperationCanceledException"/>; the bus of the probe in progress is disposed.</param>
     /// <exception cref="InvalidOperationException">The factory returned <see langword="null"/>,
-    /// a bus whose work mode is not listen-only while
-    /// <see cref="LssBitRateDetectionOptions.RequireListenOnly"/> holds, or a bus whose
+    /// a bus whose work mode is not listen-only, or whose adapter does not apply listen-only,
+    /// while <see cref="LssBitRateDetectionOptions.RequireListenOnly"/> holds, or a bus whose
     /// nominal bit rate names a rate other than the candidate.</exception>
     public static Task<LssBitRateDetectionResult> DetectAsync(Func<int, ICanBus> openListenOnly,
         LssBitRateDetectionOptions? options = null, CancellationToken cancellationToken = default)
@@ -340,6 +348,27 @@ public static class LssBitRateDetection
         }
     }
 
+    /// <summary>
+    /// The runtime-options types of adapters whose bus reports <see cref="ChannelWorkMode.ListenOnly"/>
+    /// without putting the controller into it.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CanKit.Abstractions.API.Common.IBusRTOptionsConfigurator.WorkMode"/> is the mode the factory asked for: CanKit
+    /// stores it, and each adapter decides whether to apply it. Neither it nor
+    /// <see cref="CanFeature.ListenOnly"/> says whether the controller is silent — in CanKit 0.5.6
+    /// the Kvaser adapter advertises the feature when the channel reports
+    /// <c>canCHANNEL_CAP_SILENT_MODE</c> but never calls <c>canSetBusOutputControl</c> with
+    /// <c>canDRIVER_SILENT</c> (<c>KvaserBus.ApplyConfig</c> applies only the echo mode), so the
+    /// controller stays in normal output (#345). The type of the options is the key, not the type
+    /// of the bus, because a wrapper that forwards <see cref="ICanBus.Options"/> keeps it. An entry
+    /// leaves this list when the CanKit version this library is built against applies the mode
+    /// (<c>docs/upstream-candidates.md</c>); until then a newer CanKit is not assumed to.
+    /// </remarks>
+    private static readonly string[] OptionsOfAdaptersNotApplyingListenOnly =
+    {
+        "CanKit.Adapter.Kvaser.KvaserBusRtConfigurator",
+    };
+
     private static void CheckOpenedAsRequested(ICanBus bus, int candidate, LssBitRateDetectionOptions options)
     {
         var busOptions = bus.Options;
@@ -349,6 +378,22 @@ public static class LssBitRateDetection
                 $"The bus for {candidate} bit/s was opened in {busOptions.WorkMode} mode. CiA 801 §5.2.1 requires " +
                 "listen-only: a controller in another mode disturbs the network at a wrong rate. Open the bus with " +
                 "ChannelWorkMode.ListenOnly, or set RequireListenOnly to false where that is acceptable.");
+        }
+
+        // CiA 801 has no software search for a controller that cannot be made silent: §5.2.1 rules
+        // out testing the network by transmitting, and §5.2.4 leaves such a controller to external
+        // hardware that holds its transmit line recessive, after which Figure 1 runs unchanged. So
+        // a bus that only reports listen-only is refused, not searched another way.
+        var optionsType = busOptions.GetType();
+        if (options.RequireListenOnly && Array.IndexOf(OptionsOfAdaptersNotApplyingListenOnly, optionsType.FullName) >= 0)
+        {
+            throw new InvalidOperationException(
+                $"The bus for {candidate} bit/s reports listen-only, but its adapter ({optionsType.Namespace}) does not " +
+                "put the controller into listen-only mode: it would acknowledge frames at the right rate and transmit " +
+                "error frames at a wrong one. CiA 801 §5.2.1 requires a search that does not disturb the network, and " +
+                "§5.2.4 leaves a controller without a working listen-only mode to external hardware that holds its " +
+                "transmit line recessive. Use an adapter that applies listen-only, or, with that hardware or on a " +
+                "bench where disturbing the network is acceptable, set RequireListenOnly to false.");
         }
 
         // A timing given as a target rate names the rate the factory asked for; one given as

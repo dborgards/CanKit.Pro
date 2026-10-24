@@ -1452,6 +1452,23 @@ it off **and** have your factory open each probe in normal mode — which is rea
 candidate may emit error frames, against §5.2.1. The sample's `detect` verb does exactly this
 under `--allow-non-listen-only`, and is otherwise this call on the command line, with `--demo`.
 
+`RequireListenOnly` can only check what the bus reports, and a CanKit bus reports the work mode
+the factory asked for; whether the controller is silent is up to the adapter. Of the CanKit 0.5.6
+adapters whose listen-only path was read, SocketCAN (on a `#netlink` endpoint), PCAN, Vector, ZLG
+and ControlCAN apply it, and the loopback adapter has no bus to disturb. Vector does so only when
+the port gets init access to the channel: without it (another application owns the channel)
+`VectorBus` skips its whole configuration, rate and output mode included, and only logs a warning,
+so the bus still reports the requested mode and rate. The Kvaser adapter does
+not: it accepts `ListenOnly`, reports it and advertises `CanFeature.ListenOnly`, but never switches
+the controller's output to silent, so a probe would acknowledge frames at the right rate and send
+error frames at a wrong one (#345;
+[upstream candidate](https://github.com/dborgards/CanKit.Pro/blob/main/docs/upstream-candidates.md)).
+While `RequireListenOnly` holds, the detection therefore refuses a Kvaser bus before it listens.
+CiA 801 has no other software method for such a controller — §5.2.1 rules out testing the network
+by transmitting, and §5.2.4 prescribes external hardware that holds the transmit line recessive,
+after which the Figure 1 search runs unchanged. With that hardware, or on a bench where disturbing
+the network is acceptable, turn `RequireListenOnly` off.
+
 The single-dominant-bit timing of §5.2.2, the external AND/OR-gate variant of §5.2.4 for
 controllers without a listen-only mode, and the default fallback bit rate of §5.1 are not built;
 see [Not built](#not-built-and-why).
