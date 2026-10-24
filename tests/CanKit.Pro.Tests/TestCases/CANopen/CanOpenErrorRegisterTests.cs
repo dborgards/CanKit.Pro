@@ -424,5 +424,17 @@ public partial class CanOpenPdoEngineTests
         await Inject(device, Rpdo1, 1, 2, 3, 4);
         await ExpectEmcyAsync(wire, 6, ErrorReset, 0x19);
         device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x19u);
+
+        // Codex and Bugbot on #417: an application EMCY after a dictionary write replaces that
+        // write. The register it leaves in 1001h, the node's bits ORed in, is not the
+        // application's part, and the error reset clears to what the EMCY passed.
+        await Inject(device, Rpdo1, 0x04);
+        await ExpectEmcyAsync(wire, 7, 0x8210, 0x19);
+        device.ObjectDictionary.WriteUnsigned(0x1001, 0, 0x00);
+        await device.SendEmcyAsync(0xFF00, 0x00);
+        await ExpectEmcyAsync(wire, 8, 0xFF00, Communication);
+        await Inject(device, Rpdo1, 1, 2, 3, 4);
+        await ExpectEmcyAsync(wire, 9, ErrorReset, 0x00);
+        device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0u);
     }
 }

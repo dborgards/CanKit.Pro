@@ -586,7 +586,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     WriteErrorRegister((byte)(TakeApplicationErrorRegister() | nodeBits));
                 return Task.CompletedTask;
             }
-            byte application = applicationErrorRegister ?? TakeApplicationErrorRegister();
+            // An application EMCY's register replaces the application's part, a dictionary write
+            // before it included: the write is consumed here, or the next step would take the
+            // register composed below for the application's (Codex and Bugbot on #417).
+            byte application;
+            if (applicationErrorRegister is { } passed)
+            {
+                Interlocked.Exchange(ref _applicationWroteErrorRegister, 0);
+                application = passed;
+            }
+            else
+            {
+                application = TakeApplicationErrorRegister();
+            }
             _applicationErrorRegister = application;
             byte errorRegister = (byte)(application | nodeBits);
             frame[2] = errorRegister;

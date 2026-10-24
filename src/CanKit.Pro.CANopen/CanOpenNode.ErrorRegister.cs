@@ -176,7 +176,8 @@ internal sealed partial class CanOpenNode
     /// node's own makes the value the application's part at the next step of the EMCY chain.</summary>
     private void NoteErrorRegisterWritten(ushort index, byte subindex)
     {
-        if (index == Co.ErrorRegister && subindex == 0x00
+        // 1001h is a VAR: sub-index 00h is its only entry.
+        if (index == Co.ErrorRegister
             && Volatile.Read(ref _errorRegisterWriterThread) != Environment.CurrentManagedThreadId)
             Volatile.Write(ref _applicationWroteErrorRegister, 1);
     }
