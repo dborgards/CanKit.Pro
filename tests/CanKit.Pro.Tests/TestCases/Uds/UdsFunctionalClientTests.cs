@@ -721,6 +721,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilArmed(clock, slice, TimeSpan.Zero);
 
         clock.Clock.Advance(TimeSpan.FromMilliseconds(10));
+        (clock.Clock.Elapsed - t0).Should().BeGreaterThan(p2, "the premise: the 0x78 comes after P2");
         bus.RaiseObserved(pending, isEcho: false); // the 0x78, at t0 + 15 ms: 10 ms after P2
         // The listener's slice ends with the 0x78 in it and, the send still in flight, keeps it
         // for the anchoring; the re-armed slice says it got that far.
