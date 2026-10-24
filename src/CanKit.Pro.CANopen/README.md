@@ -519,8 +519,10 @@ their own mappability and access flags. The final byte is zero-padded. Native 24
 `ObjectDictionary.AddRaw` and EDS/DCF loading; `ReadRaw`/`WriteRaw` retain their exact widths.
 The existing `ReadUnsigned`/`WriteUnsigned` convenience methods remain U8/U16/U32.
 
-**SYNC counter and start value.** The start gate applies to cyclic TPDO types 1..240;
-acyclic TPDOs (0) and synchronous RTR sampling (252) use each accepted SYNC. `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
+**SYNC counter and start value.** The start gate applies to every synchronous TPDO: acyclic (0),
+cyclic (1..240) and synchronous RTR sampling (252). CiA 301 §7.5.2.37 gives the start value to the
+PDO ("The SYNC message of which the counter value equals the SYNC start value shall be regarded as
+the first received SYNC message") and exempts no transmission type. `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
 one-byte counter that starts at 1 and wraps to 1. Boot-up, leaving NMT Stopped, enabling
 the producer and resuming a zero communication period reset it to 1. Only confirmed sends
 advance it; cancellation, rejection and stale queued ticks retain the value. A late
@@ -529,7 +531,9 @@ is rejected with `0800 0022h`, even with the periodic producer disabled. The con
 uses `1019h` to select DLC but ignores its numeric overflow value; an unexpected length
 is ignored and reports EMCY `8240h`. `SyncReceivedEventArgs.Counter` carries the counter.
 TPDO `1800h:06` = 1..240 waits for that counter after entering Operational; the matching
-SYNC is the **first counted SYNC**, so type 3 with start 5 first transmits on counter 7.
+SYNC is the **first counted SYNC**, so type 3 with start 5 first transmits on counter 7. An
+acyclic TPDO triggered before that SYNC goes out on it, and a type-252 TPDO samples first on it:
+an RTR before then has nothing sampled to answer with and is not answered.
 Start 0, or a disabled counter, preserves ordinary counting. The start value cannot
 change while the PDO is valid. RPDO sub-index 6 remains absent as the specification requires.
 
@@ -633,6 +637,29 @@ the entries N names. While the mapping is disabled the slots keep what they held
 may be written in any order, so a slot not yet overwritten does not count against a new one.
 
 ## Error control
+
+**Error register (`1001h`) and error reset.** Every EMCY the node raises itself is a
+communication error (CiA 301 Table 26, `82xxh`) and follows one rule (§7.2.7.1 and Figure 37;
+§7.5.2.2, Table 54): `8210h` for an RPDO, MPDO or SRDO shorter than its mapping, `8230h` for an
+MPDO destination that is not available, `8240h` for a SYNC of the wrong length and `8250h` for an
+RPDO deadline. Each is sent once per error event. While any of them is active the register
+carries bit 4 (communication error) and bit 0, because "The generic error shall be signaled at
+any error situation". An error ends with its cause: a frame that fits, a SYNC of the expected
+length, a destination write that lands, a reception after the deadline, or a reconfiguration of
+the PDO, of `1019h`/`1007h` or of the SRDO; leaving and entering Operational does not end one. When the last one ends, the node sends `0000h` with
+what the register still holds: 0 when nothing else is reported (transition 4, "All errors are
+repaired"), the application's bits otherwise (transition 2). The register passed to
+`SendEmcyAsync` is the application's part, taken when that EMCY is transmitted: a call cancelled
+before then, or a held EMCY a reset discards, changes nothing. A value the application writes to
+`1001h` through `ObjectDictionary` since, or one a device description gives it, is the
+application's part as well. The node ORs its own bits into every EMCY, the
+application's included, and never clears the application's bits, so an application `0000h` sent
+while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
+register of the moment it is sent. Reset Node and Reset Communication end the communication
+errors without an EMCY (transitions 5 and 0) and leave the application's bits in `1001h`. With
+the EMCY switched off (bit 31 of `1014h`) no error is raised, and an error that ends meanwhile
+still clears the bits. Heartbeat, node-guarding and life-guarding timeouts and the CAN
+controller state raise no EMCY (`8110h`–`8140h`); they are events only.
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
@@ -1824,6 +1851,12 @@ Each item names what a caller does about it.
 * **Layer setting services (CiA 305) and CiA 801 bit-rate detection** are new: the LSS master,
   the LSS slave in the node, commissioning, and `LssBitRateDetection` (see
   [Layer setting services](#layer-setting-services-cia-305)).
+* **The node keeps `1001h` for the EMCYs it raises itself** (#379): bits 4 and 0 while an RPDO,
+  MPDO or SRDO length, MPDO destination, SYNC length or RPDO deadline error is active, and EMCY
+  `0000h` when the last one ends ([Error control](#error-control)). An EMCY sent with
+  `SendEmcyAsync` carries those bits too, ORed into the register the application passes.
+* **The SYNC start value (`1800h:06`) gates every synchronous TPDO** (#358), acyclic (`00h`) and
+  RTR-only (`FCh`) included, as CiA 301 §7.5.2.37 says. Before, those two used every SYNC.
 
 ## Install
 

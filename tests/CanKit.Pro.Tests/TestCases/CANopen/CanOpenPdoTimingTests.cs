@@ -104,6 +104,85 @@ public partial class CanOpenPdoEngineTests
         await wire.WaitForCountAsync(Tpdo1, 2);
     }
 
+    // FR-CO-052, #358: §7.5.2.37 gives the start value to the PDO — "The SYNC message of which
+    // the counter value equals the SYNC start value shall be regarded as the first received SYNC
+    // message" — and exempts no synchronous type. Start 5 on counters 1, 2, 3, …: SYNCs 1–4 do not
+    // count, so an acyclic TPDO triggered before them goes out on SYNC 5, type n on the n-th SYNC
+    // from 5 on, and an FCh TPDO has nothing sampled until SYNC 5, so its RTRs before then go
+    // unanswered. TPDO2 (type 01h, start 0) is the per-SYNC ordering witness; an RTR sent after
+    // SYNC k is witnessed by TPDO2's frame for SYNC k + 1. Frame-driven, on the virtual clock.
+    [Theory]
+    [InlineData(CanOpenTransmissionType.SynchronousAcyclic)]
+    [InlineData(CanOpenTransmissionType.SynchronousEverySync)]
+    [InlineData(CanOpenTransmissionType.SynchronousCyclicMax)]
+    [InlineData(CanOpenTransmissionType.RtrOnlySynchronous)]
+    public async Task Sync_Start_Gates_Every_Synchronous_Transmission_Type(byte type)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var device = OpenClocked(bus, Device, clock);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2000, 0, 42);
+        od.AddU8(0x2001, 0, 1);
+        od.WriteUnsigned(0x1019, 0, 8);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0, 8), TpdoTransmission.Synchronous);
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0, 8), TpdoTransmission.Synchronous);
+        SetSyncStart(device, 5, type);
+        await StartAsync(wire, device);
+        if (type == CanOpenTransmissionType.SynchronousAcyclic) await device.TriggerTpdoAsync(1);
+
+        bool rtr = type == CanOpenTransmissionType.RtrOnlySynchronous;
+        int first = 4 + (type is CanOpenTransmissionType.SynchronousAcyclic or CanOpenTransmissionType.RtrOnlySynchronous ? 1 : type);
+        for (int k = 1; k <= first; k++)
+        {
+            wire.Transmit(CanOpenCobId.Sync, new[] { (byte)((k - 1) % 8 + 1) });
+            await wire.WaitForCountAsync(Tpdo2, k);
+            if (k < first || rtr)
+                wire.Count(Tpdo1).Should().Be(0, "SYNC {0} (counter {1}) is before the first counted SYNC, or answers no RTR", k, (k - 1) % 8 + 1);
+            if (rtr) wire.SendRtr(Tpdo1);
+        }
+        await wire.WaitForCountAsync(Tpdo1, 1);
+        wire.Payloads(Tpdo1)[0].Should().Equal(42);
+    }
+
+    // Codex on #417: a new 1019h arms the start gate again; an FCh sample taken before it is not
+    // the new first counted SYNC's, so an RTR is not answered from it until the start SYNC.
+    [Fact]
+    public async Task Rearming_The_Sync_Start_Gate_Discards_The_Rtr_Sample()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        using var device = OpenClocked(bus, Device, new ManualTimeSource());
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2000, 0, 42);
+        od.AddU8(0x2001, 0, 1);
+        od.WriteUnsigned(0x1019, 0, 8);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0, 8), TpdoTransmission.Synchronous);
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0, 8), TpdoTransmission.Synchronous);
+        SetSyncStart(device, 5, CanOpenTransmissionType.RtrOnlySynchronous);
+        await StartAsync(wire, device);
+        wire.Transmit(CanOpenCobId.Sync, new byte[] { 5 });
+        await wire.WaitForCountAsync(Tpdo2, 1);
+        wire.SendRtr(Tpdo1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+
+        od.WriteUnsigned(0x1019, 0, 10);
+        Settle(device);
+        wire.Transmit(CanOpenCobId.Sync, new byte[] { 1 });
+        await wire.WaitForCountAsync(Tpdo2, 2);
+        wire.SendRtr(Tpdo1);
+        wire.Transmit(CanOpenCobId.Sync, new byte[] { 2 });
+        await wire.WaitForCountAsync(Tpdo2, 3);
+        wire.Count(Tpdo1).Should().Be(1, "the sample before the re-armed gate answers no RTR");
+        wire.Transmit(CanOpenCobId.Sync, new byte[] { 5 });
+        await wire.WaitForCountAsync(Tpdo2, 4);
+        wire.SendRtr(Tpdo1);
+        await wire.WaitForCountAsync(Tpdo1, 2);
+    }
+
     [Fact]
     public async Task Sync_Producer_Counts_Wraps_And_Resets_After_Stopped()
     {

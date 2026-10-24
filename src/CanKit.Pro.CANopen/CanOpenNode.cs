@@ -506,9 +506,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // §7.3.2.2.4: EMCY triggered in Stopped is pending; the most recent one goes out
                 // after the transition into another NMT state.
                 _pendingEmcy = msg;
+                _pendingEmcyIsApplications = true;
                 return Task.CompletedTask;
             }
-            return EmitEmcy(msg, cancellationToken);
+            // errorRegister is the application's part of 1001h; the node adds its communication
+            // errors, and takes the application's part only when this EMCY is transmitted (#379).
+            return EmitEmcy(msg, cancellationToken, errorRegister);
         }).Unwrap();
     }
 
@@ -564,23 +567,42 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         return link;
     }
 
-    private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default)
+    private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
+        byte? applicationErrorRegister = null)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
-        byte errorRegister = msg.ErrorRegister;
+        // The node's bits are those of the moment the EMCY is decided; the application's part is
+        // read when it is transmitted, so it is the part of the last application EMCY before it
+        // on this chain (#379). msg.ErrorRegister is not used.
+        byte nodeBits = CommunicationErrorBits;
+        _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
         // the previous send can retarget the dictionary before this queued emergency starts.
         Func<Task> transmit = () =>
         {
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
             uint cobId = _emcyCobId;
-            if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
-            _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
+            if (cobId == 0 || !_emcyValid)
+            {
+                // No frame. An application EMCY that does not reach the bus leaves 1001h alone;
+                // the node's own still sets the register it decided, so an error that ended is
+                // not read on (Codex on #417).
+                if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
+                return Task.CompletedTask;
+            }
+            frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
+        return AppendToEmcyChain(transmit);
+    }
+
+    /// <summary>Appends one step to the EMCY chain; it runs on the actor once the steps before it
+    /// are done. Actor loop only.</summary>
+    private Task AppendToEmcyChain(Func<Task> step)
+    {
         var link = _emcySendChain.ContinueWith(
-            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(transmit),
+            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(step),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _emcySendChain = link;
         return link;

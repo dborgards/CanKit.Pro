@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
-using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Safety;
@@ -757,12 +756,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         }
     }
 
-    void ISrdoEngineHost.EmitEmcy(ushort errorCode)
-    {
-        if (!_emcyValid) return;
-        var errorRegister = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
-        _ = EmitEmcy(new EmcyMessage(_nodeId, errorCode, errorRegister));
-    }
+    void ISrdoEngineHost.EmitEmcy(int srdoNumber, ushort errorCode)
+        => RaiseCommunicationError(CommunicationError.SrdoLength, srdoNumber, errorCode);
+
+    void ISrdoEngineHost.EmcyCauseEnded(int srdoNumber)
+        => EndCommunicationError(CommunicationError.SrdoLength, srdoNumber);
 
     void ISrdoEngineHost.SrdoReceived(int srdoNumber, uint cobId, byte[] payload) => RaiseSrdoReceived(srdoNumber, cobId, payload);
     void ISrdoEngineHost.SrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason) => RaiseSrdoStateChanged(srdoNumber, isValid, reason);
