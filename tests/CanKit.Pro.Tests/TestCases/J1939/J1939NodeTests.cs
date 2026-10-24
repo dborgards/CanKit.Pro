@@ -1570,13 +1570,17 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         lock (reported) reported.Should().BeEmpty("disposing the node is not a failure of the move it interrupted");
     }
 
-    // #355 (J-5): the automatic move after an unseat is registered as the claim in hand, so a
-    // ClaimAddressAsync meanwhile meets the in-flight guard -- whose advice, "await it, or cancel
-    // it", the application cannot follow: the move hands out no task and takes no token. The
-    // fault says what it can do instead, and the move completes undisturbed. The sibling below
-    // pins the user-initiated case, whose advice stands.
-    [Fact]
-    public async Task A_Claim_During_An_Automatic_Move_Faults_With_Advice_The_Caller_Can_Follow()
+    // #355 (J-5, decided on #397 as option (b)): the automatic move after an unseat is the claim
+    // in hand, and nothing awaits it. A ClaimAddressAsync meanwhile used to fault, with advice to
+    // wait for AddressClaimChanged that left the application nothing to do but poll. It replaces
+    // the move instead, in its backoff and in its announcement window alike: the node claims the
+    // address the application asked for, the move's candidate is never committed nor claimed
+    // again, and the replaced move is no failure to report. The sibling below pins the
+    // user-initiated case, which still faults.
+    [Theory]
+    [InlineData(false)] // replaced while the move waits its backoff
+    [InlineData(true)]  // replaced once the move has announced its candidate
+    public async Task A_Claim_During_An_Automatic_Move_Replaces_The_Move(bool moveAnnounced)
     {
         using var clock = new VirtualClock();
         var session = NewSession();
@@ -1587,6 +1591,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var announce = TimeSpan.FromMilliseconds(80);
         var backoff = TimeSpan.FromMilliseconds(150);
         const byte contended = 0x40;
+        const byte moveCandidate = 0x80; // the scan's first candidate from an address outside the field
+        const byte asked = 0x90;
 
         using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
         {
@@ -1595,21 +1601,92 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }, ownsService: false, actor);
         using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await ClaimOnClockAsync(owner, clock, actor, contended, announce);
-        var moved = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
-        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claimed) moved.TrySetResult(e); };
+
+        var reported = new List<Exception>();
+        owner.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout); // the move is the claim in hand
+        var moveReport = owner.UnattendedClaimReported;
+        moveReport.Should().NotBeNull();
+        if (moveAnnounced)
+        {
+            await clock.AdvanceAsync(backoff);
+            await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout); // 0x80 announced, its window open
+            await clock.AdvanceAsync(TimeSpan.FromMilliseconds(30)); // the move's window now ends 50 ms away
+        }
+
+        var states = new List<J1939ClaimEventArgs>();
+        owner.AddressClaimChanged += (_, e) => { lock (states) states.Add(e); };
+        var claim = owner.ClaimAddressAsync(asked);
+        // Exactly the announce window away: the move's own timer, backoff or window, is gone.
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        owner.Address.Should().Be(asked);
+
+        await clock.AdvanceAsync(backoff + announce); // past anything the move could still have armed
+        owner.Address.Should().Be(asked, "the replaced move must not resume and take the node elsewhere");
+        lock (states)
+            states.Should().NotContain(e => e.Address == moveCandidate,
+                "once replaced, the move neither claims its candidate again nor commits it");
+        await moveReport!.ContinueWith(_ => { }).WithTimeout(ShortTimeout);
+        moveReport.IsCanceled.Should().BeTrue("the move's task is cancelled, not faulted, so its failure report never runs");
+        lock (reported) reported.Should().BeEmpty("a move the application replaced did not fail");
+    }
+
+    // Codex and Bugbot on #414, a consequence of the replacement above: the move's announcement
+    // may still be waiting for its confirmation when a ClaimAddressAsync for the same address
+    // replaces it, and the confirmation callbacks matched the claim in hand by address only. A
+    // late failure of the move's frame then faulted the caller's claim, and a late success armed
+    // the caller's window before the caller's own announcement was confirmed. Every claim send
+    // after the first is held, and each is settled by hand: settling one runs the node's
+    // continuation on the settling thread, which posts to the actor, so settling the clock after
+    // it proves the actor has handled it.
+    [Theory]
+    [InlineData(false)] // the move's announcement fails late
+    [InlineData(true)]  // the move's announcement is confirmed late
+    public async Task A_Late_Confirmation_Of_A_Replaced_Move_Does_Not_Settle_The_Claim_That_Replaced_It(bool moveConfirmed)
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var inner = new CanBusService(busA);
+        var service = new HeldClaimSendsService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x40;
+        const byte moveCandidate = 0x80;
+
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        await ClaimOnClockAsync(owner, clock, actor, contended, announce); // the first claim send goes through
 
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
         await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
-
-        Func<Task> claim = () => owner.ClaimAddressAsync(0x90).WithTimeout(ShortTimeout);
-        (await claim.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
-            .Contain("AddressClaimChanged").And.NotContain("await it");
-
         await clock.AdvanceAsync(backoff);
+        await service.WaitForHeldAsync(1, ShortTimeout); // the move announces its candidate, unconfirmed
+
+        var claim = owner.ClaimAddressAsync(moveCandidate);
+        await service.WaitForHeldAsync(2, ShortTimeout); // the caller's own announcement, unconfirmed
+
+        service.Settle(0, moveConfirmed);
+        await clock.SettleAsync();
+        claim.IsCompleted.Should().BeFalse("the replaced move's announcement is not the caller's");
+        owner.ClaimState.Should().Be(J1939ClaimState.Claiming);
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "the caller's window opens on the caller's own confirmation, which has not come");
+
+        service.Settle(1, confirmed: true);
         await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
         await clock.AdvanceAsync(announce);
-        (await moved.Task.AsTaskWithTimeout(ShortTimeout)).Address.Should().Be((byte)(0x80),
-            "the move scans the arbitrary field from the address it lost, and the refused claim did not disturb it");
+        await claim.WithTimeout(ShortTimeout);
+        owner.Address.Should().Be(moveCandidate);
     }
 
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
@@ -2739,6 +2816,72 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         await WaitForAnnouncesAsync(() => Volatile.Read(ref claimsAt80), 2);
         (await seen).DestinationAddress.Should().Be((byte)0x80, "the directed request still reaches the application");
+    }
+
+    // #355 (J-2), the open half pinned: a Request for Address Claimed directed at the address the
+    // node is still arbitrating for is not answered, because the node holds no address in that
+    // window. Whether SAE J1939-81 wants it answered is open (the review cited §4.2.2 from
+    // memory; the text has not been checked), so the behaviour stays and the README says so --
+    // this test makes a change to it a deliberate one. The directed request is followed by a
+    // global one, which is answered; both are handled on the actor in the order they arrived, and
+    // an answer's transmit starts inside the turn that decides it, so when the global request
+    // reaches MessageReceived every answer either request got has been counted.
+    [Fact]
+    public async Task A_Request_For_Address_Claimed_Directed_At_The_Address_In_Arbitration_Is_Not_Answered()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // the scanning tool
+        using var inner = new CanBusService(busA);
+        var service = new ClaimSendCountingService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        const byte pending = 0x80;
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x0000CC)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+
+        var claim = node.ClaimAddressAsync(pending);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout); // announced and confirmed; the window is open
+        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+        service.ClaimSends.Should().Be(1, "the arbitration's own announcement");
+
+        var atGlobalRequest = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.MessageReceived += (_, m) =>
+        {
+            if (J1939Pgn.IsRequest(m.Pgn) && m.DestinationAddress == J1939Pgn.GlobalAddress)
+                atGlobalRequest.TrySetResult(service.ClaimSends);
+        };
+        foreach (var destination in new[] { pending, J1939Pgn.GlobalAddress })
+        {
+            busB.Transmit(CanFrame.Classic(
+                (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: destination),
+                new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        }
+
+        (await atGlobalRequest.Task.AsTaskWithTimeout(ShortTimeout)).Should().Be(2,
+            "the global request is answered by re-announcing the claim, the directed one before it is not answered at all");
+
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+    }
+
+    // #355 (J12, decided on #397 as option (b)): ReceiveBufferCapacity sized an inbox no public
+    // member read, so a node retained up to that many payloads for nobody. The inbox is gone, and
+    // the option is [Obsolete] until 2.0 removes it (#299). It is still validated: a
+    // configuration that was refused is not quietly accepted now.
+    [Fact]
+    public void ReceiveBufferCapacity_Is_Obsolete_And_Still_Validated()
+    {
+        var obsolete = typeof(J1939NodeOptions).GetProperty("ReceiveBufferCapacity")!.GetCustomAttribute<ObsoleteAttribute>();
+        obsolete.Should().NotBeNull();
+        obsolete!.Message.Should().Contain("MessageReceived").And.Contain("2.0");
+
+#pragma warning disable CS0618 // the obsolete option is what is under test
+        var refused = new J1939NodeOptions(Name(1)) { ReceiveBufferCapacity = 0 };
+#pragma warning restore CS0618
+        Action validate = () => refused.Validate();
+        validate.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("ReceiveBufferCapacity");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -4136,6 +4279,103 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await disposed.Task.AsTaskWithTimeout(ShortTimeout + ShortTimeout);
         Volatile.Read(ref posted).Should().Be(0,
             "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
+    }
+
+    // From the review of #397: a fault that ends one of the node's readers was raised on that
+    // reader, and a handler that disposed the node made the disposal wait for the reader -- its
+    // own task -- for the whole 2 s join bound. Raised from the node's actor instead, the
+    // disposal is queued behind the handler and the reader has returned when it is joined. The
+    // join is made unbounded here, so waiting for itself is a hang the test sees rather than a
+    // stall it would have to time.
+    [Fact]
+    public async Task Disposing_The_Node_From_A_Frame_Reader_Fault_Handler_Does_Not_Wait_For_That_Reader()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var inner = new CanBusService(bus);
+        var service = new FaultingFramesService(inner);
+        var (node, _, _) = NodeOnScriptedTransport(service);
+        using var _node = node;
+        node.ReaderJoinTimeout = Timeout.InfiniteTimeSpan;
+        var fault = new InvalidOperationException("the subscription broke");
+        var disposeReturned = DisposeOnFault(node, fault);
+
+        service.Fault(fault);
+
+        await disposeReturned.Task.AsTaskWithTimeout(ShortTimeout);
+        await node.DisposeAsync().AsTask().WithTimeout(ShortTimeout);
+    }
+
+    // The same for the transport reader, whose fault -- one that is not a reassembly abort --
+    // ends it the same way.
+    [Fact]
+    public async Task Disposing_The_Node_From_A_Transport_Reader_Fault_Handler_Does_Not_Wait_For_That_Reader()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var (node, channels, _) = NodeOnScriptedTransport(service);
+        using var _node = node;
+        node.ReaderJoinTimeout = Timeout.InfiniteTimeSpan;
+        var fault = new InvalidOperationException("the channel broke");
+        var disposeReturned = DisposeOnFault(node, fault);
+
+        var transport = channels.Single();
+        await transport.WaitForRequestAsync(1, ShortTimeout);
+        transport.Fail(fault);
+
+        await disposeReturned.Task.AsTaskWithTimeout(ShortTimeout);
+        await node.DisposeAsync().AsTask().WithTimeout(ShortTimeout);
+    }
+
+    private static TaskCompletionSource<bool> DisposeOnFault(J1939NodeImpl node, Exception fault)
+    {
+        var disposeReturned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (!ReferenceEquals(ex, fault)) return;
+            node.Dispose();
+            disposeReturned.TrySetResult(true);
+        };
+        return disposeReturned;
+    }
+
+    // From the review of #397: the node took its handler off its own actor's
+    // BackgroundExceptionOccurred before disposing that actor, and the actor's Dispose is where
+    // it reports a callback that outlived its shutdown bound. The node's subscribers never heard
+    // of it. A callback is held on the actor across the disposal, so the bound is exceeded by
+    // construction; the actor's bound is short and the node's own wait for the teardown is driven
+    // to zero through its seam, so nothing here waits on a clock for the outcome.
+    [Fact]
+    public async Task The_Shutdown_Timeout_Of_The_Nodes_Own_Actor_Reaches_Its_Subscribers()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var release = new ManualResetEventSlim(); // declared first, so it outlives the node
+        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, shutdownTimeout: TimeSpan.FromMilliseconds(50));
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor,
+            openTransport: sa => new ScriptedTpChannel(sa), ownsActor: true); // disposes the actor it owns
+        node.TransportTeardownTimeout = TimeSpan.Zero;
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            actor.Post(() =>
+            {
+                held.TrySetResult(true);
+                release.Wait(ShortTimeout);
+            });
+            await held.Task.AsTaskWithTimeout(ShortTimeout);
+            node.Dispose(); // the actor's join gives up on the held callback and reports it
+
+            lock (reported)
+                reported.Should().Contain(e => e is TimeoutException,
+                    "the node owns that actor, and its shutdown timeout is a background failure of the node's");
+        }
+        finally
+        {
+            release.Set();
+        }
     }
 
     // The same forwarding with an injected actor its owner has already disposed: there is no
@@ -6127,6 +6367,193 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         public Action? Disposed { get; set; }
 
         public void Dispose() => Disposed?.Invoke(); // the test owns the inner service
+    }
+
+    /// <summary>
+    /// Forwards to a real service and counts the Address Claim / Cannot Claim transmits handed to
+    /// it. The count moves inside <see cref="SendConfirmedAsync"/>'s synchronous part, which the
+    /// node runs in the actor turn that decides to send, so a handler on the actor reads it exact.
+    /// </summary>
+    private sealed class ClaimSendCountingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private int _claimSends;
+
+        public ClaimSendCountingService(ICanBusService inner) => _inner = inner;
+
+        public int ClaimSends => Volatile.Read(ref _claimSends);
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (frame.IsExtendedFrame && J1939Pgn.IsAddressClaim(J1939Id.Decompose((uint)frame.ID).Pgn))
+                Interlocked.Increment(ref _claimSends);
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
+    }
+
+    /// <summary>
+    /// Forwards the first Address Claim and every Cannot Claim to a real service, and holds every
+    /// later Address Claim -- untransmitted -- until <see cref="Settle"/> settles it as confirmed
+    /// or rejected. Settling completes the send's task on the calling thread, so the node's
+    /// continuation, which posts the outcome to its actor, has run when <see cref="Settle"/> returns.
+    /// </summary>
+    private sealed class HeldClaimSendsService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly List<TaskCompletionSource<TxConfirmation>> _held = new();
+        private int _claims;
+
+        public HeldClaimSendsService(ICanBusService inner) => _inner = inner;
+
+        public async Task WaitForHeldAsync(int count, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (true)
+            {
+                lock (_held) if (_held.Count >= count) return;
+                if (DateTime.UtcNow > deadline) throw new TimeoutException($"Fewer than {count} claim sends were held.");
+                await Task.Delay(1);
+            }
+        }
+
+        public void Settle(int index, bool confirmed)
+        {
+            TaskCompletionSource<TxConfirmation> held;
+            lock (_held) held = _held[index];
+            held.SetResult(new TxConfirmation
+            {
+                Confirmed = confirmed,
+                IsApproximated = true,
+                Timestamp = DateTime.UtcNow,
+                FailureReason = confirmed ? TxConfirmFailureReason.None : TxConfirmFailureReason.Rejected,
+            });
+        }
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (frame.IsExtendedFrame)
+            {
+                var fields = J1939Id.Decompose((uint)frame.ID);
+                if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress != J1939Pgn.NullAddress
+                    && Interlocked.Increment(ref _claims) > 1)
+                {
+                    // Not RunContinuationsAsynchronously: Settle runs the node's continuation.
+                    var held = new TaskCompletionSource<TxConfirmation>();
+                    lock (_held) _held.Add(held);
+                    return held.Task;
+                }
+            }
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
+    }
+
+    /// <summary>
+    /// A service whose subscriptions yield nothing and end by throwing what <see cref="Fault"/> is
+    /// given: the frame reader of a node built on it faults when the test says so.
+    /// </summary>
+    private sealed class FaultingFramesService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly TaskCompletionSource<Exception> _fault = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public FaultingFramesService(ICanBusService inner) => _inner = inner;
+
+        public void Fault(Exception error) => _fault.TrySetResult(error);
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription(_fault.Task);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription(_fault.Task);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+
+        public void Dispose() { /* the test owns the inner service */ }
+
+        private sealed class FaultingSubscription : ISubscription
+        {
+            private readonly Task<Exception> _fault;
+
+            public FaultingSubscription(Task<Exception> fault) => _fault = fault;
+
+            public IAsyncEnumerable<CanFrameEvent> Frames => Stream();
+
+            private async IAsyncEnumerable<CanFrameEvent> Stream(
+                [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+            {
+                var error = await _fault.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (error is not null) throw error;
+                yield break;
+            }
+
+            public bool TryRead(out CanFrameEvent frameEvent)
+            {
+                frameEvent = default;
+                return false;
+            }
+
+            public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+                => throw new NotSupportedException();
+
+            public void Reconfigure(CanIdFilter filter) { }
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
+
+            public void Dispose() { }
+        }
     }
 
     /// <summary>
