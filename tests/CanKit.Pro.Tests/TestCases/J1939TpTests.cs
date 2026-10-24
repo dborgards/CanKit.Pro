@@ -4886,6 +4886,46 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await service.Disposed.WaitAsync(ShortTimeout);
     }
 
+    // #421: the channel's own actor, disposed while a callback still holds its loop, gives up on
+    // the join after its shutdown bound and reports that as a TimeoutException through its own
+    // BackgroundExceptionOccurred. The channel forwards it only while its handler is still
+    // attached, so the handler comes off after that Dispose, not before (as #414 for the node).
+    // The callback is held until the finally, so the bound is always exceeded: nothing is
+    // asserted against the clock.
+    [Fact]
+    public async Task The_Shutdown_Timeout_Of_The_Channels_Own_Actor_Reaches_Its_Subscribers()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var release = new ManualResetEventSlim(); // declared first, so it outlives the channel
+        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, shutdownTimeout: TimeSpan.FromMilliseconds(50));
+        using var channel = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(), ownsService: false,
+            actor, ownsActor: true); // disposes the actor it owns
+        // Reported on the thread pool (#356, T-2), so possibly after Dispose has returned: awaited
+        // on a signal. A report the channel never forwards leaves the signal unset and the wait fails.
+        var timedOut = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => { if (ex is TimeoutException) timedOut.TrySetResult(ex); };
+
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            actor.Post(() =>
+            {
+                held.TrySetResult(true);
+                release.Wait(TimeSpan.FromSeconds(30));
+            });
+            await held.Task.WaitAsync(ShortTimeout);
+            channel.Dispose(); // the actor's join gives up on the held callback and reports it
+
+            (await timedOut.Task.WaitAsync(ShortTimeout)).Should().BeOfType<TimeoutException>(
+                "the channel owns that actor, and its shutdown timeout is a background failure of the channel's");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
     // Codex on #183: a reader that outlived its join could still hand frames to a borrowed actor
     // after the session cleanup. Whenever the actor gets to them, frames handed over before or
     // during Dispose are dropped: here a whole BAM waits behind the caller's work while the

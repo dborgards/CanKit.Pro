@@ -154,9 +154,14 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// address before or after the loss cleared it, and either the session began while the address
     /// was held, or it is refused.
     /// </para>
+    /// <para>
+    /// <paramref name="ownsActor"/> hands an injected <paramref name="actor"/> to the channel to
+    /// dispose, as the one it creates for itself: a seam for a test that needs the channel's own
+    /// disposal of its actor on a loop with a short shutdown bound (#421).
+    /// </para>
     /// </remarks>
     internal J1939TpChannel(ICanBusService service, byte sourceAddress, J1939TpOptions options, bool ownsService,
-        ProtocolActor? actor = null, Func<bool>? sourceAddressHeld = null)
+        ProtocolActor? actor = null, Func<bool>? sourceAddressHeld = null, bool ownsActor = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         if (sourceAddress == J1939Pgn.GlobalAddress)
@@ -176,7 +181,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         };
         _pduInbox = Channel.CreateBounded<RxInboxItem>(inboxOptions);
 
-        _ownsActor = actor is null;
+        _ownsActor = actor is null || ownsActor;
         _actor = actor ?? new ProtocolActor();
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
         _deadlines = new DeadlineScheduler(_actor);
@@ -497,18 +502,25 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             }
         }
 
-        // An injected actor is not ours to dispose -- the caller may still be running other
-        // work on it -- but the handler is, so it comes off either way.
-        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
         _readerCts.Dispose();
 
+        // An injected actor is not ours to dispose -- the caller may still be running other
+        // work on it -- but the handler is, so it comes off either way. For an owned actor only
+        // after its Dispose: that is where the actor reports a callback that outlived its
+        // shutdown bound, as a TimeoutException through its BackgroundExceptionOccurred, and
+        // unsubscribed first the channel's subscribers never heard of it (#421, as #414 for the
+        // node).
         if (_ownsActor)
         {
             // Its loop runs the cleanup as it drains.
             _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             DisposeOwnedService();
+            return;
         }
-        else if (cleanup.Wait(CleanupBudget))
+
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+        if (cleanup.Wait(CleanupBudget))
         {
             // A borrowed actor keeps running, possibly busy with the caller's other work, so the
             // cleanup is waited for: no session is left using the service (Codex on #183).
