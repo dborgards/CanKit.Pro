@@ -3,7 +3,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
-using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
@@ -24,7 +23,6 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
     private long _lastSync;
     private bool _hasSync;
     private long _syncWindowGeneration;
-    private bool _syncLengthReported;
 
     /// <inheritdoc />
     public event EventHandler<RpdoTimeoutEventArgs>? RpdoTimeout;
@@ -53,7 +51,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         var window = TimeSpan.FromTicks(_od.ReadUnsigned(Co.SyncWindow, 0) * (TimeSpan.TicksPerMillisecond / 1000));
         if (window != _syncWindow) Interlocked.Increment(ref _syncWindowGeneration);
         _syncWindow = window;
-        _syncLengthReported = false;
+        EndCommunicationError(CommunicationError.SyncLength);
     }
 
     private void ResetSyncCounter()
@@ -136,14 +134,10 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         int length = _syncCounterOverflow > 1 ? 1 : 0;
         if (payload.Length != length)
         {
-            if (_emcyValid && !_syncLengthReported)
-            {
-                _syncLengthReported = true;
-                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8240, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
-            }
+            RaiseCommunicationError(CommunicationError.SyncLength, 0, 0x8240);
             return false;
         }
-        _syncLengthReported = false;
+        EndCommunicationError(CommunicationError.SyncLength);
         if (length != 0)
         {
             // A consumer ignores its configured overflow value (§7.5.2.22), but reserved
@@ -174,6 +168,8 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
 
     private void RestartRpdoDeadline(RpdoRuntime rp)
     {
+        // A reception ends the timeout the deadline reported.
+        EndCommunicationError(CommunicationError.RpdoTimeout, rp.PdoIndex);
         rp.Deadline?.Dispose();
         rp.Deadline = null;
         if (rp.EventTimer == TimeSpan.Zero) return;
@@ -181,8 +177,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         {
             rp.Deadline = null;
             if (_disposed != 0 || _state != NmtState.Operational || !rp.Valid) return;
-            if (_emcyValid)
-                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8250, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
+            RaiseCommunicationError(CommunicationError.RpdoTimeout, rp.PdoIndex, 0x8250);
             var args = new RpdoTimeoutEventArgs(rp.PdoIndex, rp.CobId, rp.EventTimer);
             EnqueueEvent(() => DeliverToSubscribers(RpdoTimeout, args), critical: true, EventKey.RpdoTimeout(rp.PdoIndex), emcyProducer: -1, producer: EventKey.RpdoProducerSlot(rp.PdoIndex));
         });

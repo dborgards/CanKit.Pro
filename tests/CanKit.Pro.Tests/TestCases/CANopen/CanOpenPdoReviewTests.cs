@@ -303,15 +303,17 @@ public partial class CanOpenPdoEngineTests
         uint emcy = CanOpenCobId.Emcy(Device);
         for (int i = 0; i < 10; i++) await Inject(node, Rpdo1, 0x80);
         await wire.WaitForCountAsync(emcy, 1);
+        // An eight-byte frame ends the length error (0000h, #379) before it names the missing target.
         for (int i = 0; i < 10; i++) await Inject(node, Rpdo1, 0x80, 0xFF, 0x2F, 0, 0, 0, 0, 0);
-        await wire.WaitForCountAsync(emcy, 2);
+        await wire.WaitForCountAsync(emcy, 3);
         await Inject(node, Rpdo1, 0x80, 0, 0x20, 0, 42, 0, 0, 0);
         node.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(42);
-        await Inject(node, Rpdo1, 0x80);
-        await wire.WaitForCountAsync(emcy, 3);
-        await Inject(node, Rpdo1, 0x80, 0xFF, 0x2F, 0, 0, 0, 0, 0);
         await wire.WaitForCountAsync(emcy, 4);
-        wire.Payloads(emcy).Select(p => p[0]).Should().BeEquivalentTo(new byte[] { 0x10, 0x30, 0x10, 0x30 });
+        await Inject(node, Rpdo1, 0x80);
+        await wire.WaitForCountAsync(emcy, 5);
+        await Inject(node, Rpdo1, 0x80, 0xFF, 0x2F, 0, 0, 0, 0, 0);
+        await wire.WaitForCountAsync(emcy, 7);
+        wire.Payloads(emcy).Select(p => p[1] << 8 | p[0]).Should().Equal(0x8210, 0, 0x8230, 0, 0x8210, 0, 0x8230);
     }
 
     // #358 (P-5): the DAM target passed the target check, and then the write itself is refused —

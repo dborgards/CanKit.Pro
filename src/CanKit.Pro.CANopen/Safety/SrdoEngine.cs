@@ -90,7 +90,7 @@ internal sealed partial class SrdoEngine : IDisposable
         rt.TotalBytes = 0;
         foreach (var e in rt.Mapping) rt.TotalBytes += e.ByteLength;
         rt.ConfigurationValid = rt.Direction != SrdoDirection.None && SrdoRecords.IsConfigurationValid(_od, srdoNumber);
-        rt.ShortFrameReported = false;
+        EndShortFrameRun(rt);
         if (_operational) Arm(rt);
         else SetInvalid(rt, rt.Direction == SrdoDirection.None ? null : SrdoInvalidReason.NotOperational);
     }
@@ -291,6 +291,13 @@ internal sealed partial class SrdoEngine : IDisposable
         // A null reason means the SRDO no longer exists (direction None): that is still a
         // valid-to-invalid transition and is reported; an SRDO that was never valid is not.
         if (changed && (reason is not null || wasValid)) _host.SrdoStateChanged(rt.Number, false, reason);
+    }
+
+    private void EndShortFrameRun(SrdoRuntime rt)
+    {
+        if (!rt.ShortFrameReported) return;
+        rt.ShortFrameReported = false;
+        _host.EmcyCauseEnded(rt.Number);
     }
 
     private void Publish(SrdoRuntime rt)

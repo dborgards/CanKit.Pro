@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
-using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
@@ -410,8 +409,7 @@ internal sealed partial class CanOpenNode
         rp.Deadline?.Dispose();
         rp.Deadline = null;
         rp.EventTimer = TimeSpan.FromMilliseconds(_od.TryReadUnsigned(comm, 0x05, out var et) ? et : 0);
-        rp.ShortFrameReported = false;
-        rp.MpdoTargetReported = false;
+        EndRpdoCommunicationErrors(n);
 
         uint word = _od.TryReadUnsigned(comm, 0x01, out var w) ? w : CanOpenCobId.InvalidBit;
         rp.Valid = (word & CanOpenCobId.InvalidBit) == 0;
@@ -670,16 +668,11 @@ internal sealed partial class CanOpenNode
             // Once per run of short frames: a producer that keeps sending one would otherwise
             // put an EMCY on the bus for every frame, and the EMCY traffic is what fills it.
             // A frame that fits ends the run, as does reconfiguring the RPDO.
-            if (_emcyValid && !rp.ShortFrameReported)
-            {
-                rp.ShortFrameReported = true;
-                var errorRegister = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
-                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8210, errorRegister));
-            }
+            RaiseCommunicationError(CommunicationError.PdoLength, rp.PdoIndex, 0x8210);
             return;
         }
 
-        rp.ShortFrameReported = false;
+        EndCommunicationError(CommunicationError.PdoLength, rp.PdoIndex);
         if (CanOpenTransmissionType.IsSynchronous(rp.TransmissionType) && !IsInsideSyncWindow()) return;
         RestartRpdoDeadline(rp);
 
@@ -996,7 +989,5 @@ internal sealed partial class CanOpenNode
         public byte[]? SyncPending { get; set; }
         public TimeSpan EventTimer { get; set; }
         public IDisposable? Deadline { get; set; }
-        public bool ShortFrameReported { get; set; }
-        public bool MpdoTargetReported { get; set; }
     }
 }

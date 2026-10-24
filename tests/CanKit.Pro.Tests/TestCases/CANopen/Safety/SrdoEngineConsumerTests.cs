@@ -374,10 +374,16 @@ public class SrdoEngineConsumerTests : IDisposable
         _engine.GetState(1).IsValid.Should().BeFalse("SCT decides; the pair was not processed");
         Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
         _host.Emcys.Should().HaveCount(1, "once per run of short frames");
+        _host.EmcyEnded.Should().BeEmpty("the run goes on");
         Frame(0x123, Plain); Frame(0x124, Inverse);
         _engine.GetState(1).IsValid.Should().BeTrue();
+        _host.EmcyEnded.Should().Equal(new[] { 1 }, "the pair that fits ends the error the run reported (#379)");
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _host.EmcyEnded.Should().HaveCount(1, "an error ends once");
         Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
         _host.Emcys.Should().HaveCount(2, "a frame that fits ends the run");
+        OnActor(() => _engine.Rebuild(1));
+        _host.EmcyEnded.Should().Equal(new[] { 1, 1 }, "a rebuild ends the run too");
     }
 
     private void RefuseWritesTo(ushort index)

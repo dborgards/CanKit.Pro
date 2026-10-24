@@ -495,6 +495,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             if (!_emcyValid)
                 throw new InvalidOperationException("EMCY is disabled: bit 31 of 1014h (COB-ID EMCY) is set.");
+            // The application's part of 1001h; the node adds its communication errors (#379).
+            _applicationErrorRegister = errorRegister;
             if (_state == NmtState.Stopped)
             {
                 // §7.3.2.2.4: EMCY triggered in Stopped is pending; the most recent one goes out
@@ -502,7 +504,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 _pendingEmcy = msg;
                 return Task.CompletedTask;
             }
-            return EmitEmcy(msg, cancellationToken);
+            return EmitEmcy(WithCurrentErrorRegister(msg), cancellationToken);
         }).Unwrap();
     }
 
@@ -563,6 +565,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
         byte errorRegister = msg.ErrorRegister;
+        _queuedErrorRegister = errorRegister;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
         // the previous send can retarget the dictionary before this queued emergency starts.
         Func<Task> transmit = () =>
