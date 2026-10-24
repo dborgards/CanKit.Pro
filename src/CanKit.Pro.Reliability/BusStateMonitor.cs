@@ -246,6 +246,15 @@ namespace CanKit.Pro.Reliability
                 // latched would silently suppress hints if the actor ever became usable again.
                 Volatile.Write(ref _recheckPending, 0);
             }
+            catch
+            {
+                // Any other refusal (a foreign IProtocolActor; ProtocolActor.Post throws nothing
+                // else) queued nothing either. Left claimed, the gate would drop every later hint
+                // for the life of the monitor, and hint latency would quietly become poll latency.
+                // The caller still gets the exception.
+                Volatile.Write(ref _recheckPending, 0);
+                throw;
+            }
         }
 
         // The coalesced hint recheck, on the actor's loop. Releasing the gate *before* sampling is

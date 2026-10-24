@@ -208,6 +208,16 @@ public sealed class ControllableBus : ICanBus
     public void RaiseErrorFrame(ICanErrorInfo? info = null)
         => ErrorFrameReceived?.Invoke(this, info ?? StubErrorInfo.Instance);
 
+    /// <summary>
+    /// How many handlers <see cref="ErrorFrameReceived"/> has. A component that unsubscribes on
+    /// dispose usually also ignores a late event, so raising one after dispose cannot tell a
+    /// detached handler from an attached one; the count can.
+    /// </summary>
+    public int ErrorFrameSubscriberCount => ErrorFrameReceived?.GetInvocationList().Length ?? 0;
+
+    /// <summary>As <see cref="ErrorFrameSubscriberCount"/>, for <see cref="FaultOccurred"/>.</summary>
+    public int FaultSubscriberCount => FaultOccurred?.GetInvocationList().Length ?? 0;
+
     // --- ICanBus: configuration, delegated to a real bus -------------------------------------
 
     public IBusRTOptionsConfigurator Options => _options;
