@@ -17,8 +17,9 @@ concurrency:
   # which commit went red. Every other event therefore gets a group of its own (the run id).
   #
   # The group, not `cancel-in-progress`, carries the distinction: with an expression in
-  # `cancel-in-progress`, re-running this pull request's run ended in `startup_failure` twice
-  # (run 39915771444), where a literal is what every other re-run in the repository has used.
+  # `cancel-in-progress`, re-running this pull request's run ended in `startup_failure` (attempt 2
+  # of run 39915771444; attempt 1 was an ordinary test failure), where a literal is what every
+  # other re-run in the repository has used.
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
