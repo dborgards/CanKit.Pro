@@ -507,8 +507,67 @@ internal sealed class ClockedLssBench : IDisposable
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(ClockedLssBench));
         if (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastProgress) > StallBudget.Ticks)
             throw new TimeoutException(
-                $"The LSS bench made no progress for {StallBudget}: no frame reached a node and the clock did not move.");
+                $"The LSS bench made no progress for {StallBudget}: no frame reached a node and the clock did not move." + DiagDump());
         await Task.Delay(1).ConfigureAwait(false);
+    }
+
+    // DIAG #399 -- temporary, removed before the final commit.
+    internal static readonly List<(string Name, Thread Thread)> DiagThreads = new();
+
+    private string DiagDump()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine($"DIAG now={Now} masterOps={Volatile.Read(ref _masterOps)}");
+        ThreadPool.GetAvailableThreads(out var aw, out var aio);
+        ThreadPool.GetMinThreads(out var mw, out var mio);
+        ThreadPool.GetMaxThreads(out var xw, out var xio);
+        sb.AppendLine($"DIAG pool avail={aw}/{aio} min={mw}/{mio} max={xw}/{xio}");
+        lock (_requestGate)
+            foreach (var r in _requests)
+                sb.AppendLine($"DIAG request until={r.Until} seen={r.Seen} probe={r.Probe?.Status} failed={r.Failed?.GetType().Name}");
+        sb.AppendLine("DIAG master actor:" + DiagStack(_masterTimers));
+        foreach (var node in Nodes())
+        {
+            var n = node.Node;
+            if (n is null) continue;
+            sb.AppendLine($"DIAG node gone={node.Gone} matched={Interlocked.Read(ref node.Matched)} handled={Interlocked.Read(ref node.Handled)} parked={node.Parked()}");
+            try
+            {
+                sb.AppendLine($"DIAG   settled={n.IsLssSettledForTests} silent={n.IsLssSilentForTests} inFlight={n.HasLssTransmitsInFlight} awaitingDriver={n.HasTransmitsAwaitingDriverForTests} held={n.HeldTransmitCountForTests} waitingForTx={n.IsWaitingForLssTransmits} switch={n.LssBitRateSwitchCompletion.Status}");
+            }
+            catch (Exception ex) { sb.AppendLine("DIAG   flags threw " + ex.GetType().Name); }
+            sb.AppendLine("DIAG   node actor:" + DiagStack(n.ActorForTests));
+        }
+        lock (DiagThreads)
+            foreach (var (name, thread) in DiagThreads)
+                sb.AppendLine($"DIAG thread {name} alive={thread.IsAlive} state={thread.ThreadState}:" + DiagStack(thread));
+        return sb.ToString();
+    }
+
+    private static string DiagStack(ProtocolActor actor)
+    {
+        var field = typeof(ProtocolActor).GetField("_dedicatedThread",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        return field?.GetValue(actor) is Thread thread ? $" state={thread.ThreadState}" + DiagStack(thread) : " (no thread)";
+    }
+
+    private static string DiagStack(Thread thread)
+    {
+#if NETFRAMEWORK
+#pragma warning disable CS0618
+        try
+        {
+            if (!thread.IsAlive || thread == Thread.CurrentThread) return " (not captured)";
+            thread.Suspend();
+            try { return Environment.NewLine + new System.Diagnostics.StackTrace(thread, false); }
+            finally { thread.Resume(); }
+        }
+        catch (Exception ex) { return " capture failed: " + ex.Message; }
+#pragma warning restore CS0618
+#else
+        return " (stacks only on net48)";
+#endif
     }
 
     private void MarkProgress() => Interlocked.Exchange(ref _lastProgress, DateTime.UtcNow.Ticks);

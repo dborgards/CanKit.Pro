@@ -642,6 +642,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         slave.BetweenHeldSendsForTests = () =>
         {
             if (Interlocked.Increment(ref seamRuns) != 1) return;
+            lock (ClockedLssBench.DiagThreads) ClockedLssBench.DiagThreads.Add(("seam", Thread.CurrentThread));
             entered.Set();
             // Longer than every wait the test makes while it holds: a seam that lets go on its own
             // sends 5Bh before 5Ch is held and fails the premise, not the claim (Windows CI on #331).
@@ -667,6 +668,18 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await bench.RunAsync(second);
         await bench.WaitUntilAsync(() => heard.LssReplies.Count >= 3);
         heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+    }
+
+    // DIAG #399 -- temporary repetition, removed before the final commit.
+    public static IEnumerable<object[]> DiagRuns() => Enumerable.Range(0, 12).Select(i => new object[] { i });
+
+    [Theory]
+    [MemberData(nameof(DiagRuns))]
+    public async Task Diag_399_Repeat(int run)
+    {
+        _ = run;
+        lock (ClockedLssBench.DiagThreads) ClockedLssBench.DiagThreads.Clear();
+        await Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends();
     }
 
     // Codex and Bugbot on #331: a driver that throws while a held heartbeat or LSS reply is
