@@ -139,9 +139,12 @@ public interface IJ1939TpChannel : IDisposable
     Task<J1939TpDatagram> ReceiveAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Enumerates every reassembled inbound datagram until the channel is disposed. Reassembly
-    /// aborts surface as <see cref="J1939TpAbortException"/> on the enumerating waiter (same
-    /// semantics as <see cref="ReceiveAsync"/>).
+    /// Enumerates every reassembled inbound datagram until the channel is disposed. A reassembly
+    /// abort is thrown out of the enumeration as <see cref="J1939TpAbortException"/>, the fault
+    /// <see cref="ReceiveAsync"/> reports, and it <em>ends</em> that enumeration. The channel and
+    /// its buffer stay open: datagrams that arrive after the abort wait for the next receive, so
+    /// a caller that keeps receiving catches the exception and enumerates again -- as a J1939
+    /// node does with its own channel (#195, #356). Each abort is delivered to one waiter only.
     /// </summary>
     IAsyncEnumerable<J1939TpDatagram> ReceiveAllAsync(CancellationToken cancellationToken = default);
 
