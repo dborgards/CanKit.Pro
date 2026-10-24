@@ -643,6 +643,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         {
             if (Interlocked.Increment(ref seamRuns) != 1) return;
             lock (ClockedLssBench.DiagThreads) ClockedLssBench.DiagThreads.Add(("seam", Thread.CurrentThread));
+            lock (ClockedLssBench.DiagNotes) ClockedLssBench.DiagNotes.Add($"seam entered on thread {Thread.CurrentThread.ManagedThreadId} pool={Thread.CurrentThread.IsThreadPoolThread} ctx={SynchronizationContext.Current?.GetType().Name} sched={TaskScheduler.Current.GetType().Name} at {DateTime.UtcNow:HH:mm:ss.fff}{Environment.NewLine}{Environment.StackTrace}");
             entered.Set();
             // Longer than every wait the test makes while it holds: a seam that lets go on its own
             // sends 5Bh before 5Ch is held and fails the premise, not the claim (Windows CI on #331).
@@ -679,6 +680,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     {
         _ = run;
         lock (ClockedLssBench.DiagThreads) ClockedLssBench.DiagThreads.Clear();
+        lock (ClockedLssBench.DiagNotes) ClockedLssBench.DiagNotes.Clear();
         await Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends();
     }
 

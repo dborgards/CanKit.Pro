@@ -505,19 +505,26 @@ internal sealed class ClockedLssBench : IDisposable
     private async Task IdleAsync()
     {
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(ClockedLssBench));
+        if (_diagMid is null && DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastProgress) > TimeSpan.FromSeconds(10).Ticks)
+            _diagMid = "MID-STALL (10 s):" + DiagDump();
         if (DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastProgress) > StallBudget.Ticks)
             throw new TimeoutException(
-                $"The LSS bench made no progress for {StallBudget}: no frame reached a node and the clock did not move." + DiagDump());
+                $"The LSS bench made no progress for {StallBudget}: no frame reached a node and the clock did not move." + _diagMid + Environment.NewLine + "AT THROW:" + DiagDump());
         await Task.Delay(1).ConfigureAwait(false);
     }
 
     // DIAG #399 -- temporary, removed before the final commit.
     internal static readonly List<(string Name, Thread Thread)> DiagThreads = new();
 
+    private string? _diagMid;
+    internal static readonly List<string> DiagNotes = new();
+
     private string DiagDump()
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine();
+        sb.AppendLine($"DIAG pump thread={Thread.CurrentThread.ManagedThreadId} trace={Environment.StackTrace}");
+        lock (DiagNotes) foreach (var note in DiagNotes) sb.AppendLine("DIAG note " + note);
         sb.AppendLine($"DIAG now={Now} masterOps={Volatile.Read(ref _masterOps)}");
         ThreadPool.GetAvailableThreads(out var aw, out var aio);
         ThreadPool.GetMinThreads(out var mw, out var mio);
@@ -541,7 +548,7 @@ internal sealed class ClockedLssBench : IDisposable
         }
         lock (DiagThreads)
             foreach (var (name, thread) in DiagThreads)
-                sb.AppendLine($"DIAG thread {name} alive={thread.IsAlive} state={thread.ThreadState}:" + DiagStack(thread));
+                sb.AppendLine($"DIAG thread {name} id={thread.ManagedThreadId} alive={thread.IsAlive} state={thread.ThreadState}:" + DiagStack(thread));
         return sb.ToString();
     }
 
@@ -549,7 +556,7 @@ internal sealed class ClockedLssBench : IDisposable
     {
         var field = typeof(ProtocolActor).GetField("_dedicatedThread",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        return field?.GetValue(actor) is Thread thread ? $" state={thread.ThreadState}" + DiagStack(thread) : " (no thread)";
+        return field?.GetValue(actor) is Thread thread ? $" id={thread.ManagedThreadId} state={thread.ThreadState}" + DiagStack(thread) : " (no thread)";
     }
 
     private static string DiagStack(Thread thread)
