@@ -138,7 +138,10 @@ namespace CanKit.Pro.RawCan
         /// Registers a subscription using the allocation-free ID-range/mask fast path
         /// (FR-RAW-010/013).
         /// </summary>
-        /// <param name="filter">ID-range or acceptance-code/mask filter.</param>
+        /// <param name="filter">ID-range or acceptance-code/mask filter. A default-initialized
+        /// struct (<c>default(CanIdFilter)</c>, or a field never assigned) is accepted and matches
+        /// the standard ID 0 only -- see <see cref="CanIdFilter"/>; the predicate overload with a
+        /// <c>null</c> predicate is the one that accepts every frame.</param>
         /// <param name="bufferCapacity">
         /// Bounded buffer capacity for this subscription; null uses
         /// <see cref="CanBusService.DefaultBufferCapacity"/>.
@@ -195,6 +198,14 @@ namespace CanKit.Pro.RawCan
         /// The frame to send. As with <see cref="ICanBus.Transmit(in CanFrame)"/>, the caller
         /// remains the owner (TX-lease) and is responsible for disposing it after this call
         /// returns/completes — <see cref="ICanBusService"/> never disposes it.
+        /// A CAN-FD payload whose length is not one a CAN-FD frame can carry (0–8, 12, 16, 20,
+        /// 24, 32, 48 or 64 bytes) is not refused here. Its DLC rounds up to the next of those
+        /// lengths, so on a real bus it goes out padded to that length. On the echo path the confirmation is matched by content, so on an adapter
+        /// that echoes the frame as it went on the wire -- padded -- the echo is never matched and
+        /// the call ends as <see cref="TxConfirmFailureReason.Timeout"/> although the frame was
+        /// sent; CanKit 0.5.6's Vector CAN-FD transceiver builds a received frame's length from its
+        /// DLC that way. Pass a canonical length to avoid it. Refusing a non-canonical length is a
+        /// behaviour change, kept for the next major version (#352, #299).
         /// </param>
         /// <param name="timeout">
         /// Maximum time to wait before failing with <see cref="TxConfirmFailureReason.Timeout"/>
@@ -217,7 +228,10 @@ namespace CanKit.Pro.RawCan
         /// send lock, after any wait for another send's driver call — so a token cancelled up to
         /// that point abandons the send with <see cref="OperationCanceledException"/> and nothing
         /// reaches the driver (#294). A frame the driver has been handed goes out; the CanKit
-        /// 0.5.6 adapters ignore the token inside their transmit.
+        /// 0.5.6 adapters ignore the token inside their transmit. Disposing the service cancels
+        /// an outstanding call the same way, on either path -- while it waits for the echo, or
+        /// while an asynchronous <see cref="ICanBus.TransmitAsync(CanFrame, System.Threading.CancellationToken)"/>
+        /// is still pending -- and it ends in <see cref="OperationCanceledException"/> (#352).
         /// </param>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }
