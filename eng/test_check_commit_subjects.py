@@ -35,23 +35,9 @@ class Subjects(unittest.TestCase):
             with self.subTest(subject):
                 self.assertFalse(checker.is_conventional(subject))
 
-    def test_merge_subjects_git_writes_are_allowed(self):
-        for subject in ('Merge pull request #408 from dborgards/test/uds-functional-window-clock-#407',
-                        "Merge branch 'main' into fix/uds-minors-#372",
-                        "Merge remote-tracking branch 'origin/main' into fix/isotp-discard-race-#353",
-                        "Merge branch 'main' of https://github.com/dborgards/CanKit.Pro into x"):
-            with self.subTest(subject):
-                self.assertTrue(checker.is_allowed_merge(subject))
-
-    def test_lookalike_merge_subjects_are_not_allowed(self):
-        for subject in ('Merge pull request fixed it', 'Merge branch', "Merge branch 'main'", 'Merge stuff into main',
-                        'Merged pull request #1 from a/b', "Merge branch 'a' into b and also changed code"):
-            with self.subTest(subject):
-                self.assertFalse(checker.is_allowed_merge(subject))
-
-    def test_offending_keeps_order_and_skips_the_allowed(self):
-        subjects = ['feat: a', 'Fix b', "Merge branch 'main' into x", 'wip', 'Merge pull request #1 from a/b']
-        self.assertEqual(['Fix b', 'wip'], checker.offending(subjects))
+    def test_offending_keeps_order_and_skips_conventional_subjects(self):
+        subjects = ['feat: a', 'Fix b', 'wip', "Merge branch 'main' into x"]
+        self.assertEqual(['Fix b', 'wip', "Merge branch 'main' into x"], checker.offending(subjects))
         self.assertEqual([], checker.offending([]))
 
 
@@ -63,13 +49,19 @@ def git(cwd: str, *args: str) -> None:
 class BranchRange(unittest.TestCase):
     """The range is `origin/<base>..HEAD`: base commits are not the branch's, the branch's are."""
 
-    def run_in_repo(self, subjects_on_branch):
+    def run_in_repo(self, subjects_on_branch, merge_subjects=()):
         with tempfile.TemporaryDirectory() as directory:
             git(directory, 'init', '-q', '-b', 'main')
             git(directory, 'commit', '-q', '--allow-empty', '-m', 'Initial commit that is not conventional')
             git(directory, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
             for subject in subjects_on_branch:
                 git(directory, 'commit', '-q', '--allow-empty', '-m', subject)
+            for subject in merge_subjects:
+                git(directory, 'switch', '-q', '-c', 'side', 'HEAD~1' if subjects_on_branch else 'HEAD')
+                git(directory, 'commit', '-q', '--allow-empty', '-m', 'feat: on the side')
+                git(directory, 'switch', '-q', 'main')
+                git(directory, 'merge', '-q', '--no-ff', '-m', subject, 'side')
+                git(directory, 'branch', '-q', '-D', 'side')
             previous = os.getcwd()
             os.chdir(directory)
             try:
@@ -90,6 +82,18 @@ class BranchRange(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("'Fixed stuff'", output)
         self.assertNotIn("'feat: a'", output)
+
+    def test_a_two_parent_commit_is_skipped_whatever_its_subject(self):
+        code, output = self.run_in_repo(['feat: a'], merge_subjects=['merge(canopen): bring main in', 'Merged stuff'])
+        self.assertEqual(0, code)
+        self.assertIn('3 commit subject(s) checked', output)  # feat: a, plus one side commit per merge
+
+    def test_a_one_parent_commit_with_the_same_subject_fails(self):
+        for subject in ('merge(canopen): bring main in', "Merge branch 'main' into x"):
+            with self.subTest(subject):
+                code, output = self.run_in_repo(['feat: a', subject])
+                self.assertEqual(1, code)
+                self.assertIn(repr(subject), output)
 
     def test_an_empty_branch_passes(self):
         code, output = self.run_in_repo([])

@@ -116,9 +116,9 @@ printed in the release notes as part of the breaking change (the 1.3.0 entries i
 show exactly that). Put such trailers above it.
 
 The `commit subjects` job in CI (pull requests only) lists every branch commit whose subject is not
-a Conventional Commit; `Merge pull request …`, `Merge branch '…' into …` and
-`Merge remote-tracking branch '…' into …` subjects are let through. It is deliberately not a
-required check — it reports, the maintainer decides — and `eng/check-commit-subjects.py <base>`
+a Conventional Commit. Merge commits (more than one parent) are skipped whatever their subject:
+semantic-release reads them but ignores a subject that is not a Conventional Commit. The job is
+deliberately not a required check — it reports, the maintainer decides — and `eng/check-commit-subjects.py <base>`
 runs the same check locally.
 
 Types that never release on their own: `docs`, `test`, `chore`, `ci`, `style`, `refactor`. Use
