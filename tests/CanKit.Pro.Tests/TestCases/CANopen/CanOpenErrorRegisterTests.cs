@@ -302,6 +302,33 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(wire, 2, 0xFF00, 0x00);
     }
 
+    // Codex on #417: a held 0000h that an application EMCY replaces in Stopped, with the EMCY then
+    // switched off, still takes the ended error out of 1001h: the application's EMCY sends and
+    // writes nothing, and the node's register update does not ride on its payload.
+    [Fact]
+    public async Task A_Held_Error_Reset_Replaced_By_An_Application_Emcy_Still_Clears_The_Register()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        await Inject(device, Rpdo1, 0x01);
+        await ExpectEmcyAsync(wire, 1, 0x8210, Communication);
+
+        wire.SendNmt(NmtCommand.Stop, Device);
+        await WaitForStateAsync(device, NmtState.Stopped);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0, 16).Add(0x2001, 0, 16)); // 0000h held
+        await device.SendEmcyAsync(0xFF00, 0x00); // replaces it
+        var od = device.ObjectDictionary;
+        od.WriteUnsigned(0x1014, 0, EmcyId | CanOpenCobId.InvalidBit);
+        Settle(device);
+        await StartAsync(wire, device);
+        await WaitForErrorRegisterAsync(device, 0x00);
+        od.WriteUnsigned(0x1014, 0, EmcyId);
+        Settle(device);
+        await device.SendEmcyAsync(0xFF00, 0x00);
+        await ExpectEmcyAsync(wire, 2, 0xFF00, 0x00);
+    }
+
     // Codex on #417: the application's part of the register is the one its last transmitted EMCY
     // carried. A call cancelled before it is transmitted changes nothing.
     [Fact]

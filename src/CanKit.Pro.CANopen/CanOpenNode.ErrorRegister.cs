@@ -111,6 +111,7 @@ internal sealed partial class CanOpenNode
             // the transition into another NMT state.
             _pendingEmcy = msg;
             _pendingEmcyIsApplications = false;
+            _heldNodeEmcy = true;
             return;
         }
         _ = EmitEmcy(msg);
@@ -120,6 +121,11 @@ internal sealed partial class CanOpenNode
     // which the node takes when the EMCY is transmitted. Actor loop only.
     private bool _pendingEmcyIsApplications;
 
+    // Whether a node EMCY was held in Stopped since the held EMCY was last released or dropped.
+    // An application EMCY that replaces it takes the frame, not the node's register update. Actor
+    // loop only.
+    private bool _heldNodeEmcy;
+
     /// <summary>Leaving Stopped (§7.3.2.2.4): the held EMCY goes out with the register of that
     /// moment. With the EMCY switched off meanwhile no frame goes out, but a held error reset of
     /// the node's still takes the ended error out of <c>1001h</c> (EmitEmcy).</summary>
@@ -127,6 +133,11 @@ internal sealed partial class CanOpenNode
     {
         bool applications = _pendingEmcyIsApplications;
         _pendingEmcyIsApplications = false;
+        // A held node EMCY that the application's replaced still updates 1001h, ahead of it on
+        // the chain: with the EMCY switched off meanwhile, the application's sends nothing and
+        // writes nothing, and an error that ended in Stopped would be read on (Codex on #417).
+        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(CommunicationErrorBits);
+        _heldNodeEmcy = false;
         _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
 
@@ -136,17 +147,22 @@ internal sealed partial class CanOpenNode
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
-        if (_errorRegisterQueued) QueueApplicationErrorRegisterWrite();
+        _heldNodeEmcy = false;
+        if (_errorRegisterQueued) QueueErrorRegisterWrite(nodeBits: 0);
     }
 
-    /// <summary>Writes the application's part, as of its place on the EMCY chain, to <c>1001h</c>
-    /// without a frame, so an EMCY queued before it cannot overwrite it afterwards.</summary>
-    private void QueueApplicationErrorRegisterWrite()
-        => _ = AppendToEmcyChain(() =>
+    /// <summary>Writes the application's part, as of its place on the EMCY chain, ORed with
+    /// <paramref name="nodeBits"/> to <c>1001h</c> without a frame, so an EMCY queued before it
+    /// cannot overwrite it afterwards.</summary>
+    private void QueueErrorRegisterWrite(byte nodeBits)
+    {
+        _errorRegisterQueued = true;
+        _ = AppendToEmcyChain(() =>
         {
-            UpdateErrorRegister(passed: null, nodeBits: 0);
+            UpdateErrorRegister(passed: null, nodeBits);
             return Task.CompletedTask;
         });
+    }
 
     /// <summary>One step of the EMCY chain on <c>1001h</c>: the application's part — the register
     /// <paramref name="passed"/> by its EMCY, which replaces a dictionary write before it, else
