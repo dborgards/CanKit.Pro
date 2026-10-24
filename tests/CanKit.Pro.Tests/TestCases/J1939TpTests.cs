@@ -4475,7 +4475,14 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var subject = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
             ownsService: false, actor);
         var background = new List<Exception>();
-        subject.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+        // Reported on the thread pool, after the inbox fault (#356, T-2): awaited, not read
+        // straight after the receive.
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        subject.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            lock (background) background.Add(ex);
+            reported.TrySetResult(ex);
+        };
 
         var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         bus.OnTransmitting = f =>
@@ -4499,6 +4506,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var ex = (await faulted.Should().ThrowAsync<J1939TpAbortException>()).Which;
         ex.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
         ex.Pgn.Should().Be(pgn);
+        // Reports arrive in the order they were made, so one made before this would have been
+        // delivered first.
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(ex);
         lock (background) background.Should().ContainSingle().Which.Should().BeSameAs(ex);
     }
 
@@ -4793,7 +4803,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: true, actor);
         var sends = await SendBamsInFlight(clock, actor, sender);
         var faults = new List<Exception>();
-        sender.BackgroundExceptionOccurred += (_, e) => { lock (faults) faults.Add(e); };
+        // Reported on the thread pool (#356, T-2), so possibly after Dispose has returned.
+        var reported = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sender.BackgroundExceptionOccurred += (_, e) =>
+        {
+            lock (faults) faults.Add(e);
+            reported.TrySetResult(true);
+        };
 
         using var release = new ManualResetEventSlim();
         var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -4807,6 +4823,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             await occupied.Task.WaitAsync(ShortTimeout);
             sender.Dispose();
 
+            await reported.Task.WaitAsync(ShortTimeout);
             lock (faults) faults.Should().ContainSingle().Which.Should().BeOfType<TimeoutException>();
             service.Disposed.IsCompleted.Should().BeFalse("the cleanup has not run, so the service is still in use");
             sends.Should().OnlyContain(t => !t.IsCompleted);

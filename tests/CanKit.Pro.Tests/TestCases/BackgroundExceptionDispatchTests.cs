@@ -153,4 +153,87 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
         (await Within(overlapped.Task)).Should().BeFalse();
         secondRan.Wait(HangGuard).Should().BeTrue("it is delivered once the first has returned");
     }
+
+    // =========================================================================================
+    // J1939-TP
+    // =========================================================================================
+
+    private const byte TpPeerSa = 0x77;
+    private const uint TpPgn = 0xFED3u;
+
+    private static J1939TpOptions TpOptions() => new J1939TpOptions().With(
+        t1: TimeSpan.FromSeconds(30), t2: TimeSpan.FromSeconds(30), t3: TimeSpan.FromSeconds(30));
+
+    // A BAM whose first TP.DT carries sequence number 2: the receiver aborts the reassembly.
+    private static void SendBrokenBam(ICanBus peer)
+    {
+        var payload = new byte[12];
+        peer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, TpPeerSa)),
+            J1939TpFrames.BuildBam(payload.Length, J1939TpFrames.TotalPackets(payload.Length), TpPgn), isExtendedFrame: true));
+        peer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, TpPeerSa)),
+            J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+    }
+
+    private static void SendBam(ICanBus peer, byte[] payload)
+    {
+        int packets = J1939TpFrames.TotalPackets(payload.Length);
+        peer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, TpPeerSa)),
+            J1939TpFrames.BuildBam(payload.Length, packets, TpPgn), isExtendedFrame: true));
+        for (int sn = 1; sn <= packets; sn++)
+        {
+            peer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, TpPeerSa)),
+                J1939TpFrames.BuildDt((byte)sn, payload, (sn - 1) * J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+        }
+    }
+
+    // #356, T-2: the abort used to be raised on the actor, before its fault was in the inbox. A
+    // handler that answered it by receiving waited for an item written only after it returned,
+    // and one that waited for the next datagram held the loop that would deliver it.
+    [Fact]
+    public async Task J1939Tp_A_Handler_That_Receives_Gets_The_Abort_And_The_Next_Datagram()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x31, options: TpOptions());
+        var fault = NewSignal<Exception?>();
+        var next = NewSignal<J1939TpDatagram>();
+        receiver.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is not J1939TpAbortException) return;
+            try
+            {
+                // Synchronously, as a handler written against a blocking API would.
+                fault.TrySetResult(Record.Exception(() => receiver.ReceiveAsync().GetAwaiter().GetResult()));
+                next.TrySetResult(receiver.ReceiveAsync().GetAwaiter().GetResult());
+            }
+            catch (Exception e)
+            {
+                next.TrySetException(e);
+            }
+        };
+
+        SendBrokenBam(peerBus);
+        (await Within(fault.Task)).Should().BeOfType<J1939TpAbortException>("the fault was in the inbox before the report");
+
+        var payload = Enumerable.Range(1, 12).Select(i => (byte)i).ToArray();
+        SendBam(peerBus, payload);
+        (await Within(next.Task)).Payload.Should().Equal(payload, "the actor went on while the handler waited");
+    }
+
+    [Fact]
+    public async Task J1939Tp_A_Throwing_Handler_Does_Not_Hide_The_Report_From_The_Next()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x31, options: TpOptions());
+        var second = NewSignal<Exception>();
+        receiver.BackgroundExceptionOccurred += (_, _) => throw new InvalidOperationException("first handler");
+        receiver.BackgroundExceptionOccurred += (_, ex) => second.TrySetResult(ex);
+
+        SendBrokenBam(peerBus);
+
+        (await Within(second.Task)).Should().BeOfType<J1939TpAbortException>();
+    }
 }

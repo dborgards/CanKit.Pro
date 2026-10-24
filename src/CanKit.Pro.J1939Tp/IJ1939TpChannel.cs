@@ -161,6 +161,16 @@ public interface IJ1939TpChannel : IDisposable
     /// exception, subscription failure, actor loop exception) must be surfaced to the
     /// application. Failures tied to a specific <see cref="SendBamAsync"/> /
     /// <see cref="SendCmAsync"/> call are reported via that call's returned task.
+    /// <para>
+    /// Raised on a thread-pool thread, never on the channel's actor loop, and only once what the
+    /// report announces is in place: a reassembly abort has already faulted the inbox, so a
+    /// handler that answers it with <see cref="ReceiveAsync"/> -- or waits on a send, or disposes
+    /// the channel -- gets the fault rather than deadlocking the actor (#356). Reports are
+    /// delivered one at a time, in the order they were made; a handler that blocks holds up
+    /// the reports behind it, not the channel. Each handler is called on its own, so one that
+    /// throws does not keep the report from the handlers after it; its exception is dropped.
+    /// A report may reach its handlers after <see cref="IDisposable.Dispose"/> has returned.
+    /// </para>
     /// </summary>
     event EventHandler<Exception>? BackgroundExceptionOccurred;
 }
