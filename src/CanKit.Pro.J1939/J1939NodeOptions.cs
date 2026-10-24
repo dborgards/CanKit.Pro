@@ -7,7 +7,7 @@ namespace CanKit.Pro.J1939;
 /// <summary>
 /// Immutable configuration for <see cref="IJ1939Node"/>. Captures the node's identity
 /// (<see cref="Name"/>), the SAE J1939-81 arbitration window <see cref="ClaimAnnounceTimeout"/>,
-/// receive-buffer bounds, and the transport-protocol options passed through to the shared
+/// the claim and receive priorities, and the transport-protocol options passed through to the shared
 /// <see cref="IJ1939TpChannel"/> for &gt;8-byte payloads.
 /// </summary>
 public sealed class J1939NodeOptions
@@ -52,9 +52,12 @@ public sealed class J1939NodeOptions
     public byte ClaimPriority { get; init; } = 6;
 
     /// <summary>
-    /// Bounded capacity of the internal receive buffer. Drops the oldest message when full so
-    /// a slow consumer never stalls the node's actor loop. Defaults to 128.
+    /// Not used. It sized an internal receive buffer that no public member reads; the node
+    /// delivers every received message through <see cref="IJ1939Node.MessageReceived"/> and no
+    /// longer keeps a copy (#355). Still validated (it must be at least 1, default 128), so a
+    /// configuration that was refused is refused as before. Removed in 2.0 (#299).
     /// </summary>
+    [Obsolete("Not used: the node keeps no receive buffer; receive through IJ1939Node.MessageReceived. Removed in 2.0 (#299).")]
     public int ReceiveBufferCapacity { get; init; } = 128;
 
     /// <summary>
@@ -77,9 +80,11 @@ public sealed class J1939NodeOptions
         if (ClaimPriority > 7)
             throw new ArgumentOutOfRangeException(nameof(ClaimPriority), ClaimPriority,
                 "J1939 priority must be in [0, 7].");
+#pragma warning disable CS0618 // validated until 2.0 removes it, so nothing that was refused is accepted now
         if (ReceiveBufferCapacity < 1)
             throw new ArgumentOutOfRangeException(nameof(ReceiveBufferCapacity), ReceiveBufferCapacity,
                 "ReceiveBufferCapacity must be >= 1.");
+#pragma warning restore CS0618
         if (TransportOptions is null)
             throw new ArgumentNullException(nameof(TransportOptions));
     }
