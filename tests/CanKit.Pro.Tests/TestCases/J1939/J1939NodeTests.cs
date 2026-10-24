@@ -2763,6 +2763,54 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await seen).DestinationAddress.Should().Be((byte)0x80, "the directed request still reaches the application");
     }
 
+    // #355 (J-2), the open half pinned: a Request for Address Claimed directed at the address the
+    // node is still arbitrating for is not answered, because the node holds no address in that
+    // window. Whether SAE J1939-81 wants it answered is open (the review cited §4.2.2 from
+    // memory; the text has not been checked), so the behaviour stays and the README says so --
+    // this test makes a change to it a deliberate one. The directed request is followed by a
+    // global one, which is answered; both are handled on the actor in the order they arrived, and
+    // an answer's transmit starts inside the turn that decides it, so when the global request
+    // reaches MessageReceived every answer either request got has been counted.
+    [Fact]
+    public async Task A_Request_For_Address_Claimed_Directed_At_The_Address_In_Arbitration_Is_Not_Answered()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // the scanning tool
+        using var inner = new CanBusService(busA);
+        var service = new ClaimSendCountingService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        const byte pending = 0x80;
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x0000CC)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+
+        var claim = node.ClaimAddressAsync(pending);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout); // announced and confirmed; the window is open
+        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+        service.ClaimSends.Should().Be(1, "the arbitration's own announcement");
+
+        var atGlobalRequest = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.MessageReceived += (_, m) =>
+        {
+            if (J1939Pgn.IsRequest(m.Pgn) && m.DestinationAddress == J1939Pgn.GlobalAddress)
+                atGlobalRequest.TrySetResult(service.ClaimSends);
+        };
+        foreach (var destination in new[] { pending, J1939Pgn.GlobalAddress })
+        {
+            busB.Transmit(CanFrame.Classic(
+                (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: destination),
+                new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        }
+
+        (await atGlobalRequest.Task.AsTaskWithTimeout(ShortTimeout)).Should().Be(2,
+            "the global request is answered by re-announcing the claim, the directed one before it is not answered at all");
+
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+    }
+
     // #355 (J12, decided on #397 as option (b)): ReceiveBufferCapacity sized an inbox no public
     // member read, so a node retained up to that many payloads for nobody. The inbox is gone, and
     // the option is [Obsolete] until 2.0 removes it (#299). It is still validated: a
@@ -6267,6 +6315,45 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>
+    /// Forwards to a real service and counts the Address Claim / Cannot Claim transmits handed to
+    /// it. The count moves inside <see cref="SendConfirmedAsync"/>'s synchronous part, which the
+    /// node runs in the actor turn that decides to send, so a handler on the actor reads it exact.
+    /// </summary>
+    private sealed class ClaimSendCountingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private int _claimSends;
+
+        public ClaimSendCountingService(ICanBusService inner) => _inner = inner;
+
+        public int ClaimSends => Volatile.Read(ref _claimSends);
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (frame.IsExtendedFrame && J1939Pgn.IsAddressClaim(J1939Id.Decompose((uint)frame.ID).Pgn))
+                Interlocked.Increment(ref _claimSends);
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
     }
 
     /// <summary>

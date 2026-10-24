@@ -44,7 +44,14 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   claim still waiting its backoff answers by starting its round. The request
   still reaches `MessageReceived`. `ClaimAddressAsync` faults only once the
   Cannot Claim it owes has gone out, so a caller that disposes the node on the
-  exception cannot suppress it.
+  exception cannot suppress it. A request directed at a node's address is
+  answered while the node holds it; one directed at the address the node is
+  still arbitrating for is not, and does not reach `MessageReceived` either,
+  because the node holds no address in that window and drops every PDU1 frame
+  not sent to the global address. Whether SAE J1939-81 requires an answer
+  there is an open question: the review behind #355 cited §4.2.2 from memory,
+  and the text has not been checked. Until it is, only a global request is
+  answered during the arbitration window.
 - **Request-PGN** (PGN 0xEA00) send and receive (**FR-J1939-005**).
 - **Auto-routing** to J1939-TP for payloads > 8 bytes; direct 29-bit frames
   for payloads ≤ 8 bytes (**FR-J1939-006**).

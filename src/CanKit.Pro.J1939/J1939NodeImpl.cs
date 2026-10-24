@@ -1826,6 +1826,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
             if (ownFrame && !directedToUs) return;
 
             // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
+            // While the node is Claiming it holds no address, so this also drops a Request for
+            // Address Claimed directed at the address it is arbitrating for: only a global request
+            // is answered in that window. Whether SAE J1939-81 requires that one to be answered
+            // too is open -- the review behind #355 (J-2) cited §4.2.2 from memory, the text has
+            // not been checked -- and the README says so. Unchanged until it is.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))
                 return;
 
