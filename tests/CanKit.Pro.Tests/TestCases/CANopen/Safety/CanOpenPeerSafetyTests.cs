@@ -1184,12 +1184,13 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     /// (13FFh:2 here): either way before anything is written, not at that write, after the
     /// delete-first pass had deleted the peer's SRDOs and cleared its 13FEh (#343).</summary>
     [Theory]
-    [InlineData("[13FFsub1]", 0x13FF, 0x01, "ro", true)]
-    [InlineData("[13FFsub1]", 0x13FF, 0x01, "const", true)]
-    [InlineData("[13FFsub2]", 0x13FF, 0x02, "ro", false)]
-    [InlineData("[13FE]", 0x13FE, 0x00, "ro", true)]
-    [InlineData("[1301sub2]", 0x1301, 0x02, "ro", true)]
-    public async Task A_Pair_The_File_Declares_Read_Only_Is_Refused_Before_Anything_Is_Written(string section, int index, byte subindex, string access, bool beforeAnyFrame)
+    [InlineData("[13FFsub1]", 0x13FF, 0x01, "ro", true, "CiA 319 §5.3 step 1")]
+    [InlineData("[13FFsub1]", 0x13FF, 0x01, "const", true, "CiA 319 §5.3 step 1")]
+    [InlineData("[13FFsub2]", 0x13FF, 0x02, "ro", false, "CiA 319 §5.3 step 1")]
+    [InlineData("[13FE]", 0x13FE, 0x00, "ro", true, "CiA 319 §5.3 step 3")]
+    [InlineData("[1301sub2]", 0x1301, 0x02, "ro", true, "CiA 319 §5.3 step 1")]
+    [InlineData("[1300]", 0x1300, 0x00, "ro", true, "CiA DSP 304 §9.2")]
+    public async Task A_Pair_The_File_Declares_Read_Only_Is_Refused_Before_Anything_Is_Written(string section, int index, byte subindex, string access, bool beforeAnyFrame, string step)
     {
         var file = CanOpenDeviceDescription.ParseDcf(PatchedSection(FixtureText(), section, "AccessType=rw", $"AccessType={access}"));
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
@@ -1201,7 +1202,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         List<(ushort, byte)> seeded;
         lock (fake.Written) seeded = fake.Written.Keys.ToList();
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
-        ex.Message.Should().Contain($"{index:X4}h:{subindex:X2}h").And.Contain("read-only").And.Contain("0601 0002h")
+        ex.Message.Should().Contain($"{index:X4}h:{subindex:X2}h").And.Contain("read-only").And.Contain("0601 0002h").And.Contain($"downloads it ({step})")
             .And.Contain(beforeAnyFrame ? "Nothing was sent" : "Nothing was written");
         lock (fake.Requests)
         {

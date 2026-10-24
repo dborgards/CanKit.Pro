@@ -272,8 +272,9 @@ internal sealed partial class CanOpenNode
 
     /// <summary>A pair the bound file declares <c>ro</c> or <c>const</c> is one a device that
     /// honours its file refuses with 0601 0002h — 13FFh:n among them, whose access a description
-    /// may restrict (#289). CiA 319 §5.3 step 1 downloads every value of the list, so such a
-    /// refusal would come mid-transaction, after the delete-first pass of §9.2 had deleted the
+    /// may restrict (#289). The transaction downloads every value of the §9.2 list (CiA 319 §5.3
+    /// step 1), then 13FEh (step 3) and the 1010h sub-index (step 5), so such a refusal would
+    /// come mid-transaction, after the delete-first pass of §9.2 had deleted the
     /// peer's SRDOs and cleared its 13FEh. Refused before that instead, with the gate: the writes
     /// the configuration fixes before the first frame, those of the SRDOs it does not name once the
     /// count is read (#343). A pair the file does not declare is the peer's to judge.</summary>
@@ -285,10 +286,21 @@ internal sealed partial class CanOpenNode
             if (!binding.DeclaresReadOnly(index, subindex)) continue;
             throw new InvalidOperationException(
                 $"The description bound for node 0x{peerNodeId:X2} declares {index:X4}h:{subindex:X2}h read-only (AccessType ro or const), " +
-                "and the configuration downloads it (CiA 319 §5.3 step 1): the peer would refuse that write with 0601 0002h part-way through, " +
+                $"and the configuration downloads it ({DownloadStepOf(index)}): the peer would refuse that write with 0601 0002h part-way through, " +
                 $"after CiA DSP 304 §9.2 had deleted its SRDOs and cleared its 13FEh. {nothingDone}");
         }
     }
+
+    /// <summary>The step that downloads a pair of <see cref="EnsureWritesFitDescription"/>: 1300h is
+    /// of the §9.2 list but no SRDO configuration data (CiA 319 §3.2), 13FEh = A5h is step 3 of
+    /// CiA 319 §5.3 and the store step 5; the records and the checksums are step 1.</summary>
+    private static string DownloadStepOf(ushort index) => index switch
+    {
+        SrdoRecords.GfcParameter => "CiA DSP 304 §9.2",
+        SrdoRecords.ConfigurationValid => "CiA 319 §5.3 step 3",
+        Co.StoreParameters => "CiA 319 §5.3 step 5",
+        _ => "CiA 319 §5.3 step 1",
+    };
 
     /// <summary>What CiA 319 §5.2 compares the peer with: the file's own 1018h:01–03 — "the
     /// entries in the EDS corresponding to the SRD" — as declared (ParameterValue, DefaultValue
