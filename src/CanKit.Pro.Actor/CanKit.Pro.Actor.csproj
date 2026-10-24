@@ -33,6 +33,12 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CanKit.Pro.Uds</_Parameter1>
     </AssemblyAttribute>
+    <!-- Every protocol layer delivers its BackgroundExceptionOccurred through the same internal
+         BackgroundExceptionDispatcher, off its actor loop (#356, T-2); J1939-TP is the one layer
+         that needed nothing else from here. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.J1939Tp</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>
