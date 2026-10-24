@@ -16,7 +16,14 @@ internal interface ISrdoEngineHost
     /// unless the node has left Operational by then.</summary>
     void SendPair(int srdoNumber, uint cobId1, byte[] plain, uint cobId2, byte[] inverted);
 
-    void EmitEmcy(ushort errorCode);
+    /// <summary>A communication error of SRDO <paramref name="srdoNumber"/> began; the engine
+    /// calls this once per run (CiA 301 §7.2.7.1, "only once per 'error event'").</summary>
+    void EmitEmcy(int srdoNumber, ushort errorCode);
+
+    /// <summary>The cause of the error <see cref="EmitEmcy"/> reported for that SRDO ended: a
+    /// pair that fits, or the SRDO rebuilt. The host keeps <c>1001h</c> and sends the error
+    /// reset (#379).</summary>
+    void EmcyCauseEnded(int srdoNumber);
     void SrdoReceived(int srdoNumber, uint cobId, byte[] payload);
     void SrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason);
     void GlobalFailsafeCommandReceived();

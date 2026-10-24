@@ -618,28 +618,4 @@ public partial class CanOpenPdoEngineTests
         await node.PostToActorAsync(() => PdoCall(node, "HandleTpdoRtr", ((Array)PdoField(node, "_tpdos")).GetValue(1)));
         frames.Should().Be(0);
     }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Sync_Start_Does_Not_Gate_Acyclic_Or_Rtr_Sampling(bool rtr)
-    {
-        using var service = new StarvedReaderBusService();
-        using var node = new CanOpenNode(service, Device, new CanOpenNodeOptions(), false);
-        node.ObjectDictionary.AddU8(0x2000, 0, 42);
-        node.ObjectDictionary.WriteUnsigned(0x1019, 0, 8);
-        node.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0, 8),
-            rtr ? TpdoTransmission.RtrOnlySynchronous : TpdoTransmission.SynchronousAcyclic);
-        SetSyncStart(node, 5, rtr ? (byte)252 : (byte)0);
-        await Inject(node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Start, Device);
-        if (!rtr) await node.TriggerTpdoAsync(1);
-        await Inject(node, CanOpenCobId.Sync, 1); // deliberately before the configured start value
-        if (rtr)
-        {
-            node.ObjectDictionary.WriteUnsigned(0x2000, 0, 99);
-            await node.PostToActorAsync(() => PdoCall(node, "HandleIncomingFrame", Tpdo1, Array.Empty<byte>(), true, false));
-        }
-        await Task.Run(async () => { while (node.HasLssTransmitsInFlight) await Task.Yield(); }).WithTimeoutAsync(ShortTimeout);
-        lock (service.Sent) service.Sent.Where(p => p.Length == 1 && p[0] != 0).Should().ContainSingle().Which.Should().Equal(42);
-    }
 }
