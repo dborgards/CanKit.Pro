@@ -70,5 +70,10 @@ existing rate and the first one with traffic is reported regardless of its value
 that means the `#netlink` endpoint, as above: CanKit sets the bit rate and listen-only mode only
 when netlink is enabled (it reconfigures the interface, which needs the privilege to bring it
 down and up), otherwise the interface must already be at the right rate — at which point there is
-nothing to detect. Adapters whose `Baud(...)` takes effect on open (PCAN, Kvaser, Vector) need no
-such suffix.
+nothing to detect. Adapters whose `Baud(...)` and listen-only mode take effect on open (PCAN,
+Vector) need no such suffix.
+
+Kvaser applies the rate but not listen-only: on CanKit 0.5.6 its adapter reports the mode without
+making the controller silent, so `detect` refuses it. `--allow-non-listen-only` runs the search
+there — non-reactive only with external hardware that holds the transmit line recessive
+(CiA 801 §5.2.4), reactive otherwise.

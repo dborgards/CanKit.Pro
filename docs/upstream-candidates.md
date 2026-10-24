@@ -8,7 +8,8 @@ nobody consumes.
 
 This page lists them so they can be offered upstream as pull requests rather than quietly lost.
 None of them is required for CanKit.Pro to build today; the first is the only one CanKit.Pro
-actively works around.
+actively works around. §7 is one it guards against instead: the CiA 801 bit-rate detection refuses
+the adapter it names.
 
 ## 1. Protocol error codes (worked around here)
 
@@ -93,6 +94,22 @@ Evidence: [`reviews/2026-10-06-echo-hardware-measurements.md`](reviews/2026-10-0
 - **Vector** (not measured, from source): Classic drops its own TX event in Echo mode
   (`if (recEcho && isEcho) return`) and delivers it flagged in Normal mode; FD never delivers it.
   Needs a measurement on hardware before it is reported.
+
+## 7. Kvaser never applies listen-only (read, #345)
+
+From source, not measured; not filed upstream yet. `KvaserProvider.QueryCapabilities` adds
+`CanFeature.ListenOnly` when the channel reports `canCHANNEL_CAP_SILENT_MODE`, and the
+configurator stores `ChannelWorkMode.ListenOnly`, but nothing in `CanKit.Adapter.Kvaser` @ v0.5.6
+calls `canSetBusOutputControl`: `KvaserBus.ApplyConfig` handles only `ChannelWorkMode.Echo`. The
+bus therefore reports listen-only while the controller runs in CANlib's default output mode —
+normal, from memory, not measured — and so acknowledges frames and sends error flags. PCAN (`PcanParameter.ListenOnly`), Vector
+(`XL_OUTPUT_MODE_SILENT`), SocketCAN (the listen-only ctrlmode, on a netlink endpoint), ZLG and
+ControlCAN (the mode byte of the channel configuration) do apply it.
+
+Proposal: before `canBusOn`, call `canSetBusOutputControl(handle, canDRIVER_SILENT)` when
+`WorkMode == ListenOnly` and `canDRIVER_NORMAL` otherwise. Until the CanKit version CanKit.Pro is
+built against does that, `LssBitRateDetection` refuses a Kvaser bus while `RequireListenOnly`
+holds, since its listen-only guarantee (CiA 801 §5.2.1) would otherwise be false on that adapter.
 
 ## How to use this list
 
