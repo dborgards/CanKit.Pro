@@ -96,25 +96,14 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         return await call;
     }
 
-    // While a collection outlasts P2 the listener keeps 20 ms slices. The call's task can
-    // complete with that slice still armed, and it is shorter than the next window, so the
-    // next window is not the earliest timer until the slice has elapsed and the listener retired.
-    private static async Task RetireInFlightSlices(WindowClock clock)
-    {
-        for (var i = 0; i < 4; i++)
-        {
-            var delay = await clock.Actor.NextTimerDelayAsync();
-            if (delay is null || delay > TimeSpan.FromMilliseconds(20)) return;
-            await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(21));
-        }
-    }
-
     // Steps the clock through a listener's in-flight slices -- and through nothing longer --
     // until `done` holds for the earliest armed timer. Those slices are re-armed from a thread
     // the test does not see, so "no timer armed" can mean one is about to be; this waits for
-    // it rather than taking it for the end, as RetireInFlightSlices does. A window still open
-    // is longer than a slice and is never stepped through: whatever waits on it times out here,
-    // which is how a window anchored too late shows (#195).
+    // it rather than taking it for the end. A helper that did take it for the end
+    // (RetireInFlightSlices) left a slice armed behind it and the next call held back by it,
+    // red on CI twice before its last two callers were moved here (#195, #407). A window still
+    // open is longer than a slice and is never stepped through: whatever waits on it times out
+    // here, which is how a window anchored too late shows (#195).
     private static async Task StepThroughSlicesUntil(WindowClock clock, Func<TimeSpan?, bool> done)
     {
         var deadline = DateTime.UtcNow + ShortTimeout;
@@ -697,42 +686,63 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex on #150: a collection window longer than P2 may hold a 0x78 from after the
     // request's P2; it answers nothing the window still covers and does not revive it.
+    // #407: this ran on the virtual clock against the virtual adapter and still went red on
+    // CI ("a timer armed 50 ms away; the earliest is 20 ms"). RetireInFlightSlices took "no
+    // timer armed" for the listener's end, and a slice re-armed from the pool a moment later
+    // held the next call back with nothing left to move the clock; nor was the 400 ms
+    // collection known to be armed before the clock moved under it. Here every instant is the
+    // test's: the driver's confirmation is held, the 0x78 is raised at a clock reading of the
+    // test's choosing, and each move of the clock waits for the timer it ends. The collection
+    // is shorter than the listener's 20 ms in-flight slice so that, once armed, it is the
+    // earliest timer and its arming can be waited for; the proportions are the original's --
+    // P2 shorter than the collection, the 0x78 after P2 and inside the collection.
     [Fact]
     public async Task A_Pending_Answer_Collected_After_P2_Does_Not_Revive_The_Window()
     {
-        var session = NewSession();
         using var clock = new WindowClock();
-        using var busTester = OpenClassic(session, 0);
-        using var busEcus = OpenClassic(session, 1);
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var p2 = TimeSpan.FromMilliseconds(5);
+        var slice = TimeSpan.FromMilliseconds(20); // the listener's, while a send is in flight
+        var collection = TimeSpan.FromMilliseconds(15);
+        using var functional = OpenOnClock(bus, clock,
+            responseWindow: p2, responsePendingWindow: TimeSpan.FromMilliseconds(2000));
 
         var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
-        busEcus.FrameObserved += (_, e) =>
-        {
-            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] != 0x90) busEcus.Transmit(positive);
-        };
-
-        using var functional = OpenOnClock(busTester, clock,
-            responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(2000));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // P2 = 100 ms; the 0x78 at 250 ms is inside the 400 ms collection but after P2.
-        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(400), cts.Token);
-        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(20));
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(250));
-        busEcus.Transmit(pending);
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(151));
-        await first;
-        await RetireInFlightSlices(clock);
+        var t0 = clock.Clock.Elapsed;
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, collection, cts.Token);
+        // Accepted by the driver at t0, its confirmation held: the window is P2 from t0, and the
+        // listener has armed it.
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await WaitForProvisionalWindow(clock, p2);
+        await clock.Clock.AdvanceAsync(p2); // P2 is over; the send in flight keeps the listener in slices
+        await WaitUntilArmed(clock, slice, TimeSpan.Zero);
 
-        // Revived, the window would reach 250 + 2000 ms and this call would not go out after
-        // a 100 ms step. It goes out after P2, which is already over.
-        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
-        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(20));
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(51));
-        var responses = await second;
-        responses.Should().ContainSingle();
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(10));
+        (clock.Clock.Elapsed - t0).Should().BeGreaterThan(p2, "the premise: the 0x78 comes after P2");
+        bus.RaiseObserved(pending, isEcho: false); // the 0x78, at t0 + 15 ms: 10 ms after P2
+        // The listener's slice ends with the 0x78 in it and, the send still in flight, keeps it
+        // for the anchoring; the re-armed slice says it got that far.
+        await clock.Clock.AdvanceAsync(slice - TimeSpan.FromMilliseconds(10));
+        await WaitUntilArmed(clock, slice, TimeSpan.Zero);
+        bus.DeferredEchoes.ReleaseNext(); // the confirmation, at t0 + 25 ms: the collection starts
+        await WaitUntilArmed(clock, collection, TimeSpan.Zero);
+        await clock.Clock.AdvanceAsync(collection);
+        var collected = await first.WaitAsync(ShortTimeout);
+        collected.Should().ContainSingle().Which.NegativeResponseCode.Should().Be(0x78,
+            "the 0x78 from after P2 was collected -- the case under test, not one where it went unheard");
+
+        // Neither the collection's copy of the 0x78 nor the listener's moved the window out: the
+        // next call goes out with the clock moved only through the listener's last slice.
+        // Revived, the window would end at t0 + 2015 ms, which is never stepped through.
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, ShortCollection, cts.Token);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
+        bus.RaiseObserved(positive, isEcho: false);
+        bus.DeferredEchoes.ReleaseNext();
+        (await RunCall(clock, second)).Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "a 0x78 from after P2 revives no window, so the next call is not held for P2*");
     }
 
     // Codex on #150: the listener's subscription is made before the send, but its worker may
@@ -1192,46 +1202,54 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
     // Bugbot on #150: a collection that outlasts P2 anchors a window already over; that must
     // not leave a completed listener behind that blocks the next window's real one.
+    // #407: the same RetireInFlightSlices race as the test above, and a third call that only
+    // started once the second's window was over, so it could not tell a living listener from
+    // a zombie -- a retired listener left registered passed it. Now the third call starts
+    // inside the second's window, and the second's late negative arrives while it waits.
     [Fact]
     public async Task A_Collection_That_Outlasts_The_Window_Does_Not_Leave_A_Zombie_Listener()
     {
-        var session = NewSession();
         using var clock = new WindowClock();
-        using var busTester = OpenClassic(session, 0);
-        using var busEcus = OpenClassic(session, 1);
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var p2 = TimeSpan.FromMilliseconds(100);
+        using var functional = OpenOnClock(bus, clock, responseWindow: p2);
 
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
-        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x92, 0x03 });
-        int seen = 0;
-        busEcus.FrameObserved += (_, e) =>
-        {
-            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (Interlocked.Increment(ref seen) == 3) busEcus.Transmit(positive);
-        };
-
-        using var functional = OpenOnClock(busTester, clock, responseWindow: TimeSpan.FromMilliseconds(400));
+        var answerToSecond = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        var answerToThird = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x92, 0x03 });
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // A collection longer than the window: the pre-send listener retires; the anchor after
-        // it is already over and must start nothing.
-        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(500), cts.Token);
-        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(400), TimeSpan.FromMilliseconds(20));
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(501));
-        await first;
-        await RetireInFlightSlices(clock);
-        // A short collection; its late negative, at 150 ms, needs a living listener's window.
-        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(30), cts.Token);
-        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(30));
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(31));
-        await second;
-        clock.Clock.Advance(TimeSpan.FromMilliseconds(150));
-        busEcus.Transmit(negative);
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(251)); // the 400 ms window is over
-        var third = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x92 }, Window, cts.Token);
-        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
-        var responses = await RunCall(clock, third);
+        // A collection longer than the window: when it ends, the window anchored at the send is
+        // already over, and the listener that read it retires.
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(150), cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await WaitForProvisionalWindow(clock, p2);
+        bus.DeferredEchoes.ReleaseNext();
+        await RunCall(clock, first);
 
-        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+        // The next call goes out once that listener has retired, and gets one of its own.
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, ShortCollection, cts.Token);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
+        var secondSentAt = clock.Clock.Elapsed;
+        await WaitForProvisionalWindow(clock, p2);
+        bus.RaiseObserved(answerToSecond, isEcho: false);
+        bus.DeferredEchoes.ReleaseNext();
+        (await CollectFor(clock, second, ShortCollection)).Should().ContainSingle();
+
+        // A short collection: the second's window runs on, and the third call waits it out on
+        // the second's listener. Its late negative comes in that wait and must not be the third's.
+        var third = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x92 }, ShortCollection, cts.Token);
+        var windowEnd = secondSentAt + p2;
+        await StepThroughSlicesUntil(clock, ArmedUntil(clock, windowEnd));
+        bus.DeferredEchoes.Enqueued.Should().Be(2, "the third call is still waiting out the second's window");
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(40));
+        bus.RaiseObserved(negative, isEcho: false);
+
+        await clock.Clock.AdvanceToAsync(windowEnd);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 3);
+        bus.RaiseObserved(answerToThird, isEcho: false);
+        bus.DeferredEchoes.ReleaseNext();
+        (await RunCall(clock, third)).Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the second request's window was honoured by a real listener, not blocked by a zombie");
     }
 
