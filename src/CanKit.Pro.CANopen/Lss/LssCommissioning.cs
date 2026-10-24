@@ -128,8 +128,11 @@ public sealed class LssSlaveConfiguration
 
     /// <summary>
     /// When <see langword="true"/> (the default), switch state global returns the slave to
-    /// waiting after the services, whether they succeeded or not. Activation sends that frame
-    /// before the switch delay, while the slave is still on the current bitrate.
+    /// waiting after the services, whether they succeeded or not. With
+    /// <see cref="ActivateBitRate"/>, activation sends that frame after both switch-delay
+    /// periods, on the new rate (CiA 305 §6.4.4). Without it, activation sends it before the
+    /// first period ends, on the rate the slave still uses: a deliberate departure from
+    /// §6.4.4, described on <see cref="ILssMaster.ActivateBitTimingAsync"/>.
     /// </summary>
     public bool ReleaseToWaiting { get; init; } = true;
 }
@@ -228,6 +231,10 @@ public sealed class LssUnconfiguredScanResult
 /// Activating bit timing in a scan is limited to one slave.
 /// Commissioning calls sharing the same master run one sequence at a time, including cleanup.
 /// Do not call the master directly while a commissioning sequence is running.
+/// A sequence that is cancelled or fails still returns its slaves to waiting before it ends. That
+/// release has no time budget of its own: it waits out whatever the master has reserved, which
+/// after an abandoned activation is both switch-delay periods (up to 2 × 65 535 ms). Disposing the
+/// master ends that wait.
 /// </remarks>
 public sealed class LssCommissioning
 {
@@ -242,14 +249,6 @@ public sealed class LssCommissioning
         _master = master;
         _sequence = Sequences.GetValue(master, static _ => new SemaphoreSlim(1, 1));
     }
-
-    /// <summary>
-    /// Test seam (#362): the wall-clock budget of the cleanup that returns the slaves to waiting.
-    /// A test whose master runs on a manual clock sets it to <see cref="Timeout.InfiniteTimeSpan"/>,
-    /// because the master's own wait there is measured on that clock and a wall-clock budget would
-    /// let a slow host skip the release. Production keeps two seconds.
-    /// </summary>
-    internal TimeSpan ReleaseBudgetForTests { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>The master this tool drives.</summary>
     public ILssMaster Master => _master;
@@ -416,8 +415,10 @@ public sealed class LssCommissioning
         }
         finally
         {
-            // Activation with returnToWaiting already sent the waiting frame, on the rate the
-            // slave can still hear. A second one after the switch goes out at the old rate.
+            // Activation with returnToWaiting already sent the waiting frame on a rate the slave
+            // hears: after both periods on the new rate with a host switch, or before the first
+            // period ends without one. Without a host switch, a second one would go out at the
+            // old rate after the slave has left it.
             if (configuration.ReleaseToWaiting && !applied.ReleasedByActivation)
                 await ReleaseToWaitingAsync().ConfigureAwait(false);
         }
@@ -648,16 +649,20 @@ public sealed class LssCommissioning
     }
 
     /// <summary>
-    /// Returns every slave to waiting. Uses its own token: the caller's token is often already
-    /// cancelled when this runs from a <c>finally</c>, and the waiting frame would never be sent.
-    /// A failure here must not replace a configuration the slave already applied.
+    /// Returns every slave to waiting. Not on the caller's token: that is often already cancelled
+    /// when this runs from a <c>finally</c>, and the waiting frame would never be sent. Nor on a
+    /// wall-clock budget of its own (L-4, #359): the master first waits out what it reserved --
+    /// both switch-delay periods of an abandoned activation, up to 2 × 65 535 ms -- so a budget
+    /// shorter than that skipped the release and left the slaves in configuration, and one that
+    /// ran out inside the send made the master's transmission indeterminate. Every wait of the
+    /// master is already bounded. A failure here must not replace a configuration the slave
+    /// already applied.
     /// </summary>
     private async Task ReleaseToWaitingAsync()
     {
-        using var cleanup = new CancellationTokenSource(ReleaseBudgetForTests);
         try
         {
-            await _master.SwitchStateGlobalAsync(LssState.Waiting, cleanup.Token).ConfigureAwait(false);
+            await _master.SwitchStateGlobalAsync(LssState.Waiting, CancellationToken.None).ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
         {
@@ -665,7 +670,7 @@ public sealed class LssCommissioning
         }
         catch (OperationCanceledException)
         {
-            // The cleanup token elapsed, or the send was cancelled with the master.
+            // The send was cancelled with the master.
         }
         catch (CanKitException)
         {

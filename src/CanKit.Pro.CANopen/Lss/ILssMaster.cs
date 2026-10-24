@@ -22,14 +22,17 @@ namespace CanKit.Pro.CANopen.Lss;
 /// no slave matched.
 /// </para>
 /// <para>
-/// Cancellation returns promptly, but later commands wait out an abandoned response window
-/// so its delayed replies cannot answer a new request. A cancelled Fastscan also preserves
-/// its probe's cycle gap. If transmission fails or is cancelled after entering the send
-/// service, delivery can remain indeterminate: the driver may still transmit arbitrarily
-/// later. The master then rejects every subsequent command with a
-/// <see cref="CanOpenTransportException"/>. Dispose it, reset the transport and re-establish
-/// a quiescent network before opening another master. Explicit driver rejection and
-/// cancellation checked before entering the service leave the master usable.
+/// Cancellation returns promptly, but later commands wait out an abandoned response window so
+/// its delayed replies cannot answer a new request. A cancelled Fastscan also preserves its
+/// probe's cycle gap. An abandoned <see cref="ActivateBitTimingAsync"/> reserves both
+/// switch-delay periods, up to 2 × 65 535 ms, and the next command waits for them, including
+/// the release to waiting that <see cref="LssCommissioning"/> sends after a cancelled sequence.
+/// If transmission fails or is cancelled after entering the send service, delivery can remain
+/// indeterminate: the driver may still transmit arbitrarily later. The master then rejects
+/// every subsequent command with a <see cref="CanOpenTransportException"/>. Dispose it, reset
+/// the transport and re-establish a quiescent network before opening another master. Explicit
+/// driver rejection and cancellation checked before entering the service leave the master
+/// usable.
 /// </para>
 /// </remarks>
 public interface ILssMaster : IDisposable, IAsyncDisposable
@@ -75,17 +78,27 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <paramref name="bitsPerSecond"/> and <see cref="LssMasterOptions.BitRateSwitch"/> are both
     /// set, the switch runs after the first period, before slaves may transmit again.
     /// When <paramref name="returnToWaiting"/> is <see langword="true"/>, switch state global
-    /// (waiting) is sent while both ends still share a bitrate. A positive delay sends it
-    /// before either delay when its confirmation returns before the first deadline.
-    /// If that window was missed, the host switches rate and sends waiting after the second
-    /// period; without a host switch the call fails after both periods have elapsed. A zero
-    /// delay has already moved the slave, so the frame is sent
-    /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
-    /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
-    /// switch the master is still on the old rate and the slave will not hear the frame.
+    /// (waiting) follows. With <paramref name="bitsPerSecond"/> and the switch callback it is
+    /// sent once both periods have elapsed, on the new rate: CiA 305 §6.4.4 and Figure 15 keep
+    /// the master and every slave silent through both periods. A zero delay has already moved
+    /// the slave, so it then requires both, and the frame is sent after the switch. Without a
+    /// host switch the master would stay on the old rate, so a positive delay sends waiting
+    /// before either period ends instead, while both ends still share a bitrate. That frame
+    /// inside the first period is a deliberate departure from §6.4.4, kept for adapters that
+    /// cannot change rate while open; 2.0 is planned to require a host switch for it. If its
+    /// confirmation returns at or after the first deadline, the call fails with
+    /// <see cref="CanOpenTransportException"/> after both periods have elapsed. The alternative
+    /// that keeps to §6.4.4 without a host switch: omit <paramref name="returnToWaiting"/>,
+    /// dispose this master after the call returns, and send switch state global from a new
+    /// master on the new bus.
     /// Cancellation or failure after a confirmed send returns to the caller promptly;
-    /// subsequent commands still wait for the activation's two periods. An indeterminate
-    /// send makes the master unusable as described in the interface remarks.
+    /// subsequent commands still wait for the activation's two periods. With
+    /// <paramref name="returnToWaiting"/>, a positive delay and a host switch, the slaves switch
+    /// whatever the caller does, so once the activation is confirmed the master follows through
+    /// on its own: it switches after the first period and sends waiting after the second, even
+    /// when the caller has stopped waiting, and subsequent commands also wait for that. Its
+    /// failure reaches only a caller still waiting. Disposing the master ends it. An
+    /// indeterminate send makes the master unusable as described in the interface remarks.
     /// </summary>
     /// <exception cref="ArgumentException">A bit rate requires a switch callback. A zero delay with returnToWaiting requires both.</exception>
     /// <exception cref="CanOpenTransportException">The old-rate waiting window was missed and no host bit-rate switch is available.</exception>
@@ -116,7 +129,10 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <summary>
     /// Reads the active node-id of the single slave in LSS configuration (§7.6.2). A slave that
     /// is still in NMT initialization and has no active node-id reports its pending node-id,
-    /// which may be <see cref="CanOpenCobId.UnconfiguredNodeId"/>.
+    /// which may be <see cref="CanOpenCobId.UnconfiguredNodeId"/>. The LSS slave of a node opened
+    /// with <c>CanOpen.OpenNode</c> never holds such a pending value: it activates a node-id in
+    /// 1..127 as soon as configure node-id writes one, so without an active node-id it reports
+    /// <see cref="CanOpenCobId.UnconfiguredNodeId"/>.
     /// </summary>
     Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default);
 
@@ -172,6 +188,15 @@ public enum LssFastscanFieldMode
     /// Do not look at this LSS number. At most two numbers may be skipped, and the vendor-id
     /// may not. The caller has to know the resulting address still selects one slave.
     /// </summary>
+    /// <remarks>
+    /// CiA 305 §6.7.1 allows skipping LSS numbers, the serial number for instance. The last number
+    /// that is not skipped is confirmed with BitCheck 0, LSSSub naming that number and LSSNext 0,
+    /// and per §6.7.3 that message switches the identified slave into LSS configuration, whatever
+    /// the LSSSub. A slave that switches only on the serial number does not conform: it answers
+    /// every step of a scan that skips the serial number and stays in waiting, so the scan reports
+    /// success and the services that follow reach no slave. Against such a slave, scan or match
+    /// the serial number.
+    /// </remarks>
     Skip,
 }
 
@@ -207,6 +232,9 @@ public sealed class LssFastscanRequest
     /// <summary>Revision number.</summary>
     public LssFastscanField RevisionNumber { get; init; } = new();
 
-    /// <summary>Serial number.</summary>
+    /// <summary>
+    /// Serial number. A scan that skips it ends on an earlier LSS number, which a conforming
+    /// slave completes on (CiA 305 §6.7.3); see <see cref="LssFastscanFieldMode.Skip"/>.
+    /// </summary>
     public LssFastscanField SerialNumber { get; init; } = new();
 }

@@ -30,7 +30,9 @@ public static class CanOpenLss
     /// <summary>
     /// Opens a master on an existing <paramref name="service"/>, shared with other protocols on
     /// the same bus. With <paramref name="leaveOpen"/> <see langword="true"/> (the default)
-    /// disposing the master does not dispose the service.
+    /// disposing the master does not dispose the service. An LSS slave opened on the same service
+    /// with <see cref="CanOpen.OpenNode(ICanBusService, byte, CanOpenNodeOptions?, bool)"/> is heard: the master receives frames the adapter flags as
+    /// this host's echo, which is how such a slave's replies arrive.
     /// </summary>
     public static ILssMaster OpenMaster(ICanBusService service, LssMasterOptions? options = null, bool leaveOpen = true)
     {
@@ -81,6 +83,9 @@ internal sealed partial class LssMaster : ILssMaster
     // Guarded by _gate. Interrupted requests retain response-window/silence reservations.
     private long _nextCommandAt;
     private Exception? _indeterminateSend;
+    // Guarded by _gate. A host switch and waiting frame an activation follows through after its
+    // caller stopped waiting; never faults, so a later command only waits for it.
+    private Task _pendingFollow = Task.CompletedTask;
 
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService, ProtocolActor? timers = null)
     {
@@ -93,12 +98,16 @@ internal sealed partial class LssMaster : ILssMaster
         _time = timers is null ? MonotonicTimeSource.Instance : timers.TimeSource;
         try
         {
+            // Echoes included (L-2, #359): a CanOpenNode LSS slave in this process on the same
+            // bus or service is on the bus too, and an adapter marks its replies as this host's
+            // echoes. The master itself only transmits on 7E5h, so an echo on 7E4h can only be
+            // a slave's reply, never one of the master's own requests.
             _subscription = service.Subscribe(frame =>
             {
                 var can = frame.Frame;
                 return can.FrameKind == CanFrameType.Can20 && !can.IsErrorFrame && !can.IsRemoteFrame
                     && !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
-            });
+            }, includeEcho: true);
         }
         catch
         {
@@ -174,6 +183,22 @@ internal sealed partial class LssMaster : ILssMaster
             long switchAt = TickMath.DueAt(start, delay, time.Frequency);
             long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
             Reserve(resumeAt);
+            // CiA 305 §6.4.4 and Figure 15: nothing is sent during either switch_delay period. A
+            // host that switches with the slaves sends waiting after both, on the new rate (L-5,
+            // #359). The slaves switch whatever happens to this call, so from here on that is
+            // followed through on the master's lifetime, not the caller's token: a caller that
+            // gives up must not leave the host on a rate the slaves have left, with nobody
+            // returning them to waiting. Later commands wait for it.
+            if (returnToWaiting && delay > TimeSpan.Zero && bitsPerSecond is int followRate)
+            {
+                var follow = FollowSwitchAsync(switchAt, resumeAt, followRate, _lifetime.Token);
+                _pendingFollow = follow.ContinueWith(static completed => _ = completed.Exception,
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                await WaitOrCancelAsync(follow, ct).ConfigureAwait(false);
+                return;
+            }
+            // A host that cannot switch would be left talking at the old rate, so it keeps the
+            // documented departure: waiting goes out before the first period ends.
             var waiting = !returnToWaiting ? WaitingPhase.None
                 : delay == TimeSpan.Zero ? WaitingPhase.AfterSwitch
                 : time.GetTimestamp() >= switchAt ? WaitingPhase.AfterResume
@@ -182,11 +207,14 @@ internal sealed partial class LssMaster : ILssMaster
             async Task SendWaitingAtAsync(WaitingPhase phase)
             {
                 if (waiting != phase) return;
-                if (phase == WaitingPhase.AfterResume && bitsPerSecond is null)
+                // Reached only without a host switch: with one, the follow-through above sends it.
+                if (phase == WaitingPhase.AfterResume)
                     throw new CanOpenTransportException(
                         "The waiting frame could not be verified before the old-rate deadline. Both switch-delay periods have elapsed; a host bit-rate switch is required to return the slaves to waiting.");
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
-                // A driver stamp is not wire completion. A late confirmation needs a resend.
+                // A driver stamp is not wire completion. A confirmation at or after the first
+                // deadline may have missed the old rate; without a host switch the call then
+                // fails once both periods have elapsed.
                 if (phase == WaitingPhase.BeforeDelay && time.GetTimestamp() >= switchAt)
                     waiting = WaitingPhase.AfterResume;
             }
@@ -201,6 +229,29 @@ internal sealed partial class LssMaster : ILssMaster
                 await DelayUntilAsync(resumeAt, ct).ConfigureAwait(false);
             await SendWaitingAtAsync(WaitingPhase.AfterResume).ConfigureAwait(false);
         }, cancellationToken);
+    }
+
+    private async Task FollowSwitchAsync(long switchAt, long resumeAt, int rate, CancellationToken lifetime)
+    {
+        await DelayUntilAsync(switchAt, lifetime).ConfigureAwait(false);
+        await Options.BitRateSwitch!(rate, lifetime).ConfigureAwait(false);
+        await DelayUntilAsync(resumeAt, lifetime).ConfigureAwait(false);
+        await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), lifetime).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Awaits <paramref name="task"/>, or stops waiting when <paramref name="cancellationToken"/>
+    /// is cancelled, which leaves the task running. <c>Task.WaitAsync</c> is not on net48.
+    /// </summary>
+    private static async Task WaitOrCancelAsync(Task task, CancellationToken cancellationToken)
+    {
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), cancelled))
+        {
+            if (await Task.WhenAny(task, cancelled.Task).ConfigureAwait(false) != task)
+                cancellationToken.ThrowIfCancellationRequested();
+        }
+        await task.ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -383,10 +434,12 @@ internal sealed partial class LssMaster : ILssMaster
             {
                 ThrowIfDisposed();
                 linked.Token.ThrowIfCancellationRequested();
-                if (_indeterminateSend is { } failure)
-                    throw new CanOpenTransportException(
-                        "The LSS master cannot continue after an indeterminate transmission. Reset the transport and re-establish a quiescent network before opening another master.", failure);
+                ThrowIfIndeterminate();
                 await DelayUntilAsync(_nextCommandAt, linked.Token).ConfigureAwait(false);
+                await WaitOrCancelAsync(_pendingFollow, linked.Token).ConfigureAwait(false);
+                // An activation followed through after its caller left sends without the gate,
+                // and that send may have been indeterminate while this command waited.
+                ThrowIfIndeterminate();
                 return await body(linked.Token).ConfigureAwait(false);
             }
             finally
@@ -624,6 +677,13 @@ internal sealed partial class LssMaster : ILssMaster
         {
             _inbound.Writer.TryComplete();
         }
+    }
+
+    private void ThrowIfIndeterminate()
+    {
+        if (_indeterminateSend is { } failure)
+            throw new CanOpenTransportException(
+                "The LSS master cannot continue after an indeterminate transmission. Reset the transport and re-establish a quiescent network before opening another master.", failure);
     }
 
     private void ThrowIfDisposed()
