@@ -789,6 +789,21 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         node.StopNodeGuardingConsumer(Producer);
     }
 
+    // The life time of a guarded node is guard time × life time factor (CiA 301 §7.2.8.3.2.1), so
+    // a factor of 0 leaves the consumer no life time to supervise and is refused up front.
+    [Fact]
+    public void A_NodeGuarding_Consumer_With_A_Life_Time_Factor_Of_Zero_Is_Refused()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, NodeId, clock);
+
+        node.Invoking(n => n.StartNodeGuardingConsumer(0x22, TimeSpan.FromMilliseconds(100), lifeTimeFactor: 0))
+            .Should().Throw<ArgumentOutOfRangeException>()
+            .Which.ParamName.Should().Be("lifeTimeFactor");
+    }
+
     // #357 C-8, producer side, kept as decided: RespondToNodeGuardingRtr = false also keeps life
     // guarding off. Guarding "starts for the NMT slave when the first RTR for its guarding CAN-ID
     // is received" (§7.2.8.2.2), and a node told not to answer is not taking part in the
