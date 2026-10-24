@@ -491,12 +491,21 @@ public sealed class UdsFunctionalClient : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // disposed: the window dies with the client
-            lock (_listeners) Retire(sid, ears);
+            // disposed: the window dies with the client (retired below)
         }
         catch (ObjectDisposedException)
         {
             // likewise
+        }
+        finally
+        {
+            // On every exit, not only the two above (#354): a listener ended by any other
+            // exception would otherwise stay in _listeners as a faulted task, and every later
+            // request for this service would find it there instead of starting a new one. No
+            // other exception is known to reach here today, so this is hardening that no test
+            // can drive. After the retirement inside the loop it is a no-op for the entry --
+            // Retire removes only this listener's own -- and disposing the listener twice is
+            // harmless.
             lock (_listeners) Retire(sid, ears);
         }
     }
