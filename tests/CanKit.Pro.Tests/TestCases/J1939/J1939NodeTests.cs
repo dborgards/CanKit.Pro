@@ -4358,13 +4358,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var release = new ManualResetEventSlim();
-        actor.Post(() =>
-        {
-            held.TrySetResult(true);
-            release.Wait(ShortTimeout);
-        });
         try
         {
+            actor.Post(() =>
+            {
+                held.TrySetResult(true);
+                release.Wait(ShortTimeout);
+            });
             await held.Task.AsTaskWithTimeout(ShortTimeout);
             node.Dispose(); // the actor's join gives up on the held callback and reports it
 
@@ -4375,6 +4375,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         finally
         {
             release.Set();
+            node.Dispose(); // idempotent; disposes the node, and so its actor, on every path
         }
     }
 
