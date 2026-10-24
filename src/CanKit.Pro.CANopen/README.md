@@ -641,7 +641,9 @@ the PDO, of `1019h`/`1007h` or of the SRDO; leaving and entering Operational doe
 what the register still holds: 0 when nothing else is reported (transition 4, "All errors are
 repaired"), the application's bits otherwise (transition 2). The register passed to
 `SendEmcyAsync` is the application's part, taken when that EMCY is transmitted: a call cancelled
-before then, or a held EMCY a reset discards, changes nothing. The node ORs its own bits into every EMCY, the
+before then, or a held EMCY a reset discards, changes nothing. A value the application writes to
+`1001h` through `ObjectDictionary` since, or one a device description gives it, is the
+application's part as well. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
 while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
 register of the moment it is sent. Reset Node and Reset Communication end the communication

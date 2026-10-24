@@ -20,8 +20,9 @@ namespace CanKit.Pro.CANopen;
 // emergency object with the error code 'reset error / no error'") when that is 0, transition 2
 // ("may be transmitted together with the remaining errors in the error register") when the
 // application still reports its own. The application's bits are the register its last
-// transmitted SendEmcyAsync passed (a cancelled or discarded one changes nothing); the node ORs
-// its own in and never clears what the application set.
+// transmitted SendEmcyAsync passed (a cancelled or discarded one changes nothing), or a value it
+// wrote to 1001h through the dictionary since; the node ORs its own in and never clears what the
+// application set.
 // A reset (transition 5, then 0) ends every communication error without an EMCY.
 internal sealed partial class CanOpenNode
 {
@@ -40,8 +41,13 @@ internal sealed partial class CanOpenNode
         SrdoLength = 5,
     }
 
-    // The register the application's last SendEmcyAsync passed. Actor loop only.
+    // The application's part of 1001h: what its last transmitted SendEmcyAsync passed, or what it
+    // (or a device description) put into 1001h through the dictionary since. Actor loop only.
     private byte _applicationErrorRegister;
+
+    // The value the node last wrote to 1001h; -1 before the first write, so the value 1001h was
+    // created or described with is taken as the application's. Actor loop only.
+    private int _nodeWrittenErrorRegister = -1;
 
     // The communication errors the node reported and whose cause has not ended. Actor loop only.
     private readonly HashSet<int> _communicationErrors = new();
@@ -117,8 +123,9 @@ internal sealed partial class CanOpenNode
         _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
 
-    /// <summary>NMT reset: transitions 5 and 0 of Figure 37 — the node is error free, "No error
-    /// message is sent". The application's bits stay, as <c>1001h</c> is not restored.</summary>
+    /// <summary>NMT reset: transitions 5 and 0 of Figure 37 — "After NMT state INITIALISATION the
+    /// CANopen device enters the error free state" (Corrigendum 3 wording; nothing there asks for
+    /// an EMCY). The application's bits stay, as <c>1001h</c> is not restored.</summary>
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
@@ -130,7 +137,24 @@ internal sealed partial class CanOpenNode
     private void QueueApplicationErrorRegisterWrite()
         => _ = AppendToEmcyChain(() =>
         {
-            _od.WriteUnsigned(Co.ErrorRegister, 0x00, _applicationErrorRegister);
+            WriteErrorRegister(TakeApplicationErrorRegister());
             return Task.CompletedTask;
         });
+
+    /// <summary>The application's part at this step of the EMCY chain. A value in <c>1001h</c>
+    /// that the node did not write there is the application's — written through the dictionary,
+    /// or given by a device description — and replaces the part its last EMCY passed (review of
+    /// #417). Actor loop only.</summary>
+    private byte TakeApplicationErrorRegister()
+    {
+        var current = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
+        if (current != _nodeWrittenErrorRegister) _applicationErrorRegister = current;
+        return _applicationErrorRegister;
+    }
+
+    private void WriteErrorRegister(byte value)
+    {
+        _od.WriteUnsigned(Co.ErrorRegister, 0x00, value);
+        _nodeWrittenErrorRegister = value;
+    }
 }

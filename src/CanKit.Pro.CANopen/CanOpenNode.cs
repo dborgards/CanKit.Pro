@@ -583,13 +583,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // the node's own still sets the register it decided, so an error that ended is
                 // not read on (Codex on #417).
                 if (applicationErrorRegister is null)
-                    _od.WriteUnsigned(Co.ErrorRegister, 0x00, (byte)(_applicationErrorRegister | nodeBits));
+                    WriteErrorRegister((byte)(TakeApplicationErrorRegister() | nodeBits));
                 return Task.CompletedTask;
             }
-            if (applicationErrorRegister is { } application) _applicationErrorRegister = application;
-            byte errorRegister = (byte)(_applicationErrorRegister | nodeBits);
+            byte application = applicationErrorRegister ?? TakeApplicationErrorRegister();
+            _applicationErrorRegister = application;
+            byte errorRegister = (byte)(application | nodeBits);
             frame[2] = errorRegister;
-            _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
+            WriteErrorRegister(errorRegister);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
         return AppendToEmcyChain(transmit);

@@ -205,8 +205,9 @@ public partial class CanOpenPdoEngineTests
         wire.Count(EmcyId).Should().Be(7);
     }
 
-    // A reset is transitions 5 and 0 of Figure 37: the node is error free, "No error message is
-    // sent". The communication bits leave 1001h, the application's stay (1001h is not restored).
+    // A reset is transitions 5 and 0 of Figure 37: "After NMT state INITIALISATION the CANopen
+    // device enters the error free state" (Corrigendum 3), with no EMCY. The communication bits
+    // leave 1001h, the application's stay (1001h is not restored).
     [Fact]
     public async Task A_Reset_Ends_The_Communication_Errors_Without_An_Emcy()
     {
@@ -388,5 +389,31 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(wire, 1, 0xFF00, 0x81); // decided before the error
         await ExpectEmcyAsync(wire, 2, 0x8210, 0x91);
         device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x91u);
+    }
+
+    // Review of #417: 1001h is in the dictionary, so the application can also set its bits there
+    // without an EMCY, and a device description can give it a value. Those bits are the
+    // application's too: a node EMCY ORs its own into them, and the error reset leaves them.
+    [Fact]
+    public async Task An_Error_Register_The_Application_Wrote_Is_Kept_By_The_Nodes_Emcys()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        device.ObjectDictionary.WriteUnsigned(0x1001, 0, 0x04);
+        await StartAsync(wire, device);
+
+        await Inject(device, Rpdo1, 0x01);
+        await ExpectEmcyAsync(wire, 1, 0x8210, 0x15);
+        await Inject(device, Rpdo1, 1, 2, 3, 4);
+        await ExpectEmcyAsync(wire, 2, ErrorReset, 0x04);
+        device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x04u);
+
+        // A write after the node's own EMCYs is taken as well.
+        device.ObjectDictionary.WriteUnsigned(0x1001, 0, 0x08);
+        await Inject(device, Rpdo1, 0x02);
+        await ExpectEmcyAsync(wire, 3, 0x8210, 0x19);
+        await Inject(device, Rpdo1, 1, 2, 3, 4);
+        await ExpectEmcyAsync(wire, 4, ErrorReset, 0x08);
+        device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x08u);
     }
 }
