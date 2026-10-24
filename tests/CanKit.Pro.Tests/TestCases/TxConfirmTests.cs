@@ -823,6 +823,85 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.TransmitCount.Should().Be(0, "a send refused at the gate never reaches the driver");
     }
 
+    // #430: the same race on the approximated path. A send that passed the eager disposed check
+    // and reached the driver only after Dispose had finished used to hand its frame over anyway;
+    // the check and the hand-off are now one step under the gate Dispose sets _pendingDisposed
+    // under, so the send is refused with ObjectDisposedException -- what the echo path throws --
+    // and the driver is never called. The double declares the Echo capability but reports Normal
+    // mode, so the send takes the approximated path and still reads WorkMode, which is the instant
+    // between the two checks; the double disposes the service there, on the sending thread, so
+    // Dispose has completed before the send goes on. Both driver kinds: one whose TransmitAsync
+    // completes at once, as every v0.5.6 adapter's does, and one whose transmit stays pending.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dispose_Between_The_Disposed_Check_And_The_Handoff_Refuses_An_Approximated_Send(bool stalledTransmit)
+    {
+        using var bus = ControllableBus.FlaggedEchoInNormalMode(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = stalledTransmit;
+        var service = new CanBusService(bus);
+        bus.OnWorkModeRead = () =>
+        {
+            bus.OnWorkModeRead = null;
+            service.Dispose();
+        };
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x675, new byte[] { 1 }), TimeSpan.FromMinutes(5));
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        bus.FirstAsyncTransmit.IsCompleted.Should().BeFalse("no frame is handed to the driver once Dispose has completed");
+        bus.TransmitCount.Should().Be(0);
+        bus.ReleaseStalledTransmits();
+    }
+
+    // #430, the other half: the disposed check and the driver call are one step with respect to a
+    // Dispose on *another* thread. The test above disposes before the check, so it pins that the
+    // check exists, not that it is atomic with the hand-off -- a lock-free re-check right before
+    // TransmitAsync passes it and still lets a Dispose that lands between the two finish while
+    // the frame is on its way to the driver. Here the driver call itself starts a Dispose on a
+    // second thread and holds still until that Dispose has either returned or blocked: blocked is
+    // the only outcome when the call is inside the gate, returned is the race. No clock decides
+    // it; the wait ends on one of the two states (or on the thread dying), never on a timeout.
+    [Fact]
+    public async Task Dispose_On_Another_Thread_Waits_For_An_Approximated_Handoff_In_Progress()
+    {
+        // Dispose's code path is run once beforehand so a JIT or type-load wait on the second
+        // thread cannot be mistaken for it waiting on the gate.
+        using (var warmUpBus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm")))
+            new CanBusService(warmUpBus).Dispose();
+
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        var service = new CanBusService(bus);
+        var disposeReturned = 0;
+        Thread? disposer = null;
+        bool? disposeReturnedDuringHandoff = null;
+        bus.OnTransmitting = _ =>
+        {
+            bus.OnTransmitting = null;
+            disposer = new Thread(() =>
+            {
+                service.Dispose();
+                Volatile.Write(ref disposeReturned, 1);
+            })
+            { IsBackground = true };
+            disposer.Start();
+            while (Volatile.Read(ref disposeReturned) == 0
+                   && disposer.IsAlive
+                   && (disposer.ThreadState & System.Threading.ThreadState.WaitSleepJoin) == 0)
+                Thread.Yield();
+            disposeReturnedDuringHandoff = Volatile.Read(ref disposeReturned) != 0;
+        };
+
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x676, new byte[] { 1 }), TimeSpan.FromMinutes(5))
+            .WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue("the send won the race: its frame was handed over before Dispose swept");
+        disposeReturnedDuringHandoff.Should().BeFalse(
+            "Dispose must not complete while a send that passed the disposed check is still handing its frame to the driver");
+        disposer!.Join(ShortTimeout).Should().BeTrue("Dispose completes once the driver call has returned");
+        bus.TransmitCount.Should().Be(1);
+    }
+
     // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
     // is the only thing that refuses it; on the echo path the gate check above would as well.
     [Theory]
