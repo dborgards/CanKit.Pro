@@ -1176,6 +1176,45 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    /// <summary>A description may restrict 13FFh:n to <c>ro</c> or <c>const</c>, and a device then
+    /// honours it (#289) — refusing the download with 0601 0002h, as the fake does here. CiA 319
+    /// §5.3 step 1 downloads every value of the list, so such a pair — a checksum, 13FEh, a record
+    /// entry — is refused before the first frame when the configuration alone fixes the write,
+    /// and once the count is read when it belongs to an SRDO the configuration does not name
+    /// (13FFh:2 here): either way before anything is written, not at that write, after the
+    /// delete-first pass had deleted the peer's SRDOs and cleared its 13FEh (#343).</summary>
+    [Theory]
+    [InlineData("[13FFsub1]", 0x13FF, 0x01, "ro", true)]
+    [InlineData("[13FFsub1]", 0x13FF, 0x01, "const", true)]
+    [InlineData("[13FFsub2]", 0x13FF, 0x02, "ro", false)]
+    [InlineData("[13FE]", 0x13FE, 0x00, "ro", true)]
+    [InlineData("[1301sub2]", 0x1301, 0x02, "ro", true)]
+    public async Task A_Pair_The_File_Declares_Read_Only_Is_Refused_Before_Anything_Is_Written(string section, int index, byte subindex, string access, bool beforeAnyFrame)
+    {
+        var file = CanOpenDeviceDescription.ParseDcf(PatchedSection(FixtureText(), section, "AccessType=rw", $"AccessType={access}"));
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Requests) fake.AbortDownloadAt[((ushort)index, subindex)] = (uint)SdoAbortCode.AttemptWriteReadOnly; // a peer honouring its file
+        master.BindPeerDeviceDescription(Device, file);
+        List<(ushort, byte)> seeded;
+        lock (fake.Written) seeded = fake.Written.Keys.ToList();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain($"{index:X4}h:{subindex:X2}h").And.Contain("read-only").And.Contain("0601 0002h")
+            .And.Contain(beforeAnyFrame ? "Nothing was sent" : "Nothing was written");
+        lock (fake.Requests)
+        {
+            if (beforeAnyFrame) fake.Requests.Should().BeEmpty("refused before the first frame");
+            else fake.Requests.Should().Equal(ReadsUpToTheCount(verify: false), "nothing after the count");
+        }
+        lock (fake.Written)
+        {
+            fake.Written.Should().NotContainKey((0x1301, 0x01), "the delete-first pass did not start");
+            fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
+        }
+    }
+
     /// <summary>13FFh:00 is the number of SRDOs, at most 64 (§8.4.2.2). A peer reporting more is
     /// not taken for 64: what it claims beyond could never be configured or verified, so the call
     /// fails before any further frame.</summary>
