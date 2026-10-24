@@ -22,8 +22,12 @@ namespace CanKit.Pro.Tests.Infrastructure;
 public enum EchoWorld
 {
     /// <summary>
-    /// Echoes and sets <c>IsEcho</c> — what SocketCAN, Kvaser and Vector do, modelled by
-    /// <see cref="ControllableBus.EchoCapable"/>. Here the echo gate can actually gate.
+    /// Echoes and sets <c>IsEcho</c>, modelled by <see cref="ControllableBus.EchoCapable"/>. Here
+    /// the echo gate can actually gate. What SocketCAN does, read from its source, not measured.
+    /// Measured against CanKit 0.5.6, no hardware adapter in Echo mode is in this world: PCAN
+    /// echoes unflagged (<see cref="Unflagged"/>), Kvaser delivers no echo on a quiet bus, and
+    /// Vector, read from its source, delivers none in Echo mode and a flagged one in Normal mode
+    /// (<see cref="FlaggedNormal"/>) — see docs/reviews/2026-10-06-echo-hardware-measurements.md.
     /// </summary>
     Flagging,
 

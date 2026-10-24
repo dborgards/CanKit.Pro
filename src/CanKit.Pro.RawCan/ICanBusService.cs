@@ -85,8 +85,15 @@ namespace CanKit.Pro.RawCan
         /// Raised when a caller-supplied subscription filter predicate throws during dispatch
         /// (FR-RAW-023-style fault channel). The failing frame is isolated to that subscription
         /// (delivery to the other subscriptions continues), and the exception is surfaced here
-        /// instead of being silently swallowed. Invoked synchronously on the bus's dispatch
-        /// thread, so handlers must return quickly and must not call back into the service.
+        /// instead of being silently swallowed. For a predicate fault it is invoked synchronously
+        /// on the bus's dispatch thread, so handlers must return quickly and must not call back
+        /// into the service.
+        /// <para>
+        /// Also raised for a failure of the callback, or of the delivery pump, of a
+        /// <see cref="CanBusServiceExtensions.Subscribe(ICanBusService, Action{CanFrameEvent}, Func{CanFrameEvent, bool}, int?, bool, Action{Exception})"/>
+        /// subscription given no <c>onError</c>. That one is invoked on the subscription's
+        /// delivery task, a thread-pool thread, not on the dispatch thread.
+        /// </para>
         /// <para>
         /// Also raised, with the adapter's own exception, whenever the bus reports a fault through
         /// <see cref="ICanBus.FaultOccurred"/>. Under the default <c>CanExceptionPolicy</c> (a lower
@@ -168,7 +175,10 @@ namespace CanKit.Pro.RawCan
         /// already timed out or been cancelled cannot be told from the next identical send's and
         /// is matched to that send (#349);
         /// otherwise it is a documented approximation based on driver acceptance
-        /// (<see cref="TxConfirmation.IsApproximated"/>, FR-RAW-032). Never hangs: timeout,
+        /// (<see cref="TxConfirmation.IsApproximated"/>, FR-RAW-032) -- that is, on the bus's
+        /// transmit returning a positive count, which means what that bus makes it mean: on a bus
+        /// wrapped in CanKit's <c>QueuedCanBus</c> it means queued in process, not taken by a
+        /// driver. Never hangs: timeout,
         /// bus-off, and outright rejection all resolve the returned task within bounded time
         /// (FR-RAW-033) — see <see cref="TxConfirmation"/> for exactly how.
         /// <para>
@@ -194,7 +204,11 @@ namespace CanKit.Pro.RawCan
         /// which every current adapter completes immediately, so it only bites for a bus whose
         /// asynchronous transmit stalls. A frame reported as timed out may still reach the wire
         /// later (the bus is asked to cancel the transmit, but a driver that ignores that cannot
-        /// be stopped). Must be positive.
+        /// be stopped). Must be positive; a non-positive timeout throws
+        /// <see cref="ArgumentOutOfRangeException"/> before anything is handed to the driver. A
+        /// timeout above <see cref="int.MaxValue"/> milliseconds (about 24.8 days, the longest
+        /// delay the runtime's timer measures on every target) is clamped to that bound, so
+        /// <see cref="TimeSpan.MaxValue"/> waits about 24.8 days.
         /// </param>
         /// <param name="cancellationToken">
         /// Caller-supplied cancellation; cancels the returned task per standard .NET convention,

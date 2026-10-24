@@ -339,4 +339,47 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
 
         service.FindOverlappingFilterSubscriptions().Should().BeEmpty();
     }
+
+    // #352: a subscription disposed concurrently with the call is not reported. Subscription.Dispose
+    // marks itself disposed first and then deregisters under the service's registry lock, so
+    // while that lock is held elsewhere a disposed subscription is still in the snapshot this
+    // lock-free diagnostic reads. The test holds that lock itself to keep the window open -- no
+    // timing involved -- and runs the dispose on another thread, which marks the subscription and
+    // then parks on the lock. Either member of the overlapping pair is disposed in turn, so both
+    // the outer and the inner skip are pinned.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async System.Threading.Tasks.Task FindOverlappingFilterSubscriptions_Skips_A_Subscription_Disposed_Concurrently(int disposedIndex)
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var first = service.Subscribe(CanIdFilter.Range(0x100, 0x1FF));
+        using var second = service.Subscribe(CanIdFilter.Range(0x180, 0x27F));
+        var disposed = (Subscription)(disposedIndex == 0 ? first : second);
+
+        var registryLock = typeof(CanBusService)
+            .GetField("_gate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(service)!;
+        System.Threading.Tasks.Task disposer;
+        System.Threading.Monitor.Enter(registryLock);
+        try
+        {
+            disposer = System.Threading.Tasks.Task.Run(disposed.Dispose);
+            System.Threading.SpinWait.SpinUntil(() => disposed.IsDisposed, TimeSpan.FromSeconds(10))
+                .Should().BeTrue("the dispose must have marked the subscription before parking on the lock");
+            service.SubscriptionCount.Should().Be(2, "the dispose has not deregistered it yet");
+
+            service.FindOverlappingFilterSubscriptions().Should().BeEmpty(
+                "a disposed subscription is not a configuration anyone can still be misled by");
+        }
+        finally
+        {
+            System.Threading.Monitor.Exit(registryLock);
+        }
+
+        // Awaited only after the lock is released: Enter and Exit must stay on this thread.
+        await disposer.WaitAsync(TimeSpan.FromSeconds(10));
+        service.SubscriptionCount.Should().Be(1);
+    }
 }

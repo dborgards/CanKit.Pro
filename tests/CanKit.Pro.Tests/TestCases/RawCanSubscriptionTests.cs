@@ -20,7 +20,7 @@ namespace CanKit.Pro.Tests.TestCases;
 
 /// <summary>
 /// Verifies the L2 multi-protocol demultiplexing / subscription layer
-/// (CanKit.Pro.RawCan, arc42 §5.3 / ADR-5, SRS FR-RAW-010..013) against the Virtual adapter.
+/// (CanKit.Pro.RawCan, arc42 §5.3 / ADR-5, SRS FR-RAW-010..015) against the Virtual adapter.
 /// </summary>
 public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 {
@@ -745,6 +745,26 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         service.SubscriptionCount.Should().Be(0);
     }
 
+    // #352: a disposed service refuses new subscriptions on every overload instead of registering
+    // one nothing will ever deliver to or complete (FR-RAW-012). Only Reconfigure after a
+    // subscription's own dispose was pinned before.
+    [Fact]
+    public void Subscribe_After_The_Service_Is_Disposed_Throws_ObjectDisposedException()
+    {
+        using var bus = Open(NewSession(), 0);
+        var service = new CanBusService(bus);
+        service.Dispose();
+
+        Action byPredicate = () => service.Subscribe();
+        Action byFilter = () => service.Subscribe(CanIdFilter.Range(0x100, 0x1FF));
+        Action byCallback = () => service.Subscribe(_ => { });
+
+        byPredicate.Should().Throw<ObjectDisposedException>();
+        byFilter.Should().Throw<ObjectDisposedException>();
+        byCallback.Should().Throw<ObjectDisposedException>();
+        service.SubscriptionCount.Should().Be(0);
+    }
+
     // Disposing the service unwinds subscriptions, detaches from FrameObserved, and delivers no
     // further frames to any of its subscriptions.
     [Fact]
@@ -884,7 +904,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
     // decides what IsEcho and ReceiveTimestamp are on it.
     // =============================================================================================
 
-    // FR-RAW-010: the default subscription is echo-free. Before #23 the demux dropped the bus's
+    // FR-RAW-015: the default subscription is echo-free. Before #23 the demux dropped the bus's
     // echo flag, so every subscriber saw its own transmissions arrive as if a peer had sent them --
     // which is what drove J1939, CANopen and the J1939 transport to each rebuild "is this mine?"
     // out of application data.
@@ -976,7 +996,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         DrainIds(sub).Should().Equal(0x401);
     }
 
-    // FR-RAW-010: the bus's own receive timestamp reaches the subscriber unmodified. The demux
+    // FR-RAW-015: the bus's own receive timestamp reaches the subscriber unmodified. The demux
     // used to discard it, leaving no way to order frames by when the adapter saw them.
     [Fact]
     public void Receive_Timestamp_Reaches_The_Subscriber_Unmodified()

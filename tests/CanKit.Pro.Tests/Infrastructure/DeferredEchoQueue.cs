@@ -13,8 +13,9 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// <c>FrameObserved</c>.
 ///
 /// <para>
-/// Why this exists: a real echo-mode adapter delivers the echo synchronously from inside
-/// <c>Transmit</c>, and <c>CanBusService.SendWithEchoConfirmAsync</c> transmits while holding its
+/// Why this exists: CanKit.Adapter.Virtual in echo mode delivers the echo synchronously from
+/// inside <c>Transmit</c> (a hardware adapter delivers it from its receive thread, which is what
+/// this queue models), and <c>CanBusService.SendWithEchoConfirmAsync</c> transmits while holding its
 /// pending-send lock. A synchronous echo therefore re-enters that lock <em>on the transmitting
 /// thread</em>, so the pending list can never hold more than the one entry that thread just
 /// registered. Every property that is only observable with two or more entries queued for the same

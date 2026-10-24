@@ -1682,6 +1682,31 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName(option);
     }
 
+    // #352 (R-4): N_As is handed to SendConfirmedAsync as the confirm timeout. A channel that sets it
+    // to TimeSpan.MaxValue as "no N_As limit" opens, and its sends must go out -- RawCan clamps a
+    // timeout above the timer's reach instead of refusing it. Single frame and multi-frame, since
+    // the First Frame and the Consecutive Frames are confirmed on separate sites.
+    [Theory]
+    [InlineData(3)]
+    [InlineData(20)]
+    public async Task A_Channel_With_An_Unbounded_NAs_Sends(int length)
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        var unbounded = new IsoTpChannelOptions { UseCanFd = false, UsePadding = true, NAs = TimeSpan.MaxValue };
+
+        using var sender = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x252, 0x253), unbounded);
+        using var receiver = IsoTpFactory.Open(busB, IsoTpEndpoint.Normal(0x253, 0x252), FastOptions());
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var receive = receiver.ReceiveAsync(cts.Token);
+
+        var pdu = Enumerable.Range(1, length).Select(i => (byte)i).ToArray();
+        await sender.SendAsync(pdu).WaitAsync(ShortTimeout);
+
+        (await receive.WaitAsync(ShortTimeout)).Should().Equal(pdu);
+    }
+
     // --------------------------------------------------------------------------------
     // FR-TP-016 — DatagramReceived event fires for a SF PDU.
     // --------------------------------------------------------------------------------

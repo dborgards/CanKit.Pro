@@ -78,9 +78,10 @@ WAIVERS = {
 # entry here that has since been traced also fails it, so closing a gap forces
 # the line out. Nothing is added without the maintainer deciding to add it.
 #
-# FR-RAW-015 and FR-RAW-032 are the echo semantics that #94 reports as
-# untestable on the default adapter -- which is why #94 is a missing
-# verification of two `Must` requirements, not test hygiene.
+# FR-RAW-032 is echo semantics that #94 reported as untestable on the default
+# adapter -- which is why #94 was a missing verification of `Must` requirements,
+# not test hygiene. Its sibling FR-RAW-015 left the list in #352: the tests pinning
+# it (RawCanSubscriptionTests, on ControllableBus) were there, but cited FR-RAW-010.
 # FR-TP-020 was waived here as verified by the package check until Codex pointed out on
 # #125 that eng/verify-packages.py inspects package count, version, README, license and
 # symbol metadata -- never the dependency list. The SRS says "Paketprüfung", but no
@@ -91,7 +92,7 @@ WAIVERS = {
 # target values yet (SRS appendix item 1).
 KNOWN_GAPS = {
     "FR-RAW-002", "FR-RAW-003", "FR-RAW-004",
-    "FR-RAW-015", "FR-RAW-032",
+    "FR-RAW-032",
     "FR-TP-013", "FR-TP-014", "FR-TP-017", "FR-TP-020",
     "NFR-001", "NFR-002",
 }

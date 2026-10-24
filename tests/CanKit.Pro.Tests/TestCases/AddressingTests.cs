@@ -234,6 +234,45 @@ public class AddressingTests
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
+    // #352: the data page is one bit; a wider value is refused rather than spilling into the
+    // reserved bit above it.
+    [Fact]
+    public void J1939_Compose_Rejects_A_Data_Page_Above_One()
+    {
+        Action act = () => J1939Id.Compose(priority: 0, reserved: false, dataPage: 2, pduFormat: 0, pduSpecific: 0, sourceAddress: 0);
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("dataPage");
+        J1939Id.Decompose(J1939Id.Compose(0, false, 1, 0, 0, 0)).DataPage.Should().Be(1);
+    }
+
+    // #352: every width-limited NAME field refuses a value one above its maximum -- each would
+    // otherwise be shifted into the field above it -- and each maximum itself is accepted.
+    [Theory]
+    [InlineData("identityNumber")]
+    [InlineData("manufacturerCode")]
+    [InlineData("ecuInstance")]
+    [InlineData("functionInstance")]
+    [InlineData("vehicleSystem")]
+    [InlineData("vehicleSystemInstance")]
+    [InlineData("industryGroup")]
+    public void J1939Name_Compose_Rejects_A_Field_One_Above_Its_Width(string field)
+    {
+        ulong Compose(bool overflow) => J1939Name.Compose(
+            identityNumber: J1939Name.IdentityNumberMax + (overflow && field == "identityNumber" ? 1u : 0u),
+            manufacturerCode: (ushort)(J1939Name.ManufacturerCodeMax + (overflow && field == "manufacturerCode" ? 1 : 0)),
+            ecuInstance: (byte)(J1939Name.EcuInstanceMax + (overflow && field == "ecuInstance" ? 1 : 0)),
+            functionInstance: (byte)(J1939Name.FunctionInstanceMax + (overflow && field == "functionInstance" ? 1 : 0)),
+            function: 0xFF,
+            reserved: true,
+            vehicleSystem: (byte)(J1939Name.VehicleSystemMax + (overflow && field == "vehicleSystem" ? 1 : 0)),
+            vehicleSystemInstance: (byte)(J1939Name.VehicleSystemInstanceMax + (overflow && field == "vehicleSystemInstance" ? 1 : 0)),
+            industryGroup: (byte)(J1939Name.IndustryGroupMax + (overflow && field == "industryGroup" ? 1 : 0)),
+            arbitraryAddressCapable: true);
+
+        Compose(overflow: false).Should().Be(ulong.MaxValue, "every field at its maximum fills all 64 bits");
+        Action act = () => Compose(overflow: true);
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName(field);
+    }
+
     // #55: the value alone cannot tell an 11-bit identifier from a 29-bit one; the overload
     // that takes the frame's kind refuses one that is not extended.
     [Fact]

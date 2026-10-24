@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -73,8 +74,8 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // identical too -- so the only observable of "matched FIFO" is which caller's task completes
     // when, and that is exactly what this asserts.
     //
-    // This needs ControllableBus in Deferred echo mode. With the synchronous echo a real adapter
-    // delivers, the echo re-enters CanBusService's pending-send lock on the transmitting thread
+    // This needs ControllableBus in Deferred echo mode. With the synchronous echo the Virtual
+    // adapter delivers, the echo re-enters CanBusService's pending-send lock on the transmitting thread
     // before that thread leaves Transmit, so the pending list holds exactly one entry -- that
     // thread's own -- for the entire match. Every FIFO ordering rule is then vacuously satisfied
     // and the test cannot fail however the matching code is written (see DeferredEchoQueue).
@@ -128,10 +129,11 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // their own confirmation -- no cross-matching, no crash. This is the exact class of bug the
     // review flagged for the ISO-TP prototype's deadline queue crashing on identical in-flight
     // frames. Deliberately kept on the *synchronous* echo bus: that is the reentrant
-    // register-transmit-match-remove path a real echo-mode adapter drives, and this test exists to
-    // hammer it from many threads at once. It says nothing about FIFO ordering -- with a
+    // register-transmit-match-remove path the Virtual adapter's timing drives, and this test exists
+    // to hammer it from many threads at once. It says nothing about FIFO ordering -- with a
     // synchronous echo there is never more than one pending entry to order. The test above is
-    // where ordering is proven.
+    // where ordering is proven, and the test below is the same stress with the echo arriving the
+    // way a hardware adapter's does.
     [Fact]
     public async Task Echo_Bus_Matches_Concurrent_Identical_Frames_Individually_Without_Crashing()
     {
@@ -147,6 +149,45 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         results.Should().HaveCount(n);
         results.Should().OnlyContain(r => r.Confirmed && !r.IsApproximated);
         sender.TransmitCount.Should().Be(n);
+    }
+
+    // #352 (R-8): the same 16-thread stress, with the echo delivered the way a hardware adapter
+    // delivers it -- from another thread, after Transmit has returned. Only here does the pending
+    // FIFO for one key actually hold several entries while sends keep racing into it: a releaser
+    // thread hands back one echo at a time, and only once at least two are parked, so every
+    // release but the last matches against a list of two or more. The synchronous test above
+    // cannot reach that state at all.
+    //
+    // No clock: the releaser waits on transmits having happened, and the bound below only catches
+    // a send that is never confirmed.
+    [Fact]
+    public async Task Deferred_Echo_Bus_Matches_Concurrent_Identical_Frames_Individually()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        const int n = 16;
+        var frame = CanFrame.Classic(0x500, new byte[] { 42 });
+        var hangBound = TimeSpan.FromSeconds(30);
+
+        var releaser = Task.Run(async () =>
+        {
+            for (var released = 0; released < n; released++)
+            {
+                await sender.DeferredEchoes.WaitForEnqueuedAsync(Math.Min(released + 2, n), hangBound);
+                sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+            }
+        });
+        var sends = Enumerable.Range(0, n)
+            .Select(_ => Task.Run(() => service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(60))))
+            .ToArray();
+
+        var results = await Task.WhenAll(sends).WaitAsync(hangBound);
+        await releaser.WaitAsync(hangBound);
+
+        results.Should().OnlyContain(r => r.Confirmed && !r.IsApproximated);
+        sender.TransmitCount.Should().Be(n);
+        sender.DeferredEchoes.Count.Should().Be(0, "every echo was handed back and consumed");
     }
 
     // FR-RAW-031/033: a pending send that has already been resolved -- here by cancellation, in
@@ -465,6 +506,60 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #352 (R-5): a remote frame with a data length -- built through the memory-owner factory,
+    // which allows it -- is a frame the echo path transmits as it is. The approximated path used to
+    // rebuild it through the ReadOnlyMemory factory, which refuses that shape, and threw before
+    // the driver call. Both paths now send it, and the driver gets the same frame.
+    [Fact]
+    public async Task A_Remote_Frame_With_A_Data_Length_Is_Sent_On_Both_Paths()
+    {
+        CanFrame RemoteWithLength() => CanFrame.Classic(0x322, new ScrubbedOwner(new byte[8]), isRemoteFrame: true, ownMemory: false);
+
+        using (var plain = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm")))
+        using (var service = new CanBusService(plain))
+        {
+            var original = RemoteWithLength();
+            var result = await service.SendConfirmedAsync(original, ShortTimeout);
+            result.Confirmed.Should().BeTrue();
+            result.IsApproximated.Should().BeTrue();
+
+            var handed = await plain.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+            handed.FrameKind.Should().Be(original.FrameKind);
+            handed.ID.Should().Be(original.ID);
+            handed.Flags.Should().Be(original.Flags);
+            handed.IsRemoteFrame.Should().BeTrue();
+            handed.Len.Should().Be(8, "the data length of a remote frame is part of the frame");
+        }
+
+        using (var echo = OpenEcho())
+        using (var service = new CanBusService(echo))
+        {
+            var result = await service.SendConfirmedAsync(RemoteWithLength(), ShortTimeout);
+            result.Confirmed.Should().BeTrue();
+            result.IsApproximated.Should().BeFalse();
+        }
+    }
+
+    // R-5 follow-up: the remote frame's private copy travels in a memory owner, and CanKit's
+    // CanFrame.Dispose disposes the owner whatever ownMemory says (v0.5.6 CanFrame.cs:370). A driver
+    // that disposes the frame it was handed therefore reaches that owner: it must release nothing
+    // and throw nothing, and never reach the caller's buffer, which the copy is detached from.
+    [Fact]
+    public async Task A_Driver_Disposing_Its_Copy_Of_A_Remote_Frame_Releases_Nothing_Of_The_Callers()
+    {
+        var callers = new ScrubbedOwner(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+        var original = CanFrame.Classic(0x323, callers, isRemoteFrame: true, ownMemory: false);
+        using var plain = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var service = new CanBusService(plain);
+
+        (await service.SendConfirmedAsync(original, ShortTimeout)).Confirmed.Should().BeTrue();
+        var handed = await plain.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+
+        handed.Invoking(f => f.Dispose()).Should().NotThrow();
+        callers.Disposed.Should().BeFalse("the driver's copy does not own the caller's buffer");
+        original.Data.ToArray().Should().Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+    }
+
     private sealed class ScrubbedOwner : System.Buffers.IMemoryOwner<byte>
     {
         private readonly byte[] _buffer;
@@ -617,6 +712,45 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    // #352 (mutation R-M2): Dispose landing between SendConfirmedAsync's eager disposed check and
+    // the pending-send gate. Dispose sets _pendingDisposed under that gate before it sweeps, and the
+    // send checks it there before registering, so it is refused instead of registering an entry
+    // nobody will ever sweep, transmitting, and waiting out its own timeout. The send's read of
+    // WorkMode is the instant between the two checks, and the double disposes the service there.
+    [Fact]
+    public async Task Dispose_Between_The_Disposed_Check_And_The_Gate_Refuses_The_Send()
+    {
+        using var sender = OpenEcho();
+        var service = new CanBusService(sender);
+        sender.OnWorkModeRead = () =>
+        {
+            sender.OnWorkModeRead = null;
+            service.Dispose();
+        };
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x670, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        sender.TransmitCount.Should().Be(0, "a send refused at the gate never reaches the driver");
+    }
+
+    // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
+    // is the only thing that refuses it; on the echo path the gate check above would as well.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SendConfirmed_After_Dispose_Throws_ObjectDisposedException(bool echoPath)
+    {
+        using var sender = echoPath ? OpenEcho() : ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        var service = new CanBusService(sender);
+        service.Dispose();
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x671, new byte[] { 1 }), ShortTimeout);
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        sender.TransmitCount.Should().Be(0);
+    }
+
     [Fact]
     public async Task SendConfirmed_Rejects_Non_Positive_Timeout()
     {
@@ -626,6 +760,70 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = async () => await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.Zero);
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    // #352 (R-4): a timeout CancelAfter cannot arm used to be found out only after the frame was on
+    // the wire -- the echo path arms it after Transmit, and the approximated path whenever the
+    // transmit is still pending -- so the caller was told "bad argument" about a frame that had
+    // gone out. Such a timeout is now clamped to the bound before the driver is called, on both
+    // paths and on one bound for every target framework: the frame goes out once, and the wait is
+    // armed at int.MaxValue ms. The seam records what is armed and trips it at once, so nothing
+    // here waits on a clock.
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task A_Timeout_Above_The_Bound_Is_Clamped_To_It_On_Both_Paths(bool echoPath, bool maxValue)
+    {
+        var timeout = maxValue
+            ? TimeSpan.MaxValue
+            : TimeSpan.FromMilliseconds(int.MaxValue) + TimeSpan.FromMilliseconds(1);
+        using var sender = echoPath
+            ? OpenEcho()
+            : ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        sender.EchoAcceptedFrames = false; // on the echo path, only the armed timeout ends the wait
+        sender.StallTransmitAsync = !echoPath; // on the approximated path, only a pending transmit arms it
+        using var service = new CanBusService(sender);
+        var armed = new List<TimeSpan>();
+        service.ArmConfirmTimeout = (source, armedTimeout) =>
+        {
+            lock (armed) armed.Add(armedTimeout);
+            source.Cancel();
+        };
+
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x660, new byte[] { 1 }), timeout)
+            .WaitAsync(ShortTimeout);
+        sender.ReleaseStalledTransmits();
+
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout, "the armed timeout was tripped");
+        armed.Should().Equal(new[] { TimeSpan.FromMilliseconds(int.MaxValue) }, "the timeout is clamped to the bound");
+        var handedToTheDriver = echoPath ? sender.TransmitCount == 1 : sender.FirstAsyncTransmit.IsCompleted;
+        handedToTheDriver.Should().BeTrue("the frame is sent, not refused");
+    }
+
+    // The real timer accepts the bound, and with the clamp it is never handed more: on the echo path
+    // CancelAfter runs after the frame is out, which is where an over-large value used to throw.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task A_Timeout_At_Or_Above_The_Bound_Is_Armed_By_The_Real_Timer_On_The_Echo_Path(int row)
+    {
+        var timeout = row switch
+        {
+            0 => TimeSpan.FromMilliseconds(int.MaxValue),
+            1 => TimeSpan.FromMilliseconds(int.MaxValue) + TimeSpan.FromMilliseconds(1),
+            _ => TimeSpan.MaxValue,
+        };
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x661, new byte[] { 1 }), timeout);
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+
+        (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
     }
 
     // FR-RAW-033: a bus-off transition while a confirmation is outstanding must resolve it
@@ -1049,5 +1247,97 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         // nothing outstanding.
         sender.RaiseObserved(sent, isEcho: true);
         (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
+    }
+
+    // #352 (R-3): which results carry the two host stamps is path-dependent, and nothing in RawCan
+    // pinned it -- only UDS and LSS tests consumed the stamps. The service is given a counter as
+    // its host clock, so "before" and "after" are orderings of readings rather than durations,
+    // and the timeouts are tripped through the ArmConfirmTimeout seam rather than waited out.
+    private static CanBusService WithCountingClock(ICanBus bus)
+    {
+        long ticks = 0;
+        return new CanBusService(bus, () => Interlocked.Increment(ref ticks));
+    }
+
+    private static void ShouldBracketTheDriverCall(TxConfirmation result)
+    {
+        result.HostHandoffTimestamp.Should().BePositive("the reading before the driver call is carried");
+        result.HostTransmitTimestamp.Should().BeGreaterThan(result.HostHandoffTimestamp,
+            "the reading after the driver call is taken after the one before it");
+    }
+
+    private static void ShouldCarryNoStamps(TxConfirmation result)
+    {
+        result.HostHandoffTimestamp.Should().Be(0);
+        result.HostTransmitTimestamp.Should().Be(0);
+    }
+
+    // On the echo path the driver call has returned before the echo wait begins, so every result
+    // for an accepted frame -- confirmed, timed out, bus-off -- carries both readings.
+    [Fact]
+    public async Task The_Echo_Path_Stamps_Every_Result_For_A_Frame_The_Driver_Accepted()
+    {
+        using var sender = OpenEcho();
+        using var service = WithCountingClock(sender);
+
+        var confirmed = await service.SendConfirmedAsync(CanFrame.Classic(0x640, new byte[] { 1 }), ShortTimeout);
+        confirmed.Confirmed.Should().BeTrue();
+        ShouldBracketTheDriverCall(confirmed);
+
+        sender.EchoAcceptedFrames = false;
+        service.ArmConfirmTimeout = static (source, _) => source.Cancel();
+        var timedOut = await service.SendConfirmedAsync(CanFrame.Classic(0x641, new byte[] { 2 }), ShortTimeout)
+            .WaitAsync(ShortTimeout);
+        timedOut.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        ShouldBracketTheDriverCall(timedOut);
+
+        service.ArmConfirmTimeout = static (_, _) => { };
+        var outstanding = service.SendConfirmedAsync(CanFrame.Classic(0x642, new byte[] { 3 }), ShortTimeout);
+        sender.BusState = BusState.BusOff;
+        sender.RaiseFault(new InvalidOperationException("simulated bus-off"));
+        var busOff = await outstanding.WaitAsync(ShortTimeout);
+        busOff.FailureReason.Should().Be(TxConfirmFailureReason.BusOff);
+        ShouldBracketTheDriverCall(busOff);
+    }
+
+    [Fact]
+    public async Task The_Echo_Path_Stamps_No_Rejection()
+    {
+        using var sender = OpenEcho();
+        sender.AcceptTransmit = false;
+        using var service = WithCountingClock(sender);
+
+        var rejected = await service.SendConfirmedAsync(CanFrame.Classic(0x643, new byte[] { 1 }), ShortTimeout);
+
+        rejected.FailureReason.Should().Be(TxConfirmFailureReason.Rejected);
+        ShouldCarryNoStamps(rejected);
+    }
+
+    // On the approximated path only a confirmation is stamped: a timeout there means the driver's
+    // asynchronous transmit never completed, so there is no reading after acceptance, and a
+    // rejection carries none either.
+    [Fact]
+    public async Task The_Approximated_Path_Stamps_A_Confirmation_Only()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var service = WithCountingClock(bus);
+
+        var confirmed = await service.SendConfirmedAsync(CanFrame.Classic(0x650, new byte[] { 1 }), ShortTimeout);
+        confirmed.Confirmed.Should().BeTrue();
+        confirmed.IsApproximated.Should().BeTrue();
+        ShouldBracketTheDriverCall(confirmed);
+
+        bus.StallTransmitAsync = true;
+        service.ArmConfirmTimeout = static (source, _) => source.Cancel();
+        var timedOut = await service.SendConfirmedAsync(CanFrame.Classic(0x651, new byte[] { 2 }), ShortTimeout)
+            .WaitAsync(ShortTimeout);
+        bus.ReleaseStalledTransmits();
+        timedOut.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        ShouldCarryNoStamps(timedOut);
+
+        bus.AcceptTransmit = false;
+        var rejected = await service.SendConfirmedAsync(CanFrame.Classic(0x652, new byte[] { 3 }), ShortTimeout);
+        rejected.FailureReason.Should().Be(TxConfirmFailureReason.Rejected);
+        ShouldCarryNoStamps(rejected);
     }
 }
