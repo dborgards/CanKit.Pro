@@ -582,27 +582,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // No frame. An application EMCY that does not reach the bus leaves 1001h alone;
                 // the node's own still sets the register it decided, so an error that ended is
                 // not read on (Codex on #417).
-                if (applicationErrorRegister is null)
-                    WriteErrorRegister((byte)(TakeApplicationErrorRegister() | nodeBits));
+                if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
                 return Task.CompletedTask;
             }
-            // An application EMCY's register replaces the application's part, a dictionary write
-            // before it included: the write is consumed here, or the next step would take the
-            // register composed below for the application's (Codex and Bugbot on #417).
-            byte application;
-            if (applicationErrorRegister is { } passed)
-            {
-                Interlocked.Exchange(ref _applicationWroteErrorRegister, 0);
-                application = passed;
-            }
-            else
-            {
-                application = TakeApplicationErrorRegister();
-            }
-            _applicationErrorRegister = application;
-            byte errorRegister = (byte)(application | nodeBits);
-            frame[2] = errorRegister;
-            WriteErrorRegister(errorRegister);
+            frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
         return AppendToEmcyChain(transmit);

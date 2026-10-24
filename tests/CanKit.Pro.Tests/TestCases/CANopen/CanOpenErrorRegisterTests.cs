@@ -437,4 +437,47 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(wire, 9, ErrorReset, 0x00);
         device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0u);
     }
+
+    // Codex and Bugbot on #417: an application write of 1001h from another thread, racing the
+    // node's step on the EMCY chain, is not overwritten and then mistaken for the composed value.
+    // The test holds the dictionary's write gate until the node's step waits at it (#171 seam),
+    // then writes 04h inside it: the step that follows takes 04h, whether or not it had already
+    // started.
+    [Fact]
+    public async Task An_Application_Write_Racing_A_Node_Emcy_Keeps_Its_Bits()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        var od = device.ObjectDictionary;
+        using var inside = new System.Threading.ManualResetEventSlim();
+        using var write = new System.Threading.ManualResetEventSlim();
+        var holder = Task.Run(() => od.Transaction(() =>
+        {
+            inside.Set();
+            write.Wait(ShortTimeout).Should().BeTrue("the test lets the write go");
+            od.WriteUnsigned(0x1001, 0, 0x04);
+        }));
+        inside.Wait(ShortTimeout).Should().BeTrue();
+        try
+        {
+            await Inject(device, Rpdo1, 0x01);
+            var deadline = DateTime.UtcNow + ShortTimeout;
+            while (od.WriteGateWaiters < 1)
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("The node's EMCY step did not reach the write gate.");
+                await Task.Delay(1);
+            }
+        }
+        finally
+        {
+            write.Set(); // a failed wait must not leave the gate held for the node's disposal
+        }
+        await holder;
+
+        await ExpectEmcyAsync(wire, 1, 0x8210, 0x15);
+        await Inject(device, Rpdo1, 1, 2, 3, 4);
+        await ExpectEmcyAsync(wire, 2, ErrorReset, 0x04);
+        od.ReadUnsigned(0x1001, 0).Should().Be(0x04u);
+    }
 }

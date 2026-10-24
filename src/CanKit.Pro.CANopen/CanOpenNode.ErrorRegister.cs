@@ -144,9 +144,37 @@ internal sealed partial class CanOpenNode
     private void QueueApplicationErrorRegisterWrite()
         => _ = AppendToEmcyChain(() =>
         {
-            WriteErrorRegister(TakeApplicationErrorRegister());
+            UpdateErrorRegister(passed: null, nodeBits: 0);
             return Task.CompletedTask;
         });
+
+    /// <summary>One step of the EMCY chain on <c>1001h</c>: the application's part — the register
+    /// <paramref name="passed"/> by its EMCY, which replaces a dictionary write before it, else
+    /// the part taken so far — ORed with <paramref name="nodeBits"/> and written. All of it runs
+    /// as one dictionary transaction, so an application write cannot land between the take and
+    /// the write and be overwritten while its notice is consumed later for the composed value
+    /// (Codex and Bugbot on #417). Returns the register written. Actor loop only.</summary>
+    private byte UpdateErrorRegister(byte? passed, byte nodeBits)
+    {
+        byte composed = 0;
+        _od.Transaction(() =>
+        {
+            byte application;
+            if (passed is { } register)
+            {
+                Interlocked.Exchange(ref _applicationWroteErrorRegister, 0);
+                application = register;
+            }
+            else
+            {
+                application = TakeApplicationErrorRegister();
+            }
+            _applicationErrorRegister = application;
+            composed = (byte)(application | nodeBits);
+            WriteErrorRegister(composed);
+        });
+        return composed;
+    }
 
     /// <summary>The application's part at this step of the EMCY chain. A value in <c>1001h</c>
     /// that the node did not write there is the application's — written through the dictionary,
@@ -172,7 +200,7 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    /// <summary>EntryWritten, on the writer's thread: a write of <c>1001h</c> that is not the
+    /// <summary>EntryWritten, on the writer's thread and under the dictionary's write gate: a write of <c>1001h</c> that is not the
     /// node's own makes the value the application's part at the next step of the EMCY chain.</summary>
     private void NoteErrorRegisterWritten(ushort index, byte subindex)
     {
