@@ -637,10 +637,11 @@ RPDO deadline. Each is sent once per error event. While any of them is active th
 carries bit 4 (communication error) and bit 0, because "The generic error shall be signaled at
 any error situation". An error ends with its cause: a frame that fits, a SYNC of the expected
 length, a destination write that lands, a reception after the deadline, or a reconfiguration of
-the PDO, of `1019h`/`1007h` or of the SRDO. When the last one ends, the node sends `0000h` with
+the PDO, of `1019h`/`1007h` or of the SRDO; leaving and entering Operational does not end one. When the last one ends, the node sends `0000h` with
 what the register still holds: 0 when nothing else is reported (transition 4, "All errors are
 repaired"), the application's bits otherwise (transition 2). The register passed to
-`SendEmcyAsync` is the application's part. The node ORs its own bits into every EMCY, the
+`SendEmcyAsync` is the application's part, taken when that EMCY is transmitted: a call cancelled
+before then, or a held EMCY a reset discards, changes nothing. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
 while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
 register of the moment it is sent. Reset Node and Reset Communication end the communication
