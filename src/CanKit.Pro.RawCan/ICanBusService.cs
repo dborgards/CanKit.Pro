@@ -240,10 +240,13 @@ namespace CanKit.Pro.RawCan
         /// send's frame is handed to the driver any more, and a send that loses that race fails
         /// with this exception -- on the approximated path since #430, as the echo path always
         /// did. A send that won it has handed its frame over -- <c>Dispose</c> does not return while
-        /// such a send is still inside the driver call, unless it is called from inside that very
-        /// call -- and if that transmit is still pending, <c>Dispose</c> cancels the call as
-        /// described under <paramref name="cancellationToken"/>. Sends do not wait for each other's
-        /// driver call on the approximated path; only <c>Dispose</c> does.
+        /// such a send is still inside the driver call -- and if that transmit is still pending,
+        /// <c>Dispose</c> cancels the call as described under <paramref name="cancellationToken"/>.
+        /// Sends do not wait for each other's driver call on the approximated path; only
+        /// <c>Dispose</c> does. The exception is a <c>Dispose</c> called from inside one of the
+        /// service's own approximated driver calls, on that call's thread (a driver disposing on
+        /// a fault): it waits for no send, since sends queued behind that call may depend on it,
+        /// so one already past the check may still reach the driver after it returns.
         /// </exception>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }

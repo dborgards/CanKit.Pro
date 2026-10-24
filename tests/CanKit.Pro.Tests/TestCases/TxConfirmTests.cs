@@ -960,6 +960,45 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             () => service.SendConfirmedAsync(CanFrame.Classic(0x679, new byte[] { 2 })));
     }
 
+    // Codex on #438: nor for a hand-off queued behind that call. A driver that serializes its
+    // transmits behind an internal lock holds a second send -- already past the disposed check --
+    // until the first driver call returns; a Dispose reached from inside that first call that
+    // waited for the second would wait for itself. The second send is started from inside the
+    // first call and the Dispose happens only once it is parked on the driver's lock (or gone).
+    // ShortTimeout only bounds the deadlock this would otherwise be.
+    [Fact]
+    public async Task Dispose_From_Inside_The_Driver_Call_Does_Not_Wait_For_A_Send_Queued_Behind_It()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        var service = new CanBusService(bus);
+        var driverLock = new object();
+        Task<TxConfirmation>? queued = null;
+        Thread? sender = null;
+        bus.OnTransmitting = _ =>
+        {
+            lock (driverLock)
+            {
+                if (sender is not null) return; // the queued send, once it gets the lock
+                sender = new Thread(() =>
+                    queued = service.SendConfirmedAsync(CanFrame.Classic(0x67B, new byte[] { 2 }), TimeSpan.FromMinutes(5)))
+                { IsBackground = true };
+                sender.Start();
+                while (sender.IsAlive && (sender.ThreadState & System.Threading.ThreadState.WaitSleepJoin) == 0)
+                    Thread.Yield();
+                service.Dispose();
+            }
+        };
+
+        var first = await Task.Run(() => service.SendConfirmedAsync(CanFrame.Classic(0x67A, new byte[] { 1 }), TimeSpan.FromMinutes(5)))
+            .WaitAsync(ShortTimeout);
+
+        first.Confirmed.Should().BeTrue();
+        sender!.Join(ShortTimeout).Should().BeTrue("the queued send gets the driver's lock once the first call returns");
+        queued.Should().NotBeNull();
+        (await queued!.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue(
+            "it passed the disposed check before Dispose, and a reentrant Dispose does not wait for it");
+    }
+
     // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
     // is the only thing that refuses it; on the echo path the gate check above would as well.
     [Theory]

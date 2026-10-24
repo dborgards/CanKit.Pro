@@ -86,8 +86,9 @@ namespace CanKit.Pro.RawCan
 
         // The services whose approximated hand-off this thread is inside of, innermost last. A
         // Dispose reached from inside a driver call on the same thread -- a driver disposing the
-        // service on a fault, say -- must not wait for that very call to return; it waits only
-        // for the others. One list per thread, reused, so a send allocates nothing for it.
+        // service on a fault, say -- must not wait for that call or for the hand-offs that may
+        // be queued behind it; see WaitForHandoffs. One list per thread, reused, so a send
+        // allocates nothing for it.
         [ThreadStatic]
         private static List<CanBusService>? t_handoffs;
 
@@ -357,19 +358,27 @@ namespace CanKit.Pro.RawCan
         }
 
         // Blocks until every approximated hand-off that passed its disposed check before
-        // _pendingDisposed was set has returned from the driver (#430) -- except those this thread
-        // is itself inside of, which cannot return before this call does. Outside _pendingGate on
+        // _pendingDisposed was set has returned from the driver (#430). Outside _pendingGate on
         // purpose: a driver call in progress may need that lock (an echo it raises reaches
         // TryMatchEcho), and nothing here needs it.
+        //
+        // Not at all when this thread is itself inside one of this service's driver calls -- a
+        // driver disposing the service on a fault, say. That call cannot return before this one
+        // does, and neither can any other hand-off that waits for it: a driver that serializes
+        // its transmits behind an internal lock holds the others there (Codex on #438). Which
+        // of them depend on the current call is not knowable from here, so a Dispose reached
+        // that way waits for none; a send already past its check may then still reach the
+        // driver after it returns, which is the price of not deadlocking a driver that was
+        // already mid-call when it asked for disposal.
         private void WaitForHandoffs()
         {
-            var own = t_handoffs?.Count(service => ReferenceEquals(service, this)) ?? 0;
+            if (t_handoffs?.Contains(this) == true) return;
 
             lock (_handoffDrain)
             {
                 // The CompareExchange is the full fence that pairs with the send's increment:
                 // _pendingDisposed is already written, so a send not counted here sees it.
-                while (Interlocked.CompareExchange(ref _handoffsInFlight, 0, 0) > own)
+                while (Interlocked.CompareExchange(ref _handoffsInFlight, 0, 0) > 0)
                     Monitor.Wait(_handoffDrain);
             }
         }
@@ -498,7 +507,7 @@ namespace CanKit.Pro.RawCan
             // sends do not wait for each other's driver call, and a driver call that waits for
             // another send through this service -- a delivery held on the sending thread until
             // the next request goes out (#439) -- does not deadlock it. Only Dispose waits, and
-            // not for a hand-off its own thread is inside of.
+            // not when it is called from inside one of this service's driver calls.
             Interlocked.Increment(ref _handoffsInFlight);
             try
             {
