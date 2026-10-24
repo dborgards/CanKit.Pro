@@ -629,6 +629,26 @@ may be written in any order, so a slot not yet overwritten does not count agains
 
 ## Error control
 
+**Error register (`1001h`) and error reset.** Every EMCY the node raises itself is a
+communication error (CiA 301 Table 26, `82xxh`) and follows one rule (§7.2.7.1 and Figure 37;
+§7.5.2.2, Table 54): `8210h` for an RPDO, MPDO or SRDO shorter than its mapping, `8230h` for an
+MPDO destination that is not available, `8240h` for a SYNC of the wrong length and `8250h` for an
+RPDO deadline. Each is sent once per error event. While any of them is active the register
+carries bit 4 (communication error) and bit 0, because "The generic error shall be signaled at
+any error situation". An error ends with its cause: a frame that fits, a SYNC of the expected
+length, a destination write that lands, a reception after the deadline, or a reconfiguration of
+the PDO, of `1019h`/`1007h` or of the SRDO. When the last one ends, the node sends `0000h` with
+what the register still holds: 0 when nothing else is reported (transition 4, "All errors are
+repaired"), the application's bits otherwise (transition 2). The register passed to
+`SendEmcyAsync` is the application's part. The node ORs its own bits into every EMCY, the
+application's included, and never clears the application's bits, so an application `0000h` sent
+while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
+register of the moment it is sent. Reset Node and Reset Communication end the communication
+errors without an EMCY (transitions 5 and 0) and leave the application's bits in `1001h`. With
+the EMCY switched off (bit 31 of `1014h`) no error is raised, and an error that ends meanwhile
+still clears the bits. Heartbeat, node-guarding and life-guarding timeouts and the CAN
+controller state raise no EMCY (`8110h`–`8140h`); they are events only.
+
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
 other. `1017h` ≠ 0 runs the producer. Each sub-index of `1016h` with a node-id in 1..127 and a
@@ -1764,6 +1784,12 @@ Each item names what a caller does about it.
 * **Layer setting services (CiA 305) and CiA 801 bit-rate detection** are new: the LSS master,
   the LSS slave in the node, commissioning, and `LssBitRateDetection` (see
   [Layer setting services](#layer-setting-services-cia-305)).
+* **The node keeps `1001h` for the EMCYs it raises itself** (#379): bits 4 and 0 while an RPDO,
+  MPDO or SRDO length, MPDO destination, SYNC length or RPDO deadline error is active, and EMCY
+  `0000h` when the last one ends ([Error control](#error-control)). An EMCY sent with
+  `SendEmcyAsync` carries those bits too, ORed into the register the application passes.
+* **The SYNC start value (`1800h:06`) gates every synchronous TPDO** (#358), acyclic (`00h`) and
+  RTR-only (`FCh`) included, as CiA 301 §7.5.2.37 says. Before, those two used every SYNC.
 
 ## Install
 
