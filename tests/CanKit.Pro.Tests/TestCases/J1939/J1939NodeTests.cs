@@ -1570,13 +1570,17 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         lock (reported) reported.Should().BeEmpty("disposing the node is not a failure of the move it interrupted");
     }
 
-    // #355 (J-5): the automatic move after an unseat is registered as the claim in hand, so a
-    // ClaimAddressAsync meanwhile meets the in-flight guard -- whose advice, "await it, or cancel
-    // it", the application cannot follow: the move hands out no task and takes no token. The
-    // fault says what it can do instead, and the move completes undisturbed. The sibling below
-    // pins the user-initiated case, whose advice stands.
-    [Fact]
-    public async Task A_Claim_During_An_Automatic_Move_Faults_With_Advice_The_Caller_Can_Follow()
+    // #355 (J-5, decided on #397 as option (b)): the automatic move after an unseat is the claim
+    // in hand, and nothing awaits it. A ClaimAddressAsync meanwhile used to fault, with advice to
+    // wait for AddressClaimChanged that left the application nothing to do but poll. It replaces
+    // the move instead, in its backoff and in its announcement window alike: the node claims the
+    // address the application asked for, the move's candidate is never committed nor claimed
+    // again, and the replaced move is no failure to report. The sibling below pins the
+    // user-initiated case, which still faults.
+    [Theory]
+    [InlineData(false)] // replaced while the move waits its backoff
+    [InlineData(true)]  // replaced once the move has announced its candidate
+    public async Task A_Claim_During_An_Automatic_Move_Replaces_The_Move(bool moveAnnounced)
     {
         using var clock = new VirtualClock();
         var session = NewSession();
@@ -1587,6 +1591,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var announce = TimeSpan.FromMilliseconds(80);
         var backoff = TimeSpan.FromMilliseconds(150);
         const byte contended = 0x40;
+        const byte moveCandidate = 0x80; // the scan's first candidate from an address outside the field
+        const byte asked = 0x90;
 
         using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
         {
@@ -1595,21 +1601,37 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }, ownsService: false, actor);
         using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await ClaimOnClockAsync(owner, clock, actor, contended, announce);
-        var moved = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
-        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claimed) moved.TrySetResult(e); };
 
+        var reported = new List<Exception>();
+        owner.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout); // the move is the claim in hand
+        var moveReport = owner.UnattendedClaimReported;
+        moveReport.Should().NotBeNull();
+        if (moveAnnounced)
+        {
+            await clock.AdvanceAsync(backoff);
+            await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout); // 0x80 announced, its window open
+            await clock.AdvanceAsync(TimeSpan.FromMilliseconds(30)); // the move's window now ends 50 ms away
+        }
 
-        Func<Task> claim = () => owner.ClaimAddressAsync(0x90).WithTimeout(ShortTimeout);
-        (await claim.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
-            .Contain("AddressClaimChanged").And.NotContain("await it");
-
-        await clock.AdvanceAsync(backoff);
+        var states = new List<J1939ClaimEventArgs>();
+        owner.AddressClaimChanged += (_, e) => { lock (states) states.Add(e); };
+        var claim = owner.ClaimAddressAsync(asked);
+        // Exactly the announce window away: the move's own timer, backoff or window, is gone.
         await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
         await clock.AdvanceAsync(announce);
-        (await moved.Task.AsTaskWithTimeout(ShortTimeout)).Address.Should().Be((byte)(0x80),
-            "the move scans the arbitrary field from the address it lost, and the refused claim did not disturb it");
+        await claim.WithTimeout(ShortTimeout);
+        owner.Address.Should().Be(asked);
+
+        await clock.AdvanceAsync(backoff + announce); // past anything the move could still have armed
+        owner.Address.Should().Be(asked, "the replaced move must not resume and take the node elsewhere");
+        lock (states)
+            states.Should().NotContain(e => e.Address == moveCandidate,
+                "once replaced, the move neither claims its candidate again nor commits it");
+        await moveReport!.ContinueWith(_ => { }).WithTimeout(ShortTimeout);
+        moveReport.IsCanceled.Should().BeTrue("the move's task is cancelled, not faulted, so its failure report never runs");
+        lock (reported) reported.Should().BeEmpty("a move the application replaced did not fail");
     }
 
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets

@@ -382,22 +382,32 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // claim whose task has already completed -- cancelled by its caller, whose cancel is
         // still on its way to this loop -- is over, and is swept here so that awaiting the
         // cancellation and claiming again is race-free.
+        //
+        // The automatic move after an unseat is swept as well, wherever it is -- waiting its
+        // backoff or in its announcement window (#355, J-5). Nobody awaits it, so replacing it
+        // answers no caller wrongly, and this claim is the application's explicit word on which
+        // address the node should hold. It used to fault with advice to wait for
+        // AddressClaimChanged, which left the application nothing to do but poll. The move's task
+        // is cancelled, not faulted: it did not fail, and ReportUnattendedClaimFailure reports
+        // faults only.
         if (_pendingClaim is { } inFlight)
         {
-            if (!inFlight.Tcs.Task.IsCompleted)
+            bool unattended = ReferenceEquals(inFlight.Tcs, _unattendedClaim);
+            if (!inFlight.Tcs.Task.IsCompleted && !unattended)
             {
                 ctr.Dispose();
-                // The automatic move after an unseat hands out no task and takes no token, so
-                // "await it, or cancel it" is advice its caller cannot follow; what it can do is
-                // wait for the move's outcome (#355, J-5).
-                tcs.TrySetException(new InvalidOperationException(ReferenceEquals(inFlight.Tcs, _unattendedClaim)
-                    ? $"The node is moving to SA 0x{inFlight.PreferredAddress:X2} on its own after losing its address; nothing awaits that claim, so wait for AddressClaimChanged to report its outcome before claiming again."
-                    : $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
+                tcs.TrySetException(new InvalidOperationException(
+                    $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
                 return;
             }
             _pendingClaim = null;
             inFlight.Deadline?.Dispose();
             inFlight.CtRegistration.Dispose();
+            if (unattended)
+            {
+                _unattendedClaim = null;
+                inFlight.Tcs.TrySetCanceled();
+            }
         }
 
         BeginClaimRound(preferredAddress, tcs, ctr);
@@ -884,8 +894,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     // The lost address is the peer's from this instant: invalidated now, so no
                     // application traffic goes out under it during the backoff; only the next
                     // round waits. Registered as the claim in hand meanwhile, so a
-                    // ClaimAddressAsync during the backoff meets the in-flight guard, and the
-                    // delayed round runs only if it still is (Codex on #153).
+                    // ClaimAddressAsync during the backoff finds it and replaces it (BeginClaim,
+                    // J-5), and the delayed round runs only if it still is (Codex on #153).
                     WriteAddress(null);
                     RebindTransportOnLoop(J1939Pgn.NullAddress);
                     SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
@@ -925,8 +935,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     // A disposal ends an automatic round as it ends any claim, with ObjectDisposedException, and
     // that is not a failure of the round: the application disposed the node, and nothing about
-    // the bus went wrong (#355, J-3). A cancellation never faults this task -- nothing holds a
-    // token for it -- so it needs no exclusion.
+    // the bus went wrong (#355, J-3). A ClaimAddressAsync that replaces the round cancels its
+    // task (BeginClaim, J-5), and a cancellation never runs this report, which is attached for
+    // faults only, so it needs no exclusion here.
     private void ReportUnattendedClaimFailure(Exception error)
     {
         if (error is ObjectDisposedException) return;
