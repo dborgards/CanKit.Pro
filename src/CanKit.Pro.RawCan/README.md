@@ -132,7 +132,9 @@ own, and its `Frames` stream stays open.
 Byte-identical sends pending at the same time are matched to their own confirmation in FIFO
 order, never cross-matched (FR-RAW-031). The matching is by content: the echo of a send that has
 already timed out or been cancelled cannot be told from the next identical send's and confirms that
-one (#349). The per-call timeout is configurable (FR-RAW-034); disposing the
+one (#349). The per-call timeout is configurable (FR-RAW-034): it must be positive, and one above
+`int.MaxValue` ms (about 24.8 days, the longest delay the runtime's timer measures) is clamped to
+that bound, so `TimeSpan.MaxValue` waits about 24.8 days. Disposing the
 service cancels any outstanding `SendConfirmedAsync` calls rather than leaving them to time out.
 
 The caller's cancellation token is consulted immediately before the driver call — on the echo

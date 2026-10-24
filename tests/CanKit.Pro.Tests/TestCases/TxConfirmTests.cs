@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -744,14 +745,16 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // #352 (R-4): a timeout CancelAfter cannot arm used to be found out only after the frame was on
     // the wire -- the echo path arms it after Transmit, and the approximated path whenever the
     // transmit is still pending -- so the caller was told "bad argument" about a frame that had
-    // gone out. Both paths now refuse it before the driver is called, on one bound for every
-    // target framework.
+    // gone out. Such a timeout is now clamped to the bound before the driver is called, on both
+    // paths and on one bound for every target framework: the frame goes out once, and the wait is
+    // armed at int.MaxValue ms. The seam records what is armed and trips it at once, so nothing
+    // here waits on a clock.
     [Theory]
     [InlineData(true, true)]
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(false, false)]
-    public async Task A_Timeout_Above_The_Bound_Is_Refused_Before_The_Driver_Call(bool echoPath, bool maxValue)
+    public async Task A_Timeout_Above_The_Bound_Is_Clamped_To_It_On_Both_Paths(bool echoPath, bool maxValue)
     {
         var timeout = maxValue
             ? TimeSpan.MaxValue
@@ -759,25 +762,44 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var sender = echoPath
             ? OpenEcho()
             : ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
-        sender.EchoAcceptedFrames = false; // on the echo path, nothing may confirm a send that went out
+        sender.EchoAcceptedFrames = false; // on the echo path, only the armed timeout ends the wait
+        sender.StallTransmitAsync = !echoPath; // on the approximated path, only a pending transmit arms it
         using var service = new CanBusService(sender);
+        var armed = new List<TimeSpan>();
+        service.ArmConfirmTimeout = (source, armedTimeout) =>
+        {
+            lock (armed) armed.Add(armedTimeout);
+            source.Cancel();
+        };
 
-        var send = service.SendConfirmedAsync(CanFrame.Classic(0x660, new byte[] { 1 }), timeout);
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x660, new byte[] { 1 }), timeout)
+            .WaitAsync(ShortTimeout);
+        sender.ReleaseStalledTransmits();
 
-        (await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => send.WaitAsync(ShortTimeout)))
-            .ParamName.Should().Be("timeout");
-        sender.TransmitCount.Should().Be(0, "the argument is refused before anything reaches the driver");
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout, "the armed timeout was tripped");
+        armed.Should().Equal(new[] { TimeSpan.FromMilliseconds(int.MaxValue) }, "the timeout is clamped to the bound");
+        var handedToTheDriver = echoPath ? sender.TransmitCount == 1 : sender.FirstAsyncTransmit.IsCompleted;
+        handedToTheDriver.Should().BeTrue("the frame is sent, not refused");
     }
 
-    // The bound itself is accepted, and armed: on the echo path the real CancelAfter runs with it
-    // after the frame is out, which is where an over-large value used to throw.
-    [Fact]
-    public async Task A_Timeout_At_The_Bound_Is_Accepted_On_The_Echo_Path()
+    // The real timer accepts the bound, and with the clamp it is never handed more: on the echo path
+    // CancelAfter runs after the frame is out, which is where an over-large value used to throw.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task A_Timeout_At_Or_Above_The_Bound_Is_Armed_By_The_Real_Timer_On_The_Echo_Path(int row)
     {
+        var timeout = row switch
+        {
+            0 => TimeSpan.FromMilliseconds(int.MaxValue),
+            1 => TimeSpan.FromMilliseconds(int.MaxValue) + TimeSpan.FromMilliseconds(1),
+            _ => TimeSpan.MaxValue,
+        };
         using var sender = OpenDeferredEcho();
         using var service = new CanBusService(sender);
 
-        var send = service.SendConfirmedAsync(CanFrame.Classic(0x661, new byte[] { 1 }), TimeSpan.FromMilliseconds(int.MaxValue));
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x661, new byte[] { 1 }), timeout);
         await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
 
