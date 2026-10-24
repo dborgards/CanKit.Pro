@@ -99,8 +99,9 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>The fixture with 1010h declared — sub-indices 0 and 1 ("save all parameters"), and
     /// 2 ("save communication parameters") when asked — as a device that stores on command
-    /// lists it. The test device implements sub-index 1 only (CiA 301 §7.5.2.13).</summary>
-    private static CanOpenDeviceDescription PeerFileWith1010(bool withSub2)
+    /// lists it. The test device implements sub-index 1 only (CiA 301 §7.5.2.13). Sub-index 1 is
+    /// declared with <paramref name="sub1Access"/>.</summary>
+    private static CanOpenDeviceDescription PeerFileWith1010(bool withSub2, string sub1Access = "rw")
     {
         var text = FixtureText();
         text = text.Replace("[OptionalObjects]\nSupportedObjects=7\n", "[OptionalObjects]\nSupportedObjects=8\n").Replace("7=0x13FF\n", "7=0x13FF\n8=0x1010\n");
@@ -108,7 +109,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var sections = new System.Text.StringBuilder();
         sections.Append($"\n[1010]\nParameterName=Store parameters\nObjectType=0x8\nSubNumber={(withSub2 ? 3 : 2)}\n");
         sections.Append($"\n[1010sub0]\nParameterName=Highest sub-index supported\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue={(withSub2 ? 2 : 1)}\nPDOMapping=0\n");
-        sections.Append("\n[1010sub1]\nParameterName=Save all parameters\nObjectType=0x7\nDataType=0x0007\nAccessType=rw\nDefaultValue=1\nPDOMapping=0\n");
+        sections.Append($"\n[1010sub1]\nParameterName=Save all parameters\nObjectType=0x7\nDataType=0x0007\nAccessType={sub1Access}\nDefaultValue=1\nPDOMapping=0\n");
         if (withSub2) sections.Append("\n[1010sub2]\nParameterName=Save communication parameters\nObjectType=0x7\nDataType=0x0007\nAccessType=rw\nDefaultValue=1\nPDOMapping=0\n");
         var file = CanOpenDeviceDescription.ParseDcf(text.TrimEnd('\n') + "\n" + sections);
         file.Contains(0x1010, 0x01).Should().BeTrue();
@@ -1214,6 +1215,24 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             fake.Written.Should().NotContainKey((0x1301, 0x01), "the delete-first pass did not start");
             fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
         }
+    }
+
+    /// <summary>The store of CiA 319 §5.3 step 5 is a download as well: a 1010h sub-index the file
+    /// declares read-only, asked for by <see cref="PeerSafetyConfiguration.Storage"/>, is refused
+    /// before the first frame like the pairs of step 1, and the message names step 5.</summary>
+    [Fact]
+    public async Task A_Store_Sub_Index_The_File_Declares_Read_Only_Is_Refused_Before_The_First_Frame()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false, sub1Access: "ro"));
+        var configuration = Configuration();
+        configuration.Storage = PeerSafetyStorage.AllParameters;
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("1010h:01h").And.Contain("downloads it (CiA 319 §5.3 step 5)").And.Contain("Nothing was sent");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("refused before the first frame");
     }
 
     /// <summary>13FFh:00 is the number of SRDOs, at most 64 (§8.4.2.2). A peer reporting more is
