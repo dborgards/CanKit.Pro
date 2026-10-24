@@ -610,12 +610,20 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex on #331: a reply must not overtake an older one when a new silence begins while the
     // older ones are still being flushed. A silence starts only once nothing is in flight, so the
-    // window is between two held sends. On the virtual bus a send confirms synchronously and the
-    // flush runs on the actor, which closes that window; a bus that confirms asynchronously — any
-    // hardware adapter — lets the flush continue on the pool with the actor free, and the seam
-    // holds the flush there while the test drives the second silence and a third command into it.
-    [Fact]
-    public async Task Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends()
+    // window is between two held sends, and the seam holds the flush there while the test drives
+    // the second silence and a third command into it.
+    //
+    // #399: the seam holds the flush by awaiting, never by blocking a thread. Which thread the
+    // flush is on when it reaches the seam is the bus's doing, not the test's: a send that is
+    // already confirmed when the flush looks at it -- the virtual bus, or a confirmation that
+    // came back from the pool first -- leaves the flush on the slave's actor. A seam that blocked
+    // there blocked the actor itself, the slave could not take the second activate, and the
+    // bench waited for it in vain (Windows net48 CI, where the pool often won). Both ways of
+    // reaching the seam are run here, so neither depends on who wins.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends(bool asynchronousConfirmation)
     {
         int switches = 0;
         using var bench = NewBench();
@@ -630,43 +638,47 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
                 },
             },
             SdoTimeout = TimeSpan.FromMilliseconds(250),
-        }, inner => new AsynchronouslyConfirmingService(inner));
+        }, inner => asynchronousConfirmation ? new AsynchronouslyConfirmingService(inner) : inner);
         await EnterConfiguration(bench, slave);
         (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
         using var heard = bench.Listen();
         using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
 
         using var entered = new ManualResetEventSlim();
-        using var release = new ManualResetEventSlim();
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int seamRuns = 0;
         slave.BetweenHeldSendsForTests = () =>
         {
-            if (Interlocked.Increment(ref seamRuns) != 1) return;
+            if (Interlocked.Increment(ref seamRuns) != 1) return Task.CompletedTask;
             entered.Set();
-            // Longer than every wait the test makes while it holds: a seam that lets go on its own
-            // sends 5Bh before 5Ch is held and fails the premise, not the claim (Windows CI on #331).
-            release.Wait(TimeSpan.FromSeconds(30));
+            return release.Task;
         };
         // The flush parked in the seam is the test's doing; the clock may move meanwhile.
-        bench.Park(slave, () => entered.IsSet && !release.IsSet);
-
-        var first = bench.Undriven.ActivateBitTimingAsync(200, null);          // the first silence
-        await bench.WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
-        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // 5Ah, held
-        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));     // 5Bh, held
-        await bench.RunAsync(first);
-        await bench.WaitUntilAsync(() => entered.IsSet);                           // 5Ah is out; the flush holds before 5Bh
-        // A long second silence: the premise is that 5Ch is held by it, and a loaded runner must
-        // not let the silence end before 5Ch has reached the slave (macOS CI on #331).
-        var second = bench.Undriven.ActivateBitTimingAsync(1000, null);        // the second silence begins in that window
-        await bench.WaitUntilAsync(() => Volatile.Read(ref switches) == 2);
-        Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives in it
-        await bench.WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2); // 5Bh and 5Ch held
-        slave.IsLssSilentForTests.Should().BeTrue("the premise: 5Ch arrived during the second silence");
-        release.Set();                                                        // the flush goes on
-        await bench.RunAsync(second);
-        await bench.WaitUntilAsync(() => heard.LssReplies.Count >= 3);
-        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+        bench.Park(slave, () => entered.IsSet && !release.Task.IsCompleted);
+        try
+        {
+            var first = bench.Undriven.ActivateBitTimingAsync(200, null);          // the first silence
+            await bench.WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+            Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // 5Ah, held
+            Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));     // 5Bh, held
+            await bench.RunAsync(first);
+            await bench.WaitUntilAsync(() => entered.IsSet);                      // 5Ah is out; the flush holds before 5Bh
+            // A long second silence: the premise is that 5Ch is held by it, and a loaded runner must
+            // not let the silence end before 5Ch has reached the slave (macOS CI on #331).
+            var second = bench.Undriven.ActivateBitTimingAsync(1000, null);        // the second silence begins in that window
+            await bench.WaitUntilAsync(() => Volatile.Read(ref switches) == 2);
+            Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives in it
+            await bench.WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2); // 5Bh and 5Ch held
+            slave.IsLssSilentForTests.Should().BeTrue("the premise: 5Ch arrived during the second silence");
+            release.TrySetResult(true);                                           // the flush goes on
+            await bench.RunAsync(second);
+            await bench.WaitUntilAsync(() => heard.LssReplies.Count >= 3);
+            heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
     }
 
     // Codex and Bugbot on #331: a driver that throws while a held heartbeat or LSS reply is
@@ -850,7 +862,9 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>A bus service whose confirmations complete asynchronously, as a hardware adapter's
-    /// do; the virtual bus confirms synchronously, which keeps a flush on the actor.</summary>
+    /// do; the virtual bus confirms synchronously, which keeps a flush on the actor. The
+    /// confirmation is finished on the pool and can be finished before the caller looks at it,
+    /// and then the caller carries on synchronously after all (#399).</summary>
     private sealed class AsynchronouslyConfirmingService : ICanBusService
     {
         private readonly ICanBusService _inner;
