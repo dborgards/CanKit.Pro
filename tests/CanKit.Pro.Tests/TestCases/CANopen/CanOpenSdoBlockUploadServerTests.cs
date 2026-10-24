@@ -120,6 +120,85 @@ public class CanOpenSdoBlockUploadServerTests
         sent.Count(f => (f[0] & 0x80) == 0 && f[0] is >= 2 and <= 20).Should().Be(0, "no further segment was sent");
     }
 
+    public static TheoryData<string> MidBatchAcks => new() { "a partial ack", "an ack of segments not yet sent" };
+
+    // #378: the batch's stop check asks whether the session is still the open one, and a partial
+    // ack that arrives while the batch is still going leaves it open: it starts the
+    // retransmission as a second batch for the same session. The batch already running must
+    // stop then, or its remaining segments reach the client interleaved with the
+    // retransmission, each seqno twice. An ack that claims segments the batch has not handed
+    // over yet confirms nothing that left; it is a protocol error like any ack past the
+    // sub-block, and the session is aborted (Codex on #392) -- not moved on past data the client
+    // was never sent.
+    [Theory]
+    [MemberData(nameof(MidBatchAcks))]
+    public async Task An_Ack_While_The_SubBlock_Is_Still_Being_Sent_Stops_That_Batch(string ack)
+    {
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-server-midack-{Guid.NewGuid():N}");
+        var toClient = new List<byte[]>();
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoTx(ServerNodeId)) lock (toClient) toClient.Add(frame.Data.ToArray());
+        };
+        using var server = new CanOpenNode(new CanBusService(bus), ServerNodeId,
+            new CanOpenNodeOptions(), ownsService: true);
+        var nmtSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.NmtCommandReceived += (_, e) =>
+        {
+            if (e.Command == NmtCommand.EnterPreOperational) nmtSeen.TrySetResult();
+        };
+        server.ObjectDictionary.AddDomain(Index, 0x00,
+            Enumerable.Range(0, 140).Select(i => (byte)i).ToArray(), OdAccess.ReadOnly); // 20 segments
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        FromClient(bus, SdoBlockFrames.BuildBlockUploadInit(Index, 0x00, clientCrcSupported: false, blockSize: 20, pst: 0));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate response
+        bus.DeferredEchoes.ReleaseAll();
+        FromClient(bus, SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, its confirmation held
+
+        // Segment 1 is out: a partial ack confirms it and asks for the rest again; an ack of all
+        // 20 claims 19 that have not left. An NMT command behind the ack is handled behind it.
+        FromClient(bus, SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck,
+            lastAckedSeq: ack == "a partial ack" ? (byte)1 : (byte)20, nextBlockSize: 20));
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new byte[] { (byte)NmtCommand.EnterPreOperational, ServerNodeId }), isEcho: false);
+        await nmtSeen.Task.WithTimeoutAsync(ShortTimeout);
+        // The answer to the ack is on the bus before the window opens -- the retransmission's
+        // first segment, or the abort -- while the first batch still waits for segment 1's
+        // confirmation, so the fourth transmit can be nothing else. Waited for, not given time:
+        // within the window below a slow host could leave it unsent, and the assertions that
+        // need it would fail for want of scheduling.
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
+
+        // Let both sends run. The first batch, still sending, would go on with segment 2 at
+        // once and one more segment at every later release. No signal says "nothing more is
+        // coming", so this is a negative window: it can only pass falsely on a slow host.
+        for (var i = 0; i < 3; i++)
+        {
+            bus.DeferredEchoes.ReleaseAll();
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+        }
+        bus.DeferredEchoes.ReleaseAll();
+
+        byte[][] sent;
+        lock (toClient) sent = toClient.ToArray();
+        var seqnos = sent.Skip(1).Where(f => (f[0] & 0x7F) is >= 1 and <= 20).Select(f => f[0] & 0x7F).ToList();
+        if (ack == "a partial ack")
+        {
+            seqnos.Should().HaveCountGreaterThan(1, "the retransmission is under way");
+            seqnos.Should().Equal(Enumerable.Range(1, seqnos.Count),
+                "the first batch stopped at the ack, so each segment went out once, in order");
+            return;
+        }
+        seqnos.Should().Equal(new[] { 1 }, "the session ended at the ack; nothing more was sent");
+        sent.Should().HaveCount(3, "the initiate response, segment 1 and the abort");
+        sent[2][0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(sent[2]).Should().Be((uint)SdoAbortCode.General);
+        SdoFrames.ReadIndex(sent[2]).Should().Be((Index, (byte)0x00));
+    }
+
     // An empty object cannot be expedited and used to leave the block path without a segment
     // at all: the client waited for seqno 1, the server for an ack, and both timed out. The
     // encoding has the case: one last segment carrying nothing, n = 7 in the end frame.

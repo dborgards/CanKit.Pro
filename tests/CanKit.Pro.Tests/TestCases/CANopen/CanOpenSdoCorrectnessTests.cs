@@ -1,8 +1,6 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -496,8 +494,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         var stray = new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 };
         // In the jump table (SendingSegments = 1) and past it (AwaitEnd = 5).
-        DeliverBlockFrameWhilePhase(master, 0x11, "SendingSegments", "AwaitInitResponse", stray);
-        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitEnd", "AwaitInitResponse", stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEnd, stray);
         download.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the download");
 
         Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
@@ -533,9 +531,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
 
         var stray = new byte[] { 0x43, 0x01, 0x20, 0x00, 0xAA, 0xBB, 0xCC, 0xDD };
-        DeliverBlockFrameWhilePhase(master, 0x11, "SendingSegments", "AwaitInitResponse", stray);
-        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitSubBlockAck", "AwaitInitResponse", stray);
-        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitEndResponse", "AwaitInitResponse", stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitSubBlockAck, stray);
+        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEndResponse, stray);
         upload.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the upload");
 
         var payload = new byte[] { 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77 };
@@ -549,51 +547,6 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             unusedBytesInLastSegment: 0, crc: 0));
         tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse);
         (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(payload);
-    }
-
-    // The phase is private and a block client never leaves it sitting across a bus frame, so the
-    // frame is delivered on the actor with the phase already set. Restoring the phase in that
-    // same turn is what lets the real response, sent afterwards, belong to the transfer again.
-    private static bool IsFatal(Exception ex) =>
-        ex is OutOfMemoryException
-            or StackOverflowException
-            or AccessViolationException
-            or AppDomainUnloadedException
-            or BadImageFormatException
-            or CannotUnloadAppDomainException
-            or InvalidProgramException
-            or ThreadAbortException;
-
-    private static void DeliverBlockFrameWhilePhase(ICanOpenNode node, byte serverNodeId, string phase,
-        string restore, byte[] data)
-    {
-        var nodeType = node.GetType();
-        var incoming = nodeType.GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var phaseType = nodeType.GetNestedType("SdoBlockClientPhase", BindingFlags.NonPublic)!;
-        var clientsField = nodeType.GetField("_sdoBlockClients", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var actor = nodeType.GetField("_actor", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(node)!;
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Action work = () =>
-        {
-            try
-            {
-                var clients = (IDictionary)clientsField.GetValue(node)!;
-                object? session = null;
-                foreach (DictionaryEntry entry in clients)
-                    session = entry.Value;
-                var phaseProperty = session!.GetType().GetProperty("Phase")!;
-                phaseProperty.SetValue(session, Enum.Parse(phaseType, phase));
-                incoming.Invoke(node, new object[] { CanOpenCobId.SdoTx(serverNodeId), data, false });
-                phaseProperty.SetValue(session, Enum.Parse(phaseType, restore));
-                done.TrySetResult();
-            }
-            catch (Exception ex) when (!IsFatal(ex))
-            {
-                done.TrySetException(ex);
-            }
-        };
-        actor.GetType().GetMethod("Post", new[] { typeof(Action) })!.Invoke(actor, new object[] { work });
-        done.Task.GetAwaiter().GetResult();
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1364,6 +1317,111 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: true, new byte[] { 1, 2, 3 }));
 
         var abort = tap.Next(ShortTimeout);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+    }
+
+    // #357 C-13: the toggle bit alternates per segment (CiA 301 §7.2.4.3.5, §7.2.4.3.7), and a
+    // segment or segment ack carrying the wrong one is answered with 0503 0000h. The server's
+    // download direction had a test (Sdo_Segmented_Download_Wrong_Toggle_Aborts); the client's
+    // two checks and the server's upload direction had none, and each survived `if (false)`.
+    [Fact]
+    public async Task Sdo_Client_Upload_Aborts_A_Segment_With_The_Wrong_Toggle()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 10));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadSegmentBase, "the first request, toggle 0");
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: true, lastSegment: false, new byte[] { 1, 2, 3, 4, 5, 6, 7 }));
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+    }
+
+    [Fact]
+    public async Task Sdo_Client_Download_Aborts_A_Segment_Ack_With_The_Wrong_Toggle()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var download = client.SdoDownloadAsync(0x02, 0x2100, 0x00, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsDownloadInitSegmented);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), new byte[] { SdoFrames.ScsDownloadInitAck, 0x00, 0x21, 0x00, 0, 0, 0, 0 });
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsDownloadSegmentBase, "the first segment, toggle 0, not the last");
+        Send(rawBus, CanOpenCobId.SdoTx(0x02),
+            new byte[] { (byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit), 0, 0, 0, 0, 0, 0, 0 });
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => download.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+    }
+
+    [Fact]
+    public void Sdo_Server_Upload_Aborts_A_Segment_Request_With_The_Wrong_Toggle()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[20]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoFrames.BuildUploadInit(0x2100, 0x00));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsUploadInitSegmented);
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[]
+        {
+            (byte)(SdoFrames.CcsUploadSegmentBase | SdoFrames.ToggleBit), 0, 0, 0, 0, 0, 0, 0,
+        });
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.ToggleBitNotAlternated);
+        SdoFrames.ReadIndex(abort).Should().Be(((ushort)0x2100, (byte)0x00));
+    }
+
+    // #357 C-5: the block-upload client read "s = 1, size 0" as no size at all and accepted
+    // whatever followed; the classic client above refuses it. The same announced length of
+    // nothing, the same answer.
+    [Fact]
+    public async Task Sdo_BlockClient_Upload_Aborts_When_The_Server_Announces_Zero_And_Sends_Data()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00, mode: SdoTransferMode.Block);
+        (tap.Next(ShortTimeout)[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2100, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true,
+            new byte[] { 1, 2, 3, 0, 0, 0, 0 }));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
+            unusedBytesInLastSegment: 4, crc: 0));
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
         SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
         await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
     }

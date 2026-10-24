@@ -37,18 +37,19 @@ public sealed class J1939NoAddressException : J1939NodeException
 }
 
 /// <summary>
-/// Thrown by <see cref="IJ1939Node.ClaimAddressAsync"/> when a higher-priority peer contests
-/// the preferred address and the node has no fallback (arbitrary addressing disabled or the
-/// caller supplied only one candidate). The node transitions to
-/// <see cref="J1939ClaimState.CannotClaim"/> and broadcasts Cannot Claim (SA=0xFE) before
-/// throwing (SRS FR-J1939-004).
+/// Thrown by <see cref="IJ1939Node.ClaimAddressAsync"/> when the preferred address cannot be
+/// claimed: a peer with a lower NAME contests it and arbitrary addressing is off, every address
+/// of the arbitrary field was contested as well, or a peer with this node's own NAME claims it
+/// (SAE J1939-81 §4.4.3.3 gives an equal NAME to neither CA, and a tie does not scan). The node
+/// transitions to <see cref="J1939ClaimState.CannotClaim"/> and broadcasts Cannot Claim
+/// (SA=0xFE) before throwing (SRS FR-J1939-004).
 /// </summary>
 public sealed class J1939CannotClaimException : J1939NodeException
 {
     /// <summary>Constructs the exception with the preferred address that was lost.</summary>
     public J1939CannotClaimException(byte preferredAddress)
         : base(ProtocolErrorCodes.AddressClaimFailed,
-            $"J1939 node could not claim preferred address 0x{preferredAddress:X2}: contested by a peer with higher-priority NAME.")
+            $"J1939 node could not claim preferred address 0x{preferredAddress:X2}: a peer with a lower or equal NAME contested it, and no other address could be claimed.")
     {
         PreferredAddress = preferredAddress;
     }

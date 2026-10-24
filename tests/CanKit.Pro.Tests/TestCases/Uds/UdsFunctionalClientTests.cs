@@ -915,6 +915,39 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the 0x78 in the gap moved the window past the negative at 500 ms");
     }
 
+    // #354 (U-5): the 0x78s that move a window out are bounded, as the physical client's are
+    // by MaxResponsePendingCount. With a bound of one, the second 0x78 in the gap after a
+    // suppressed send leaves the window where the first put it: P2* from 100 ms, not from 200.
+    [Fact]
+    public async Task The_Pending_Answers_That_Move_A_Window_Out_Are_Bounded()
+    {
+        var session = NewSession();
+        using var clock = new WindowClock();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x78 });
+
+        var iso = new IsoTpFunctionalClient(new CanBusService(busTester, clock.Actor.TimeSource.GetTimestamp),
+            FunctionalTxId, Ecu1, 0x7EF, FastOptions(), ownsService: true, clock.Actor);
+        using var functional = UdsFunctionalClient.Create(iso, clock.Actor, ownsClient: true,
+            responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500),
+            maxPendingExtensions: 1);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(20));
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(100));
+        busEcus.Transmit(pending); // the first 0x78, at 100 ms
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(100));
+        busEcus.Transmit(pending); // the second, at 200 ms: one too many
+
+        // The listener's 300 ms collection ends and applies what it heard: the window ends at
+        // 1600, about 1300 from there. Moved out by the second 0x78 as well, it would end at
+        // 1700, about 1400 away.
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(101));
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(1250), TimeSpan.FromMilliseconds(60));
+    }
+
     // Codex on #150: a request the functional client refuses before transmitting -- longer
     // than a Single Frame carries -- reaches no ECU, and leaves no window for the next call
     // to wait out; suppressed or not.

@@ -23,6 +23,12 @@ the SRS's own stated means. A waiver is a claim about the SRS and is checked
 against it: naming a requirement whose verification column does *not* match
 fails the build, so the list cannot quietly grow to cover real gaps.
 
+The check also runs the other way round: every requirement id (FR-/NFR-) and every ADR id
+cited in src/, tests/, samples/ or tools/ must exist -- in the SRS and in the arc42
+document's decision list respectively. XML documentation and comments are published verbatim
+and the API reference turns those ids into links, so a typo'd or renumbered id is a dead link
+nobody notices until a reader follows it.
+
 Usage: python3 eng/verify-requirements-traceability.py [srs_path] [tests_dir]
 """
 from __future__ import annotations
@@ -36,6 +42,17 @@ import sys
 # twelve NFRs -- the totals looked plausible and the ratchet simply did not cover them
 # (Bugbot on #125). eng/mkdocs_hooks.py already treats that segment as optional.
 REQ = re.compile(r"\b(?:FR|NFR)-(?:[A-Z0-9]+-)?\d+\b")
+
+# Architecture decisions are cited as ADR-7 and defined as `### ADR-7 (umgesetzt): ...` headings
+# of the arc42 document. docs/decisions/ numbers its records on its own (0001-...), not as ADR-n.
+ADR = re.compile(r"\bADR-\d+\b")
+ADR_HEADING = re.compile(r"^#{2,4}\s+(ADR-\d+)\b", re.MULTILINE)
+# .csproj/.props carry citations too (the CANopen package description cites its requirements).
+CITATION_SUFFIXES = {".cs", ".md", ".csproj", ".props", ".targets"}
+# `FR-RAW-030..034` and `FR-CO-002/003/004` write the later endpoints without the prefix; REQ
+# alone sees only the first id, so a typo in a later endpoint would pass.
+REQ_SHORTHAND = re.compile(r"\b((?:FR|NFR)-(?:[A-Z0-9]+-)?)(\d+)((?:(?:\.\.|/)\d+)*)")
+GENERATED_DIRECTORIES = {"bin", "obj"}
 
 # id -> the substring that must appear in the SRS verification column for the
 # waiver to hold. Keep the reason, not just the id: a bare id list is how an
@@ -98,8 +115,39 @@ def parse_srs(path: pathlib.Path) -> dict[str, tuple[str, str]]:
     return out
 
 
-def main(argv: list[str]) -> int:
-    root = pathlib.Path(__file__).resolve().parent.parent
+def cited_requirements(text: str) -> list[str]:
+    """Every requirement id cited in `text`, with the endpoints of `A..B` and `A/B/C` shorthand
+    spelled out. A range is checked at its endpoints only: the ids in between are not cited."""
+    cited = []
+    for prefix, first, rest in REQ_SHORTHAND.findall(text):
+        cited.append(f"{prefix}{first}")
+        cited.extend(f"{prefix}{number}" for number in re.findall(r"\d+", rest))
+    return cited
+
+
+def unknown_citations(roots: list[pathlib.Path], known_reqs: set[str],
+                      known_adrs: set[str]) -> dict[str, list[str]]:
+    """Return {id: [files citing it]} for every cited FR-/NFR-/ADR- id that is not defined."""
+    unknown: dict[str, set[str]] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*"):
+            if f.suffix not in CITATION_SUFFIXES or not f.is_file():
+                continue
+            if GENERATED_DIRECTORIES & set(f.relative_to(root).parts):
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            cited = [(i, known_reqs) for i in cited_requirements(text)] + \
+                    [(i, known_adrs) for i in ADR.findall(text)]
+            for cited_id, known in cited:
+                if cited_id not in known:
+                    unknown.setdefault(cited_id, set()).add(f.as_posix())
+    return {i: sorted(files) for i, files in sorted(unknown.items())}
+
+
+def main(argv: list[str], root: pathlib.Path | None = None) -> int:
+    root = root or pathlib.Path(__file__).resolve().parent.parent
     srs = pathlib.Path(argv[1]) if len(argv) > 1 else root / "docs/requirements/SRS-CanKit.Pro.md"
     tests = pathlib.Path(argv[2]) if len(argv) > 2 else root / "tests"
 
@@ -115,6 +163,18 @@ def main(argv: list[str]) -> int:
         print(f"error: no requirement rows parsed from {srs} -- has the table shape changed?",
               file=sys.stderr)
         return 2
+
+    # The citation check needs the repository's own layout: with explicit paths the caller is
+    # pointing the script at a fixture, and the real sources cite the real SRS.
+    unknown: dict[str, list[str]] = {}
+    if len(argv) <= 1:
+        arc42 = root / "docs/architecture/arc42-CanKit.Pro.md"
+        if not arc42.is_file():
+            print(f"error: arc42 document not found at {arc42}", file=sys.stderr)
+            return 2
+        known_adrs = set(ADR_HEADING.findall(arc42.read_text(encoding="utf-8")))
+        unknown = unknown_citations([root / "src", tests, root / "samples", root / "tools"],
+                                    set(reqs), known_adrs)
 
     traced: set[str] = set()
     for f in tests.rglob("*.cs"):
@@ -143,6 +203,14 @@ def main(argv: list[str]) -> int:
     print(f"  Must untraced (recorded):{len(open_gaps) - len(new_gaps)}")
     print(f"  Must untraced (NEW):     {len(new_gaps)}")
 
+    if unknown:
+        print("\nCited ids that are defined nowhere:", file=sys.stderr)
+        for cited_id, files in unknown.items():
+            print(f"  {cited_id}  cited in {', '.join(files[:3])}"
+                  f"{' and ' + str(len(files) - 3) + ' more' if len(files) > 3 else ''}",
+                  file=sys.stderr)
+        print("\nFix the id, or add the requirement to the SRS / the decision to arc42.", file=sys.stderr)
+
     if bad_waivers:
         print("\nWaiver list is out of step with the SRS:", file=sys.stderr)
         for m in bad_waivers:
@@ -161,7 +229,7 @@ def main(argv: list[str]) -> int:
         for i in closed:
             print(f"  {i}", file=sys.stderr)
 
-    return 1 if (new_gaps or closed or bad_waivers) else 0
+    return 1 if (new_gaps or closed or bad_waivers or unknown) else 0
 
 
 if __name__ == "__main__":

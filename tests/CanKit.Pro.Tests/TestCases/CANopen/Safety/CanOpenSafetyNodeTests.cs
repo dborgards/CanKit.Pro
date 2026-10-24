@@ -1575,15 +1575,17 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         using var receiver = CanOpen.OpenNode(busB, Consumer, new CanOpenNodeOptions { SrdoCount = 1 });
         int gfcs = 0;
         receiver.Safety().GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
-        receiver.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sender.Safety().SendGlobalFailsafeCommandAsync());
         wire.SendNmt(NmtCommand.Start, 0);
         await WaitUntilAsync(() => sender.State == NmtState.Operational && receiver.State == NmtState.Operational, "start");
-        await Assert.ThrowsAsync<InvalidOperationException>(() => sender.Safety().SendGlobalFailsafeCommandAsync());
-        sender.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        // EN 50325-5:2010 §6.4.2.1: 1300h is the record, not the precondition (#289).
+        sender.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u);
         await sender.Safety().SendGlobalFailsafeCommandAsync();
         await wire.WaitForCountAsync(CanOpenCobId.GlobalFailsafeCommand, 1);
         wire.Payloads(CanOpenCobId.GlobalFailsafeCommand)[0].Should().BeEmpty();
         await WaitUntilAsync(() => Volatile.Read(ref gfcs) >= 1, "GFC received");
+        sender.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(1u, "the SRD that requested the GFC records it");
+        await WaitUntilAsync(() => receiver.ObjectDictionary.ReadUnsigned(0x1300, 0) == 1, "1300h recorded on the receiver");
     }
 
     [Fact]

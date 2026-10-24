@@ -13,8 +13,10 @@ namespace CanKit.Pro.Uds;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The MVP surface covers the seven services listed in SRS FR-UDS-001..007 (0x10, 0x11, 0x22,
-/// 0x27, 0x2E, 0x31, 0x3E) plus the raw escape hatch
+/// The surface covers eleven services: the seven of SRS FR-UDS-001..007 (0x10, 0x11, 0x22,
+/// 0x27, 0x2E, 0x31, 0x3E) and the four of the upload/download sequence, FR-UDS-012 (0x34,
+/// 0x35, 0x36, 0x37), with a multi-DID 0x22 (FR-UDS-011) and the one-shot
+/// <see cref="DownloadAsync"/> and <see cref="UploadAsync"/> on top -- plus the raw escape hatch
 /// <see cref="SendRawAsync(ReadOnlyMemory{byte}, System.Threading.CancellationToken)"/>. Every
 /// method:
 /// </para>
@@ -34,7 +36,12 @@ namespace CanKit.Pro.Uds;
 /// not corrupt the client (the next call will still see a clean state).
 /// </para>
 /// <para><see cref="IDisposable.Dispose"/> is thread-safe and idempotent; disposing an active
-/// client cancels any pending request and stops the TesterPresent keep-alive (if any).</para>
+/// client cancels any pending request and stops the TesterPresent keep-alive (if any). It then
+/// waits for the keep-alive loop to end and for the request in flight to release the request
+/// lock, each wait bounded by five seconds -- up to ten in all where both outlast the
+/// cancellation -- and holds the calling thread meanwhile.
+/// <see cref="UdsClientExtensions.DisposeAsync(IUdsClient)"/> does the same without holding a
+/// thread.</para>
 /// </remarks>
 public interface IUdsClient : IDisposable
 {
@@ -51,6 +58,12 @@ public interface IUdsClient : IDisposable
     /// <see cref="EcuResetAsync"/>. Starts at <see cref="UdsSessionType.Default"/> because
     /// ISO 14229-1 §9.2 guarantees an ECU starts up in the default session.
     /// </summary>
+    /// <remarks>
+    /// Only those two methods move it. A DiagnosticSessionControl or ECUReset sent through
+    /// <see cref="SendRawAsync"/> -- answered, or suppressed (<c>10 83</c>, <c>11 81</c>), which
+    /// the ECU acts on without a word -- changes the ECU's session and leaves this property, and
+    /// the P2/P2* budgets the session's record would have set, as they were (#354).
+    /// </remarks>
     byte CurrentSession { get; }
 
     /// <summary>
@@ -157,13 +170,14 @@ public interface IUdsClient : IDisposable
     ///   the returned key, then send <c>0x27 sendKeyLevel</c> with the caller-computed key
     ///   bytes.</description></item>
     /// </list>
-    /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7F</c> and
-    /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically. A zero-length seed
-    /// (ISO 14229-1 §9.4.5.3 "already unlocked") short-circuits the exchange without invoking
-    /// <paramref name="computeKey"/>.
+    /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7D</c> and
+    /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically, so at most
+    /// <c>0x7E</c>. A seed of all zeroes -- of any length, including none -- means "already
+    /// unlocked" (ISO 14229-1 §9.4.5.3) and short-circuits the exchange without invoking
+    /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="requestSeedLevel"/> is not
-    /// an odd byte in the range <c>0x01..0x7F</c>.</exception>
+    /// an odd byte in the range <c>0x01..0x7D</c>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="computeKey"/> is <c>null</c>.</exception>
     Task SecurityAccessAsync(byte requestSeedLevel, Func<byte[], byte[]> computeKey,
         CancellationToken cancellationToken = default);
@@ -187,6 +201,14 @@ public interface IUdsClient : IDisposable
     /// requests through the same request lock; a slow request never causes a stale keep-alive
     /// frame to interleave (SRS FR-UDS-007).
     /// </summary>
+    /// <remarks>
+    /// A TesterPresent that fails -- a timeout, a negative response, a transport error -- is
+    /// dropped and the next one goes out a period later; nothing reports it, and the channel's
+    /// <c>BackgroundExceptionOccurred</c> does not carry it either. A session the ECU has left
+    /// (after a reset, or with S3 run out) therefore shows only in the answer to the next
+    /// request, typically NRC 0x7E or 0x7F. The keep-alive ends without notice when the client
+    /// or its channel is disposed.
+    /// </remarks>
     /// <param name="period">Override for the send interval; must be positive.</param>
     /// <exception cref="InvalidOperationException">A keep-alive is already running; call
     /// <see cref="IDisposable.Dispose"/> on the previous handle first.</exception>
@@ -201,6 +223,12 @@ public interface IUdsClient : IDisposable
     /// frame is confirmed, and a negative response the server may still send is not waited for
     /// (#57).
     /// </summary>
+    /// <remarks>
+    /// The request is not interpreted: a session change or reset sent here does not move
+    /// <see cref="CurrentSession"/> or the P2/P2* budgets, whether it is answered or suppressed
+    /// (#354). Use <see cref="DiagnosticSessionControlAsync(byte, CancellationToken)"/> and
+    /// <see cref="EcuResetAsync"/> where the client should follow the session.
+    /// </remarks>
     Task<byte[]> SendRawAsync(ReadOnlyMemory<byte> request,
         CancellationToken cancellationToken = default);
 
@@ -315,6 +343,8 @@ public interface IUdsClient : IDisposable
     /// <paramref name="memorySize"/> bytes were read, and finally calls
     /// <see cref="RequestTransferExitAsync"/>.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="memorySize"/> has nonzero
+    /// high-order bytes beyond what a <see cref="ulong"/> can represent; nothing is sent.</exception>
     /// <exception cref="UdsProtocolException">The ECU delivered an empty TransferData payload
     /// before the declared size was reached, or <paramref name="memorySize"/> exceeds what can
     /// reasonably be buffered.</exception>

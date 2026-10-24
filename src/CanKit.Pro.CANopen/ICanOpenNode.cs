@@ -108,7 +108,10 @@ public interface ICanOpenNode : IDisposable
     /// queued in between, and a producer with
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> distinct emergencies already waiting
     /// has its further ones discarded, reported once per burst on
-    /// <see cref="BackgroundExceptionOccurred"/>.</summary>
+    /// <see cref="BackgroundExceptionOccurred"/>. The producer is the COB-ID minus <c>080h</c>,
+    /// the pre-defined connection set: for a peer whose <c>1014h</c> was moved off that set,
+    /// <see cref="EmcyMessage.ProducerNodeId"/> is not the peer's node-id, and the folding above
+    /// is keyed on it as well.</summary>
     event EventHandler<EmcyReceivedEventArgs>? EmcyReceived;
 
     /// <summary>Raised whenever a SYNC frame is received on the configured SYNC COB-ID
@@ -161,8 +164,10 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="LifeGuardingState.Occurred"/> when this node, being guarded by a master, was
     /// not polled within its node life time (<c>100Ch</c> guard time × <c>100Dh</c> life time
     /// factor, both from the object dictionary), and with <see cref="LifeGuardingState.Resolved"/>
-    /// when a poll arrives again afterwards. Guarding starts with the first RTR received; both
-    /// objects at 0 (the default) disable it.
+    /// when a poll arrives again afterwards. Guarding starts with the first RTR the node answers;
+    /// both objects at 0 (the default) disable it, and so does an RTR the node does not answer --
+    /// with the heartbeat producer on, or with <see cref="CanOpenNodeOptions.RespondToNodeGuardingRtr"/>
+    /// off.
     /// </summary>
     event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent;
 
@@ -355,6 +360,9 @@ public interface ICanOpenNode : IDisposable
     /// One transfer per server is in flight at a time: with one in flight — a safety transaction
     /// with that server counts as one for its whole length — the call fails with
     /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
+    /// <remarks>The client is not gated by this node's NMT state: it transfers in Stopped too,
+    /// as <see cref="SendSyncAsync"/> sends (#254). What CiA 301 Table 37 rules out in Stopped is
+    /// applied to this node's SDO server.</remarks>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
         CancellationToken cancellationToken = default);
@@ -380,6 +388,8 @@ public interface ICanOpenNode : IDisposable
     /// One transfer per server is in flight at a time: with one in flight — a safety transaction
     /// with that server counts as one for its whole length — the call fails with
     /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
+    /// <remarks>Not gated by this node's NMT state, as
+    /// <see cref="SdoUploadAsync(byte, ushort, byte, SdoTransferMode, CancellationToken)"/>.</remarks>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,

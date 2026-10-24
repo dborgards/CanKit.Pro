@@ -88,6 +88,8 @@ internal sealed partial class CanOpenNode
             }
         }
 
+        DeleteOmittedSrdos(_od, DescribedSrdoCount(description), objects.ContainsKey);
+
         // A mapping names application objects, so every other object comes first, then the
         // PDO communication records (the PDO is destroyed while its mapping is written), then
         // the mapping records, then — below — the creates.
@@ -145,6 +147,19 @@ internal sealed partial class CanOpenNode
     // CiA DSP 304: the loader's SRDO steps are static over the dictionary they write, so that
     // LoadDescribedSafetyObjects runs the very same code for PeerSafetyConfiguration.
     // -----------------------------------------------------------------------------------------
+
+    /// <summary>An SRDO whose communication record the description leaves out is provided "at its
+    /// defaults — the SRDO deleted" (the finding the loaders report). SRDO 1 of a node-id up to 64
+    /// exists at power-on (EN 50325-5:2010 Table 5, #289), so the deletion is a write now, not
+    /// the power-on value. A declared record starts deleted in <see cref="ApplySrdoCommunicationRecord"/>.</summary>
+    private static void DeleteOmittedSrdos(ObjectDictionary od, int srdoCount, Func<ushort, bool> declares)
+    {
+        for (int n = 1; n <= srdoCount; n++)
+        {
+            var comm = SrdoRecords.CommIndex(n);
+            if (!declares(comm) && od.ReadUnsigned(comm, 0x01) != 0) od.WriteUnsigned(comm, 0x01, 0);
+        }
+    }
 
     /// <summary>The deferred "create SRDO" step: the direction is written last, once the mapping
     /// is in, and only over a mapping record that exists and was applied as described.</summary>
@@ -204,6 +219,7 @@ internal sealed partial class CanOpenNode
         var findings = new List<DeviceDescriptionFinding>();
         var pendingSrdoCreates = new List<(int Srdo, byte Direction, string Raw)>();
         var failedMappings = new HashSet<ushort>();
+        DeleteOmittedSrdos(od, srdoCount, objects.Contains);
         // Rank 0 as in ApplyDeviceDescription: what a mapping names is data the loader declares
         // first (1000h–1FFFh cannot be mapped, so only the application area matters).
         foreach (var (index, entries) in objects.Ordered(i => i >= 0x2000))

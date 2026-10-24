@@ -114,7 +114,13 @@ check-jsonschema --schemafile specification/schema/bom-1.6.schema.json CanKit.Pr
 dotnet pack CanKit.Pro.sln -c Release -p:Version=9.9.9 -o artifacts/nuget
 python3 eng/generate-sboms.py artifacts/nuget 9.9.9 artifacts/sbom
 python3 eng/verify-sboms.py   artifacts/sbom   artifacts/nuget 9.9.9
+python3 -m unittest discover -s eng -p "test_*.py"    # the checks' own tests
 ```
+
+`verify-sboms.py` cross-checks every SBOM against its package's `.nuspec`: each declared dependency must be
+listed, at a version no lower than the floor the `.nuspec` gives it (the SBOM is the restored closure, so it
+may sit above a floor, never below). Where the target frameworks declare different floors, the highest
+version listed has to reach the highest floor.
 
 The SBOMs are generated in the release workflow's `verify` job — the one with no credentials — from the
 packages it has just packed, and handed on as an artifact. `prepareCmd` checks them again against the

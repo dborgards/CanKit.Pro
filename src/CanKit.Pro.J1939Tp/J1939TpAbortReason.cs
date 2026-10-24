@@ -33,16 +33,28 @@ public enum J1939TpAbortReason : byte
     /// </summary>
     Timeout = 3,
 
-    /// <summary>CTS messages received when data transfer is in progress (table 7, code 4).</summary>
+    /// <summary>
+    /// CTS messages received when data transfer is in progress (table 7, code 4). Received only:
+    /// this stack never sends it. An originator that gets a CTS while a block is still draining
+    /// keeps it and applies it when the block ends (a receiver's next CTS can legitimately arrive
+    /// before the originator's own confirmation of the block's last TP.DT).
+    /// </summary>
     CtsReceivedDuringDataTransfer = 4,
 
     /// <summary>
-    /// Maximum retransmit request limit reached (table 7, code 5). This stack does not
-    /// retransmit, so a CTS asking for a packet already sent reaches the limit at once.
+    /// Maximum retransmit request limit reached (table 7, code 5). Sent by the originator when a
+    /// CTS asks for a packet already sent once the session has served
+    /// <see cref="J1939TpOptions.MaxRetransmitRequests"/> such requests (#58).
     /// </summary>
     MaximumRetransmitRequestsReached = 5,
 
-    /// <summary>Unexpected data transfer packet (table 7, code 6).</summary>
+    /// <summary>
+    /// Unexpected data transfer packet (table 7, code 6). Received only: this stack never sends
+    /// it. Its receiver grants the next block in the same step that takes the last TP.DT of the
+    /// current one, so a TP.DT carrying the next expected sequence number is always taken, even
+    /// one the originator sent before it saw that grant; any other is answered with
+    /// <see cref="BadSequenceNumber"/> or <see cref="DuplicateSequenceNumber"/>.
+    /// </summary>
     UnexpectedDataTransferPacket = 6,
 
     /// <summary>
