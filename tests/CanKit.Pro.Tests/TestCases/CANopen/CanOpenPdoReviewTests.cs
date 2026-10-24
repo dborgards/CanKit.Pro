@@ -406,8 +406,9 @@ public partial class CanOpenPdoEngineTests
         await wire.WaitForCountAsync(CanOpenCobId.Emcy(Device), 1);
         await Inject(node, CanOpenCobId.Sync);
         await Inject(node, CanOpenCobId.Sync, 1);
-        await wire.WaitForCountAsync(CanOpenCobId.Emcy(Device), 2);
-        wire.Count(CanOpenCobId.Emcy(Device)).Should().Be(2);
+        // The valid SYNC ends the error with 0000h (#379); the bad one after it is a new error.
+        await wire.WaitForCountAsync(CanOpenCobId.Emcy(Device), 3);
+        wire.Payloads(CanOpenCobId.Emcy(Device)).Select(p => p[1] << 8 | p[0]).Should().Equal(0x8240, 0, 0x8240);
     }
 
     [Fact]
