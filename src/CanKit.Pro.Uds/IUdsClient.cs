@@ -176,6 +176,18 @@ public interface IUdsClient : IDisposable
     /// unlocked" (ISO 14229-1 §9.4.5.3) and short-circuits the exchange without invoking
     /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
+    /// <remarks>
+    /// The client's request lock is held from the seed request to the key's answer, and so
+    /// across <paramref name="computeKey"/>: no other request -- the
+    /// <see cref="StartTesterPresentKeepAlive"/> TesterPresent included -- goes out in between,
+    /// so nothing can come between seed and key on the ECU's side. The cost is that a
+    /// <paramref name="computeKey"/> that takes longer than the server's S3 timer (an HSM-backed
+    /// one, say) also holds back the keep-alive, and the session may time out before the key is
+    /// sent. Whether ISO 14229-1 lets a TesterPresent between seed and key leave the seed valid --
+    /// in which case the keep-alive alone could be let through during
+    /// <paramref name="computeKey"/> -- has not been checked against the text; until it is, the
+    /// lock stays (#354).
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="requestSeedLevel"/> is not
     /// an odd byte in the range <c>0x01..0x7D</c>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="computeKey"/> is <c>null</c>.</exception>
@@ -317,6 +329,18 @@ public interface IUdsClient : IDisposable
     /// <paramref name="data"/> is the encoded payload this client forwards unchanged, so
     /// their lengths are not compared.
     /// </summary>
+    /// <remarks>
+    /// No block is retried. Beyond the repeat after NRC 0x21 (busyRepeatRequest) that every
+    /// request gets (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>), the first failure of
+    /// a TransferData -- a negative response such as NRC 0x73 (wrongBlockSequenceCounter), a
+    /// timeout, a transport error -- ends the call with that exception, and no
+    /// RequestTransferExit follows, so the server's download is
+    /// left where the failed block left it. This is a scope limit of this convenience method, not
+    /// a reading of ISO 14229-1: whether and how the standard has a client repeat a block has not
+    /// been checked against the text (#354). A caller that wants to repeat blocks drives
+    /// <see cref="RequestDownloadAsync"/>, <see cref="TransferDataAsync"/> and
+    /// <see cref="RequestTransferExitAsync"/> itself.
+    /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="dataFormatIdentifier"/> is
     /// <c>0x00</c> and <paramref name="memorySize"/> does not decode to the length of
     /// <paramref name="data"/>.</exception>

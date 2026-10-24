@@ -480,11 +480,18 @@ public static class IsoTpFrameCodec
     /// <c>true</c> when the frame has enough bytes and a valid PCI nibble; <c>false</c> for
     /// truncated frames, reserved PCI nibbles (&gt; 3), reserved Flow-Status values (&gt; 2),
     /// escape-form PCIs on classic CAN, a CAN-FD escape-form First Frame whose FF_DL is not above
-    /// 4095, or CAN-FD Single-Frame short-form SF_DL values above
+    /// 4095 or is above <see cref="int.MaxValue"/>, or CAN-FD Single-Frame short-form SF_DL values above
     /// <see cref="SingleFrameShortFormMaxDataLength"/> for the endpoint's addressing mode
     /// (those lengths must use the <c>0x00 LEN</c> escape — 8..15 without address extension,
     /// 7..15 with extended/mixed addressing).
     /// </returns>
+    /// <remarks>
+    /// A channel drops a frame this returns <c>false</c> for without answering it. For a Flow
+    /// Control with a reserved Flow-Status that leaves the transfer waiting until N_Bs expires, and
+    /// for an escape First Frame above <see cref="int.MaxValue"/> it means no <c>FC(OVFLW)</c>.
+    /// Whether ISO 15765-2 asks for an abort (N_INVALID_FS) and an <c>FC(OVFLW)</c> there is an
+    /// open question; the text has not been checked (#353, see the package README).
+    /// </remarks>
     public static bool TryParsePci(ReadOnlySpan<byte> canPayload, in IsoTpEndpoint endpoint,
         bool isCanFd, out Pci pci)
     {
@@ -629,9 +636,18 @@ public static class IsoTpFrameCodec
     /// </list>
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The commonly-used values <c>0 ms</c> and <c>1 ms</c> encode as <c>0x00</c> and <c>0x01</c>
-    /// respectively (fixes review §1.1 point 5). Values that fall between the two ISO 15765-2
-    /// ranges (e.g. 999 µs) or exceed 127 ms are clamped to the nearest representable value.
+    /// respectively (fixes review §1.1 point 5). A value of 1 ms or more is rounded to the nearest
+    /// millisecond, half up, and capped at 127 ms (<c>0x7F</c>). A smaller one is truncated down to
+    /// its 100 µs step, but not below 100 µs (<c>0xF1</c>); under 1 µs encodes as <c>0x00</c>. So
+    /// 190 µs encodes as 100 µs, 999 µs as 900 µs and 1.4 ms as 1 ms.
+    /// </para>
+    /// <para>
+    /// Rounding down advertises less separation than was asked for. Whether a minimum separation
+    /// has to be rounded up is an open ISO 15765-2 question; the text has not been checked, and the
+    /// encoding stays as it is until it is (#353, see the package README).
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="value"/> is negative.</exception>
     public static byte EncodeStMin(TimeSpan value)
