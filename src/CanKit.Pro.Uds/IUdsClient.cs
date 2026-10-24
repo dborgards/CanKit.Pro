@@ -176,6 +176,18 @@ public interface IUdsClient : IDisposable
     /// unlocked" (ISO 14229-1 §9.4.5.3) and short-circuits the exchange without invoking
     /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
+    /// <remarks>
+    /// The client's request lock is held from the seed request to the key's answer, and so
+    /// across <paramref name="computeKey"/>: no other request -- the
+    /// <see cref="StartTesterPresentKeepAlive"/> TesterPresent included -- goes out in between,
+    /// so nothing can come between seed and key on the ECU's side. The cost is that a
+    /// <paramref name="computeKey"/> that takes longer than the server's S3 timer (an HSM-backed
+    /// one, say) also holds back the keep-alive, and the session may time out before the key is
+    /// sent. Whether ISO 14229-1 lets a TesterPresent between seed and key leave the seed valid --
+    /// in which case the keep-alive alone could be let through during
+    /// <paramref name="computeKey"/> -- has not been checked against the text; until it is, the
+    /// lock stays (#354).
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="requestSeedLevel"/> is not
     /// an odd byte in the range <c>0x01..0x7D</c>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="computeKey"/> is <c>null</c>.</exception>
