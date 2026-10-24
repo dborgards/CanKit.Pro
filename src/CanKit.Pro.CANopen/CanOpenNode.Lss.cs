@@ -127,14 +127,33 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// yet -- it is still on its way from the thread pool to the bus. A send the driver holds
     /// (a test double that confirms later) has returned from that call and does not count.
     /// </summary>
+    /// <remarks>
+    /// Both counts are read under <see cref="_lssTxGate"/>, as one snapshot (#428). Read apart, a
+    /// send that completes between the reads is still in the in-driver count and already gone from
+    /// the reservations, and a send still on its way to the driver reads as none.
+    /// Under the gate no reservation can be taken or released, and a send enters the driver count
+    /// only after its reservation and leaves it before releasing it, so the count read there never
+    /// exceeds the reservations it belongs to: the seam can over-report for an instant, never
+    /// under-report.
+    /// </remarks>
     internal bool HasTransmitsAwaitingDriverForTests
     {
         get
         {
-            int inDriver = Volatile.Read(ref _txInDriver);
-            lock (_lssTxGate) return _lssTxInFlight > inDriver;
+            lock (_lssTxGate)
+            {
+                int inDriver = Volatile.Read(ref _txInDriver);
+                BetweenAwaitingDriverReadsForTests?.Invoke();
+                return _lssTxInFlight > inDriver;
+            }
         }
     }
+
+    /// <summary>
+    /// Test seam (#428): runs between the two reads of <see cref="HasTransmitsAwaitingDriverForTests"/>,
+    /// so a test can let sends complete and start exactly there.
+    /// </summary>
+    internal Action? BetweenAwaitingDriverReadsForTests { get; set; }
 
     /// <summary>
     /// Test seam (#362): no LSS work of this node is in flight that the next instant of a test's
