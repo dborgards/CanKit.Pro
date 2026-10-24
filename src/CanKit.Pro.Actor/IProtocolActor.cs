@@ -69,6 +69,18 @@ namespace CanKit.Pro.Actor
         /// failing item never stops the actor. Never raised for <see cref="PostAsync(Action, CancellationToken)"/>/
         /// <see cref="PostAsync{T}(Func{T}, CancellationToken)"/> failures, which surface through their own returned
         /// task instead.
+        /// <para>
+        /// Those reports are raised on the loop, as part of the callback that failed, so a
+        /// subscriber may touch the protocol instance's single-writer state there. A report about
+        /// the actor's own shutdown is the exception: <see cref="ProtocolActor"/> reports a
+        /// <see cref="IDisposable.Dispose"/> that gave up waiting for the loop
+        /// (<see cref="TimeoutException"/>) on the thread that called <c>Dispose</c>, while the
+        /// loop is still inside the callback that would not finish. In the task-based execution
+        /// modes it also reports a loop that failed outside every callback: on that thread too,
+        /// or, when the loop fails only after <c>Dispose</c> gave up on it, on the thread the loop
+        /// ended on, after its callbacks. A subscriber that mutates loop-owned state must not do
+        /// so from those reports.
+        /// </para>
         /// </summary>
         event EventHandler<Exception> BackgroundExceptionOccurred;
     }

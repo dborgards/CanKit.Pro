@@ -85,13 +85,6 @@ namespace CanKit.Pro.Actor
         // now measured as one.
         private readonly ITimeSource _time;
 
-        /// <summary>
-        /// The clock this actor measures its timers against. Exposed so a component that keeps
-        /// its own elapsed-time arithmetic alongside a deadline armed here -- J1939's fixed-rate
-        /// anchor is the one that does -- can read the same clock rather than a second one.
-        /// Asking the actor is what makes a mismatch unrepresentable: there is one clock per
-        /// loop and no way to pass a different one alongside it.
-        /// </summary>
         // How many actor loops are running process-wide. Two Interlocked operations per actor
         // lifetime, and nothing reads it in production.
         //
@@ -112,6 +105,13 @@ namespace CanKit.Pro.Actor
 
         private static void ExitLoopCount() => Interlocked.Decrement(ref s_runningLoops);
 
+        /// <summary>
+        /// The clock this actor measures its timers against. Exposed so a component that keeps
+        /// its own elapsed-time arithmetic alongside a deadline armed here -- J1939's fixed-rate
+        /// anchor is the one that does -- can read the same clock rather than a second one.
+        /// Asking the actor is what makes a mismatch unrepresentable: there is one clock per
+        /// loop and no way to pass a different one alongside it.
+        /// </summary>
         internal ITimeSource TimeSource => _time;
 
         /// <summary>
@@ -173,6 +173,9 @@ namespace CanKit.Pro.Actor
         // Set by the first Dispose caller whose join timed out, so the TimeoutException goes
         // through BackgroundExceptionOccurred once rather than once per caller (see Dispose).
         private int _shutdownTimeoutReported;
+
+        // The same, for the fault of a loop task that ended by throwing (see WaitForLoopTask).
+        private int _loopFaultReported;
 
         // The actors whose shutdown-timeout reports the *current thread* is inside, outermost
         // first. A BackgroundExceptionOccurred subscriber that answers the TimeoutException by
@@ -554,6 +557,13 @@ namespace CanKit.Pro.Actor
                 {
                     _stopCts.Cancel();
                 }
+                catch (ObjectDisposedException)
+                {
+                    // Only the loop disposes _stopCts, as its last act: a loop that is already
+                    // gone without being asked to stop has faulted outside every callback. There
+                    // is nothing left to stop, and the join below reports that fault (see
+                    // WaitForLoopTask) instead of this Dispose throwing about a token.
+                }
                 finally
                 {
                     Volatile.Write(ref _stopRequestFinished, 1);
@@ -589,7 +599,7 @@ namespace CanKit.Pro.Actor
             // through a few instructions of its own, never for user code; it reads a flag and
             // stays valid after the loop has disposed _stopCts. _stopRequestFinished covers the
             // one case where that flag never turns: a loop that ended without being cancelled
-            // has already disposed _stopCts, and the first caller's Cancel throws instead.
+            // has already disposed _stopCts, and the first caller's Cancel was refused instead.
             if (!_stopCts.IsCancellationRequested)
             {
                 var spin = new SpinWait();
@@ -640,16 +650,45 @@ namespace CanKit.Pro.Actor
         private bool WaitForLoopTask()
         {
             if (_loopTask is null) return true;
+            bool finished;
             try
             {
-                return _loopTask.Wait(_shutdownTimeout);
+                finished = _loopTask.Wait(_shutdownTimeout);
             }
-            catch (AggregateException)
+            catch (AggregateException faulted)
             {
-                // Expected: the loop observed cancellation and exited via OperationCanceledException.
-                // It *did* finish, which is all this return value reports.
+                // The loop did end, which is what the return value reports; see ReportLoopFault
+                // for why it ended by throwing and where that goes.
+                ReportLoopFault(faulted);
                 return true;
             }
+
+            // Gave up joining a loop that is still inside a callback. Should that loop fault once
+            // the callback returns, nobody would be waiting on it any more: the fault is observed
+            // where it happens instead, on the thread the loop ends on.
+            if (!finished)
+            {
+                _ = _loopTask.ContinueWith(
+                    static (loop, state) => ((ProtocolActor)state!).ReportLoopFault(loop.Exception!),
+                    this,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+            return finished;
+        }
+
+        // Not a shutdown path: the loop catches its own OperationCanceledException and ends
+        // normally, and every user callback runs under RunSafely. A faulted loop task means
+        // something outside every callback threw -- the ITimeSource, or the primitives the loop
+        // waits on. That is a defect, and it goes through the one background channel (FR-RAW-023)
+        // instead of being dropped, or thrown out of a Dispose that must stay safe in a finally.
+        // Once: every caller joins and would find the same fault.
+        private void ReportLoopFault(AggregateException faulted)
+        {
+            if (Interlocked.Exchange(ref _loopFaultReported, 1) != 0) return;
+            foreach (var inner in faulted.Flatten().InnerExceptions)
+                RaiseBackgroundException(inner);
         }
 
         private void RunLoopBlocking()
@@ -677,14 +716,23 @@ namespace CanKit.Pro.Actor
             }
             finally
             {
-                FinalDrain();
-                // Disposed here, by the loop itself, only once it has actually stopped running --
-                // never by Dispose() directly (see its comment) -- so these objects are never
-                // touched again after this point regardless of how long a stuck callback delayed
-                // getting here.
-                _stopCts.Dispose();
-                _signal.Dispose();
-                ExitLoopCount();
+                // FinalDrain runs user callbacks under RunSafely, but reads the clock outside it;
+                // a throw there must not skip the release below, or the loop count stays taken
+                // for good and the two disposables leak.
+                try
+                {
+                    FinalDrain();
+                }
+                finally
+                {
+                    // Disposed here, by the loop itself, only once it has actually stopped running --
+                    // never by Dispose() directly (see its comment) -- so these objects are never
+                    // touched again after this point regardless of how long a stuck callback delayed
+                    // getting here.
+                    _stopCts.Dispose();
+                    _signal.Dispose();
+                    ExitLoopCount();
+                }
             }
         }
 
@@ -713,10 +761,17 @@ namespace CanKit.Pro.Actor
             }
             finally
             {
-                FinalDrain();
-                _stopCts.Dispose();
-                _signal.Dispose();
-                ExitLoopCount();
+                // As in RunLoopBlocking: a fault in FinalDrain must not skip the release.
+                try
+                {
+                    FinalDrain();
+                }
+                finally
+                {
+                    _stopCts.Dispose();
+                    _signal.Dispose();
+                    ExitLoopCount();
+                }
             }
         }
 
@@ -960,13 +1015,23 @@ namespace CanKit.Pro.Actor
 
         private void RaiseBackgroundException(Exception ex)
         {
-            try
+            var handler = BackgroundExceptionOccurred;
+            if (handler is null) return;
+
+            // One subscriber at a time, as CanOpenNode does: a multicast Invoke stops at the first
+            // subscriber that throws, so a single try around it protected the loop but not the
+            // other listeners -- every one registered after a throwing one never heard of the
+            // exception (#381).
+            foreach (var subscriber in handler.GetInvocationList())
             {
-                BackgroundExceptionOccurred?.Invoke(this, ex);
-            }
-            catch
-            {
-                // A misbehaving subscriber must never be able to crash the actor loop itself.
+                try
+                {
+                    ((EventHandler<Exception>)subscriber)(this, ex);
+                }
+                catch
+                {
+                    // A misbehaving subscriber must never be able to crash the actor loop itself.
+                }
             }
         }
 

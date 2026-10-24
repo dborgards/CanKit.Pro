@@ -86,4 +86,19 @@ public class TickMathTests
         TickMath.DueAt(5, TimeSpan.MaxValue, 1_000_000_000).Should().Be(long.MaxValue);
         TickMath.DueAt(5, TimeSpan.FromMilliseconds(35), 10_000_000).Should().Be(5 + 350_000);
     }
+
+    // A-6 (2026-10-21 deep review): the saturation test was `ticks >= long.MaxValue - now`, and for a
+    // negative now that subtraction overflows to a large negative number, so every delay counted as
+    // unreachable and came back as long.MaxValue. No real counter reads negative, but ITimeSource
+    // does not forbid it and a test source may be seeded there.
+    [Theory]
+    [InlineData(-5L)]
+    [InlineData(long.MinValue)]
+    public void A_Due_Instant_From_A_Negative_Reading_Is_The_Sum_Not_Saturation(long now)
+    {
+        TickMath.DueAt(now, TimeSpan.FromMilliseconds(35), 10_000_000).Should().Be(now + 350_000);
+        TickMath.DueAt(now, TimeSpan.Zero, 10_000_000).Should().Be(now);
+        TickMath.DueAt(-5, TimeSpan.MaxValue, 1_000_000_000).Should().Be(long.MaxValue,
+            "a span no counter reaches still saturates from a negative reading");
+    }
 }
