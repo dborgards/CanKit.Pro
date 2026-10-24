@@ -260,7 +260,7 @@ internal sealed partial class CanOpenNode
     /// that, or the call ends at the count — then 13FEh and the 1010h sub-index asked for.</summary>
     private static IEnumerable<(ushort Index, byte Subindex)> FixedConfigurationWrites(PeerSafetyConfiguration configuration, PeerDescriptionBinding binding)
     {
-        int highestNamed = configuration.Srdos.Count == 0 ? 0 : configuration.Srdos.Keys.Max();
+        int highestNamed = configuration.Srdos.Keys.DefaultIfEmpty(0).Max();
         foreach (var pair in WrittenPairs(SafetyWrites(configuration, highestNamed, binding, nameof(configuration)))) yield return pair;
         yield return (SrdoRecords.ConfigurationValid, 0x00);
         if (configuration.Storage != PeerSafetyStorage.None) yield return (Co.StoreParameters, (byte)configuration.Storage);
