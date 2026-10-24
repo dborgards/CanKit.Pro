@@ -4178,6 +4178,63 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
     }
 
+    // From the review of #397: a fault that ends one of the node's readers was raised on that
+    // reader, and a handler that disposed the node made the disposal wait for the reader -- its
+    // own task -- for the whole 2 s join bound. Raised from the node's actor instead, the
+    // disposal is queued behind the handler and the reader has returned when it is joined. The
+    // join is made unbounded here, so waiting for itself is a hang the test sees rather than a
+    // stall it would have to time.
+    [Fact]
+    public async Task Disposing_The_Node_From_A_Frame_Reader_Fault_Handler_Does_Not_Wait_For_That_Reader()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var inner = new CanBusService(bus);
+        var service = new FaultingFramesService(inner);
+        var (node, _, _) = NodeOnScriptedTransport(service);
+        using var _node = node;
+        node.ReaderJoinTimeout = Timeout.InfiniteTimeSpan;
+        var fault = new InvalidOperationException("the subscription broke");
+        var disposeReturned = DisposeOnFault(node, fault);
+
+        service.Fault(fault);
+
+        await disposeReturned.Task.AsTaskWithTimeout(ShortTimeout);
+        await node.DisposeAsync().AsTask().WithTimeout(ShortTimeout);
+    }
+
+    // The same for the transport reader, whose fault -- one that is not a reassembly abort --
+    // ends it the same way.
+    [Fact]
+    public async Task Disposing_The_Node_From_A_Transport_Reader_Fault_Handler_Does_Not_Wait_For_That_Reader()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var (node, channels, _) = NodeOnScriptedTransport(service);
+        using var _node = node;
+        node.ReaderJoinTimeout = Timeout.InfiniteTimeSpan;
+        var fault = new InvalidOperationException("the channel broke");
+        var disposeReturned = DisposeOnFault(node, fault);
+
+        var transport = channels.Single();
+        await transport.WaitForRequestAsync(1, ShortTimeout);
+        transport.Fail(fault);
+
+        await disposeReturned.Task.AsTaskWithTimeout(ShortTimeout);
+        await node.DisposeAsync().AsTask().WithTimeout(ShortTimeout);
+    }
+
+    private static TaskCompletionSource<bool> DisposeOnFault(J1939NodeImpl node, Exception fault)
+    {
+        var disposeReturned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (!ReferenceEquals(ex, fault)) return;
+            node.Dispose();
+            disposeReturned.TrySetResult(true);
+        };
+        return disposeReturned;
+    }
+
     // From the review of #397: the node took its handler off its own actor's
     // BackgroundExceptionOccurred before disposing that actor, and the actor's Dispose is where
     // it reports a callback that outlived its shutdown bound. The node's subscribers never heard
@@ -6207,6 +6264,78 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         public Action? Disposed { get; set; }
 
         public void Dispose() => Disposed?.Invoke(); // the test owns the inner service
+    }
+
+    /// <summary>
+    }
+
+    /// <summary>
+    /// A service whose subscriptions yield nothing and end by throwing what <see cref="Fault"/> is
+    /// given: the frame reader of a node built on it faults when the test says so.
+    /// </summary>
+    private sealed class FaultingFramesService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly TaskCompletionSource<Exception> _fault = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public FaultingFramesService(ICanBusService inner) => _inner = inner;
+
+        public void Fault(Exception error) => _fault.TrySetResult(error);
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription(_fault.Task);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription(_fault.Task);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+
+        public void Dispose() { /* the test owns the inner service */ }
+
+        private sealed class FaultingSubscription : ISubscription
+        {
+            private readonly Task<Exception> _fault;
+
+            public FaultingSubscription(Task<Exception> fault) => _fault = fault;
+
+            public IAsyncEnumerable<CanFrameEvent> Frames => Stream();
+
+            private async IAsyncEnumerable<CanFrameEvent> Stream(
+                [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+            {
+                var error = await _fault.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (error is not null) throw error;
+                yield break;
+            }
+
+            public bool TryRead(out CanFrameEvent frameEvent)
+            {
+                frameEvent = default;
+                return false;
+            }
+
+            public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+                => throw new NotSupportedException();
+
+            public void Reconfigure(CanIdFilter filter) { }
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
+
+            public void Dispose() { }
+        }
     }
 
     /// <summary>

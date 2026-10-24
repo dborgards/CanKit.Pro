@@ -1632,7 +1632,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             }
         }
         catch (OperationCanceledException) { /* expected on Dispose */ }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+        catch (Exception ex) { RaiseOnActor(ex); }
     }
 
     // The channel is told whether the node still holds its address, and asks where a session
@@ -1670,7 +1670,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             catch (J1939TpAbortException) { /* surfaced by the channel; keep reading */ }
             catch (OperationCanceledException) { return; /* expected on Dispose */ }
             catch (ObjectDisposedException) { return; /* the node was disposed with a datagram in hand */ }
-            catch (Exception ex) { RaiseBackgroundException(ex); return; }
+            catch (Exception ex) { RaiseOnActor(ex); return; }
         }
     }
 
@@ -1947,8 +1947,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // A channel that throws on Dispose is this disposal's failure, not a reason to leave
             // the rest running: the subscription, the actor and an owned service are released
             // all the same before it propagates (Codex and Bugbot on #397).
-            try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* the reader reports its own faults */ }
-            try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* likewise */ }
+            try { _readerTask.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* the reader reports its own faults */ }
+            try { transportReader.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* likewise */ }
 
             _subscription.Dispose();
             // An injected actor is not ours to dispose; the handler is, either way. It comes off
@@ -1968,6 +1968,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// shutdown bound. A seam for tests of the path where the actor does not get there in time.
     /// </summary>
     internal TimeSpan TransportTeardownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long the disposal waits for each of the two readers -- the frame reader and the current
+    /// transport reader -- to end. A seam for tests: made infinite, a reader the disposal waits for
+    /// from inside its own handler is a hang instead of a 2 s stall, which no test has to time.
+    /// </summary>
+    internal TimeSpan ReaderJoinTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// A seam for tests, null in production: runs on the disposing thread once the teardown has
@@ -2106,9 +2113,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // The channel raises a fault -- a reassembly abort, a T1 timeout -- on its own actor. Raised
     // from there, a handler that disposed the node made that thread wait for the node's actor
     // to tear the channel down, and tearing it down joins the channel's actor: the thread doing
-    // the waiting (#375). From the node's actor a Dispose tears down in place. A node whose
-    // injected actor is already gone reports it where it arrived.
-    private void OnTransportBackgroundException(object? sender, Exception ex)
+    // the waiting (#375). From the node's actor a Dispose tears down in place.
+    private void OnTransportBackgroundException(object? sender, Exception ex) => RaiseOnActor(ex);
+
+    // Raises a fault that arrived off the node's actor from the actor: a transport fault (above),
+    // and the end of either of the node's own readers. Raised on the reader, a handler that
+    // disposed the node made the disposal wait for that reader -- its own task -- for the whole
+    // join bound, 2 s each (#355, from the review of #397). From the actor the disposal is queued
+    // behind the handler's turn, and the reader has returned by the time it is joined. A node
+    // whose injected actor is already gone reports the fault where it arrived; a handler that
+    // disposes the node from there still waits out that bound on its own reader, as nothing is
+    // left to hand it to.
+    private void RaiseOnActor(Exception ex)
     {
         try { _actor.Post(() => RaiseBackgroundException(ex)); }
         catch (ObjectDisposedException) { RaiseBackgroundException(ex); }
