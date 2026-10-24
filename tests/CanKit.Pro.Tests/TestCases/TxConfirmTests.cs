@@ -540,6 +540,26 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // R-5 follow-up: the remote frame's private copy travels in a memory owner, and CanKit's
+    // CanFrame.Dispose disposes the owner whatever ownMemory says (v0.5.6 CanFrame.cs:370). A driver
+    // that disposes the frame it was handed therefore reaches that owner: it must release nothing
+    // and throw nothing, and never reach the caller's buffer, which the copy is detached from.
+    [Fact]
+    public async Task A_Driver_Disposing_Its_Copy_Of_A_Remote_Frame_Releases_Nothing_Of_The_Callers()
+    {
+        var callers = new ScrubbedOwner(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+        var original = CanFrame.Classic(0x323, callers, isRemoteFrame: true, ownMemory: false);
+        using var plain = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var service = new CanBusService(plain);
+
+        (await service.SendConfirmedAsync(original, ShortTimeout)).Confirmed.Should().BeTrue();
+        var handed = await plain.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+
+        handed.Invoking(f => f.Dispose()).Should().NotThrow();
+        callers.Disposed.Should().BeFalse("the driver's copy does not own the caller's buffer");
+        original.Data.ToArray().Should().Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+    }
+
     private sealed class ScrubbedOwner : System.Buffers.IMemoryOwner<byte>
     {
         private readonly byte[] _buffer;
