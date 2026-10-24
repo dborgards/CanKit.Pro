@@ -712,8 +712,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // round's confirmation or failure is not its (Codex and Bugbot on #414).
     private void OnClaimAnnounceTxConfirmed(byte preferredAddress, PendingClaim round)
     {
-        var pending = _pendingClaim;
-        if (pending is null || !ReferenceEquals(pending, round)) return;
+        if (!ReferenceEquals(_pendingClaim, round)) return; // no claim in hand, or another one
+        var pending = round;
         if (pending.Tcs.Task.IsCompleted) return;
         if (pending.Deadline is not null) return; // already armed (defensive)
         if ((J1939ClaimState)Volatile.Read(ref _claimStateStore) != J1939ClaimState.Claiming)
@@ -733,8 +733,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // like an equal-NAME peer, or lets it spend the retry's marker (#180).
         ApplyClaimEchoFailure(echo, mayStillEcho);
 
-        var pending = _pendingClaim;
-        if (pending is null || !ReferenceEquals(pending, round)) return;
+        if (!ReferenceEquals(_pendingClaim, round)) return; // no claim in hand, or another one
+        var pending = round;
 
         _pendingClaim = null;
         pending.Deadline?.Dispose();
