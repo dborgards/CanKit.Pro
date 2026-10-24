@@ -359,7 +359,7 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="SdoTransferMode.Auto"/> uses the classic client because the payload length is
     /// unknown until the server replies — whether that reply is expedited or segmented is the
     /// server's choice and is handled transparently. Pass <see cref="SdoTransferMode.Block"/> to
-    /// force block transfer (CiA 301 §7.2.4.3.15).
+    /// force block transfer (CiA 301 §7.2.4.3.12–7.2.4.3.15).
     /// (FR-CO-002 / FR-CO-003 / FR-CO-004). Refused locally with
     /// <see cref="PeerSdoAccessException"/> when the pair is not allowed for
     /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.

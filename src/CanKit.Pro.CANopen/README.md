@@ -239,7 +239,9 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 `22h`): "d contains unspecified number of bytes to be downloaded". The server then takes the
 object's own width: a fixed-width object of 1..4 bytes gets the first bytes of `d`, an object
 without a fixed width (a string or a `DOMAIN`) gets all four, and an object wider than four bytes,
-which an expedited frame cannot carry, is refused with `0607 0013h`.
+which an expedited frame cannot carry, is refused with `0607 0013h`. The client side does not
+apply a width: for an expedited upload response without a size (§7.2.4.3.6, "e = 1, s = 0: d
+contains unspecified number of bytes to be uploaded") `SdoUploadAsync` returns all four bytes.
 
 **Read-only by default.** `CanOpenNodeOptions.WritableCommunicationParameters` (default
 `false`) decides whether a master may write the PDO communication and mapping records over SDO.

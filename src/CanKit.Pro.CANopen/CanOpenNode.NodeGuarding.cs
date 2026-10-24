@@ -7,7 +7,7 @@ using CanKit.Pro.Reliability;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// Node-Guarding (CiA 301 §7.2.8.3.3, FR-CO-009) partial of <see cref="CanOpenNode"/>. Runs
+/// Node-Guarding (CiA 301 §7.2.8.3.2.1, FR-CO-009) partial of <see cref="CanOpenNode"/>. Runs
 /// on the actor loop like every other protocol subsystem and shares the heartbeat COB-ID
 /// range (<c>0x700 + node-id</c>) with the heartbeat producer/consumer.
 /// </summary>
@@ -34,7 +34,7 @@ internal sealed partial class CanOpenNode
                 "guardTime must be positive.");
         if (lifeTimeFactor == 0)
             throw new ArgumentOutOfRangeException(nameof(lifeTimeFactor), lifeTimeFactor,
-                "lifeTimeFactor must be >= 1 (CiA 301 §7.2.8.3.3).");
+                "lifeTimeFactor must be >= 1: the node life time is the guard time multiplied by the life time factor (CiA 301 §7.2.8.3.2.1).");
 
         _actor.Post(() =>
         {

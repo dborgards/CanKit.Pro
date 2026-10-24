@@ -139,7 +139,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private IDisposable? _syncProducerHandle;
     private TimeSpan _syncProducerInterval;
 
-    // Node-guarding producer toggle bit (FR-CO-009). CiA 301 §7.2.8.3.3 requires the producer
+    // Node-guarding producer toggle bit (FR-CO-009). CiA 301 §7.2.8.3.2.1 requires the producer
     // to start with toggle=0 and flip it on every reply so the consumer can distinguish a
     // fresh answer from a stale duplicate.
     private bool _nodeGuardingProducerToggle;
