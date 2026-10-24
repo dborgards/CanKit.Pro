@@ -577,15 +577,30 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
             uint cobId = _emcyCobId;
-            if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
+            if (cobId == 0 || !_emcyValid)
+            {
+                // No frame. An application EMCY that does not reach the bus leaves 1001h alone;
+                // the node's own still sets the register it decided, so an error that ended is
+                // not read on (Codex on #417).
+                if (applicationErrorRegister is null)
+                    _od.WriteUnsigned(Co.ErrorRegister, 0x00, (byte)(_applicationErrorRegister | nodeBits));
+                return Task.CompletedTask;
+            }
             if (applicationErrorRegister is { } application) _applicationErrorRegister = application;
             byte errorRegister = (byte)(_applicationErrorRegister | nodeBits);
             frame[2] = errorRegister;
             _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
+        return AppendToEmcyChain(transmit);
+    }
+
+    /// <summary>Appends one step to the EMCY chain; it runs on the actor once the steps before it
+    /// are done. Actor loop only.</summary>
+    private Task AppendToEmcyChain(Func<Task> step)
+    {
         var link = _emcySendChain.ContinueWith(
-            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(transmit),
+            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(step),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _emcySendChain = link;
         return link;

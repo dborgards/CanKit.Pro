@@ -319,6 +319,54 @@ public partial class CanOpenPdoEngineTests
         device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x91u);
     }
 
+    // Codex on #417: the error reset was decided with the EMCY on, and the EMCY is switched off
+    // before its turn on the chain comes. No frame goes out, but the register still drops the
+    // ended error. The loop is held so that both run in one drain, ahead of the transmission.
+    [Fact]
+    public async Task An_Error_Reset_Whose_Emcy_Is_Switched_Off_Before_Its_Turn_Still_Clears_The_Register()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        await Inject(device, Rpdo1, 0x01);
+        await ExpectEmcyAsync(wire, 1, 0x8210, Communication);
+
+        var node = (CanOpenNode)device;
+        var od = device.ObjectDictionary;
+        using var release = new System.Threading.ManualResetEventSlim();
+        var held = node.PostToActorAsync(() => release.Wait(ShortTimeout));
+        var fits = Inject(device, Rpdo1, 1, 2, 3, 4);
+        var off = node.PostToActorAsync(() => od.WriteUnsigned(0x1014, 0, EmcyId | CanOpenCobId.InvalidBit));
+        release.Set();
+        await held;
+        await fits;
+        await off;
+        await WaitForErrorRegisterAsync(device, 0x00);
+        od.WriteUnsigned(0x1014, 0, EmcyId);
+        Settle(device);
+        await device.SendEmcyAsync(0xFF00, 0x00);
+        await ExpectEmcyAsync(wire, 2, 0xFF00, 0x00);
+    }
+
+    // Reconfiguring an RPDO ends its own errors only; another active one keeps the bit, and the
+    // error reset waits for it.
+    [Fact]
+    public async Task Reconfiguring_An_Rpdo_Leaves_Another_Error_Active()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        await Inject(device, Rpdo1, 0x01);
+        await ExpectEmcyAsync(wire, 1, 0x8210, Communication);
+        await Inject(device, CanOpenCobId.Sync, 7);
+        await ExpectEmcyAsync(wire, 2, 0x8240, Communication);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0, 16).Add(0x2001, 0, 16));
+        Settle(device);
+        await Inject(device, CanOpenCobId.Sync);
+        await ExpectEmcyAsync(wire, 3, ErrorReset, 0x00);
+        wire.Count(EmcyId).Should().Be(3);
+    }
+
     // Bugbot on #417: an error decided after an application EMCY was queued, but before that
     // EMCY is transmitted, still carries the application's new part — it follows it on the chain.
     // The loop is held so that both calls run in one drain, ahead of the queued transmission.

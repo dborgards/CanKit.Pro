@@ -46,9 +46,9 @@ internal sealed partial class CanOpenNode
     // The communication errors the node reported and whose cause has not ended. Actor loop only.
     private readonly HashSet<int> _communicationErrors = new();
 
-    // Whether an EMCY or a register write was ever queued: from then on, a reset and a held EMCY
-    // discarded with the EMCY off write the register they leave behind, in their place on the
-    // chain. Before, 1001h holds what the node created it with. Actor loop only.
+    // Whether an EMCY was ever queued: from then on, a reset writes the register it leaves
+    // behind, in its place on the chain. Before, 1001h holds what the node created it with, or
+    // what the application wrote to it. Actor loop only.
     private bool _errorRegisterQueued;
 
     private static int CommunicationErrorKey(CommunicationError kind, int number = 0) => ((int)kind << 16) | number;
@@ -83,17 +83,10 @@ internal sealed partial class CanOpenNode
         if (removed && _communicationErrors.Count == 0) EmitErrorReset();
     }
 
-    private void EmitErrorReset()
-    {
-        // With the EMCY switched off there is no frame to carry the register, but the master
-        // must not keep reading an error that has ended.
-        if (!_emcyValid)
-        {
-            QueueErrorRegisterWrite(CommunicationErrorBits);
-            return;
-        }
-        EmitNodeEmcy(ErrorResetCode);
-    }
+    // With the EMCY switched off — now, or by the time the frame's turn on the chain comes —
+    // there is no frame, but the node's EMCY still writes the register (EmitEmcy), so the master
+    // does not keep reading an error that has ended.
+    private void EmitErrorReset() => EmitNodeEmcy(ErrorResetCode);
 
     private void EmitNodeEmcy(ushort errorCode)
     {
@@ -115,17 +108,12 @@ internal sealed partial class CanOpenNode
     private bool _pendingEmcyIsApplications;
 
     /// <summary>Leaving Stopped (§7.3.2.2.4): the held EMCY goes out with the register of that
-    /// moment. With the EMCY switched off meanwhile it is discarded, but an error that ended
-    /// while it was held must still leave <c>1001h</c>.</summary>
+    /// moment. With the EMCY switched off meanwhile no frame goes out, but a held error reset of
+    /// the node's still takes the ended error out of <c>1001h</c> (EmitEmcy).</summary>
     private void EmitPendingEmcy(EmcyMessage pending)
     {
         bool applications = _pendingEmcyIsApplications;
         _pendingEmcyIsApplications = false;
-        if (!_emcyValid)
-        {
-            if (_errorRegisterQueued) QueueErrorRegisterWrite(CommunicationErrorBits);
-            return;
-        }
         _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
 
@@ -134,22 +122,15 @@ internal sealed partial class CanOpenNode
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
-        if (_errorRegisterQueued) QueueErrorRegisterWrite(0);
+        if (_errorRegisterQueued) QueueApplicationErrorRegisterWrite();
     }
 
-    /// <summary>Writes <c>1001h</c> without a frame, in its place on the EMCY chain, so an EMCY
-    /// queued before it cannot overwrite it afterwards: the node's bits as now, the application's
-    /// part as of that place.</summary>
-    private void QueueErrorRegisterWrite(byte nodeBits)
-    {
-        _errorRegisterQueued = true;
-        var link = _emcySendChain.ContinueWith(
-            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(() =>
-            {
-                _od.WriteUnsigned(Co.ErrorRegister, 0x00, (byte)(_applicationErrorRegister | nodeBits));
-                return Task.CompletedTask;
-            }),
-            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
-        _emcySendChain = link;
-    }
+    /// <summary>Writes the application's part, as of its place on the EMCY chain, to <c>1001h</c>
+    /// without a frame, so an EMCY queued before it cannot overwrite it afterwards.</summary>
+    private void QueueApplicationErrorRegisterWrite()
+        => _ = AppendToEmcyChain(() =>
+        {
+            _od.WriteUnsigned(Co.ErrorRegister, 0x00, _applicationErrorRegister);
+            return Task.CompletedTask;
+        });
 }
