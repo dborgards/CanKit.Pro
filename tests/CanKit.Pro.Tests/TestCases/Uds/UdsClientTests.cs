@@ -849,16 +849,16 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // On the virtual clock (#407): over BuildPair the request ran against a 1 s P2 on the wall
+    // clock, which a host stalled for that long ends with a timeout. Here P2 ends only when the
+    // test moves the clock, which it never does; Within is the hang bound.
     [Fact]
     public async Task SecurityAccess_Accepts_Seed_Level_0x7D()
     {
-        var (client, ecu, dispose) = BuildPair(e => e.On(0x27, req => new byte[] { req[1], 0x00, 0x00 }));
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SecurityAccessAsync(0x7D, seed => seed, cts.Token); // an all-zero seed: unlocked
-            ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x27, 0x7D });
-        }
+        using var pair = new ClockPair(e => e.On(0x27, req => new byte[] { req[1], 0x00, 0x00 }));
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.SecurityAccessAsync(0x7D, seed => seed, cts.Token)); // an all-zero seed: unlocked
+        pair.Ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x27, 0x7D });
     }
 
     // The same repeat without an injected clock, where the delay is a real Task.Delay: the
