@@ -746,7 +746,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
         bus.StallTransmitAsync = true;
-        var service = new CanBusService(bus);
+        using var service = new CanBusService(bus); // Dispose is idempotent: the explicit call below is the one under test
 
         var send = service.SendConfirmedAsync(CanFrame.Classic(0x672, new byte[] { 1 }), TimeSpan.FromMinutes(5));
         service.Dispose();
@@ -766,7 +766,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
         bus.StallTransmitAsync = true;
-        var service = new CanBusService(bus);
+        using var service = new CanBusService(bus);
         service.ArmConfirmTimeout = (_, _) => service.Dispose(); // arms nothing: only Dispose ends it
 
         var send = service.SendConfirmedAsync(CanFrame.Classic(0x673, new byte[] { 1 }), TimeSpan.FromMinutes(5));
@@ -784,7 +784,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
         bus.StallTransmitAsync = true;
-        var service = new CanBusService(bus);
+        using var service = new CanBusService(bus);
         service.ArmConfirmTimeout = (source, _) =>
         {
             source.Cancel();
