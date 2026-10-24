@@ -220,6 +220,16 @@ public interface IIsoTpChannel : IDisposable
     /// <see cref="SendAsync"/> call are reported via that call's returned task; reassembly
     /// aborts are reported both here and by faulting a pending <see cref="ReceiveAsync"/>
     /// (FailTx analogue on the receive side).
+    /// <para>
+    /// Raised on a thread-pool thread, never on the channel's actor loop, and only once what the
+    /// report announces is in place: a reassembly abort has already faulted the inbox, so a
+    /// handler that answers it with <see cref="ReceiveAsync"/>, <see cref="DiscardPendingPdus()"/>
+    /// or a send -- or disposes the channel -- does not deadlock the actor (#356). Reports are
+    /// delivered one at a time, in the order they were made; a handler that blocks holds up
+    /// the reports behind it, not the channel. Each handler is called on its own, so one that
+    /// throws does not keep the report from the handlers after it; its exception is dropped.
+    /// A report may reach its handlers after <see cref="IDisposable.Dispose"/> has returned.
+    /// </para>
     /// </summary>
     event EventHandler<Exception>? BackgroundExceptionOccurred;
 }

@@ -169,6 +169,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
+    // BackgroundExceptionOccurred goes out through this, on the thread pool and in order, never
+    // on the actor's loop (#356, T-2).
+    private readonly BackgroundExceptionDispatcher _backgroundReports = new();
+
     /// <summary>
     /// Builds a node on <paramref name="service"/>. A null <paramref name="actor"/> -- the only
     /// value production passes -- makes the node create and own its own loop; an injected one
@@ -1636,7 +1640,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
             }
         }
         catch (OperationCanceledException) { /* expected on Dispose */ }
-        catch (Exception ex) { RaiseOnActor(ex); }
+        // Queued on the dispatcher, which returns at once, so this reader has ended by the time a
+        // handler runs. Raised on the reader, as it once was, a handler that disposed the node
+        // made the disposal wait for that reader -- its own task -- for the whole join bound
+        // (#355, from the review of #397); #414 hopped onto the node's actor for it, which the
+        // dispatcher makes unnecessary (#356 T-2), also when an injected actor is already gone.
+        catch (Exception ex) { RaiseBackgroundException(ex); }
     }
 
     // The channel is told whether the node still holds its address, and asks where a session
@@ -1674,7 +1683,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             catch (J1939TpAbortException) { /* surfaced by the channel; keep reading */ }
             catch (OperationCanceledException) { return; /* expected on Dispose */ }
             catch (ObjectDisposedException) { return; /* the node was disposed with a datagram in hand */ }
-            catch (Exception ex) { RaiseOnActor(ex); return; }
+            catch (Exception ex) { RaiseBackgroundException(ex); return; /* as RunReaderAsync's */ }
         }
     }
 
@@ -2112,32 +2121,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // Diagnostics helpers
     // =========================================================================================
 
+    // Off the actor's loop and one subscriber at a time: see BackgroundExceptionDispatcher
+    // (#356 T-2, #381).
     private void RaiseBackgroundException(Exception ex)
-    {
-        try { BackgroundExceptionOccurred?.Invoke(this, ex); }
-        catch { /* misbehaving subscriber must not tear the node down */ }
-    }
+        => _backgroundReports.Raise(this, BackgroundExceptionOccurred, ex);
 
     private void OnActorBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
-    // The channel raises a fault -- a reassembly abort, a T1 timeout -- on its own actor. Raised
-    // from there, a handler that disposed the node made that thread wait for the node's actor
-    // to tear the channel down, and tearing it down joins the channel's actor: the thread doing
-    // the waiting (#375). From the node's actor a Dispose tears down in place.
-    private void OnTransportBackgroundException(object? sender, Exception ex) => RaiseOnActor(ex);
 
-    // Raises a fault that arrived off the node's actor from the actor: a transport fault (above),
-    // and the end of either of the node's own readers. Raised on the reader, a handler that
-    // disposed the node made the disposal wait for that reader -- its own task -- for the whole
-    // join bound, 2 s each (#355, from the review of #397). From the actor the disposal is queued
-    // behind the handler's turn, and the reader has returned by the time it is joined. A node
-    // whose injected actor is already gone reports the fault where it arrived; a handler that
-    // disposes the node from there still waits out that bound on its own reader, as nothing is
-    // left to hand it to.
-    private void RaiseOnActor(Exception ex)
-    {
-        try { _actor.Post(() => RaiseBackgroundException(ex)); }
-        catch (ObjectDisposedException) { RaiseBackgroundException(ex); }
-    }
+    // The channel reports a fault -- a reassembly abort, a T1 timeout -- on the thread pool,
+    // not on its own actor, and the node passes it on from there. Raised on the channel's actor,
+    // as it once was, a handler that disposed the node made that thread wait for the node's
+    // actor to tear the channel down, and tearing it down joins the channel's actor: the thread
+    // doing the waiting (#375). Neither thread is an actor's any more, so a Dispose from the
+    // handler waits for the teardown like any other caller's.
+    private void OnTransportBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
 
     private void ThrowIfDisposed()
     {

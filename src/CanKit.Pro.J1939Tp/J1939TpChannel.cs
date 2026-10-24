@@ -66,6 +66,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // IsoTpChannel.AbortRx).
     private readonly Channel<RxInboxItem> _pduInbox;
 
+    // BackgroundExceptionOccurred goes out through this, on the thread pool and in order, never
+    // on the actor's loop (#356, T-2).
+    private readonly BackgroundExceptionDispatcher _backgroundReports = new();
+
     // Per-session state -- keyed differently for TX and RX because the two directions have
     // different identifiers on the wire (TX is per-destination, RX is per-source). Both maps are
     // only ever touched from the actor loop, so no lock is needed.
@@ -1549,30 +1553,25 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     /// <summary>
     /// Aborts in-flight reassembly notification. Mirrors IsoTpChannel.AbortRx / FailTx on the
-    /// receive side: raises <see cref="BackgroundExceptionOccurred"/> and enqueues the fault
-    /// into the PDU inbox so a blocked <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/>
-    /// completes with the same exception instead of waiting indefinitely.
+    /// receive side: enqueues the fault into the PDU inbox so a blocked
+    /// <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/> completes with the same exception
+    /// instead of waiting indefinitely, and then raises <see cref="BackgroundExceptionOccurred"/>.
     /// Successful datagrams already in the inbox are unaffected (FIFO); exactly one waiter
     /// consumes the fault item, preserving multi-receive inbox semantics for subsequent PDUs.
     /// Caller is responsible for cancelling/removing the <see cref="RxSession"/> first.
     /// </summary>
     private void AbortRx(Exception ex)
     {
-        RaiseBackgroundException(ex);
+        // The fault first, then the report: a subscriber that answers it by receiving finds the
+        // fault there rather than waiting for an item written only after it returned (#356, T-2).
         _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex));
+        RaiseBackgroundException(ex);
     }
 
+    // Off the actor's loop, as EmitPdu raises DatagramReceived, and one subscriber at a time:
+    // see BackgroundExceptionDispatcher (#356 T-2, #381).
     private void RaiseBackgroundException(Exception ex)
-    {
-        try
-        {
-            BackgroundExceptionOccurred?.Invoke(this, ex);
-        }
-        catch
-        {
-            // A misbehaving subscriber must not tear down the channel.
-        }
-    }
+        => _backgroundReports.Raise(this, BackgroundExceptionOccurred, ex);
 
     private void OnActorBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
 

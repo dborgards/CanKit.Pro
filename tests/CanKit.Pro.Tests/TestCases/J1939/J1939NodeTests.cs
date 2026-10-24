@@ -4223,14 +4223,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             lock (channels) channels.Add(channel);
             return channel;
         });
-        var reported = new List<Exception>();
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var reported = new BackgroundReports();
+        node.BackgroundExceptionOccurred += reported.Add;
 
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
         Volatile.Write(ref failNextOpen, 1);
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
 
-        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the channel could not be opened");
+        // Delivered on the thread pool (#356, T-2): awaited, then nothing else came before it.
+        await reported.WaitForAsync(ex => ex.Message == "the channel could not be opened");
+        reported.Seen.Should().ContainSingle();
         node.ClaimState.Should().Be(J1939ClaimState.Claimed);
         lock (channels)
         {
@@ -4241,13 +4243,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // #375, a consequence of the fix above: the teardown now waits for the node's actor, and the
-    // TP channel raises a transport fault -- a reassembly abort -- on its own actor. Forwarded
-    // from there as it was, a handler that disposed the node made the channel's actor wait for
-    // the node's, which was disposing the channel and so joining the very thread waiting for it:
-    // Dispose stalled for the actors' shutdown bound. The node forwards transport faults from its
-    // own actor, where a Dispose tears down in place and waits on nothing.
+    // TP channel raised a transport fault -- a reassembly abort -- on its own actor. Forwarded
+    // from there, a handler that disposed the node made the channel's actor wait for the node's,
+    // which was disposing the channel and so joining the very thread waiting for it: Dispose
+    // stalled for the actors' shutdown bound. #375 forwarded the fault from the node's actor, where
+    // a Dispose tears down in place; since #356 (T-2) neither layer raises it on an actor at all,
+    // and a Dispose from the handler waits for the teardown like any other caller's. The wait is
+    // unbounded here, so a handler back on either actor would hang this test rather than return
+    // after the bound.
     [Fact]
-    public async Task Disposing_The_Node_From_A_Transport_Fault_Handler_Tears_Down_In_Place()
+    public async Task Disposing_The_Node_From_A_Transport_Fault_Handler_Does_Not_Stall()
     {
         const byte peerSa = 0x77;
         var session = NewSession();
@@ -4256,7 +4261,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var node = new J1939NodeImpl(new CanBusService(busNode), new J1939NodeOptions(Name(1))
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
-        }, ownsService: true);
+        }, ownsService: true)
+        {
+            TransportTeardownTimeout = Timeout.InfiniteTimeSpan,
+        };
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
 
         int posted = 0;
@@ -4277,14 +4285,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
 
         await disposed.Task.AsTaskWithTimeout(ShortTimeout + ShortTimeout);
-        Volatile.Read(ref posted).Should().Be(0,
-            "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
+        Volatile.Read(ref posted).Should().Be(1,
+            "the handler ran off the node's actor, so the teardown was queued there and waited for");
     }
 
     // From the review of #397: a fault that ends one of the node's readers was raised on that
     // reader, and a handler that disposed the node made the disposal wait for the reader -- its
-    // own task -- for the whole 2 s join bound. Raised from the node's actor instead, the
-    // disposal is queued behind the handler and the reader has returned when it is joined. The
+    // own task -- for the whole 2 s join bound. Raised through the dispatcher on the thread pool
+    // (#356 T-2; #414 hopped onto the node's actor), the reader has returned when it is joined. The
     // join is made unbounded here, so waiting for itself is a hang the test sees rather than a
     // stall it would have to time.
     [Fact]
@@ -4354,8 +4362,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor,
             openTransport: sa => new ScriptedTpChannel(sa), ownsActor: true); // disposes the actor it owns
         node.TransportTeardownTimeout = TimeSpan.Zero;
-        var reported = new List<Exception>();
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        // Reported on the thread pool (#356, T-2), so possibly after Dispose has returned: awaited
+        // on a signal. A report the node never forwards leaves the signal unset and the wait fails.
+        var timedOut = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => { if (ex is TimeoutException) timedOut.TrySetResult(ex); };
 
         var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
@@ -4368,9 +4378,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             await held.Task.AsTaskWithTimeout(ShortTimeout);
             node.Dispose(); // the actor's join gives up on the held callback and reports it
 
-            lock (reported)
-                reported.Should().Contain(e => e is TimeoutException,
-                    "the node owns that actor, and its shutdown timeout is a background failure of the node's");
+            (await timedOut.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeOfType<TimeoutException>(
+                "the node owns that actor, and its shutdown timeout is a background failure of the node's");
         }
         finally
         {
@@ -4417,12 +4426,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
         var failure = new InvalidOperationException("the channel would not close");
         lock (channels) channels.Last().DisposeFailure = failure;
-        var reported = new List<Exception>();
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var reported = new BackgroundReports();
+        node.BackgroundExceptionOccurred += reported.Add;
 
         await node.ClaimAddressAsync(0x32).WithTimeout(ShortTimeout);
 
-        lock (reported) reported.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        // Delivered on the thread pool (#356, T-2): awaited, then nothing else came before it.
+        await reported.WaitForAsync(ex => ReferenceEquals(ex, failure));
+        reported.Seen.Should().ContainSingle();
         lock (channels) channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0xFE, 0x32 },
             "the failed disposal did not stop the rebinds the re-claim makes");
         node.Address.Should().Be((byte)0x32);

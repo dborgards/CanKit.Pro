@@ -33,7 +33,8 @@ namespace CanKit.Pro.J1939;
 /// <see cref="ClaimState"/> and <see cref="Address"/> keep the last values they had.
 /// </para>
 /// <para>
-/// Called from one of this node's handlers, which run on its actor, neither
+/// Called from a <see cref="MessageReceived"/> or <see cref="AddressClaimChanged"/> handler,
+/// which run on the node's actor, neither
 /// <see cref="IDisposable.Dispose"/> nor <see cref="IAsyncDisposable.DisposeAsync"/> waits for
 /// the teardown: it runs on the actor once that handler's turn has ended, a failure of it is
 /// reported through <see cref="BackgroundExceptionOccurred"/>, and a
@@ -76,6 +77,15 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     /// <summary>
     /// Raised when a background failure (subscription faulted, actor exception, event-handler
     /// throw, TP channel background error) must be surfaced to the application.
+    /// <para>
+    /// Raised on a thread-pool thread, never on the node's actor loop, so a handler may wait on
+    /// the node -- a send, a claim, <see cref="IDisposable.Dispose"/>, which then waits for the
+    /// teardown as any other caller's does -- without deadlocking the actor (#356). Reports are
+    /// delivered one at a time, in the order they were made; a handler that blocks holds up the
+    /// reports behind it, not the node. Each handler is called on its own, so one that throws
+    /// does not keep the report from the handlers after it; its exception is dropped. A report
+    /// may reach its handlers after <see cref="IDisposable.Dispose"/> has returned.
+    /// </para>
     /// </summary>
     event EventHandler<Exception>? BackgroundExceptionOccurred;
 

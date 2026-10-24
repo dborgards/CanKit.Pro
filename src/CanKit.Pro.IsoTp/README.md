@@ -102,8 +102,12 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   shared byte): there the host echo flag is the only thing telling the channel's frame from the
   peer's, and host echoes are withheld (#56). Extended addressing on one identifier keeps them,
   the source and target bytes doing the telling.
-- `DiscardPendingPdus` may be called from a `BackgroundExceptionOccurred` handler, which runs on
-  the channel's actor: the clear then runs inline instead of waiting on the loop it is on (#56).
+- `BackgroundExceptionOccurred` is raised on the thread pool, never on the channel's actor, one
+  report at a time in the order they were made, and each handler is called on its own (#356,
+  #381). A reassembly abort has faulted the inbox before its report goes out, so a handler may
+  call `ReceiveAsync`, `DiscardPendingPdus` or `SendAsync`, or dispose the channel, without
+  deadlocking the actor. Called on the actor itself -- other work on an injected actor --
+  `DiscardPendingPdus` runs its clear inline instead of waiting on the loop it is on (#56).
 
 ## Timing accuracy — STmin pacing (NFR-003)
 
