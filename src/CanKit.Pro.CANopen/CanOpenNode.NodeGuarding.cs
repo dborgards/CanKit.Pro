@@ -7,7 +7,7 @@ using CanKit.Pro.Reliability;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// Node-Guarding (CiA 301 §7.2.8.3.3, FR-CO-009) partial of <see cref="CanOpenNode"/>. Runs
+/// Node-Guarding (CiA 301 §7.2.8.3.2.1, FR-CO-009) partial of <see cref="CanOpenNode"/>. Runs
 /// on the actor loop like every other protocol subsystem and shares the heartbeat COB-ID
 /// range (<c>0x700 + node-id</c>) with the heartbeat producer/consumer.
 /// </summary>
@@ -34,7 +34,7 @@ internal sealed partial class CanOpenNode
                 "guardTime must be positive.");
         if (lifeTimeFactor == 0)
             throw new ArgumentOutOfRangeException(nameof(lifeTimeFactor), lifeTimeFactor,
-                "lifeTimeFactor must be >= 1 (CiA 301 §7.2.8.3.3).");
+                "lifeTimeFactor must be >= 1: the node life time is the guard time multiplied by the life time factor (CiA 301 §7.2.8.3.2.1).");
 
         _actor.Post(() =>
         {
@@ -213,11 +213,12 @@ internal sealed partial class CanOpenNode
         // (see the boot-up branch above), so 0x80 would read as a boot-up that is not one.
         bool reportable = TryDecodeHeartbeatState(stateByte, out var state) && stateByte != 0;
 
-        // CiA 301 §7.2.8.3.3: a reply that does not alternate the toggle bit is invalid for
-        // resetting the life-time window (stale/repeated frames must not keep the consumer
-        // alive). The first observed reply establishes the baseline; every later reply must
-        // flip bit 7 relative to the previous accepted response. Invalid toggles are dropped
-        // entirely — do not raise NodeGuardingReceived for them.
+        // CiA 301 §7.2.8.3.2.1, Figure 44: "If a response is received with the same value of the
+        // toggle-bit as in the preceding response then the new response is handled as if it was
+        // not received." So it neither re-arms the life time (a stale or repeated frame must not
+        // keep the consumer alive) nor raises NodeGuardingReceived; the life time of the last
+        // reply received runs on, and its expiry is the indication. The first reply sets the
+        // baseline; every later one must flip bit 7 relative to the last reply received (#357 C-7).
         if (consumer.HasSeenResponse && toggle == consumer.LastToggle)
             return;
 

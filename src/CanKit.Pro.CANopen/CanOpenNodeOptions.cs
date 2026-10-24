@@ -131,8 +131,8 @@ public sealed class CanOpenNodeOptions
     /// <summary>
     /// When <c>true</c> this node answers a Node-Guarding RTR (COB-ID <c>0x700 + own node-id</c>)
     /// with a one-byte data frame carrying the current NMT state (bits 0..6) and an alternating
-    /// toggle bit (bit 7), per CiA 301 §7.2.8.3.3. Ignored when the heartbeat producer is active
-    /// (CiA 301 §7.2.8.3 makes heartbeat and node-guarding mutually exclusive on the same node).
+    /// toggle bit (bit 7), per CiA 301 §7.2.8.3.2.1. Ignored when the heartbeat producer is active
+    /// (CiA 301 §7.2.8.3.2.2 makes heartbeat and node-guarding mutually exclusive on the same node).
     /// Defaults to <c>true</c> so slaves are answered out of the box.
     /// <para>
     /// <c>false</c> also keeps producer-side life guarding off: guarding starts with the first RTR
