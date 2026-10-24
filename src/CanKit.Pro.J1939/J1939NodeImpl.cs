@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -96,7 +95,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private Task _transportReaderTask = null!;
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _readerCts = new();
-    private readonly Channel<J1939Message> _rxInbox;
 
     private PendingClaim? _pendingClaim;
     private int _disposed;
@@ -192,9 +190,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// channel of its own, and the real channel refuses on its own loop a session that would
     /// start after the address was lost (#347). A substitute opened through the seam is not
     /// told; a test of that refusal opens the real one.
+    /// <paramref name="ownsActor"/> hands an injected <paramref name="actor"/> to the node to
+    /// dispose, as the one it creates for itself: a seam for a test that needs the node's own
+    /// disposal of its actor on a loop with a short shutdown bound.
     /// </remarks>
     internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService,
-        ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null)
+        ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null, bool ownsActor = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -203,15 +204,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         _name = options.Name;
         _openTransport = openTransport;
 
-        var inboxOpts = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
-        {
-            SingleReader = false,
-            SingleWriter = true,
-            FullMode = BoundedChannelFullMode.DropOldest,
-        };
-        _rxInbox = Channel.CreateBounded<J1939Message>(inboxOpts);
-
-        _ownsActor = actor is null;
+        _ownsActor = actor is null || ownsActor;
         _actor = actor ?? new ProtocolActor();
         _time = _actor.TimeSource;
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
@@ -382,22 +375,32 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // claim whose task has already completed -- cancelled by its caller, whose cancel is
         // still on its way to this loop -- is over, and is swept here so that awaiting the
         // cancellation and claiming again is race-free.
+        //
+        // The automatic move after an unseat is swept as well, wherever it is -- waiting its
+        // backoff or in its announcement window (#355, J-5). Nobody awaits it, so replacing it
+        // answers no caller wrongly, and this claim is the application's explicit word on which
+        // address the node should hold. It used to fault with advice to wait for
+        // AddressClaimChanged, which left the application nothing to do but poll. The move's task
+        // is cancelled, not faulted: it did not fail, and ReportUnattendedClaimFailure reports
+        // faults only.
         if (_pendingClaim is { } inFlight)
         {
-            if (!inFlight.Tcs.Task.IsCompleted)
+            bool unattended = ReferenceEquals(inFlight.Tcs, _unattendedClaim);
+            if (!inFlight.Tcs.Task.IsCompleted && !unattended)
             {
                 ctr.Dispose();
-                // The automatic move after an unseat hands out no task and takes no token, so
-                // "await it, or cancel it" is advice its caller cannot follow; what it can do is
-                // wait for the move's outcome (#355, J-5).
-                tcs.TrySetException(new InvalidOperationException(ReferenceEquals(inFlight.Tcs, _unattendedClaim)
-                    ? $"The node is moving to SA 0x{inFlight.PreferredAddress:X2} on its own after losing its address; nothing awaits that claim, so wait for AddressClaimChanged to report its outcome before claiming again."
-                    : $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
+                tcs.TrySetException(new InvalidOperationException(
+                    $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
                 return;
             }
             _pendingClaim = null;
             inFlight.Deadline?.Dispose();
             inFlight.CtRegistration.Dispose();
+            if (unattended)
+            {
+                _unattendedClaim = null;
+                inFlight.Tcs.TrySetCanceled();
+            }
         }
 
         BeginClaimRound(preferredAddress, tcs, ctr);
@@ -588,7 +591,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             ArbitraryScanStart = scanStart,
             RequestedAddress = requestedAddress ?? preferredAddress,
         };
-        TransmitAddressClaimConfirmed(sourceAddress: preferredAddress);
+        TransmitAddressClaimConfirmed(sourceAddress: preferredAddress, _pendingClaim);
 
         // The peer's claim may already have been through this loop, before the claim was
         // pending. Their NAME is not lower than ours, so §4.4.3.3 does not have them
@@ -703,10 +706,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         pending.Tcs.TrySetResult(null);
     }
 
-    private void OnClaimAnnounceTxConfirmed(byte preferredAddress)
+    // `round` is the claim whose announcement was sent. Matched by identity, not by address: a
+    // claim that replaced it for the same address -- a ClaimAddressAsync over the automatic move
+    // (J-5), or one after a cancelled claim -- has an announcement of its own, and the replaced
+    // round's confirmation or failure is not its (Codex and Bugbot on #414).
+    private void OnClaimAnnounceTxConfirmed(byte preferredAddress, PendingClaim round)
     {
-        var pending = _pendingClaim;
-        if (pending is null || pending.PreferredAddress != preferredAddress) return;
+        if (!ReferenceEquals(_pendingClaim, round)) return; // no claim in hand, or another one
+        var pending = round;
         if (pending.Tcs.Task.IsCompleted) return;
         if (pending.Deadline is not null) return; // already armed (defensive)
         if ((J1939ClaimState)Volatile.Read(ref _claimStateStore) != J1939ClaimState.Claiming)
@@ -717,7 +724,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             () => OnClaimAnnounceElapsed(preferredAddress));
     }
 
-    private void OnClaimAnnounceTxFailed(byte preferredAddress, Exception error, ClaimEcho? echo,
+    private void OnClaimAnnounceTxFailed(byte preferredAddress, PendingClaim round, Exception error, ClaimEcho? echo,
         bool mayStillEcho)
     {
         // Rejected: the driver never accepted the frame, so nothing will echo and the marker
@@ -726,8 +733,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // like an equal-NAME peer, or lets it spend the retry's marker (#180).
         ApplyClaimEchoFailure(echo, mayStillEcho);
 
-        var pending = _pendingClaim;
-        if (pending is null || pending.PreferredAddress != preferredAddress) return;
+        if (!ReferenceEquals(_pendingClaim, round)) return; // no claim in hand, or another one
+        var pending = round;
 
         _pendingClaim = null;
         pending.Deadline?.Dispose();
@@ -884,8 +891,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     // The lost address is the peer's from this instant: invalidated now, so no
                     // application traffic goes out under it during the backoff; only the next
                     // round waits. Registered as the claim in hand meanwhile, so a
-                    // ClaimAddressAsync during the backoff meets the in-flight guard, and the
-                    // delayed round runs only if it still is (Codex on #153).
+                    // ClaimAddressAsync during the backoff finds it and replaces it (BeginClaim,
+                    // J-5), and the delayed round runs only if it still is (Codex on #153).
                     WriteAddress(null);
                     RebindTransportOnLoop(J1939Pgn.NullAddress);
                     SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
@@ -925,8 +932,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     // A disposal ends an automatic round as it ends any claim, with ObjectDisposedException, and
     // that is not a failure of the round: the application disposed the node, and nothing about
-    // the bus went wrong (#355, J-3). A cancellation never faults this task -- nothing holds a
-    // token for it -- so it needs no exclusion.
+    // the bus went wrong (#355, J-3). A ClaimAddressAsync that replaces the round cancels its
+    // task (BeginClaim, J-5), and a cancellation never runs this report, which is attached for
+    // faults only, so it needs no exclusion here.
     private void ReportUnattendedClaimFailure(Exception error)
     {
         if (error is ObjectDisposedException) return;
@@ -1035,7 +1043,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// posts success/failure back onto the actor so the arbitration deadline is armed only
     /// after a confirmed TX.
     /// </summary>
-    private void TransmitAddressClaimConfirmed(byte sourceAddress)
+    private void TransmitAddressClaimConfirmed(byte sourceAddress, PendingClaim round)
     {
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
@@ -1049,11 +1057,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
         // address scan is up to 121 of them, the preferred address and the 120 of the field (#58).
-        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, echo);
+        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, round, echo);
     }
 
     private async Task TransmitAddressClaimConfirmedAsync(uint canId, byte[] payload, byte preferred,
-        ClaimEcho? echo)
+        PendingClaim round, ClaimEcho? echo)
     {
         try
         {
@@ -1064,20 +1072,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 var ex = new J1939NodeException(
                     $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
                 var mayEcho = ClaimEchoMayFollow(confirmation.FailureReason);
-                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayEcho)); }
+                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, round, ex, echo, mayEcho)); }
                 catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
                 return;
             }
 
             SettleConfirmedClaimEcho(echo);
-            try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
+            try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred, round)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
         catch (Exception ex)
         {
             // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
             // failures that do this have not put the frame on the wire.
-            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, round, ex, echo, mayStillEcho: false)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
     }
@@ -1628,7 +1636,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             }
         }
         catch (OperationCanceledException) { /* expected on Dispose */ }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+        catch (Exception ex) { RaiseOnActor(ex); }
     }
 
     // The channel is told whether the node still holds its address, and asks where a session
@@ -1666,7 +1674,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             catch (J1939TpAbortException) { /* surfaced by the channel; keep reading */ }
             catch (OperationCanceledException) { return; /* expected on Dispose */ }
             catch (ObjectDisposedException) { return; /* the node was disposed with a datagram in hand */ }
-            catch (Exception ex) { RaiseBackgroundException(ex); return; }
+            catch (Exception ex) { RaiseOnActor(ex); return; }
         }
     }
 
@@ -1822,6 +1830,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
             if (ownFrame && !directedToUs) return;
 
             // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
+            // While the node is Claiming it holds no address, so this also drops a Request for
+            // Address Claimed directed at the address it is arbitrating for: only a global request
+            // is answered in that window. Whether SAE J1939-81 requires that one to be answered
+            // too is open -- the review behind #355 (J-2) cited §4.2.2 from memory, the text has
+            // not been checked -- and the README says so. Unchanged until it is.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))
                 return;
 
@@ -1856,7 +1869,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             RaiseBackgroundException(ex);
         }
-        _rxInbox.Writer.TryWrite(message);
+        // No copy is kept: MessageReceived is the receive path. An internal inbox nothing read
+        // used to retain up to ReceiveBufferCapacity payloads per node (#355, J12).
     }
 
     // =========================================================================================
@@ -1931,7 +1945,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void DisposeCore()
     {
         try { _readerCts.Cancel(); } catch { }
-        _rxInbox.Writer.TryComplete();
 
         var transportReader = Volatile.Read(ref _transportReaderTask);
         try
@@ -1943,13 +1956,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // A channel that throws on Dispose is this disposal's failure, not a reason to leave
             // the rest running: the subscription, the actor and an owned service are released
             // all the same before it propagates (Codex and Bugbot on #397).
-            try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* the reader reports its own faults */ }
-            try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* likewise */ }
+            try { _readerTask.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* the reader reports its own faults */ }
+            try { transportReader.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* likewise */ }
 
             _subscription.Dispose();
-            // An injected actor is not ours to dispose; the handler is, either way.
-            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            // An injected actor is not ours to dispose; the handler is, either way. It comes off
+            // only after an owned actor's Dispose: that is where the actor reports a callback that
+            // outlived its shutdown bound, as a TimeoutException through its
+            // BackgroundExceptionOccurred, and unsubscribed first the node's subscribers never
+            // heard of it (#355, from the review of #397).
             if (_ownsActor) _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             _readerCts.Dispose();
             if (_ownsService) _service.Dispose();
         }
@@ -1960,6 +1977,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// shutdown bound. A seam for tests of the path where the actor does not get there in time.
     /// </summary>
     internal TimeSpan TransportTeardownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long the disposal waits for each of the two readers -- the frame reader and the current
+    /// transport reader -- to end. A seam for tests: made infinite, a reader the disposal waits for
+    /// from inside its own handler is a hang instead of a 2 s stall, which no test has to time.
+    /// </summary>
+    internal TimeSpan ReaderJoinTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// A seam for tests, null in production: runs on the disposing thread once the teardown has
@@ -2088,9 +2112,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // Diagnostics helpers
     // =========================================================================================
 
-    internal IAsyncEnumerable<J1939Message> InboxAll(CancellationToken cancellationToken)
-        => _rxInbox.Reader.ReadAllAsync(cancellationToken);
-
     private void RaiseBackgroundException(Exception ex)
     {
         try { BackgroundExceptionOccurred?.Invoke(this, ex); }
@@ -2101,9 +2122,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // The channel raises a fault -- a reassembly abort, a T1 timeout -- on its own actor. Raised
     // from there, a handler that disposed the node made that thread wait for the node's actor
     // to tear the channel down, and tearing it down joins the channel's actor: the thread doing
-    // the waiting (#375). From the node's actor a Dispose tears down in place. A node whose
-    // injected actor is already gone reports it where it arrived.
-    private void OnTransportBackgroundException(object? sender, Exception ex)
+    // the waiting (#375). From the node's actor a Dispose tears down in place.
+    private void OnTransportBackgroundException(object? sender, Exception ex) => RaiseOnActor(ex);
+
+    // Raises a fault that arrived off the node's actor from the actor: a transport fault (above),
+    // and the end of either of the node's own readers. Raised on the reader, a handler that
+    // disposed the node made the disposal wait for that reader -- its own task -- for the whole
+    // join bound, 2 s each (#355, from the review of #397). From the actor the disposal is queued
+    // behind the handler's turn, and the reader has returned by the time it is joined. A node
+    // whose injected actor is already gone reports the fault where it arrived; a handler that
+    // disposes the node from there still waits out that bound on its own reader, as nothing is
+    // left to hand it to.
+    private void RaiseOnActor(Exception ex)
     {
         try { _actor.Post(() => RaiseBackgroundException(ex)); }
         catch (ObjectDisposedException) { RaiseBackgroundException(ex); }

@@ -118,7 +118,7 @@ public sealed class RpdoReceivedEventArgs : EventArgs
 
 /// <summary>
 /// Argument type for the <c>NodeGuardingReceived</c> event: a valid node-guarding response was
-/// received from <see cref="ProducerNodeId"/> (FR-CO-009, CiA 301 §7.2.8.3.3).
+/// received from <see cref="ProducerNodeId"/> (FR-CO-009, CiA 301 §7.2.8.3.2.1).
 /// </summary>
 public sealed class NodeGuardingReceivedEventArgs : EventArgs
 {
@@ -128,7 +128,7 @@ public sealed class NodeGuardingReceivedEventArgs : EventArgs
     /// <summary>Reported NMT state (bits 0..6 of the response byte).</summary>
     public NmtState State { get; }
 
-    /// <summary>Toggle bit (bit 7 of the response byte). CiA 301 §7.2.8.3.3 requires the
+    /// <summary>Toggle bit (bit 7 of the response byte). CiA 301 §7.2.8.3.2.1 requires the
     /// producer to flip this on every reply so consumers can distinguish a stale duplicate from
     /// a fresh answer.</summary>
     public bool Toggle { get; }

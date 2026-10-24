@@ -8,9 +8,11 @@ CONTRIBUTING.md), so a subject that is not `type(scope)?!?: description` is sile
 analyser: a `fix` written as "Fix the thing" publishes nothing. This reports such subjects on the
 pull request that introduces them. Standard library only; the unit tests are eng/test_check_commit_subjects.py.
 
-The commits checked are `git log --no-merges origin/<base>..HEAD --format=%s`; the workflow checks
-out the pull request's head commit, not GitHub's synthetic merge commit, so the range is the
-branch's own.
+The commits checked are `git log --no-merges origin/<base>..HEAD --format=%s`, run in the current
+directory; the workflow checks out the pull request's head commit, not GitHub's synthetic merge
+commit, so the range is the branch's own. The workflow runs the base branch's copy of this script
+(extracted to the runner's temp directory), not the head's, so a pull request is judged by the
+checker it was opened against.
 
 Commits with more than one parent are skipped whatever their subject. Merge commits are written by
 git (`Merge branch '…' into …`, `Merge remote-tracking branch '…' into …`) or by people and agents
