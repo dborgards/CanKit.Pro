@@ -740,13 +740,95 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
             "replies answered before the Start report Pre-operational and every later one Operational");
     }
 
+    // #357 C-7, consumer side. CiA 301 §7.2.8.3.2.1, Figure 44: "If a response is received with
+    // the same value of the toggle-bit as in the preceding response then the new response is
+    // handled as if it was not received." So a repeated toggle raises no NodeGuardingReceived,
+    // and it does not re-arm the life time either: the timeout comes when the accepted reply's
+    // life time ends, not one life time after the repeat. The life time is 100 ms; the accepted
+    // reply arrives at 60 ms (due at 160 ms), the repeat at 120 ms (would push it to 220 ms). The
+    // reply with the toggle flipped afterwards is the ordering witness for the missing event.
+    [Fact]
+    public async Task A_Guarding_Reply_That_Repeats_The_Toggle_Is_Handled_As_If_It_Was_Not_Received()
+    {
+        const byte Producer = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 1);
+        using var masterBus = Open(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, NodeId, clock);
+        var witness = new ActorWitness(node, masterBus, clock);
+        var replies = new AsyncQueue<NodeGuardingReceivedEventArgs>();
+        var timeouts = new AsyncQueue<NodeGuardingTimeoutEventArgs>();
+        node.NodeGuardingReceived += (_, e) => { if (e.ProducerNodeId == Producer) replies.Add(e); };
+        node.NodeGuardingTimeout += (_, e) => { if (e.ProducerNodeId == Producer) timeouts.Add(e); };
+
+        void Reply(byte value) => masterBus.Transmit(CanFrame.Classic(
+            unchecked((int)CanOpenCobId.Heartbeat(Producer)), new[] { value }, isExtendedFrame: false));
+
+        node.StartNodeGuardingConsumer(Producer, guardTime: TimeSpan.FromMilliseconds(100), lifeTimeFactor: 1);
+        await witness.SettleAsync();
+
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(60));
+        Reply((byte)NmtState.PreOperational);                       // toggle 0: accepted, due at 160 ms
+        var accepted = await replies.NextAsync(ShortTimeout, "guarding reply");
+        accepted.Toggle.Should().BeFalse();
+
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(60));
+        Reply((byte)NmtState.PreOperational);                       // toggle 0 again: not received
+        await witness.SettleAsync();
+        timeouts.Count.Should().Be(0, "at 120 ms the life time of the reply at 60 ms has not elapsed");
+
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(40));
+        timeouts.Count.Should().Be(1,
+            "the repeat did not re-arm the life time: the reply at 60 ms was the last one received, so it ends at 160 ms");
+
+        Reply((byte)(0x80 | (byte)NmtState.PreOperational));       // toggle 1: received
+        var next = await replies.NextAsync(ShortTimeout, "guarding reply");
+        next.Toggle.Should().BeTrue("the reply after the repeat is the next one reported");
+        replies.Count.Should().Be(0, "the repeated toggle raised no NodeGuardingReceived of its own");
+        node.StopNodeGuardingConsumer(Producer);
+    }
+
+    // #357 C-8, producer side, kept as decided: RespondToNodeGuardingRtr = false also keeps life
+    // guarding off. Guarding "starts for the NMT slave when the first RTR for its guarding CAN-ID
+    // is received" (§7.2.8.2.2), and a node told not to answer is not taking part in the
+    // protocol: it must not report a master lost for a supervision it opted out of. Configured
+    // and polled exactly as in LifeGuarding_Starts_With_The_First_Rtr_..., where the same clock
+    // movement yields Occurred.
+    [Fact]
+    public async Task LifeGuarding_Stays_Off_When_The_Node_Does_Not_Answer_Guarding_Rtrs()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 1);
+        using var masterBus = Open(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, NodeId, clock,
+            new CanOpenNodeOptions { RespondToNodeGuardingRtr = false });
+        var witness = new ActorWitness(node, masterBus, clock);
+        var events = new AsyncQueue<LifeGuardingEventArgs>();
+        node.LifeGuardingEvent += (_, e) => events.Add(e);
+
+        node.ObjectDictionary.WriteUnsigned(GuardTimeIndex, 0x00, 50);
+        node.ObjectDictionary.WriteUnsigned(LifeTimeFactorIndex, 0x00, 3);
+        await witness.SettleAsync();
+
+        SendRtr(masterBus, NodeId);
+        await witness.SettleAsync();
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(150));
+        await witness.AdvanceAsync(TimeSpan.FromHours(1));
+
+        events.Count.Should().Be(0,
+            "an RTR the node does not answer does not start life guarding, whatever 100Ch and 100Dh hold");
+    }
+
     // =========================================================================================
     // Helpers.
     // =========================================================================================
 
     /// <summary>The node under test on the clock the test drives (#113).</summary>
-    private static CanOpenNode OpenClockedNode(ICanBus bus, byte nodeId, ManualTimeSource clock)
-        => new(new CanBusService(bus), nodeId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+    private static CanOpenNode OpenClockedNode(ICanBus bus, byte nodeId, ManualTimeSource clock,
+        CanOpenNodeOptions? options = null)
+        => new(new CanBusService(bus), nodeId, options ?? new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
 
     /// <summary>A node-guarding poll: an RTR on <c>0x700 + nodeId</c>. Same shape the node's own
     /// consumer sends (CanOpenNode.NodeGuarding.cs, SendNodeGuardingRtr), DLC 0 included.</summary>
