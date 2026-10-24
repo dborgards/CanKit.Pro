@@ -156,6 +156,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private int _disposed;
 
+    // BackgroundExceptionOccurred goes out through this, on the thread pool and in order, never
+    // on the actor's loop (#356, T-2).
+    private readonly BackgroundExceptionDispatcher _backgroundReports = new();
+
     // What the current SendAsync is awaiting, published for Dispose's fallback when the actor is
     // already gone (#205). Completing a TaskCompletionSource is thread-safe; the actor-owned state
     // behind it is not touched. A stale reference only ever completes something nobody awaits.
@@ -508,9 +512,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // drained. Post+wait so anything already queued on the mailbox is settled first. A
         // reception that began after the stamp is kept: it is not what the caller asked to
         // drop, and its PDU may be the one the caller waits for next.
-        // Called from the actor itself -- a BackgroundExceptionOccurred handler runs there --
-        // the post-and-wait below would wait for the very loop it is on (#56). The clear runs
-        // inline instead: it is on the single writer already.
+        // Called from the actor itself -- other work on an injected actor, say; a
+        // BackgroundExceptionOccurred handler ran there until #356 -- the post-and-wait below
+        // would wait for the very loop it is on (#56). The clear runs inline instead: it is on
+        // the single writer already.
         if (_actor is ProtocolActor { IsOnCurrentActor: true })
             return ClearReceptionsBefore(stamp);
 
@@ -771,9 +776,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         // _sendGate is deliberately not disposed, and not waited for either (#339): the wait
         // used to block for up to 2 s whenever the actor could not run FailInFlightSend first
-        // -- for a Dispose from an actor-side BackgroundExceptionOccurred handler that is the
-        // actor loop itself, stalled with every frame and timer on it -- and the disposal then
-        // stranded every SendAsync still queued on the gate. See the field.
+        // -- for a Dispose from an actor-side BackgroundExceptionOccurred handler, as handlers
+        // were until #356, that was the actor loop itself, stalled with every frame and timer on
+        // it -- and the disposal then stranded every SendAsync still queued on the gate. See the
+        // field.
 
         if (_ownsService)
             _service.Dispose();
@@ -983,17 +989,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
+    // Off the actor's loop, as EmitPdu raises DatagramReceived, and one subscriber at a time:
+    // see BackgroundExceptionDispatcher (#356 T-2, #381).
     private void RaiseBackgroundException(Exception ex)
-    {
-        try
-        {
-            BackgroundExceptionOccurred?.Invoke(this, ex);
-        }
-        catch
-        {
-            // A misbehaving subscriber must not tear down the channel.
-        }
-    }
+        => _backgroundReports.Raise(this, BackgroundExceptionOccurred, ex);
 
     private void OnActorBackgroundException(object? sender, Exception ex) => RaiseBackgroundException(ex);
 
@@ -1813,9 +1812,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
         if (rx is not null)
             WithdrawReception(rx.Announce);
-        // Raised last: a handler that discards inline (#56) then finds the fault in the inbox
-        // and drains it, instead of the fault landing after the drain and poisoning the next
-        // receive.
+        // Raised last, and off the loop: a handler that discards (#56) then finds the fault in the
+        // inbox and drains it, instead of the fault landing after the drain and poisoning the
+        // next receive, and one that receives gets the fault instead of waiting on the loop it
+        // would be blocking (#356, T-2).
         RaiseBackgroundException(ex);
     }
 
