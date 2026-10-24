@@ -17,8 +17,9 @@ concurrency:
   # which commit went red. Every other event therefore gets a group of its own (the run id).
   #
   # The group, not `cancel-in-progress`, carries the distinction: with an expression in
-  # `cancel-in-progress`, re-running this pull request's run ended in `startup_failure` twice
-  # (run 39915771444), where a literal is what every other re-run in the repository has used.
+  # `cancel-in-progress`, re-running this pull request's run ended in `startup_failure` (attempt 2
+  # of run 39915771444; attempt 1 was an ordinary test failure), where a literal is what every
+  # other re-run in the repository has used.
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
@@ -256,6 +257,11 @@ jobs:
 
       # The checks' own tests (eng/test_*.py), standard library only. They live in this job
       # because it is the one that runs the scripts they cover.
+      #
+      # That includes eng/test_verify_ruleset.py, which compares the required checks of the
+      # exported `main` ruleset (.github/rulesets/main.json) with the job names in this file: a
+      # renamed job fails here, on the pull request that renames it, rather than leaving a
+      # required check that never reports.
       - name: Test the verification scripts
         run: python3 -m unittest discover -s eng -p "test_*.py"
 
@@ -356,3 +362,31 @@ jobs:
       # checks of the `main` ruleset (a repository setting, not something this file can declare).
       - name: Verify formatting
         run: dotnet format CanKit.Pro.sln --verify-no-changes --verbosity diagnostic
+
+  commit-subjects:
+    name: commit subjects
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The pull request's own head, not the synthetic merge commit GitHub checks out by default:
+      # `origin/<base>..HEAD` is then exactly the branch's commits. Full history, so that
+      # `origin/<base>` exists to compare with.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # semantic-release analyses every commit on the branch (CLAUDE.md, CONTRIBUTING.md), and
+      # silently skips a subject that is not a Conventional Commit -- a `fix` written as "Fix the
+      # thing" publishes nothing. Merge commits are skipped (see the script).
+      #
+      # Deliberately NOT a required check of the `main` ruleset, and not listed in
+      # .github/rulesets/main.json: it reports, the maintainer decides. It only runs on pull
+      # requests, so it is absent -- not red -- on `main`.
+      - name: Check commit subjects
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 eng/check-commit-subjects.py "$BASE_REF"

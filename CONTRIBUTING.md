@@ -115,6 +115,12 @@ the end of the message, as the note — so a `Co-Authored-By:` or other trailer 
 printed in the release notes as part of the breaking change (the 1.3.0 entries in `CHANGELOG.md`
 show exactly that). Put such trailers above it.
 
+The `commit subjects` job in CI (pull requests only) lists every branch commit whose subject is not
+a Conventional Commit. Merge commits (more than one parent) are skipped whatever their subject:
+semantic-release reads them but ignores a subject that is not a Conventional Commit. The job is
+deliberately not a required check — it reports, the maintainer decides — and `eng/check-commit-subjects.py <base>`
+runs the same check locally.
+
 Types that never release on their own: `docs`, `test`, `chore`, `ci`, `style`, `refactor`. Use
 them honestly — labelling a behaviour change as `refactor` means it ships with no changelog entry
 and no version bump, which is worse than a noisy changelog.
