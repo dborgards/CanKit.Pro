@@ -232,8 +232,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
 
     // CiA 319 §5.3, after step 5 (FR-CO-036): the first SDO download indication to a safety
     // parameter clears 13FEh "even if the value included in the download indication is identical
-    // to the value currently in the object entry"; a download the node answers with a failure
-    // "shall not".
+    // to the value currently in the object entry"; one to an object that "is read-only", or that
+    // the node answers "with a remote result Failure", shall not.
     [Fact]
     public async Task A_Download_Of_The_Identical_Value_Clears_13FEh_A_Refused_One_Does_Not()
     {
@@ -248,16 +248,23 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         var od = device.ObjectDictionary;
         uint request = CanOpenCobId.SdoRx(Producer), response = CanOpenCobId.SdoTx(Producer);
 
-        // Refused: sub-index 04h is the transmission type, 0609 0030h on any write (§8.4.2.2).
+        // Read-only: sub-index 04h, the transmission type, is declared ro (§8.4.2.2: 254, constant),
+        // so the server refuses it with 0601 0002h before the value is looked at.
         wire.Transmit(request, new byte[] { 0x2F, 0x01, 0x13, 0x04, 254, 0, 0, 0 });
         await wire.WaitForCountAsync(response, 1);
-        wire.Payloads(response)[0][0].Should().Be(0x80, "abort");
+        wire.Payloads(response)[0].Should().Equal(0x80, 0x01, 0x13, 0x04, 0x02, 0x00, 0x01, 0x06);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "a download to a read-only object is no indication");
+
+        // Failure: sub-index 02h is writable, and 0 ms is outside 1..65535 (0609 0030h).
+        wire.Transmit(request, new byte[] { 0x2B, 0x01, 0x13, 0x02, 0, 0, 0, 0 });
+        await wire.WaitForCountAsync(response, 2);
+        wire.Payloads(response)[1].Should().Equal(0x80, 0x01, 0x13, 0x02, 0x30, 0x00, 0x09, 0x06);
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "a download answered with a failure is no indication");
 
         // Identical: 25 ms is what the record holds.
         wire.Transmit(request, new byte[] { 0x2B, 0x01, 0x13, 0x02, 25, 0, 0, 0 });
-        await wire.WaitForCountAsync(response, 2);
-        wire.Payloads(response)[1][0].Should().Be(0x60, "accepted");
+        await wire.WaitForCountAsync(response, 3);
+        wire.Payloads(response)[2][0].Should().Be(0x60, "accepted");
         od.ReadUnsigned(0x1301, 2).Should().Be(25u);
         od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the download indication clears 13FEh, whether or not the value changed");
     }
