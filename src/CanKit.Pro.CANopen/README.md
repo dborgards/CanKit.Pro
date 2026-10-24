@@ -726,6 +726,17 @@ timeout (`CanOpenNodeOptions.SdoServerTimeout`, default 5 s) matching the block 
 and block transfer retransmits from the first unconfirmed segment on a partial sub-block ACK
 (bounded by `CanOpenNodeOptions.SdoBlockMaxRetransmissions`, default 3).
 
+**Cancelling a block download.** The caller's task ends as cancelled without waiting for the
+abort (`0800 0000h`) to be on the wire, and the sub-block being sent stops before its next segment. The abort and
+the sub-block leave on separate sending tasks, though, and the sub-block checks only between two
+segments, so the one segment it had already started to hand to the bus when the cancellation
+took effect can reach the bus after the abort — and, if the caller starts the next transfer with
+that server at once, after that transfer's initiate as well. The server then reads it as whatever
+its first byte means as a command specifier. This narrow window is accepted (#377): closing it
+would mean completing the cancellation only once the abort is on the wire, which changes when a
+cancelled call returns. No other transfer has the window: an expedited or segmented download
+sends one frame per server response, and an upload's segments come from the server.
+
 ## CANopen Safety (CiA 304)
 
 The binding is **CiA DSP 304 version 1.0** (1 January 2001), the safety-relevant communication

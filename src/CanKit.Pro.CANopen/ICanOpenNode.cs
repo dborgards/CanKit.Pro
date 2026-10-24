@@ -394,8 +394,16 @@ public interface ICanOpenNode : IDisposable
     /// One transfer per server is in flight at a time: with one in flight — a safety transaction
     /// with that server counts as one for its whole length — the call fails with
     /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
-    /// <remarks>Not gated by this node's NMT state, as
-    /// <see cref="SdoUploadAsync(byte, ushort, byte, SdoTransferMode, CancellationToken)"/>.</remarks>
+    /// <remarks>
+    /// <para>Not gated by this node's NMT state, as
+    /// <see cref="SdoUploadAsync(byte, ushort, byte, SdoTransferMode, CancellationToken)"/>.</para>
+    /// <para>Cancelling <paramref name="cancellationToken"/> ends the returned task as cancelled and
+    /// sends the server an abort (<c>0800 0000h</c>). During a block download the sub-block
+    /// being sent stops before its next segment, but the segment it had already started to hand to
+    /// the bus is not recalled: it can reach the bus after the abort, and after the initiate of a
+    /// transfer to the same server started right after the cancellation (#377). The task does not
+    /// wait for the abort to be on the wire.</para>
+    /// </remarks>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,
