@@ -2445,14 +2445,27 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         Task blocked = Task.CompletedTask;
         try
         {
-            await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+            // The second delay does not elapse on the stopped clock; the test ends it below, while
+            // the switch is still in the hook. A zero delay ended it on a timer instead, which the
+            // loop fires after the mailbox batch that began the silence and ahead of the item
+            // holding the actor (both are stamped at the same instant). A loop descheduled before
+            // that timer pass fired it only after the switch had finished, and the timer then
+            // ended the silence with the actor about to be held (#419).
+            await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
             await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             // The hook has been entered; the node records its task as soon as the hook returns it.
             // From then on it is the application's to finish, and the slave counts as settled.
             await WaitUntilAsync(() => slave.IsLssSettledForTests);
             slave.LssBitRateSwitchCompletion.IsCompleted.Should().BeFalse();
+            // The delay is over while the switch is still in the hook, so the silence now ends
+            // only when the switch's completion reaches the actor.
+            await slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
+            slave.IsLssSilentForTests.Should().BeTrue("the switch has not finished");
 
-            blocked = slave.PostToActorAsync(() => release.Wait(LssTestTiming.SchedulingBudget));
+            // Held until the finally releases it, not for a budget: the assertions below are true
+            // only while the actor is held, and a hold that runs out lets a switch completion that
+            // arrives late, behind a starved thread pool, end the silence first.
+            blocked = slave.PostToActorAsync(() => release.Wait());
             hook.TrySetResult(true);
             await slave.LssBitRateSwitchCompletion.WaitAsync(LssTestTiming.SchedulingBudget);
             slave.IsLssSettledForTests.Should().BeFalse("the finished switch has not reached the held actor yet");
