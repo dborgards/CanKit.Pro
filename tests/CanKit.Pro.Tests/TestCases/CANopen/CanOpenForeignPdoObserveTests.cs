@@ -104,7 +104,8 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         using var peer = CanOpen.OpenNode(peerBus, Peer, file);
         // Right behind the peer's node, so it holds the 1A00:00 delivery in the window #424 raced
         // through: the peer already has the request, and the tap must already have it too.
-        using var stall = stallTheServersDelivery ? new DeliveryStall(peerBus, Peer, 0x1A00, 0x00) : null;
+        using var stall = stallTheServersDelivery ? new DeliveryStall(peerBus, Peer,
+            hold: (0x1A00, 0x00), until: (0x1A00, 0x01)) : null;
         stall?.Watch(uploads);
         // The tool's SDO deadline on a clock nobody advances: a delivery the stall holds keeps its
         // request inside the driver call, and the thread pool takes its time to bring another
@@ -1414,7 +1415,7 @@ PDOMapping=1
     {
         private readonly List<(ushort Index, byte Sub)> _uploads = new();
         private readonly object _gate = new();
-        private TaskCompletionSource<bool>? _next;
+        private readonly List<((ushort Index, byte Sub) Upload, TaskCompletionSource<bool> Seen)> _awaited = new();
 
         public SdoTap(ICanBus bus, byte server)
         {
@@ -1429,9 +1430,10 @@ PDOMapping=1
                 lock (_gate)
                 {
                     _uploads.Add((index, data[3]));
-                    var next = _next;
-                    _next = null;
-                    next?.TrySetResult(true);
+                    foreach (var awaited in _awaited)
+                    {
+                        if (awaited.Upload == (index, data[3])) awaited.Seen.TrySetResult(true);
+                    }
                 }
             };
         }
@@ -1444,21 +1446,23 @@ PDOMapping=1
             }
         }
 
-        /// <summary>Completes when the tap records its next upload, the one after those it has
-        /// now.</summary>
-        public Task NextRecord()
+        /// <summary>Completes once the tap has recorded <paramref name="upload"/> -- at once if
+        /// it already has.</summary>
+        public Task Recorded((ushort Index, byte Sub) upload)
         {
             lock (_gate)
             {
-                _next ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                return _next.Task;
+                if (_uploads.Contains(upload)) return Task.CompletedTask;
+                var seen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _awaited.Add((upload, seen));
+                return seen.Task;
             }
         }
     }
 
     /// <summary>Holds one SDO request's delivery on the thread delivering it -- after the
     /// handlers subscribed before this one, before those subscribed after it -- until the tap has
-    /// recorded one more request. That forces the interleaving behind #424 instead of waiting for
+    /// recorded a named later request, the one the client sends only after the server's answer. That forces the interleaving behind #424 instead of waiting for
     /// the scheduler to produce it: the server, subscribed earlier, has the request and answers it
     /// while the delivery is held, and the client's next request, delivered on another thread,
     /// reaches the tap first unless the tap was subscribed ahead of the server.</summary>
@@ -1466,29 +1470,32 @@ PDOMapping=1
     {
         private readonly ICanBus _bus;
         private readonly uint _cobId;
-        private readonly ushort _index;
-        private readonly byte _sub;
+        private readonly (ushort Index, byte Sub) _hold;
+        private readonly (ushort Index, byte Sub) _until;
+        private readonly TaskCompletionSource<bool> _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private SdoTap? _tap;
         private int _armed = 1;
 
-        public DeliveryStall(ICanBus bus, byte server, ushort index, byte sub)
+        /// <summary>Holds the delivery of <paramref name="hold"/> until the tap has recorded
+        /// <paramref name="until"/>. A named request rather than "the next one": where this thread
+        /// is descheduled before it starts waiting, the rest of the exchange may be over, and there
+        /// is no next request left to wait for (Codex on #439).</summary>
+        public DeliveryStall(ICanBus bus, byte server, (ushort Index, byte Sub) hold, (ushort Index, byte Sub) until)
         {
             _bus = bus;
             _cobId = CanOpenCobId.SdoRx(server);
-            _index = index;
-            _sub = sub;
+            _hold = hold;
+            _until = until;
             bus.FrameObserved += OnFrame;
         }
 
-        private readonly TaskCompletionSource<bool> _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        /// <summary>Completes when the held delivery is let go: true if a further request
-        /// reaching the tap released it, false if the hang guard ran out first, i.e. no
-        /// interleaving was forced. A task rather than a flag, because the delivering thread
+        /// <summary>Completes when the held delivery is let go: true if the tap's
+        /// recording the awaited request released it, false if the hang guard ran out first, i.e.
+        /// no interleaving was forced. A task rather than a flag, because the delivering thread
         /// sets it after the wait, and the test can get there first.</summary>
         public Task<bool> Released => _released.Task;
 
-        /// <summary>The tap whose next record releases the held delivery. Set apart from the
+        /// <summary>The tap whose recording of the awaited request releases the held delivery. Set apart from the
         /// constructor so that where this stall subscribes does not depend on where the tap
         /// does.</summary>
         public void Watch(SdoTap tap) => Volatile.Write(ref _tap, tap);
@@ -1499,13 +1506,13 @@ PDOMapping=1
             if (frame.IsExtendedFrame || frame.IsRemoteFrame || (uint)frame.ID != _cobId) return;
             var data = frame.Data.ToArray();
             if (data.Length < 4 || data[0] != 0x40) return;
-            if ((ushort)(data[1] | (data[2] << 8)) != _index || data[3] != _sub) return;
+            if (((ushort)(data[1] | (data[2] << 8)), data[3]) != _hold) return;
             var tap = Volatile.Read(ref _tap);
             if (tap is null || Interlocked.Exchange(ref _armed, 0) == 0) return;
             // Task.Wait rather than a monitor: a pool thread blocked in it is one the pool replaces
             // at once, so the peer's answer and the client's next request -- both queued to the
             // pool -- do not wait for its starvation heuristic to add a worker.
-            _released.TrySetResult(tap.NextRecord().Wait(ShortTimeout));
+            _released.TrySetResult(tap.Recorded(_until).Wait(ShortTimeout));
         }
 
         public void Dispose() => _bus.FrameObserved -= OnFrame;
