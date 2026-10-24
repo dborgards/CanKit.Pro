@@ -2578,7 +2578,19 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // when the wait took that token directly, and as CancelInFlightSend reports a cancellation
     // after the gate -- and must not be taken for a disposal.
     [Fact]
-    public async Task A_Send_Queued_On_The_Gate_That_Its_Caller_Cancels_Reports_The_Callers_Token()
+    public Task A_Send_Queued_On_The_Gate_That_Its_Caller_Cancels_Reports_The_Callers_Token()
+        => CallerCancelsASendQueuedOnTheGateAsync(disposeAsLateAsPossible: false);
+
+    // #400: the test above released the actor right after starting the disposal, so the send
+    // holding the gate could begin -- and complete -- before Dispose had marked the channel
+    // disposed, and then no ObjectDisposedException was due. This runs it with the disposal
+    // started as late as the test lets it (see LateDisposal), which forces that interleaving
+    // whenever the actor is released before the disposal is seen to have begun.
+    [Fact]
+    public Task A_Send_Queued_On_The_Gate_That_Its_Caller_Cancels_Reports_The_Callers_Token_However_Late_The_Disposal_Runs()
+        => CallerCancelsASendQueuedOnTheGateAsync(disposeAsLateAsPossible: true);
+
+    private static async Task CallerCancelsASendQueuedOnTheGateAsync(bool disposeAsLateAsPossible)
     {
         var session = NewSession();
         using var bus = OpenClassic(session, 0);
@@ -2593,6 +2605,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var send1 = channel.SendAsync(new byte[] { 0x01 });
         var send2 = channel.SendAsync(new byte[] { 0x02 }, callerCts.Token);
         send2.IsCompleted.Should().BeFalse();
+        // Ends once Dispose is under way, and so after its first line, which marks the channel
+        // disposed: from then on the actor fails send1 instead of beginning it.
+        var receive = channel.ReceiveAsync();
+        var late = new LateDisposal(disposeAsLateAsPossible, send1);
 
         try
         {
@@ -2602,13 +2618,59 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         }
         finally
         {
-            var disposal = Task.Run(channel.Dispose);
+            var disposal = Task.Run(async () =>
+            {
+                await late.MayStartAsync().ConfigureAwait(false);
+                channel.Dispose();
+            });
+            // Released only once the disposal is seen to have begun (#400): released earlier,
+            // send1 can begin and complete before Dispose reaches it, and then it owes no
+            // ObjectDisposedException.
+            await late.WaitForAsync(receive);
+            late.ActorReleased();
             release.Set();
             await busy;
             await disposal.WaitAsync(ShortTimeout);
         }
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
+    }
+
+    /// <summary>Starts a disposal as late as the test lets it: not before the test waits on it,
+    /// and, if by then the actor has been released, not before the send the actor was holding
+    /// back has ended. A scheduler that runs the disposing thread last, made deterministic.</summary>
+    private sealed class LateDisposal
+    {
+        private readonly bool _enabled;
+        private readonly Task _heldSend;
+        private readonly TaskCompletionSource<bool> _testWaits = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _actorReleased;
+
+        public LateDisposal(bool enabled, Task heldSend)
+        {
+            _enabled = enabled;
+            _heldSend = heldSend;
+        }
+
+        public void ActorReleased() => Volatile.Write(ref _actorReleased, 1);
+
+        /// <summary>Waits, with the hang guard, on <paramref name="signal"/> -- a sign of the
+        /// disposal -- letting the disposal start first.</summary>
+        public async Task WaitForAsync(Task signal)
+        {
+            _testWaits.TrySetResult(true);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => signal.WaitAsync(ShortTimeout));
+        }
+
+        public async Task MayStartAsync()
+        {
+            if (!_enabled) return;
+            await _testWaits.Task.ConfigureAwait(false);
+            if (Volatile.Read(ref _actorReleased) == 0) return;
+            // Its outcome is the test's to assert; here only its end matters.
+            try { await _heldSend.ConfigureAwait(false); }
+            catch (Exception) { /* asserted by the test */ }
+        }
     }
 
     // --------------------------------------------------------------------------------
