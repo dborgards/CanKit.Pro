@@ -4289,8 +4289,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
     // From the review of #397: a fault that ends one of the node's readers was raised on that
     // reader, and a handler that disposed the node made the disposal wait for the reader -- its
-    // own task -- for the whole 2 s join bound. Raised from the node's actor instead, the
-    // disposal is queued behind the handler and the reader has returned when it is joined. The
+    // own task -- for the whole 2 s join bound. Raised through the dispatcher on the thread pool
+    // (#356 T-2; #414 hopped onto the node's actor), the reader has returned when it is joined. The
     // join is made unbounded here, so waiting for itself is a hang the test sees rather than a
     // stall it would have to time.
     [Fact]
@@ -4360,8 +4360,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor,
             openTransport: sa => new ScriptedTpChannel(sa), ownsActor: true); // disposes the actor it owns
         node.TransportTeardownTimeout = TimeSpan.Zero;
-        var reported = new List<Exception>();
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        // Reported on the thread pool (#356, T-2), so possibly after Dispose has returned: awaited
+        // on a signal. A report the node never forwards leaves the signal unset and the wait fails.
+        var timedOut = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => { if (ex is TimeoutException) timedOut.TrySetResult(ex); };
 
         var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
@@ -4374,9 +4376,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             await held.Task.AsTaskWithTimeout(ShortTimeout);
             node.Dispose(); // the actor's join gives up on the held callback and reports it
 
-            lock (reported)
-                reported.Should().Contain(e => e is TimeoutException,
-                    "the node owns that actor, and its shutdown timeout is a background failure of the node's");
+            (await timedOut.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeOfType<TimeoutException>(
+                "the node owns that actor, and its shutdown timeout is a background failure of the node's");
         }
         finally
         {
