@@ -740,6 +740,55 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
             "replies answered before the Start report Pre-operational and every later one Operational");
     }
 
+    // #357 C-7, consumer side. CiA 301 §7.2.8.3.2.1, Figure 44: "If a response is received with
+    // the same value of the toggle-bit as in the preceding response then the new response is
+    // handled as if it was not received." So a repeated toggle raises no NodeGuardingReceived,
+    // and it does not re-arm the life time either: the timeout comes when the accepted reply's
+    // life time ends, not one life time after the repeat. The life time is 100 ms; the accepted
+    // reply arrives at 60 ms (due at 160 ms), the repeat at 120 ms (would push it to 220 ms). The
+    // reply with the toggle flipped afterwards is the ordering witness for the missing event.
+    [Fact]
+    public async Task A_Guarding_Reply_That_Repeats_The_Toggle_Is_Handled_As_If_It_Was_Not_Received()
+    {
+        const byte Producer = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 1);
+        using var masterBus = Open(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, NodeId, clock);
+        var witness = new ActorWitness(node, masterBus, clock);
+        var replies = new AsyncQueue<NodeGuardingReceivedEventArgs>();
+        var timeouts = new AsyncQueue<NodeGuardingTimeoutEventArgs>();
+        node.NodeGuardingReceived += (_, e) => { if (e.ProducerNodeId == Producer) replies.Add(e); };
+        node.NodeGuardingTimeout += (_, e) => { if (e.ProducerNodeId == Producer) timeouts.Add(e); };
+
+        void Reply(byte value) => masterBus.Transmit(CanFrame.Classic(
+            unchecked((int)CanOpenCobId.Heartbeat(Producer)), new[] { value }, isExtendedFrame: false));
+
+        node.StartNodeGuardingConsumer(Producer, guardTime: TimeSpan.FromMilliseconds(100), lifeTimeFactor: 1);
+        await witness.SettleAsync();
+
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(60));
+        Reply((byte)NmtState.PreOperational);                       // toggle 0: accepted, due at 160 ms
+        var accepted = await replies.NextAsync(ShortTimeout, "guarding reply");
+        accepted.Toggle.Should().BeFalse();
+
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(60));
+        Reply((byte)NmtState.PreOperational);                       // toggle 0 again: not received
+        await witness.SettleAsync();
+        timeouts.Count.Should().Be(0, "at 120 ms the life time of the reply at 60 ms has not elapsed");
+
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(40));
+        timeouts.Count.Should().Be(1,
+            "the repeat did not re-arm the life time: the reply at 60 ms was the last one received, so it ends at 160 ms");
+
+        Reply((byte)(0x80 | (byte)NmtState.PreOperational));       // toggle 1: received
+        var next = await replies.NextAsync(ShortTimeout, "guarding reply");
+        next.Toggle.Should().BeTrue("the reply after the repeat is the next one reported");
+        replies.Count.Should().Be(0, "the repeated toggle raised no NodeGuardingReceived of its own");
+        node.StopNodeGuardingConsumer(Producer);
+    }
+
     // =========================================================================================
     // Helpers.
     // =========================================================================================

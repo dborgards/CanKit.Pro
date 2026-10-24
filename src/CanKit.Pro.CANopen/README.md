@@ -660,8 +660,13 @@ set it is not the peer's node-id, and the per-producer backlog above is keyed on
 
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after
-`guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A boot-up from the
-producer resets the toggle baseline rather than counting as a reply.
+`guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A reply that repeats
+the previous toggle is dropped without an event and does not re-arm the life time, as CiA 301
+§7.2.8.3.2.1 prescribes: "If a response is received with the same value of the toggle-bit as in
+the preceding response then the new response is handled as if it was not received." The
+indication of a producer that stops alternating is therefore `NodeGuardingTimeout`, one life
+time after the last reply received. A boot-up from the producer resets the toggle baseline
+rather than counting as a reply.
 
 **Life guarding (producer side).** With `100Ch` (guard time) and `100Dh` (life time factor)
 both non-zero, the node supervises the master that guards it: guarding starts with the first

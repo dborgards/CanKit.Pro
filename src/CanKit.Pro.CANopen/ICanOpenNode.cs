@@ -147,7 +147,10 @@ public interface ICanOpenNode : IDisposable
 
     /// <summary>Raised whenever a node-guarding response (data frame on <c>0x700 + producer</c>
     /// with the toggle bit in bit 7 and the NMT state in bits 0..6) is received for a
-    /// configured node-guarding consumer (FR-CO-009 / CiA 301 §7.2.8.3.2.1).</summary>
+    /// configured node-guarding consumer (FR-CO-009 / CiA 301 §7.2.8.3.2.1). A response whose
+    /// toggle bit repeats the previous one is "handled as if it was not received"
+    /// (§7.2.8.3.2.1): it raises no event and does not re-arm the life time, so a producer that
+    /// stops alternating is reported through <see cref="NodeGuardingTimeout"/>.</summary>
     event EventHandler<NodeGuardingReceivedEventArgs>? NodeGuardingReceived;
 
     /// <summary>Raised when a configured node-guarding consumer's life-time
