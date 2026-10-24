@@ -611,7 +611,10 @@ internal sealed partial class CanOpenNode
             var rt = _tpdos[n];
             if (rt is null || !rt.Valid) continue;
             byte type = rt.TransmissionType;
-            if (type is >= CanOpenTransmissionType.SynchronousEverySync and <= CanOpenTransmissionType.SynchronousCyclicMax
+            // §7.5.2.37: "The SYNC message of which the counter value equals the SYNC start value
+            // shall be regarded as the first received SYNC message" — for the PDO, whatever its
+            // synchronous type: acyclic (00h), cyclic (01h–F0h) and RTR-only sampling (FCh) alike.
+            if ((CanOpenTransmissionType.IsSynchronous(type) || type == CanOpenTransmissionType.RtrOnlySynchronous)
                 && _syncCounterOverflow > 1 && rt.SyncStartValue != 0 && !rt.SyncStarted)
             {
                 if (counter.GetValueOrDefault() != rt.SyncStartValue) continue;

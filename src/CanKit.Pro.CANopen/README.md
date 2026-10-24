@@ -510,8 +510,10 @@ their own mappability and access flags. The final byte is zero-padded. Native 24
 `ObjectDictionary.AddRaw` and EDS/DCF loading; `ReadRaw`/`WriteRaw` retain their exact widths.
 The existing `ReadUnsigned`/`WriteUnsigned` convenience methods remain U8/U16/U32.
 
-**SYNC counter and start value.** The start gate applies to cyclic TPDO types 1..240;
-acyclic TPDOs (0) and synchronous RTR sampling (252) use each accepted SYNC. `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
+**SYNC counter and start value.** The start gate applies to every synchronous TPDO: acyclic (0),
+cyclic (1..240) and synchronous RTR sampling (252). CiA 301 §7.5.2.37 gives the start value to the
+PDO ("The SYNC message of which the counter value equals the SYNC start value shall be regarded as
+the first received SYNC message") and exempts no transmission type. `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
 one-byte counter that starts at 1 and wraps to 1. Boot-up, leaving NMT Stopped, enabling
 the producer and resuming a zero communication period reset it to 1. Only confirmed sends
 advance it; cancellation, rejection and stale queued ticks retain the value. A late
@@ -520,7 +522,9 @@ is rejected with `0800 0022h`, even with the periodic producer disabled. The con
 uses `1019h` to select DLC but ignores its numeric overflow value; an unexpected length
 is ignored and reports EMCY `8240h`. `SyncReceivedEventArgs.Counter` carries the counter.
 TPDO `1800h:06` = 1..240 waits for that counter after entering Operational; the matching
-SYNC is the **first counted SYNC**, so type 3 with start 5 first transmits on counter 7.
+SYNC is the **first counted SYNC**, so type 3 with start 5 first transmits on counter 7. An
+acyclic TPDO triggered before that SYNC goes out on it, and a type-252 TPDO samples first on it:
+an RTR before then has nothing sampled to answer with and is not answered.
 Start 0, or a disabled counter, preserves ordinary counting. The start value cannot
 change while the PDO is valid. RPDO sub-index 6 remains absent as the specification requires.
 
