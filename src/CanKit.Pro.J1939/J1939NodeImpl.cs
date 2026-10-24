@@ -591,7 +591,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             ArbitraryScanStart = scanStart,
             RequestedAddress = requestedAddress ?? preferredAddress,
         };
-        TransmitAddressClaimConfirmed(sourceAddress: preferredAddress);
+        TransmitAddressClaimConfirmed(sourceAddress: preferredAddress, _pendingClaim);
 
         // The peer's claim may already have been through this loop, before the claim was
         // pending. Their NAME is not lower than ours, so §4.4.3.3 does not have them
@@ -706,10 +706,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         pending.Tcs.TrySetResult(null);
     }
 
-    private void OnClaimAnnounceTxConfirmed(byte preferredAddress)
+    // `round` is the claim whose announcement was sent. Matched by identity, not by address: a
+    // claim that replaced it for the same address -- a ClaimAddressAsync over the automatic move
+    // (J-5), or one after a cancelled claim -- has an announcement of its own, and the replaced
+    // round's confirmation or failure is not its (Codex and Bugbot on #414).
+    private void OnClaimAnnounceTxConfirmed(byte preferredAddress, PendingClaim round)
     {
         var pending = _pendingClaim;
-        if (pending is null || pending.PreferredAddress != preferredAddress) return;
+        if (pending is null || !ReferenceEquals(pending, round)) return;
         if (pending.Tcs.Task.IsCompleted) return;
         if (pending.Deadline is not null) return; // already armed (defensive)
         if ((J1939ClaimState)Volatile.Read(ref _claimStateStore) != J1939ClaimState.Claiming)
@@ -720,7 +724,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             () => OnClaimAnnounceElapsed(preferredAddress));
     }
 
-    private void OnClaimAnnounceTxFailed(byte preferredAddress, Exception error, ClaimEcho? echo,
+    private void OnClaimAnnounceTxFailed(byte preferredAddress, PendingClaim round, Exception error, ClaimEcho? echo,
         bool mayStillEcho)
     {
         // Rejected: the driver never accepted the frame, so nothing will echo and the marker
@@ -730,7 +734,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         ApplyClaimEchoFailure(echo, mayStillEcho);
 
         var pending = _pendingClaim;
-        if (pending is null || pending.PreferredAddress != preferredAddress) return;
+        if (pending is null || !ReferenceEquals(pending, round)) return;
 
         _pendingClaim = null;
         pending.Deadline?.Dispose();
@@ -1039,7 +1043,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// posts success/failure back onto the actor so the arbitration deadline is armed only
     /// after a confirmed TX.
     /// </summary>
-    private void TransmitAddressClaimConfirmed(byte sourceAddress)
+    private void TransmitAddressClaimConfirmed(byte sourceAddress, PendingClaim round)
     {
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
@@ -1053,11 +1057,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
         // address scan is up to 121 of them, the preferred address and the 120 of the field (#58).
-        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, echo);
+        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, round, echo);
     }
 
     private async Task TransmitAddressClaimConfirmedAsync(uint canId, byte[] payload, byte preferred,
-        ClaimEcho? echo)
+        PendingClaim round, ClaimEcho? echo)
     {
         try
         {
@@ -1068,20 +1072,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 var ex = new J1939NodeException(
                     $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
                 var mayEcho = ClaimEchoMayFollow(confirmation.FailureReason);
-                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayEcho)); }
+                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, round, ex, echo, mayEcho)); }
                 catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
                 return;
             }
 
             SettleConfirmedClaimEcho(echo);
-            try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
+            try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred, round)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
         catch (Exception ex)
         {
             // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
             // failures that do this have not put the frame on the wire.
-            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, round, ex, echo, mayStillEcho: false)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
     }

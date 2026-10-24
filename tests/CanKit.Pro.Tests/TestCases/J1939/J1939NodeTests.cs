@@ -1634,6 +1634,61 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         lock (reported) reported.Should().BeEmpty("a move the application replaced did not fail");
     }
 
+    // Codex and Bugbot on #414, a consequence of the replacement above: the move's announcement
+    // may still be waiting for its confirmation when a ClaimAddressAsync for the same address
+    // replaces it, and the confirmation callbacks matched the claim in hand by address only. A
+    // late failure of the move's frame then faulted the caller's claim, and a late success armed
+    // the caller's window before the caller's own announcement was confirmed. Every claim send
+    // after the first is held, and each is settled by hand: settling one runs the node's
+    // continuation on the settling thread, which posts to the actor, so settling the clock after
+    // it proves the actor has handled it.
+    [Theory]
+    [InlineData(false)] // the move's announcement fails late
+    [InlineData(true)]  // the move's announcement is confirmed late
+    public async Task A_Late_Confirmation_Of_A_Replaced_Move_Does_Not_Settle_The_Claim_That_Replaced_It(bool moveConfirmed)
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var inner = new CanBusService(busA);
+        var service = new HeldClaimSendsService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x40;
+        const byte moveCandidate = 0x80;
+
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        await ClaimOnClockAsync(owner, clock, actor, contended, announce); // the first claim send goes through
+
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        await clock.AdvanceAsync(backoff);
+        await service.WaitForHeldAsync(1, ShortTimeout); // the move announces its candidate, unconfirmed
+
+        var claim = owner.ClaimAddressAsync(moveCandidate);
+        await service.WaitForHeldAsync(2, ShortTimeout); // the caller's own announcement, unconfirmed
+
+        service.Settle(0, moveConfirmed);
+        await clock.SettleAsync();
+        claim.IsCompleted.Should().BeFalse("the replaced move's announcement is not the caller's");
+        owner.ClaimState.Should().Be(J1939ClaimState.Claiming);
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "the caller's window opens on the caller's own confirmation, which has not come");
+
+        service.Settle(1, confirmed: true);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        owner.Address.Should().Be(moveCandidate);
+    }
+
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
     // the in-flight guard -- the claim in hand stays registered through the backoff -- and the
     // re-claim completes for its caller.
@@ -6350,6 +6405,82 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         {
             if (frame.IsExtendedFrame && J1939Pgn.IsAddressClaim(J1939Id.Decompose((uint)frame.ID).Pgn))
                 Interlocked.Increment(ref _claimSends);
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
+    }
+
+    /// <summary>
+    /// Forwards the first Address Claim and every Cannot Claim to a real service, and holds every
+    /// later Address Claim -- untransmitted -- until <see cref="Settle"/> settles it as confirmed
+    /// or rejected. Settling completes the send's task on the calling thread, so the node's
+    /// continuation, which posts the outcome to its actor, has run when <see cref="Settle"/> returns.
+    /// </summary>
+    private sealed class HeldClaimSendsService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly List<TaskCompletionSource<TxConfirmation>> _held = new();
+        private int _claims;
+
+        public HeldClaimSendsService(ICanBusService inner) => _inner = inner;
+
+        public async Task WaitForHeldAsync(int count, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (true)
+            {
+                lock (_held) if (_held.Count >= count) return;
+                if (DateTime.UtcNow > deadline) throw new TimeoutException($"Fewer than {count} claim sends were held.");
+                await Task.Delay(1);
+            }
+        }
+
+        public void Settle(int index, bool confirmed)
+        {
+            TaskCompletionSource<TxConfirmation> held;
+            lock (_held) held = _held[index];
+            held.SetResult(new TxConfirmation
+            {
+                Confirmed = confirmed,
+                IsApproximated = true,
+                Timestamp = DateTime.UtcNow,
+                FailureReason = confirmed ? TxConfirmFailureReason.None : TxConfirmFailureReason.Rejected,
+            });
+        }
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (frame.IsExtendedFrame)
+            {
+                var fields = J1939Id.Decompose((uint)frame.ID);
+                if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress != J1939Pgn.NullAddress
+                    && Interlocked.Increment(ref _claims) > 1)
+                {
+                    // Not RunContinuationsAsynchronously: Settle runs the node's continuation.
+                    var held = new TaskCompletionSource<TxConfirmation>();
+                    lock (_held) _held.Add(held);
+                    return held.Task;
+                }
+            }
             return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
         }
 
