@@ -374,10 +374,33 @@ public class SrdoEngineConsumerTests : IDisposable
         _engine.GetState(1).IsValid.Should().BeFalse("SCT decides; the pair was not processed");
         Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
         _host.Emcys.Should().HaveCount(1, "once per run of short frames");
+        _host.EmcyEnded.Should().BeEmpty("the run goes on");
         Frame(0x123, Plain); Frame(0x124, Inverse);
         _engine.GetState(1).IsValid.Should().BeTrue();
+        _host.EmcyEnded.Should().Equal(new[] { 1 }, "the pair that fits ends the error the run reported (#379)");
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _host.EmcyEnded.Should().HaveCount(1, "an error ends once");
         Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
         _host.Emcys.Should().HaveCount(2, "a frame that fits ends the run");
+        OnActor(() => _engine.Rebuild(1));
+        _host.EmcyEnded.Should().Equal(new[] { 1, 1 }, "a rebuild ends the run too");
+    }
+
+    /// <summary>Bugbot on #417: entering Operational re-reads every SRDO without a change of its
+    /// own, so it does not end a run of short pairs — the error goes on until a pair fits, as an
+    /// RPDO's does — and a short pair after it is the same run.</summary>
+    [Fact]
+    public void Entering_Operational_Does_Not_End_A_Run_Of_Short_Pairs()
+    {
+        StartConsumer();
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.Emcys.Should().Equal((ushort)0x8210);
+        OnActor(() => { _engine.LeaveOperational(); _engine.EnterOperational(); });
+        _host.EmcyEnded.Should().BeEmpty();
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.Emcys.Should().HaveCount(1, "the run goes on across the NMT cycle");
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _host.EmcyEnded.Should().Equal(new[] { 1 });
     }
 
     private void RefuseWritesTo(ushort index)

@@ -1403,8 +1403,9 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
         await device.SendEmcyAsync(Witness, 0);
         while (!emcys.Any(m => m.ErrorCode == Witness)) arrived.Take(timeout.Token);
 
-        emcys.Where(m => m.ErrorCode != Witness).Should().HaveCount(2, "the second short frame continues the run the first one reported");
-        emcys.Where(m => m.ErrorCode != Witness).Should().OnlyContain(m => m.ErrorCode == 0x8210);
+        // Each fitting frame ends the run and its error with 0000h (#379).
+        emcys.Where(m => m.ErrorCode != Witness).Select(m => m.ErrorCode).Should().Equal(
+            new ushort[] { 0x8210, 0x0000, 0x8210, 0x0000 }, "the second short frame continues the run the first one reported");
     }
 
     // FR-CO-024 (C13) — with the EMCY switched off (1014h bit 31) a short frame raises nothing, and

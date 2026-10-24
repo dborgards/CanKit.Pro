@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
@@ -148,14 +147,10 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
     {
         if (payload.Length != 8)
         {
-            if (_emcyValid && !rp.ShortFrameReported)
-            {
-                rp.ShortFrameReported = true;
-                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8210, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
-            }
+            RaiseCommunicationError(CommunicationError.PdoLength, rp.PdoIndex, 0x8210);
             return;
         }
-        rp.ShortFrameReported = false;
+        EndCommunicationError(CommunicationError.PdoLength, rp.PdoIndex);
         bool destination = (payload[0] & 0x80) != 0;
         byte node = (byte)(payload[0] & 0x7F);
         if (destination != (rp.MappingKind == (byte)MpdoAddressMode.Destination)) return;
@@ -166,11 +161,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
         {
             if (node != 0 && node != _nodeId) return;
             written = WriteMpdoTarget(index, subindex, payload);
-            if (!written && _emcyValid && !rp.MpdoTargetReported)
-            {
-                rp.MpdoTargetReported = true;
-                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8230, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
-            }
+            if (!written) RaiseCommunicationError(CommunicationError.MpdoTarget, rp.PdoIndex, 0x8230);
         }
         else
         {
@@ -186,7 +177,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
             }
         }
         if (!written) return;
-        rp.MpdoTargetReported = false;
+        EndCommunicationError(CommunicationError.MpdoTarget, rp.PdoIndex);
         RestartRpdoDeadline(rp);
         RaiseRpdoReceived(rp.PdoIndex, rp.CobId, payload);
     }

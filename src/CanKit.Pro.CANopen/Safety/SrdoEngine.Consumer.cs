@@ -153,11 +153,11 @@ internal sealed partial class SrdoEngine
             if (!rt.ShortFrameReported)
             {
                 rt.ShortFrameReported = true;
-                _host.EmitEmcy(0x8210);
+                _host.EmitEmcy(rt.Number, 0x8210);
             }
             return;
         }
-        rt.ShortFrameReported = false;
+        EndShortFrameRun(rt);
         // Data the consumer cannot use is not received, as §8.1.3.1 leaves a short pair
         // unprocessed: a pair a mapped object refused neither validates the SRDO nor restarts the
         // SCT, which runs on from the last pair taken.
