@@ -217,7 +217,10 @@ namespace CanKit.Pro.RawCan
         /// send lock, after any wait for another send's driver call — so a token cancelled up to
         /// that point abandons the send with <see cref="OperationCanceledException"/> and nothing
         /// reaches the driver (#294). A frame the driver has been handed goes out; the CanKit
-        /// 0.5.6 adapters ignore the token inside their transmit.
+        /// 0.5.6 adapters ignore the token inside their transmit. Disposing the service cancels
+        /// an outstanding call the same way, on either path -- while it waits for the echo, or
+        /// while an asynchronous <see cref="ICanBus.TransmitAsync(CanFrame, System.Threading.CancellationToken)"/>
+        /// is still pending -- and it ends in <see cref="OperationCanceledException"/> (#352).
         /// </param>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }

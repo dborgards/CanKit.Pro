@@ -712,6 +712,67 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    // #352 (R-2): the same on the approximated path, for a bus whose TransmitAsync is genuinely
+    // asynchronous. The call returns its task only once the send is parked on the pending
+    // transmit -- everything before that wait runs on this thread -- so Dispose lands on a tracked
+    // send. The timeout is far beyond the hang bound: only Dispose can end the call in time.
+    [Fact]
+    public async Task Disposing_Service_Cancels_An_Approximated_Send_Whose_Transmit_Is_Pending()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        var service = new CanBusService(bus);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x672, new byte[] { 1 }), TimeSpan.FromMinutes(5));
+        service.Dispose();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        send.IsCanceled.Should().BeTrue("a disposal is a cancellation, as on the echo path");
+        (await bus.FirstAsyncTransmitToken.WaitAsync(ShortTimeout)).IsCancellationRequested
+            .Should().BeTrue("the driver is asked to stop the transmit the send abandoned");
+        bus.ReleaseStalledTransmits();
+    }
+
+    // #352 (R-2): Dispose landing after the driver was handed the frame but before the send is
+    // tracked. Arming the timeout is that instant, and the seam disposes the service there. The
+    // send finds the sweep done and ends at once instead of waiting out its timeout.
+    [Fact]
+    public async Task Dispose_Before_A_Pending_Approximated_Send_Is_Tracked_Still_Cancels_It()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        var service = new CanBusService(bus);
+        service.ArmConfirmTimeout = (_, _) => service.Dispose(); // arms nothing: only Dispose ends it
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x673, new byte[] { 1 }), TimeSpan.FromMinutes(5));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        send.IsCanceled.Should().BeTrue();
+        bus.ReleaseStalledTransmits();
+    }
+
+    // #352 (R-2): a send whose timeout had already run out when Dispose reached it reports the
+    // timeout, not a cancellation -- Dispose ends only a wait that is still running. The seam trips
+    // the timeout and then disposes, both before the send is tracked.
+    [Fact]
+    public async Task An_Approximated_Send_That_Timed_Out_Before_Dispose_Reports_The_Timeout()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        var service = new CanBusService(bus);
+        service.ArmConfirmTimeout = (source, _) =>
+        {
+            source.Cancel();
+            service.Dispose();
+        };
+
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x674, new byte[] { 1 }), TimeSpan.FromMinutes(5))
+            .WaitAsync(ShortTimeout);
+
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        bus.ReleaseStalledTransmits();
+    }
+
     // #352 (mutation R-M2): Dispose landing between SendConfirmedAsync's eager disposed check and
     // the pending-send gate. Dispose sets _pendingDisposed under that gate before it sweeps, and the
     // send checks it there before registering, so it is refused instead of registering an entry

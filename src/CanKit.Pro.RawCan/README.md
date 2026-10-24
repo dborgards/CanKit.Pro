@@ -135,7 +135,10 @@ already timed out or been cancelled cannot be told from the next identical send'
 one (#349). The per-call timeout is configurable (FR-RAW-034): it must be positive, and one above
 `int.MaxValue` ms (about 24.8 days, the longest delay the runtime's timer measures) is clamped to
 that bound, so `TimeSpan.MaxValue` waits about 24.8 days. Disposing the
-service cancels any outstanding `SendConfirmedAsync` calls rather than leaving them to time out.
+service cancels any outstanding `SendConfirmedAsync` calls rather than leaving them to time out, on
+both paths: a call waiting for its echo, and a call whose driver transmit is still pending on a
+bus whose `TransmitAsync` completes asynchronously (#352). Either ends in
+`OperationCanceledException`; a frame already handed to the driver may still go out.
 
 The caller's cancellation token is consulted immediately before the driver call — on the echo
 path inside the send lock, so after any wait behind another send's driver call — and a token
