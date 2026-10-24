@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
@@ -84,22 +85,32 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
 " + Var("2001", "0x0005", "7")));
 
     [Fact]
-    public async Task Live_mapping_splits_a_peer_TPDO_and_the_local_dictionary_is_not_written()
+    public Task Live_mapping_splits_a_peer_TPDO_and_the_local_dictionary_is_not_written()
+        => LiveMappingSplitsAPeerTpdoAsync(stallTheServersDelivery: false);
+
+    [Fact]
+    public Task Live_mapping_upload_order_survives_a_delivery_stalled_behind_the_server()
+        => LiveMappingSplitsAPeerTpdoAsync(stallTheServersDelivery: true);
+
+    private static async Task LiveMappingSplitsAPeerTpdoAsync(bool stallTheServersDelivery)
     {
         var session = NewSession();
         using var peerBus = Open(session, 0);
         using var toolBus = Open(session, 1);
+        // On the peer's bus, not a bystander's, and before the peer's node subscribes to it: this
+        // test asserts the order of the uploads (see SdoTap).
+        var uploads = new SdoTap(peerBus, Peer);
         var file = PeerFile();
         using var peer = CanOpen.OpenNode(peerBus, Peer, file);
+        // Right behind the peer's node, so it holds the 1A00:00 delivery in the window #424 raced
+        // through: the peer already has the request, and the tap must already have it too.
+        using var stall = stallTheServersDelivery ? new DeliveryStall(peerBus, Peer, 0x1A00, 0x00) : null;
+        stall?.Watch(uploads);
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ConfigureTpdo(1, new PdoMapping()
             .Add(0x0005, 0x00, 8)
             .Add(0x2001, 0x00, 8));
-
-        // On the peer's bus, not a bystander's: this test asserts the order of the uploads, and
-        // only a participant of the exchange sees them in it (see SdoTap).
-        var uploads = new SdoTap(peerBus, Peer);
         var sink = new ListSink();
         var background = new List<Exception>();
         tool.BackgroundExceptionOccurred += (_, ex) => background.Add(ex);
@@ -144,6 +155,7 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         tool.ObjectDictionary.ContainsIndex(0x2001).Should().BeFalse();
         background.Should().BeEmpty();
 
+        if (stall is not null) stall.Stalled.Should().BeTrue("the stall must have held a delivery for the forced interleaving to exist");
         uploads.Uploads.Should().Equal(
             ((ushort)0x1800, (byte)0x01),
             ((ushort)0x1803, (byte)0x01),
@@ -1374,13 +1386,19 @@ PDOMapping=1
 
     /// <summary>SDO upload initiates addressed to one server, in the order the tapped bus saw them.</summary>
     /// <remarks>
-    /// That is the order they were sent in only on a bus that takes part in the exchange. The
+    /// <para>That is the order they were sent in only on a bus that takes part in the exchange. The
     /// Virtual hub hands one frame to its targets one after another on the sender's thread, with
     /// nothing holding the targets together; between the server's bus and a bystander's the sender
     /// can be preempted, the server answers, and the next request — sent only after that answer —
-    /// reaches the bystander first. On the server's bus the next request cannot arrive before the
-    /// one it was waiting on. Tap that bus for an ordered assertion (#321); a bystander is fine for
-    /// <c>Contain</c>/<c>NotContain</c>.
+    /// reaches the bystander first. Tap the server's bus for an ordered assertion (#321); a
+    /// bystander is fine for <c>Contain</c>/<c>NotContain</c>.</para>
+    /// <para>On the server's bus, too, only if the tap is created before the server's node is
+    /// opened on it (#424). A bus raises <c>FrameObserved</c> to its handlers in subscription order
+    /// on the delivering thread, again with nothing holding them together: subscribed after the
+    /// node, the tap can be preempted after the server has the request and answered it, and the
+    /// next request, delivered on another thread, is recorded first. Subscribed ahead of it, the
+    /// tap records each request before the server can answer it, so before the next one exists.
+    /// <see cref="DeliveryStall"/> forces exactly that preemption.</para>
     /// </remarks>
     private sealed class SdoTap
     {
@@ -1397,7 +1415,11 @@ PDOMapping=1
                 var data = frame.Data.ToArray();
                 if (data.Length < 4 || data[0] != 0x40) return;
                 var index = (ushort)(data[1] | (data[2] << 8));
-                lock (_gate) _uploads.Add((index, data[3]));
+                lock (_gate)
+                {
+                    _uploads.Add((index, data[3]));
+                    Monitor.PulseAll(_gate);
+                }
             };
         }
 
@@ -1408,5 +1430,74 @@ PDOMapping=1
                 lock (_gate) return _uploads.ToArray();
             }
         }
+
+        public int Count
+        {
+            get
+            {
+                lock (_gate) return _uploads.Count;
+            }
+        }
+
+        /// <summary>Blocks until more than <paramref name="count"/> uploads are recorded.</summary>
+        public bool WaitForMoreThan(int count, TimeSpan hangGuard)
+        {
+            lock (_gate)
+            {
+                while (_uploads.Count <= count)
+                {
+                    if (!Monitor.Wait(_gate, hangGuard)) return false;
+                }
+                return true;
+            }
+        }
+    }
+
+    /// <summary>Holds one SDO request's delivery on the thread delivering it -- after the
+    /// handlers subscribed before this one, before those subscribed after it -- until the tap has
+    /// recorded one more request. That forces the interleaving behind #424 instead of waiting for
+    /// the scheduler to produce it: the server, subscribed earlier, has the request and answers it
+    /// while the delivery is held, and the client's next request, delivered on another thread,
+    /// reaches the tap first unless the tap was subscribed ahead of the server.</summary>
+    private sealed class DeliveryStall : IDisposable
+    {
+        private readonly ICanBus _bus;
+        private readonly uint _cobId;
+        private readonly ushort _index;
+        private readonly byte _sub;
+        private SdoTap? _tap;
+        private int _armed = 1;
+
+        public DeliveryStall(ICanBus bus, byte server, ushort index, byte sub)
+        {
+            _bus = bus;
+            _cobId = CanOpenCobId.SdoRx(server);
+            _index = index;
+            _sub = sub;
+            bus.FrameObserved += OnFrame;
+        }
+
+        /// <summary>Whether a delivery was held and then released by a further request reaching
+        /// the tap -- false if the hang guard ran out first, i.e. no interleaving was forced.</summary>
+        public bool Stalled { get; private set; }
+
+        /// <summary>The tap whose next record releases the held delivery. Set apart from the
+        /// constructor so that where this stall subscribes does not depend on where the tap
+        /// does.</summary>
+        public void Watch(SdoTap tap) => Volatile.Write(ref _tap, tap);
+
+        private void OnFrame(object? sender, CanReceiveDataView e)
+        {
+            var frame = e.CanFrame;
+            if (frame.IsExtendedFrame || frame.IsRemoteFrame || (uint)frame.ID != _cobId) return;
+            var data = frame.Data.ToArray();
+            if (data.Length < 4 || data[0] != 0x40) return;
+            if ((ushort)(data[1] | (data[2] << 8)) != _index || data[3] != _sub) return;
+            var tap = Volatile.Read(ref _tap);
+            if (tap is null || Interlocked.Exchange(ref _armed, 0) == 0) return;
+            Stalled = tap.WaitForMoreThan(tap.Count, ShortTimeout);
+        }
+
+        public void Dispose() => _bus.FrameObserved -= OnFrame;
     }
 }
