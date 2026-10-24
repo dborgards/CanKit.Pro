@@ -1595,6 +1595,60 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
     }
 
+    // #357 C-4: an expedited initiate without a size (22h: e = 1, s = 0) is legal — CiA 301
+    // §7.2.4.3.3, Figure 21: "e = 1, s = 0: d contains unspecified number of bytes to be
+    // downloaded". A fixed-width object of 1..4 bytes then takes its own width from the front of
+    // d; refusing 1..3-byte objects with 0607 0012h left a conforming master unable to write an
+    // UNSIGNED8 or UNSIGNED16 that way. The four-byte row was accepted before and stays so.
+    [Theory]
+    [InlineData(OdDataType.Unsigned8, 1)]
+    [InlineData(OdDataType.Integer16, 2)]
+    [InlineData(OdDataType.Unsigned24, 3)]
+    [InlineData(OdDataType.Unsigned32, 4)]
+    public void Sdo_Server_Expedited_Download_Without_A_Size_Takes_The_Width_Of_A_Fixed_Width_Object(OdDataType type, int width)
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddRaw(0x2100, 0x00, type, new byte[width]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { 0x22, 0x00, 0x21, 0x00, 0x11, 0x22, 0x33, 0x44 });
+
+        var ack = tap.Next(ShortTimeout);
+        ack[0].Should().Be(SdoFrames.ScsDownloadInitAck, "the write of a {0}-byte object without a size is accepted", width);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(
+            new byte[] { 0x11, 0x22, 0x33, 0x44 }.Take(width).ToArray(),
+            "the object's width decides how many bytes of d are the value");
+    }
+
+    // The other two sides of C-4: an object without a fixed width has no width to take, so it
+    // gets all four bytes, as before; an object wider than four bytes cannot be carried by an
+    // expedited frame at all and is still refused as too short.
+    [Fact]
+    public void Sdo_Server_Expedited_Download_Without_A_Size_Gives_A_Domain_Four_Bytes_And_Refuses_A_Wider_Object()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[] { 0xFF });
+        var wide = new byte[5];
+        server.ObjectDictionary.AddRaw(0x2101, 0x00, OdDataType.Unsigned40, wide);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { 0x22, 0x00, 0x21, 0x00, 0x11, 0x22, 0x33, 0x44 });
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 });
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { 0x22, 0x01, 0x21, 0x00, 0x11, 0x22, 0x33, 0x44 });
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooLow);
+        server.ObjectDictionary.ReadRaw(0x2101, 0x00).Should().Equal(wide);
+    }
+
     // With no size in the initiate, a fixed-width object can be checked only when the last
     // segment says how long the value is. A domain (no fixed width) is the other side of that
     // check and is covered by the transfers above.

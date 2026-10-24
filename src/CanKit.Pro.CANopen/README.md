@@ -235,6 +235,12 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0800 0020h` | Wrong signature written to `1010h:01` / `1011h:01` |
 | `0800 0022h` | SDO server session open when the node entered Stopped or was reset; `1F82h` written while this node is not the active NMT master |
 
+**Expedited download without a size.** CiA 301 §7.2.4.3.3 permits `e = 1, s = 0` (command byte
+`22h`): "d contains unspecified number of bytes to be downloaded". The server then takes the
+object's own width: a fixed-width object of 1..4 bytes gets the first bytes of `d`, an object
+without a fixed width (a string or a `DOMAIN`) gets all four, and an object wider than four bytes,
+which an expedited frame cannot carry, is refused with `0607 0013h`.
+
 **Read-only by default.** `CanOpenNodeOptions.WritableCommunicationParameters` (default
 `false`) decides whether a master may write the PDO communication and mapping records over SDO.
 Off, the records are `ro` on the bus: the application configures its PDOs through

@@ -2036,9 +2036,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             return;
         }
 
-        // Expedited download (e = 1). s = 0 means all four data bytes are valid.
+        // Expedited download (e = 1). With s = 1, n says how many of the four data bytes are
+        // valid. With s = 0 the frame does not say: "d contains unspecified number of bytes to be
+        // downloaded" (CiA 301 §7.2.4.3.3, Figure 21). The object's own width then decides for a
+        // fixed-width object that fits the frame (1..4 bytes): its first bytes are the value, as a
+        // master writing an UNSIGNED8 with 22h expects. An object without a fixed width takes
+        // all four, and one wider than four cannot be carried expedited and is refused below.
         var payload = SdoFrames.ReadExpeditedPayload(data);
         int required = OdEntryLayout.FixedSize(entry.DataType);
+        if ((cs & 0x01) == 0 && required is >= 1 and < 4)
+            payload = payload.AsSpan(0, required).ToArray();
         if (required > 0 && payload.Length != required)
         {
             var reason = payload.Length > required
