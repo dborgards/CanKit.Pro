@@ -815,7 +815,7 @@ internal sealed partial class CanOpenNode
             // §7.3.2.2.4: "The most recent active EMCY reason may be transmitted after the
             // CANopen device transits into another NMT state."
             _pendingEmcy = null;
-            if (_emcyValid) _ = EmitEmcy(WithCurrentErrorRegister(pending));
+            EmitPendingEmcy(pending);
         }
 
         // A state-change heartbeat is an early heartbeat, so it belongs to the heartbeat protocol
@@ -836,6 +836,7 @@ internal sealed partial class CanOpenNode
     {
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
         _pendingEmcy = null;
+        _pendingEmcyIsApplications = false;
         EndCommunicationErrorsForReset();
         // §7.2.8.3.2.1: "The toggle bit in the guarding protocol shall be reset to 0 when the NMT
         // sub-state reset communication is passed."

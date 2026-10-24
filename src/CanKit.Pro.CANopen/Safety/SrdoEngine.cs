@@ -68,7 +68,11 @@ internal sealed partial class SrdoEngine : IDisposable
 
     /// <summary>Reads record n and brings its runtime in line: configuration validity
     /// (§9.5 last rule), direction, times, ids and mapping. Re-arms when Operational.</summary>
-    public void Rebuild(int srdoNumber)
+    public void Rebuild(int srdoNumber) => Rebuild(srdoNumber, reconfigured: true);
+
+    // reconfigured: a record was written, which ends a run of short pairs. Entering Operational
+    // re-reads every SRDO without a change of its own, and the run goes on (#379, as an RPDO's).
+    private void Rebuild(int srdoNumber, bool reconfigured)
     {
         CheckRange(srdoNumber);
         if (_disposed) return;
@@ -90,7 +94,7 @@ internal sealed partial class SrdoEngine : IDisposable
         rt.TotalBytes = 0;
         foreach (var e in rt.Mapping) rt.TotalBytes += e.ByteLength;
         rt.ConfigurationValid = rt.Direction != SrdoDirection.None && SrdoRecords.IsConfigurationValid(_od, srdoNumber);
-        EndShortFrameRun(rt);
+        if (reconfigured) EndShortFrameRun(rt);
         if (_operational) Arm(rt);
         else SetInvalid(rt, rt.Direction == SrdoDirection.None ? null : SrdoInvalidReason.NotOperational);
     }
@@ -101,7 +105,7 @@ internal sealed partial class SrdoEngine : IDisposable
     {
         if (_disposed) return;
         _operational = true;
-        for (int n = 1; n <= SrdoCount; n++) Rebuild(n);
+        for (int n = 1; n <= SrdoCount; n++) Rebuild(n, reconfigured: false);
     }
 
     /// <summary>Cycles stop, deadlines go, every existing SRDO is NotOperational.</summary>

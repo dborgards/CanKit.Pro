@@ -495,16 +495,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             if (!_emcyValid)
                 throw new InvalidOperationException("EMCY is disabled: bit 31 of 1014h (COB-ID EMCY) is set.");
-            // The application's part of 1001h; the node adds its communication errors (#379).
-            _applicationErrorRegister = errorRegister;
             if (_state == NmtState.Stopped)
             {
                 // §7.3.2.2.4: EMCY triggered in Stopped is pending; the most recent one goes out
                 // after the transition into another NMT state.
                 _pendingEmcy = msg;
+                _pendingEmcyIsApplications = true;
                 return Task.CompletedTask;
             }
-            return EmitEmcy(WithCurrentErrorRegister(msg), cancellationToken);
+            // errorRegister is the application's part of 1001h; the node adds its communication
+            // errors, and takes the application's part only when this EMCY is transmitted (#379).
+            return EmitEmcy(WithCurrentErrorRegister(msg, errorRegister), cancellationToken, errorRegister);
         }).Unwrap();
     }
 
@@ -560,7 +561,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         return link;
     }
 
-    private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default)
+    private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
+        byte? applicationErrorRegister = null)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
@@ -573,6 +575,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
+            if (applicationErrorRegister is { } application) _applicationErrorRegister = application;
             _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
             return SendControlFrame(cobId, frame, cancellationToken);
         };

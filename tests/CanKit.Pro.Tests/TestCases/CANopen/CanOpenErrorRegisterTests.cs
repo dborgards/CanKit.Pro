@@ -275,4 +275,47 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(wire, 3, ErrorReset, 0x00);
         wire.Count(EmcyId).Should().Be(3);
     }
+
+    // Bugbot on #417: a held 0000h that is discarded because the EMCY was switched off in Stopped
+    // still takes the ended error out of 1001h.
+    [Fact]
+    public async Task A_Held_Error_Reset_Discarded_With_The_Emcy_Off_Still_Clears_The_Register()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        await Inject(device, Rpdo1, 0x01);
+        await ExpectEmcyAsync(wire, 1, 0x8210, Communication);
+
+        wire.SendNmt(NmtCommand.Stop, Device);
+        await WaitForStateAsync(device, NmtState.Stopped);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0, 16).Add(0x2001, 0, 16)); // 0000h held
+        var od = device.ObjectDictionary;
+        od.WriteUnsigned(0x1014, 0, EmcyId | CanOpenCobId.InvalidBit);
+        Settle(device);
+        await StartAsync(wire, device);
+        await WaitForErrorRegisterAsync(device, 0x00);
+        od.WriteUnsigned(0x1014, 0, EmcyId);
+        Settle(device);
+        await device.SendEmcyAsync(0xFF00, 0x00);
+        await ExpectEmcyAsync(wire, 2, 0xFF00, 0x00);
+    }
+
+    // Codex on #417: the application's part of the register is the one its last transmitted EMCY
+    // carried. A call cancelled before it is transmitted changes nothing.
+    [Fact]
+    public async Task A_Cancelled_Application_Emcy_Leaves_The_Applications_Bits()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        await device.SendEmcyAsync(0xFF00, 0x81);
+        await ExpectEmcyAsync(wire, 1, 0xFF00, 0x81);
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => device.SendEmcyAsync(0xFF01, 0x00, cancellationToken: cancelled.Token));
+        await Inject(device, Rpdo1, 0x01);
+        await ExpectEmcyAsync(wire, 2, 0x8210, 0x91);
+        device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x91u);
+    }
 }
