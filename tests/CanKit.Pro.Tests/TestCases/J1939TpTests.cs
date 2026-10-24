@@ -777,8 +777,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var service = new HeldConfirmationBusService(new CanBusService(bus));
         using var sender = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
             ownsService: false, actor);
-        var background = new List<Exception>();
-        sender.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+        var background = new BackgroundReports();
+        sender.BackgroundExceptionOccurred += background.Add;
         const byte peerSa = 0x20;
         const uint cancelledPgn = 0xFEC3u, nextPgn = 0xFEC4u;
 
@@ -796,10 +796,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         handed.Skip(1).Select(d => (d[0], J1939TpFrames.ReadDataPgn(d))).Should().Equal(
             (J1939TpFrames.ControlAbort, cancelledPgn),
             (J1939TpFrames.ControlRts, nextPgn));
-        // The failed RTS belongs to no send any more: it is reported where background faults go.
-        lock (background)
-            background.Should().ContainSingle().Which.Should().BeOfType(
-                throws ? typeof(InvalidOperationException) : typeof(J1939TpSendRejectedException));
+        // The failed RTS belongs to no send any more: it is reported where background faults go,
+        // on the thread pool (#356, T-2), so awaited; then nothing else came before it.
+        var expected = throws ? typeof(InvalidOperationException) : typeof(J1939TpSendRejectedException);
+        await background.WaitForAsync(ex => ex.GetType() == expected);
+        background.Seen.Should().ContainSingle();
     }
 
     // A channel disposed while a cancelled send's abort still waits for its RTS sends none, as no

@@ -553,12 +553,13 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
         Tighten(rig.Node);
         var signals = Record(rig.Node);
-        var failures = new List<Exception>();
-        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (failures) failures.Add(e); };
+        var failures = new BackgroundReports();
+        rig.Node.BackgroundExceptionOccurred += failures.Add;
         rig.Node.StartFlyingMaster(0, Heartbeat);
         await UntilAsync(rig.Clock, rig.Witness, null, () => Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid), 2000, "the verification failed");
         signals.Should().Contain((FlyingMasterSignal.SlaveSafetyConfigurationInvalid, (byte?)Slave));
-        lock (failures) failures.Should().Contain(e => e is SdoAbortException, "the abort is reported, not swallowed");
+        // The abort is reported, not swallowed; on the thread pool (#356, T-2), so awaited.
+        await failures.WaitForAsync(e => e is SdoAbortException);
         slave.State.Should().NotBe(NmtState.Operational);
     }
 

@@ -35,8 +35,8 @@ public class CanOpenSdoClientSendFailureTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-send-fail-{Guid.NewGuid():N}");
         using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
-        var reported = new ConcurrentQueue<Exception>();
-        client.BackgroundExceptionOccurred += (_, ex) => reported.Enqueue(ex);
+        var reported = new BackgroundReports();
+        client.BackgroundExceptionOccurred += reported.Add;
         bus.AcceptTransmit = false;
 
         Func<Task> act = transfer switch
@@ -48,7 +48,7 @@ public class CanOpenSdoClientSendFailureTests
 
         await FluentActions.Awaiting(() => act().WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<CanOpenTransportException>();
-        reported.Should().Contain(ex => ex is CanOpenTransportException);
+        await reported.WaitForAsync(ex => ex is CanOpenTransportException);
     }
 
     public static TheoryData<string> BlockDownloadEndings => new() { "the server aborts", "the caller cancels" };
@@ -215,8 +215,8 @@ public class CanOpenSdoClientSendFailureTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-send-throws-{Guid.NewGuid():N}");
         using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
-        var reported = new ConcurrentQueue<Exception>();
-        client.BackgroundExceptionOccurred += (_, ex) => reported.Enqueue(ex);
+        var reported = new BackgroundReports();
+        client.BackgroundExceptionOccurred += reported.Add;
         bus.OnTransmitting = frame =>
         {
             if ((uint)frame.ID == CanOpenCobId.SdoRx(0x11)) throw new InvalidOperationException("adapter fault");
@@ -225,8 +225,8 @@ public class CanOpenSdoClientSendFailureTests
         var failure = (await FluentActions.Awaiting(() => client.SdoUploadAsync(0x11, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<CanOpenTransportException>()).Which;
         failure.InnerException.Should().BeOfType<InvalidOperationException>();
-        // Raised before the transfer is failed: the event carries that same failure.
-        reported.Should().Contain(failure);
+        // The event carries that same failure; delivered on the thread pool, so awaited (#356, T-2).
+        await reported.WaitForAsync(ex => ReferenceEquals(ex, failure));
     }
 
     [Fact]
@@ -283,8 +283,8 @@ public class CanOpenSdoClientSendFailureTests
         using var service = new CanBusService(bus);
         using var client = CanOpen.OpenNode(service, 0x7F,
             new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
-        var reported = new ConcurrentQueue<Exception>();
-        client.BackgroundExceptionOccurred += (_, ex) => reported.Enqueue(ex);
+        var reported = new BackgroundReports();
+        client.BackgroundExceptionOccurred += reported.Add;
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
 
@@ -294,8 +294,9 @@ public class CanOpenSdoClientSendFailureTests
 
         var failure = (await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<CanOpenTransportException>()).Which;
-        // Raised before the transfer is failed, so it is there by now.
-        reported.Should().Contain(failure, "the outage is reported on the background event as well");
+        // The outage is reported on the background event as well; delivered on the thread pool,
+        // so awaited (#356, T-2).
+        await reported.WaitForAsync(ex => ReferenceEquals(ex, failure));
     }
 
     [Fact]

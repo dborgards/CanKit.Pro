@@ -4223,14 +4223,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             lock (channels) channels.Add(channel);
             return channel;
         });
-        var reported = new List<Exception>();
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var reported = new BackgroundReports();
+        node.BackgroundExceptionOccurred += reported.Add;
 
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
         Volatile.Write(ref failNextOpen, 1);
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
 
-        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the channel could not be opened");
+        // Delivered on the thread pool (#356, T-2): awaited, then nothing else came before it.
+        await reported.WaitForAsync(ex => ex.Message == "the channel could not be opened");
+        reported.Seen.Should().ContainSingle();
         node.ClaimState.Should().Be(J1939ClaimState.Claimed);
         lock (channels)
         {
@@ -4424,12 +4426,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
         var failure = new InvalidOperationException("the channel would not close");
         lock (channels) channels.Last().DisposeFailure = failure;
-        var reported = new List<Exception>();
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var reported = new BackgroundReports();
+        node.BackgroundExceptionOccurred += reported.Add;
 
         await node.ClaimAddressAsync(0x32).WithTimeout(ShortTimeout);
 
-        lock (reported) reported.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        // Delivered on the thread pool (#356, T-2): awaited, then nothing else came before it.
+        await reported.WaitForAsync(ex => ReferenceEquals(ex, failure));
+        reported.Seen.Should().ContainSingle();
         lock (channels) channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0xFE, 0x32 },
             "the failed disposal did not stop the rebinds the re-claim makes");
         node.Address.Should().Be((byte)0x32);

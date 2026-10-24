@@ -998,8 +998,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var bus = OpenClassic(session, 0);
         using var service = new CanBusService(bus);
         using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
-        var reported = new List<Exception>();
-        channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var reported = new BackgroundReports();
+        channel.BackgroundExceptionOccurred += reported.Add;
 
         var first = channel.ReceiveAsync();
         var second = channel.ReceiveAsync();
@@ -1018,7 +1018,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // And a receive after the loss ends at once with the same reason instead of waiting.
         Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
         await next.Should().ThrowAsync<ObjectDisposedException>();
-        lock (reported) reported.Should().ContainSingle().Which.Should().BeOfType<ObjectDisposedException>();
+        // Delivered on the thread pool (#356, T-2): awaited, then nothing else came before it.
+        await reported.WaitForAsync(ex => ex is ObjectDisposedException);
+        reported.Seen.Should().ContainSingle();
     }
 
     // A PDU that had already arrived is not lost with the service: it stays readable, and the

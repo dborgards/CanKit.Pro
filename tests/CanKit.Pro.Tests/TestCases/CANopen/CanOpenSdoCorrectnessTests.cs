@@ -1447,8 +1447,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(client, 0x02);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
-        var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
-        client.BackgroundExceptionOccurred += (_, e) => reports.Enqueue(e);
+        var reports = new BackgroundReports();
+        client.BackgroundExceptionOccurred += reports.Add;
 
         var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
         tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
@@ -1458,8 +1458,10 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: true, new byte[] { 1, 2, 3 }));
 
         (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(1, 2, 3);
-        reports.Should().ContainSingle().Which.Should().BeOfType<CanOpenTransportException>()
-            .Which.Message.Should().Contain("announced 20").And.Contain("delivered 3");
+        // Delivered on the thread pool (#356, T-2): awaited, then nothing else came before it.
+        (await reports.WaitForAsync(e => e is CanOpenTransportException)).Message.Should()
+            .Contain("announced 20").And.Contain("delivered 3");
+        reports.Seen.Should().ContainSingle();
     }
 
     [Fact]
