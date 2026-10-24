@@ -17,10 +17,12 @@ namespace CanKit.Pro.J1939;
 /// destination.
 /// </para>
 /// <para>
-/// <see cref="DestinationAddress"/> is significant only when the PGN's PF byte is a PDU1
-/// (peer-to-peer) value (&lt; 240). For PDU2 (broadcast-only) PGNs the destination is always
-/// <see cref="CanKit.Pro.Addressing.J1939Pgn.GlobalAddress"/> (0xFF) regardless of what is
-/// passed here.
+/// <see cref="DestinationAddress"/> is written into the identifier only for a PDU1
+/// (peer-to-peer) PGN, whose PF byte is &lt; 240. A PDU2 PGN's PS byte is its group extension,
+/// so a single frame of one goes out with no destination at all, whatever is passed here. A
+/// payload over 8 bytes is routed by <see cref="DestinationAddress"/> for either format:
+/// <see cref="CanKit.Pro.Addressing.J1939Pgn.GlobalAddress"/> (0xFF) sends a TP.BAM, any other
+/// value a TP.CM session to that address.
 /// </para>
 /// </remarks>
 public readonly struct J1939Message : IEquatable<J1939Message>
@@ -36,8 +38,9 @@ public readonly struct J1939Message : IEquatable<J1939Message>
     /// <param name="sourceAddress">Node's own source address. For inbound messages, this is the
     /// remote sender's SA; for outbound sends, the node fills this in from its own claimed
     /// address, so any value passed here is ignored.</param>
-    /// <param name="destinationAddress">Destination address for PDU1 PGNs; ignored for PDU2
-    /// PGNs (always 0xFF on the wire). Defaults to
+    /// <param name="destinationAddress">Destination address: in the identifier of a PDU1 PGN;
+    /// for a PDU2 PGN used only to route a payload over 8 bytes (a TP.CM session to that
+    /// address instead of a TP.BAM). Defaults to
     /// <see cref="CanKit.Pro.Addressing.J1939Pgn.GlobalAddress"/> (0xFF).</param>
     public J1939Message(uint pgn, ReadOnlyMemory<byte> payload, byte priority = 6,
         byte sourceAddress = 0xFE, byte destinationAddress = 0xFF)
@@ -72,7 +75,9 @@ public readonly struct J1939Message : IEquatable<J1939Message>
     /// <summary>Source address (the sender's claimed address).</summary>
     public byte SourceAddress { get; }
 
-    /// <summary>Destination address for PDU1 PGNs, or 0xFF for PDU2/broadcast.</summary>
+    /// <summary>Destination address. Inbound: the PDU1 destination, or a reassembled transfer's
+    /// (0xFF for a TP.BAM); 0xFF for a PDU2 single frame. Outbound: see the remarks on the
+    /// type.</summary>
     public byte DestinationAddress { get; }
 
     /// <summary>True when the wire transport was TP (<see cref="Payload"/> length &gt; 8).</summary>

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.IsoTp;
+using CanKit.Pro.Uds;
 
 namespace CanKit.Pro.Tests.TestCases.Uds;
 
@@ -119,8 +120,12 @@ public sealed class SimulatedUdsEcu : IDisposable
                     if (pdu.Length == 0) continue;
 
                     Volatile.Write(ref _lastRequest, pdu);
-                    byte sid = (byte)(pdu[0] & 0x7F); // Strip suppressPositiveResponse bit for lookup.
-                    bool suppressPositive = (pdu[0] == 0x3E) && pdu.Length >= 2 && (pdu[1] & 0x80) != 0;
+                    // The SID as sent: masking bit 7 looked 0x83..0x87 up as 0x03..0x07. The
+                    // suppressPosRspMsgIndication bit is the sub-function's, on every service that
+                    // has one -- a conformant server stays silent on a positive answer to any of
+                    // them, not to TesterPresent only, and may still send a negative one (#354).
+                    byte sid = pdu[0];
+                    bool suppressPositive = UdsResponseEcho.HasSubFunction(sid) && pdu.Length >= 2 && (pdu[1] & 0x80) != 0;
 
                     if (!_handlers.TryGetValue(sid, out var handler))
                     {
@@ -284,8 +289,6 @@ public sealed class EcuResponsePending : Exception
     }
 }
 
-/// <summary>Sentinel thrown by an ECU handler to force N × NRC 0x78 and then go completely
-/// silent — the client's restarted P2* timer must expire (FR-UDS-008).</summary>
 /// <summary>Send N × NRC 0x78, then a negative response: the final answer is negative (#150).</summary>
 public sealed class EcuResponsePendingThenNegative : Exception
 {
@@ -311,6 +314,8 @@ public sealed class EcuResponsePendingThenNegative : Exception
     }
 }
 
+/// <summary>Sentinel thrown by an ECU handler to force N × NRC 0x78 and then go completely
+/// silent — the client's restarted P2* timer must expire (FR-UDS-008).</summary>
 public sealed class EcuResponsePendingThenSilent : Exception
 {
     /// <summary>How many NRC 0x78 frames to send before going silent.</summary>

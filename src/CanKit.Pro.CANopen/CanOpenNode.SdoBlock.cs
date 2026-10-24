@@ -366,6 +366,9 @@ internal sealed partial class CanOpenNode
                     }
                     session.CrcActive = session.LocalCrcSupported && SdoBlockFrames.ReadCrcSupportedBit(cs);
                     session.DeclaredTotalSize = declared;
+                    // s = 1 with a size of 0 announces an empty value; only s = 0 leaves the
+                    // length open (as the classic client decides since 124130a, #357 C-5).
+                    session.SizeIndicated = (cs & 0x02) != 0;
                     session.Payload = declared > 0 ? new byte[declared] : Array.Empty<byte>();
                     session.Offset = 0;
                     session.NextExpectedSeq = 1;
@@ -402,7 +405,7 @@ internal sealed partial class CanOpenNode
                         session.Offset -= n;
                     }
 
-                    if (session.DeclaredTotalSize > 0 && session.Offset != session.DeclaredTotalSize)
+                    if (session.SizeIndicated && session.Offset != session.DeclaredTotalSize)
                     {
                         AbortBlockClient(session,
                             session.Offset > session.DeclaredTotalSize
@@ -711,18 +714,11 @@ internal sealed partial class CanOpenNode
         // Block upload start (0xA3), sub-block ack (0xA2), end response (0xA1). Each is taken in
         // its own phase only: a start repeated once the sub-block is out used to re-run the
         // sender and reset the phase, so after the end frame the end response no longer matched
-        // and the session only ended in its timeout (#341). CiA 301 defines no repeat of the
-        // start -- a sub-block is re-requested through the ack's ackseq -- so outside its phase
-        // it is a command specifier the open session does not expect, and the session is
-        // aborted with 0504 0001h as the client side aborts its own (AbortBlockClient in the
-        // phase handlers' default arms). Not left to the classic server's abort: a 0xA3 frame
-        // carries no multiplexer, so that abort would name 0000:00 -- not this transfer, in the
-        // eyes of a client that matches aborts by object -- and the session would stay in the
-        // slot until its timeout aborted it a second time.
-        if (cs == SdoBlockFrames.CcsBlockUploadStart && _sdoBlockServer is { InDownload: false } up)
+        // and the session only ended in its timeout (#341).
+        if (cs == SdoBlockFrames.CcsBlockUploadStart
+            && _sdoBlockServer is { InDownload: false, Phase: SdoBlockServerPhase.AwaitStart } up)
         {
-            if (up.Phase == SdoBlockServerPhase.AwaitStart) HandleBlockUploadServerStart(up);
-            else AbortBlockServer(up, SdoAbortCode.CommandSpecifierInvalid);
+            HandleBlockUploadServerStart(up);
             return true;
         }
         if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck
@@ -738,8 +734,33 @@ internal sealed partial class CanOpenNode
             upEndResp.Deadline?.Dispose();
             return true;
         }
+        // Any other block follow-up frame while a block session is open -- a start, ack or end
+        // response outside its phase, or one of them during a block download, or a download end
+        // during an upload -- is a command specifier the open session does not expect. CiA 301
+        // defines no repeat of the start (a sub-block is re-requested through the ack's ackseq),
+        // so the session is aborted with 0504 0001h, as the client side aborts its own
+        // (AbortBlockClient in the phase handlers' default arms). Not left to the classic
+        // server: these frames carry no multiplexer, so its abort could only name 0000:00 --
+        // not this transfer, in the eyes of a client that matches aborts by object -- and the
+        // session would stay in the slot until its timeout aborted it a second time (#341, #378).
+        if (_sdoBlockServer is { } open && IsBlockFollowUpSpecifier(cs))
+        {
+            AbortBlockServer(open, SdoAbortCode.CommandSpecifierInvalid);
+            return true;
+        }
         return false;
     }
+
+    /// <summary>
+    /// A client-to-server block-transfer frame that belongs to a session already open: the upload
+    /// start (0xA3), the upload sub-block ack (0xA2), the upload end response (0xA1), and the
+    /// download end (ccs = 6, cs = 1, with n in bits 2..4).
+    /// </summary>
+    private static bool IsBlockFollowUpSpecifier(byte cs) =>
+        cs is SdoBlockFrames.CcsBlockUploadStart
+            or SdoBlockFrames.CcsBlockUploadSubBlockAck
+            or SdoBlockFrames.CcsBlockUploadEndResponse
+        || (cs & 0xE3) == CcsBlockDownloadEndMask;
 
     private void HandleBlockDownloadServerInit(byte[] data, byte cs)
     {
@@ -1036,8 +1057,13 @@ internal sealed partial class CanOpenNode
         var (ackseq, nextBlkSize) = SdoBlockFrames.ReadSubBlockAck(data);
         // ackseq counts cumulatively from the start of the current sub-block
         // (CiA 301 §7.2.4.3.15). More than sent is a protocol violation; less asks for
-        // retransmission from ackseq + 1 with the original seqnos.
-        if (ackseq > session.SubBlockLastSeqno)
+        // retransmission from ackseq + 1 with the original seqnos. "Sent" is what the batch has
+        // handed to the bus, not what it was given: an ack that arrives while the batch is
+        // still going cannot confirm a segment that never left (Codex on #392), and taking it
+        // would stop the batch and move on past data the client was never sent.
+        int handedOver;
+        lock (session.SendGate) handedOver = session.HighestSeqnoHandedOver;
+        if (ackseq > handedOver)
         {
             _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
                 SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)SdoAbortCode.General));
@@ -1101,6 +1127,7 @@ internal sealed partial class CanOpenNode
         if (session.ResumeSeqno == 1)
             session.SubBlockStartOffset = session.Offset;
         var seqno = session.ResumeSeqno;
+        byte firstSeqno = seqno;
         if (session.Buffer.Length == 0)
         {
             // An empty object still needs its one segment: the block encoding carries zero data
@@ -1141,8 +1168,33 @@ internal sealed partial class CanOpenNode
         // sending task, which is why the field is volatile. The segments still to go would
         // otherwise reach a client that has no session for them any more: a client that aborts
         // and starts its next transfer at once sees them interleaved with that transfer's frames.
+        //
+        // The slot cannot tell this batch from the session's next one, though: a partial ack
+        // that arrives while the batch is still going starts the retransmission as a second
+        // batch for the same session (#378). So the batch also stops once the session has sent
+        // anything newer, as the block client's LatestSendId decides which of its sends still
+        // counts (#197). Each frame it lets go is recorded as handed over first, under the same
+        // gate as the generation, so an ack -- which can only answer a frame that left -- is
+        // judged against what was actually sent (HandleBlockUploadServerSubBlockAck).
+        int generation;
+        lock (session.SendGate)
+        {
+            generation = ++session.SendGeneration;
+            if (firstSeqno == 1) session.HighestSeqnoHandedOver = 0;
+        }
+        int next = firstSeqno;
         _ = SendOrderedControlFrames(onSendCompleted: null,
-            shouldStop: () => !ReferenceEquals(_sdoBlockServer, session), frames.ToArray());
+            shouldStop: () =>
+            {
+                lock (session.SendGate)
+                {
+                    if (!ReferenceEquals(_sdoBlockServer, session) || session.SendGeneration != generation)
+                        return true;
+                    session.HighestSeqnoHandedOver = Math.Max(session.HighestSeqnoHandedOver, next++);
+                    return false;
+                }
+            },
+            frames.ToArray());
     }
 
     private void SendBlockUploadEnd(SdoBlockServerSession session)
@@ -1231,7 +1283,25 @@ internal sealed partial class CanOpenNode
     // Session state objects (private nested).
     // =========================================================================================
 
-    private enum SdoBlockClientPhase
+    /// <summary>
+    /// Test seam: hands <paramref name="data"/> to the incoming path as an SDO response from
+    /// <paramref name="serverNodeId"/>, in one actor turn with the open block client session set
+    /// to <paramref name="phase"/> and set back afterwards. A block client never sits in some of
+    /// its phases across a bus frame, so a frame cannot be made to meet them from the wire.
+    /// Compile-time bound, so a rename breaks the build rather than turning the tests that use
+    /// it into reflection failures (#357).
+    /// </summary>
+    internal Task DeliverBlockClientResponseInPhaseForTests(byte serverNodeId, SdoBlockClientPhase phase, byte[] data)
+        => _actor.PostAsync(() =>
+        {
+            var session = _sdoBlockClients[serverNodeId];
+            var restore = session.Phase;
+            session.Phase = phase;
+            HandleIncoming(CanOpenCobId.SdoTx(serverNodeId), data, isRtr: false);
+            session.Phase = restore;
+        });
+
+    internal enum SdoBlockClientPhase
     {
         AwaitInitResponse = 0,
         SendingSegments = 1,
@@ -1308,6 +1378,8 @@ internal sealed partial class CanOpenNode
         public byte LocalBlockSize = 127;
         public byte NextExpectedSeq = 1;
         public uint DeclaredTotalSize;
+        // The initiate response set s: DeclaredTotalSize is a length, zero included.
+        public bool SizeIndicated;
         // A segment of the current sub-block was lost or reordered: the rest of the sub-block
         // is ignored and its one confirm carries the last good seqno (#39, CiA 301 §7.2.4.3.14).
         public bool SubBlockDamaged;
@@ -1351,5 +1423,17 @@ internal sealed partial class CanOpenNode
         public byte ResumeSeqno { get; set; } = 1;
         public byte SubBlockLastSeqno { get; set; }
         public int Retransmissions { get; set; }
+
+        /// <summary>Guards <see cref="SendGeneration"/> and <see cref="HighestSeqnoHandedOver"/>,
+        /// written on the actor and on the batch's sending task.</summary>
+        public readonly object SendGate = new();
+
+        /// <summary>Numbers the upload server's sub-block batches; a batch stops once a newer one
+        /// exists (#378).</summary>
+        public int SendGeneration;
+
+        /// <summary>The highest seqno of the current sub-block a batch has handed to the bus; an
+        /// ack cannot confirm more.</summary>
+        public int HighestSeqnoHandedOver;
     }
 }

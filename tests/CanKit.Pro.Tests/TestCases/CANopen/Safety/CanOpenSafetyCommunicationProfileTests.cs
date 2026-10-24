@@ -25,8 +25,15 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
-    private static ICanOpenNode OpenDevice(ICanBus bus, int srdoCount = 2, byte nodeId = Device)
-        => CanOpen.OpenNode(bus, nodeId, new CanOpenNodeOptions { SrdoCount = srdoCount, WritableCommunicationParameters = true });
+    /// <summary>EN 50325-5:2010 Table 5 (#289): SRDO 1 of a node-id 1..64 exists at power-on, so
+    /// the rules below that start from "no SRDO" first delete it, as the norm's tool does
+    /// before it changes a mapping (OBE-12430). <paramref name="keepDefaults"/> leaves it.</summary>
+    private static ICanOpenNode OpenDevice(ICanBus bus, int srdoCount = 2, byte nodeId = Device, bool keepDefaults = false)
+    {
+        var node = CanOpen.OpenNode(bus, nodeId, new CanOpenNodeOptions { SrdoCount = srdoCount, WritableCommunicationParameters = true });
+        if (!keepDefaults && node.ObjectDictionary.ReadUnsigned(0x1301, 1) != 0) node.ObjectDictionary.WriteUnsigned(0x1301, 1, 0);
+        return node;
+    }
 
     private static SdoAbortCode Rejected(Action write)
     {
@@ -68,11 +75,12 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
     {
         var session = VirtualAdapterFixture.NewSession("co-safety-od");
         using var bus = Open(session, 1);
-        using var node = OpenDevice(bus, srdoCount: 2);
+        using var node = OpenDevice(bus, srdoCount: 2, keepDefaults: true);
         var od = node.ObjectDictionary;
         od.ReadUnsigned(0x1300, 0).Should().Be(0u);
         od.ReadUnsigned(0x1301, 0).Should().Be(6u);
-        od.ReadUnsigned(0x1301, 1).Should().Be(0u, "not valid until configured");
+        od.ReadUnsigned(0x1301, 1).Should().Be(1u, "Table 5: node-id 1..32 produces SRDO 1");
+        od.ReadUnsigned(0x1302, 1).Should().Be(0u, "1302h to 1340h: 00h");
         od.ReadUnsigned(0x1301, 2).Should().Be(25u);
         od.ReadUnsigned(0x1301, 3).Should().Be(20u);
         od.ReadUnsigned(0x1301, 4).Should().Be(254u);
@@ -88,6 +96,24 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.ReadUnsigned(0x13FF, 2).Should().Be(0u);
         od.ContainsIndex(0x1303).Should().BeFalse();
         od.ContainsIndex(0x1383).Should().BeFalse();
+    }
+
+    /// <summary>EN 50325-5:2010 Table 5, 1301h:01: node-id 1..32 produces, 33..64 consumes,
+    /// 65..127 has no SRDO 1 (#289). The boundaries are the ones a wrong comparison moves.</summary>
+    [Theory]
+    [InlineData(1, 1u)]
+    [InlineData(32, 1u)]
+    [InlineData(33, 2u)]
+    [InlineData(64, 2u)]
+    [InlineData(65, 0u)]
+    [InlineData(127, 0u)]
+    public void The_Default_Direction_Of_Srdo_1_Follows_The_Node_Id(byte nodeId, uint direction)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus, srdoCount: 2, nodeId: nodeId, keepDefaults: true);
+        node.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(direction);
+        node.ObjectDictionary.ReadUnsigned(0x1302, 1).Should().Be(0u);
     }
 
     [Fact]
@@ -313,7 +339,7 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         SendNmt(master, NmtCommand.ResetCommunication, Device);
         await WaitForStateAsync(node, NmtState.PreOperational);
 
-        od.ReadUnsigned(0x1301, 1).Should().Be(0u, "the factory default: no SRDO");
+        od.ReadUnsigned(0x1301, 1).Should().Be(1u, "the factory default of node-id 0x11: SRDO 1 produces (Table 5)");
         od.ReadUnsigned(0x1301, 2).Should().Be(25u);
         od.ReadUnsigned(0x1381, 0).Should().Be(0u);
         od.ReadUnsigned(0x13FF, 1).Should().Be(0u);

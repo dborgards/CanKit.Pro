@@ -9,9 +9,11 @@ namespace CanKit.Pro.CANopen.Sdo;
 /// <see cref="SdoBlockFrames"/>.
 /// </summary>
 /// <remarks>
-/// All frames are exactly eight bytes on the wire (per the SDO spec). Frames shorter than eight
-/// bytes on the wire are still accepted on decode as long as they contain the fields the current
-/// state machine needs — this matches what real ECUs sometimes emit under DLC padding rules.
+/// All frames are exactly eight bytes on the wire (per the SDO spec). An initiate or control frame
+/// shorter than that is padded with zeros and accepted, since its unused bytes are zero by
+/// definition — real ECUs sometimes emit such frames under DLC padding rules. A segment is not:
+/// its bytes are data, and one shorter than its own <c>n</c> field declares is refused
+/// (<see cref="SegmentIsComplete"/>, #203) rather than completed with bytes the peer never sent.
 /// </remarks>
 internal static class SdoFrames
 {

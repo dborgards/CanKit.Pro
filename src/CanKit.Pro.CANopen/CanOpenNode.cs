@@ -237,13 +237,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _heartbeatConsumer.TimedOut += (producer, timeout) => RaiseHeartbeatTimeout(producer, timeout);
         AttachFlyingMasterHeartbeatWatch();
 
-        // The communication-profile objects at their CiA 301 defaults, plus the OD hooks that
-        // validate writes to them and carry accepted values into the runtime
-        // (CanOpenNode.CommunicationProfile.cs).
-        PopulateCommunicationProfile();
-        // A device description shapes the dictionary on top of that, before the node is on the
-        // bus (CanOpenNode.DeviceDescription.cs).
-        if (description is not null) ApplyDeviceDescription(description);
+        // The actor's thread is running from here on, and a constructor that throws leaves no
+        // node for anyone to dispose: a failure ends that thread before it propagates. Filling
+        // the dictionary is the work that can fail -- a description that cannot be applied used
+        // to leave the thread behind (#357 C-10).
+        try
+        {
+            // The communication-profile objects at their CiA 301 defaults, plus the OD hooks
+            // that validate writes to them and carry accepted values into the runtime
+            // (CanOpenNode.CommunicationProfile.cs).
+            PopulateCommunicationProfile();
+            // A device description shapes the dictionary on top of that, before the node is on
+            // the bus (CanOpenNode.DeviceDescription.cs).
+            if (description is not null) ApplyDeviceDescription(description);
+        }
+        catch
+        {
+            _actor.Dispose();
+            throw;
+        }
 
         // Change-of-state TPDOs (FR-CO-006): application-originated OD writes trigger
         // event-driven TPDOs whose mapping contains the written entry.
@@ -305,11 +317,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             throw;
         }
 
-        _readerTask = Task.Run(RunReaderAsync);
-
         // Enter Pre-Operational immediately and announce a bootup on the wire. Bootup is a
         // one-shot 1-byte frame with data[0] == 0 on COB-ID 0x700 + nodeId
         // (CiA 301 §7.2.8.3.2). We do it here at construction so tests can observe it.
+        //
+        // Posted before the reader starts, which posts every received frame to the same
+        // mailbox: so the start-up runs before the first frame does. Started the other way round,
+        // an NMT Start that came in at once could be handled first, and the start-up then set
+        // Pre-Operational over it without leaving Operational (#357 C-10).
         _actor.Post(() =>
         {
             ApplyAllCommunicationObjects();
@@ -320,6 +335,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             _state = NmtState.PreOperational;
             _ = EmitHeartbeat(0x00);
         });
+
+        _readerTask = Task.Run(RunReaderAsync);
     }
 
     /// <inheritdoc />
@@ -1792,8 +1809,47 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             return;
         }
 
-        // Anything else is a protocol error → abort.
-        SendSdoServerAbort(index, subindex, SdoAbortCode.CommandSpecifierInvalid);
+        // A classic segment the open session cannot take -- a download segment while an upload
+        // is open, or an upload segment request while a download is -- is its own protocol gone
+        // wrong, and it ends that session, named by the session's own object: the frame is a
+        // segment and carries no multiplexer.
+        if ((cs & 0xE0) is SdoFrames.CcsDownloadSegmentBase or SdoFrames.CcsUploadSegmentBase
+            && _sdoServer is { } open)
+        {
+            SendSdoServerAbort(open.Index, open.Subindex, SdoAbortCode.CommandSpecifierInvalid);
+            return;
+        }
+
+        // Anything else is a command specifier no session here could take: an unknown one, a
+        // segment with no session open, or a block follow-up frame with no block session (one
+        // that is open takes its own, HandleSdoServerRequestBlock). It is answered with
+        // 0504 0001h and ends nothing: it used to clear the open classic session, so a late
+        // frame of an earlier block transfer aborted the segmented transfer running now. The
+        // abort names the frame's multiplexer only where the frame has one -- an upload
+        // initiate with reserved bits set (ccs = 2) is the one such frame that reaches here --
+        // and 0000:00 otherwise, rather than reading bytes 1..3 of a frame that carries none
+        // (#357 C-2).
+        if ((cs & 0xE0) != SdoFrames.CcsUploadInit)
+        {
+            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+                SdoFrames.BuildAbort(0, 0, (uint)SdoAbortCode.CommandSpecifierInvalid));
+            return;
+        }
+        // An abort that names an open transfer ends it at the client, which matches aborts by
+        // object; so it ends it here too, or the session would outlive its own abort and a
+        // retry would meet a supersede abort for it first.
+        if (_sdoServer is { } named && named.Index == index && named.Subindex == subindex)
+        {
+            SendSdoServerAbort(index, subindex, SdoAbortCode.CommandSpecifierInvalid);
+            return;
+        }
+        if (_sdoBlockServer is { } namedBlock && namedBlock.Index == index && namedBlock.Subindex == subindex)
+        {
+            AbortBlockServer(namedBlock, SdoAbortCode.CommandSpecifierInvalid);
+            return;
+        }
+        _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+            SdoFrames.BuildAbort(index, subindex, (uint)SdoAbortCode.CommandSpecifierInvalid));
     }
 
     private void HandleServerUploadInit(ushort index, byte subindex, OdEntry? entry)

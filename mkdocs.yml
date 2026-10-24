@@ -34,10 +34,13 @@ docs_dir: docs
 site_dir: site
 strict: true
 
-# Internal working documents that live in docs/ but are not part of the website, plus the API
-# tab's navigation source, which mkdocs-literate-nav reads but which is not a page.
+# Internal working documents that live in docs/ but are not part of the website (review reports,
+# agent implementation plans), plus the API tab's navigation source, which mkdocs-literate-nav
+# reads but which is not a page. Without an entry here a file under docs/ with no nav entry is
+# still built as an orphan page, reachable by URL and by the site search.
 exclude_docs: |
   reviews/
+  superpowers/
   api/SUMMARY.md
 
 theme:

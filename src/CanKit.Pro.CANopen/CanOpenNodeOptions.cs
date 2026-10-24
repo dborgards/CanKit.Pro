@@ -134,6 +134,11 @@ public sealed class CanOpenNodeOptions
     /// toggle bit (bit 7), per CiA 301 §7.2.8.3.3. Ignored when the heartbeat producer is active
     /// (CiA 301 §7.2.8.3 makes heartbeat and node-guarding mutually exclusive on the same node).
     /// Defaults to <c>true</c> so slaves are answered out of the box.
+    /// <para>
+    /// <c>false</c> also keeps producer-side life guarding off: guarding starts with the first RTR
+    /// the node answers, so with no RTR answered <see cref="ICanOpenNode.LifeGuardingEvent"/> is
+    /// never raised, whatever <c>100Ch</c> and <c>100Dh</c> hold.
+    /// </para>
     /// </summary>
     public bool RespondToNodeGuardingRtr { get; init; } = true;
 
