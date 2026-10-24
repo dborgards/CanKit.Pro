@@ -140,6 +140,14 @@ both paths: a call waiting for its echo, and a call whose driver transmit is sti
 bus whose `TransmitAsync` completes asynchronously (#352). Either ends in
 `OperationCanceledException`; a frame already handed to the driver may still go out.
 
+A CAN-FD payload of a length no CAN-FD frame carries (anything but 0–8, 12, 16, 20, 24, 32, 48 or
+64 bytes) is sent, not refused. Its DLC rounds up to the next of those lengths, so on a real bus it
+goes out padded to that length. The echo path
+matches by content, so on an adapter that echoes the padded frame — CanKit 0.5.6's Vector CAN-FD
+transceiver builds a received frame's length from its DLC — the echo never matches and the
+confirmation ends as `Timeout` although the frame went out. Send canonical lengths. Refusing the
+others is kept for the next major version (#352).
+
 The caller's cancellation token is consulted immediately before the driver call — on the echo
 path inside the send lock, so after any wait behind another send's driver call — and a token
 cancelled up to that point abandons the send with `OperationCanceledException`: nothing reaches

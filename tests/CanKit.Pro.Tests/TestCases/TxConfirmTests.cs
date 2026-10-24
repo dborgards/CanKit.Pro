@@ -393,6 +393,31 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => classic);
     }
 
+    // #352 (Q7): what SendConfirmedAsync documents for a CAN-FD length no frame carries -- it is
+    // sent, not refused, and an echo of the frame padded to the next valid length (as an adapter
+    // rebuilding the echo from its DLC delivers it) does not confirm it, so the call times out.
+    // The timeout is tripped by hand once the padded echo has been offered: had it matched, the
+    // confirmation would already be set and the trip would change nothing.
+    [Fact]
+    public async Task A_Non_Canonical_Fd_Length_Is_Sent_And_Its_Padded_Echo_Does_Not_Confirm_It()
+    {
+        using var sender = OpenEcho();
+        sender.EchoAcceptedFrames = false;
+        using var service = new CanBusService(sender);
+        CancellationTokenSource? armed = null;
+        service.ArmConfirmTimeout = (source, _) => armed = source;
+
+        var payload = Enumerable.Range(1, 10).Select(i => (byte)i).ToArray();
+        var send = service.SendConfirmedAsync(CanFrame.Fd(0x675, payload), ShortTimeout);
+        sender.TransmitCount.Should().Be(1, "a non-canonical length is not refused");
+
+        sender.RaiseObserved(CanFrame.Fd(0x675, payload.Concat(new byte[2]).ToArray()), isEcho: true);
+        armed.Should().NotBeNull("the echo wait is armed before the call returns");
+        armed!.Cancel();
+
+        (await send.WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+    }
+
     // FR-RAW-033: a send whose echo will never arrive fails observably (Confirmed = false,
     // FailureReason = Timeout) within the configured timeout, not an indefinite hang.
     [Fact]

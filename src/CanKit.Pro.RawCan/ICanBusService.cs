@@ -198,6 +198,14 @@ namespace CanKit.Pro.RawCan
         /// The frame to send. As with <see cref="ICanBus.Transmit(in CanFrame)"/>, the caller
         /// remains the owner (TX-lease) and is responsible for disposing it after this call
         /// returns/completes — <see cref="ICanBusService"/> never disposes it.
+        /// A CAN-FD payload whose length is not one a CAN-FD frame can carry (0–8, 12, 16, 20,
+        /// 24, 32, 48 or 64 bytes) is not refused here. Its DLC rounds up to the next of those
+        /// lengths, so on a real bus it goes out padded to that length. On the echo path the confirmation is matched by content, so on an adapter
+        /// that echoes the frame as it went on the wire -- padded -- the echo is never matched and
+        /// the call ends as <see cref="TxConfirmFailureReason.Timeout"/> although the frame was
+        /// sent; CanKit 0.5.6's Vector CAN-FD transceiver builds a received frame's length from its
+        /// DLC that way. Pass a canonical length to avoid it. Refusing a non-canonical length is a
+        /// behaviour change, kept for the next major version (#352, #299).
         /// </param>
         /// <param name="timeout">
         /// Maximum time to wait before failing with <see cref="TxConfirmFailureReason.Timeout"/>
