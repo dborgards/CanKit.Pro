@@ -257,6 +257,11 @@ jobs:
 
       # The checks' own tests (eng/test_*.py), standard library only. They live in this job
       # because it is the one that runs the scripts they cover.
+      #
+      # That includes eng/test_verify_ruleset.py, which compares the required checks of the
+      # exported `main` ruleset (.github/rulesets/main.json) with the job names in this file: a
+      # renamed job fails here, on the pull request that renames it, rather than leaving a
+      # required check that never reports.
       - name: Test the verification scripts
         run: python3 -m unittest discover -s eng -p "test_*.py"
 
