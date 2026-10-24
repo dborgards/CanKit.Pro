@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -68,13 +69,53 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
     }
 
     /// <summary>The fixture with 13FFh:01 set to the checksum this implementation computes.</summary>
-    private static CanOpenDeviceDescription SafetyDcf()
+    private static CanOpenDeviceDescription SafetyDcf() => CanOpenDeviceDescription.ParseDcf(SafetyDcfTextWithChecksum());
+
+    private static string SafetyDcfTextWithChecksum()
     {
         var parameter = new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A);
         var mapping = new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8);
         ushort crc = SrdoCrc.Compute(parameter, mapping);
-        var text = SafetyDcfText().Replace("ParameterValue=0x0000", $"ParameterValue=0x{crc:X4}");
-        return CanOpenDeviceDescription.ParseDcf(text);
+        return SafetyDcfText().Replace("ParameterValue=0x0000", $"ParameterValue=0x{crc:X4}");
+    }
+
+    /// <summary>13FFh is <c>rw</c> by default (sub-index 1..n), and a description may restrict it;
+    /// the node then honours the declared access (#289). A checksum the file declares <c>ro</c> or
+    /// <c>const</c> is loaded with its value and read-only on the bus: a download is refused with
+    /// 0601 0002h and leaves 13FEh at A5h — CiA 319 v2.0.0 §5.3: "Object 13FEh … shall not be set
+    /// to 00h … if the object addressed in the download indication is read-only". The checksum
+    /// the file leaves <c>rw</c> takes a download, which clears 13FEh (§5.3, the download
+    /// indication).</summary>
+    [Theory]
+    [InlineData("ro")]
+    [InlineData("const")]
+    public async Task A_Checksum_The_File_Declares_Read_Only_Refuses_A_Download_And_Leaves_13FEh(string access)
+    {
+        var text = SafetyDcfTextWithChecksum();
+        int at = text.IndexOf("[13FFsub1]", StringComparison.Ordinal);
+        at.Should().BeGreaterThan(-1);
+        int next = text.IndexOf("\n[", at, StringComparison.Ordinal);
+        text = text[..at] + text[at..next].Replace("AccessType=rw", $"AccessType={access}") + text[next..];
+        var file = CanOpenDeviceDescription.ParseDcf(text);
+        var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var device = CanOpen.OpenNode(busB, file);
+        using var master = new CanOpenNode(new CanKit.Pro.RawCan.CanBusService(busA), 0x01, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+        master.BindPeerDeviceDescription(5, file);
+        var od = device.ObjectDictionary;
+        od.TryGet(0x13FF, 0x01, out var checksum).Should().BeTrue();
+        checksum.Access.Should().Be(OdAccess.ReadOnly, $"the file declares 13FFh:01 {access}");
+        uint loaded = od.ReadUnsigned(0x13FF, 0x01);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "the file's checksum fits its records");
+
+        var refused = await Assert.ThrowsAsync<SdoAbortException>(() => master.SdoDownloadAsync(5, 0x13FF, 0x01, new byte[] { (byte)~loaded, 0 }).WithTimeoutAsync(TimeSpan.FromSeconds(5)));
+        refused.AbortCode.Should().Be((uint)SdoAbortCode.AttemptWriteReadOnly);
+        od.ReadUnsigned(0x13FF, 0x01).Should().Be(loaded);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "CiA 319 §5.3: not set to 00h for a read-only target");
+
+        await master.SdoDownloadAsync(5, 0x13FF, 0x02, new byte[] { 0, 0 }).WithTimeoutAsync(TimeSpan.FromSeconds(5));
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "13FFh:02 is rw in the file, and a download to it clears 13FEh");
     }
 
     [Fact]
