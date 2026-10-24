@@ -103,7 +103,8 @@ configurator stores `ChannelWorkMode.ListenOnly`, but nothing in `CanKit.Adapter
 calls `canSetBusOutputControl`: `KvaserBus.ApplyConfig` handles only `ChannelWorkMode.Echo`. The
 bus therefore reports listen-only while the controller runs in CANlib's default output mode —
 normal, from memory, not measured — and so acknowledges frames and sends error flags. PCAN (`PcanParameter.ListenOnly`), Vector
-(`XL_OUTPUT_MODE_SILENT`), SocketCAN (the listen-only ctrlmode, on a netlink endpoint), ZLG and
+(`XL_OUTPUT_MODE_SILENT`, but only with init access: without it `VectorBus` skips `ApplyConfig`
+and logs a warning), SocketCAN (the listen-only ctrlmode, on a netlink endpoint), ZLG and
 ControlCAN (the mode byte of the channel configuration) do apply it.
 
 Proposal: before `canBusOn`, call `canSetBusOutputControl(handle, canDRIVER_SILENT)` when

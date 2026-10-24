@@ -1438,7 +1438,10 @@ under `--allow-non-listen-only`, and is otherwise this call on the command line,
 `RequireListenOnly` can only check what the bus reports, and a CanKit bus reports the work mode
 the factory asked for; whether the controller is silent is up to the adapter. Of the CanKit 0.5.6
 adapters whose listen-only path was read, SocketCAN (on a `#netlink` endpoint), PCAN, Vector, ZLG
-and ControlCAN apply it, and the loopback adapter has no bus to disturb. The Kvaser adapter does
+and ControlCAN apply it, and the loopback adapter has no bus to disturb. Vector does so only when
+the port gets init access to the channel: without it (another application owns the channel)
+`VectorBus` skips its whole configuration, rate and output mode included, and only logs a warning,
+so the bus still reports the requested mode and rate. The Kvaser adapter does
 not: it accepts `ListenOnly`, reports it and advertises `CanFeature.ListenOnly`, but never switches
 the controller's output to silent, so a probe would acknowledge frames at the right rate and send
 error frames at a wrong one (#345;
