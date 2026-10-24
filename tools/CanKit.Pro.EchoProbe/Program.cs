@@ -348,8 +348,7 @@ internal static class Program
     {
         var claimFramesOnPeer = 0;
         var name = ProbeName;
-        var nameBytes = BitConverter.GetBytes(name.Value);
-        if (!BitConverter.IsLittleEndian) Array.Reverse(nameBytes);
+        var nameBytes = name.ToBytes();
 
         // This probe's own claim: the Address Claimed PGN, from the address it claims, carrying its
         // NAME. Another ECU claiming on the same bus is not evidence about A.

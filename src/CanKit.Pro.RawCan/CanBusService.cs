@@ -31,6 +31,9 @@ namespace CanKit.Pro.RawCan
         /// </summary>
         public static readonly TimeSpan DefaultConfirmTimeout = TimeSpan.FromSeconds(1);
 
+        // The longest delay CancellationTokenSource.CancelAfter accepts on every target framework.
+        private static readonly TimeSpan MaxConfirmTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
+
         private readonly ICanBus _bus;
 
         // Guards the mutable registry and the rebuild of _snapshot; only entered on
@@ -323,6 +326,17 @@ namespace CanKit.Pro.RawCan
             var effectiveTimeout = timeout ?? DefaultConfirmTimeout;
             if (effectiveTimeout <= TimeSpan.Zero)
                 throw new ArgumentOutOfRangeException(nameof(timeout), "Timeout must be positive.");
+            // Clamped here, before anything reaches the driver (#352, R-4): the timeout is armed
+            // with CancellationTokenSource.CancelAfter only after the frame has been handed over,
+            // and that throws for a delay above int.MaxValue ms on netstandard2.0/net48 (above
+            // uint.MaxValue - 1 on .NET 6+). Unclamped, TimeSpan.MaxValue put the frame on the
+            // wire and then told the caller "bad argument". A longer timeout is clamped rather
+            // than refused, so a caller -- ISO-TP's N_As among them -- that passes TimeSpan.MaxValue
+            // to mean "no limit" gets the longest wait the timer can measure (about 24.8 days)
+            // instead of a send that fails. One bound for every target, so the wait does not
+            // depend on which runtime the caller happens to be on.
+            if (effectiveTimeout > MaxConfirmTimeout)
+                effectiveTimeout = MaxConfirmTimeout;
 
             // FR-RAW-030: one API, two internal strategies, chosen by whether the bus both
             // declares the hardware capability *and* has actually enabled it for this session --
@@ -364,7 +378,8 @@ namespace CanKit.Pro.RawCan
             // accepted the frame -- and the peer may already be answering -- before this method
             // runs again, and a reading taken there starts a caller's response deadline late
             // (Codex on #112). ExecuteSynchronously is what observes completion closest; when the
-            // runtime declines to inline it the reading is what it would have been anyway.
+            // runtime declines to inline it, the continuation is queued and the reading is taken one
+            // scheduling hop later -- still no later than resuming this method would take it.
             var stamp = new HandoffStamp(_hostTimestamp);
             var handoffStart = stamp.Now();
             //
@@ -373,12 +388,23 @@ namespace CanKit.Pro.RawCan
             // completes, and when the timeout below wins the driver's asynchronous operation may
             // still be running -- reading a buffer that has meanwhile been released or reused. The
             // copy is a few bytes; the echo path is unaffected (its Transmit is synchronous).
+            //
+            // A remote frame goes through the memory-owner factory, which takes the payload as it
+            // is (#352, R-5). The ReadOnlyMemory overload of CanFrame.Classic refuses a remote
+            // frame with a payload -- the shape a caller gets from the owner overload for "RTR
+            // with DLC 8 over a pooled buffer" -- so this path threw for a frame the echo path,
+            // which transmits the caller's frame itself, sends: two answers to one call, keyed on
+            // the bus mode. Only that shape needs the owner; every other frame keeps the overload
+            // that wraps the copy without one more object per send.
             var copy = frame.Data.ToArray();
             var detached = frame.FrameKind == CanFrameType.CanFd
                 ? CanFrame.Fd(frame.ID, copy, BRS: frame.BitRateSwitch, ESI: frame.ErrorStateIndicator,
                     isExtendedFrame: frame.IsExtendedFrame, isErrorFrame: frame.IsErrorFrame)
-                : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
-                    isRemoteFrame: frame.IsRemoteFrame, isErrorFrame: frame.IsErrorFrame);
+                : frame.IsRemoteFrame
+                    ? CanFrame.Classic(frame.ID, new DetachedPayload(copy), isExtendedFrame: frame.IsExtendedFrame,
+                        isRemoteFrame: true, ownMemory: false, isErrorFrame: frame.IsErrorFrame)
+                    : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
+                        isErrorFrame: frame.IsErrorFrame);
             //
             // The driver's token is ours, linked to the caller's: when the timeout wins it is
             // cancelled, so a driver that honours cancellation stops the abandoned operation
@@ -772,6 +798,22 @@ namespace CanKit.Pro.RawCan
                     FailureReason = TxConfirmFailureReason.BusOff,
                 });
             }
+        }
+
+        /// <summary>
+        /// The driver's private copy of a remote frame's payload on the approximated path, as the
+        /// memory owner the owner-taking <see cref="CanFrame"/> factory wants. Nothing to release: the array is
+        /// the driver's for as long as it holds the frame.
+        /// </summary>
+        private sealed class DetachedPayload : System.Buffers.IMemoryOwner<byte>
+        {
+            private readonly byte[] _payload;
+
+            public DetachedPayload(byte[] payload) => _payload = payload;
+
+            public Memory<byte> Memory => _payload;
+
+            public void Dispose() { }
         }
 
         /// <summary>

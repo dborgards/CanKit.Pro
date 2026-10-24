@@ -62,6 +62,12 @@ namespace CanKit.Pro.RawCan
         /// hardware echo (FR-RAW-032) — i.e. "best-effort acknowledgment", not a guarantee the
         /// frame reached the wire. Always false when <see cref="Confirmed"/> is false.
         /// </summary>
+        /// <remarks>
+        /// "Driver acceptance" is the bus's transmit returning a positive count, and means no more
+        /// than that bus makes it mean. CanKit's <c>QueuedCanBus</c> returns the number of frames
+        /// it queued in process -- its own documentation says so -- so behind it an approximated
+        /// confirmation says the frame was queued, not that a driver took it.
+        /// </remarks>
         public bool IsApproximated { get; init; }
 
         /// <summary>
@@ -77,9 +83,18 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading taken immediately
-        /// after the driver accepted the frame, or zero when nothing was handed to the driver
-        /// (an outright rejection). Monotonic, and comparable with the
+        /// after the driver accepted the frame. Monotonic, and comparable with the
         /// <c>HostArrivalTimestamp</c> the demux puts on received frames.
+        /// <para>
+        /// Which results carry it depends on the path. On the echo path, every result for a frame
+        /// the driver accepted: a confirmation, a <see cref="TxConfirmFailureReason.Timeout"/> and a
+        /// <see cref="TxConfirmFailureReason.BusOff"/> alike, because the driver call has returned
+        /// before the echo wait begins. On the approximated path, only a confirmation: a
+        /// <see cref="TxConfirmFailureReason.Timeout"/> there means the driver's asynchronous
+        /// transmit had not completed, so the frame may have been handed over but there is no
+        /// reading after acceptance, and the value is zero. A
+        /// <see cref="TxConfirmFailureReason.Rejected"/> result carries zero on either path.
+        /// </para>
         /// </summary>
         /// <remarks>
         /// <see cref="Timestamp"/> answers "when was this result produced" and is a wall-clock
@@ -93,9 +108,11 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// The host-monotonic <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading
-        /// taken immediately <em>before</em> the driver call, inside the service's send lock, or
-        /// zero when nothing was handed to the driver. Comparable with
+        /// taken immediately <em>before</em> the driver call -- on the echo path inside the
+        /// service's send lock; the approximated path has no such lock. Comparable with
         /// <see cref="HostTransmitTimestamp"/> and with the demux's <c>HostArrivalTimestamp</c>.
+        /// Carried by exactly the results that carry <see cref="HostTransmitTimestamp"/>, and zero
+        /// on the others.
         /// </summary>
         /// <remarks>
         /// The other end of the driver call. <see cref="HostTransmitTimestamp"/> is where a
@@ -103,8 +120,9 @@ namespace CanKit.Pro.RawCan
         /// includes the peer's answer, and on an asynchronous adapter a completion callback -- so
         /// a fast peer's response can be stamped by the demux before it. A caller deciding
         /// whether a received frame can be a response to this transmission at all needs an
-        /// instant no later than the frame's wire instant: this one. Taken inside the lock, so
-        /// no wait for another sender's driver call sits between it and the handoff.
+        /// instant no later than the frame's wire instant: this one. On the echo path it is taken
+        /// inside the lock, so no wait for another sender's driver call sits between it and the
+        /// handoff.
         /// </remarks>
         public long HostHandoffTimestamp { get; init; }
     }

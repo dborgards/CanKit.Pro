@@ -17,16 +17,19 @@ public enum EchoDelivery
 {
     /// <summary>
     /// Raised from inside <see cref="ControllableBus.Transmit(in CanFrame)"/> — on the
-    /// transmitting thread, inside whatever lock the caller holds while transmitting. What a real
-    /// echo-mode adapter (CanKit.Adapter.Virtual in <c>ChannelWorkMode.Echo</c>) does, and what
-    /// makes the reentrancy in <c>CanBusService.SendWithEchoConfirmAsync</c> observable.
+    /// transmitting thread, inside whatever lock the caller holds while transmitting. The timing of
+    /// CanKit.Adapter.Virtual in <c>ChannelWorkMode.Echo</c> (which does not flag its echo,
+    /// though), and what makes the reentrancy in <c>CanBusService.SendWithEchoConfirmAsync</c>
+    /// observable. No hardware adapter delivers this way: they report an echo from their receive
+    /// thread, after <c>Transmit</c> has returned, which is what <see cref="Deferred"/> models.
     /// </summary>
     Synchronous,
 
     /// <summary>
     /// Parked in <see cref="ControllableBus.DeferredEchoes"/> instead of being raised. The test
     /// chooses when each echo is delivered, which lets more than one pending send exist at once —
-    /// see <see cref="DeferredEchoQueue"/> for why that is not achievable synchronously.
+    /// see <see cref="DeferredEchoQueue"/> for why that is not achievable synchronously. The shape
+    /// of a hardware adapter, whose echo arrives on its receive thread after <c>Transmit</c>.
     /// </summary>
     Deferred,
 }
@@ -77,7 +80,9 @@ public sealed class ControllableBus : ICanBus
     /// Creates a double whose <see cref="Options"/> report <c>ChannelWorkMode.Echo</c> and the
     /// <c>CanFeature.Echo</c> capability — the combination that makes <c>SendConfirmedAsync</c> take
     /// the real-echo-matching path (FR-RAW-031) — and that echoes synchronously from inside
-    /// <see cref="Transmit(in CanFrame)"/>, exactly as a real echo-mode adapter does.
+    /// <see cref="Transmit(in CanFrame)"/>, with the timing of CanKit.Adapter.Virtual. A hardware
+    /// adapter delivers its echo from its receive thread after <c>Transmit</c> has returned; that
+    /// is <see cref="DeferredEchoCapable"/>.
     /// </summary>
     public static ControllableBus EchoCapable(string session)
         => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo), EchoDelivery.Synchronous);
@@ -220,6 +225,17 @@ public sealed class ControllableBus : ICanBus
 
     // --- ICanBus: configuration, delegated to a real bus -------------------------------------
 
+    /// <summary>
+    /// Invoked whenever the service reads <c>Options.WorkMode</c>; see
+    /// <see cref="EchoCapableOptions.WorkModeRead"/>. Only on a double whose options are its own
+    /// echo-capable ones, i.e. not on <see cref="Plain"/>.
+    /// </summary>
+    public Action? OnWorkModeRead
+    {
+        get => ((EchoCapableOptions)_options).WorkModeRead;
+        set => ((EchoCapableOptions)_options).WorkModeRead = value;
+    }
+
     public IBusRTOptionsConfigurator Options => _options;
 
     private BusState _busState;
@@ -259,9 +275,9 @@ public sealed class ControllableBus : ICanBus
 
         if (EchoAcceptedFrames)
         {
-            // Synchronous is the default because that is what a real echo-mode adapter does, and
-            // matching it is what makes the reentrancy in CanBusService.SendWithEchoConfirmAsync
-            // observable. Deferred parks the echo instead, so the caller leaves Transmit — and
+            // Synchronous is the default: it is the timing of CanKit.Adapter.Virtual in Echo mode,
+            // and it is what makes the reentrancy in CanBusService.SendWithEchoConfirmAsync
+            // observable. A hardware adapter's echo comes from its receive thread instead. Deferred parks the echo instead, so the caller leaves Transmit — and
             // releases the service's pending-send lock — with its entry still pending; see
             // DeferredEchoQueue for why some FR-RAW-031 behaviour is only reachable that way.
             if (EchoMode == EchoDelivery.Deferred) DeferredEchoes.Park(frame);
