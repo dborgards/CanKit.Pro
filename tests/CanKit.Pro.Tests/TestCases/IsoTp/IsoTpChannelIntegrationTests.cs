@@ -2667,9 +2667,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             if (!_enabled) return;
             await _testWaits.Task.ConfigureAwait(false);
             if (Volatile.Read(ref _actorReleased) == 0) return;
-            // Its outcome is the test's to assert; here only its end matters.
-            try { await _heldSend.ConfigureAwait(false); }
-            catch (Exception) { /* asserted by the test */ }
+            // Its end, not its outcome, which is the test's to assert.
+            await _heldSend.ContinueWith(static _ => { }, CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
         }
     }
 
