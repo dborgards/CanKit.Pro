@@ -172,7 +172,8 @@ internal sealed partial class CanOpenNode
     /// call, not half-way through this one. Built from one reading of the description
     /// (<see cref="DescribedObjects"/>, the same one an expectation derived from the description
     /// is built from); only what the transaction reads is kept: the declared pairs of the safety
-    /// area 1300h–13FFh, of 1018h and of 1010h (the only objects its transfers touch), the
+    /// area 1300h–13FFh, of 1018h and of 1010h (the only objects its transfers touch) and which of
+    /// them it declares read-only (the writes the pre-check refuses), the
     /// file's identity (CiA 319 §5.2), which communication records the file declares without an
     /// SRVT (CiA 319 §6.2), the highest SRDO record the file declares (the implied records), and
     /// the described entries the pre-check reads (the mapped objects of a configuration).
@@ -180,6 +181,7 @@ internal sealed partial class CanOpenNode
     private sealed class PeerDescriptionBinding
     {
         private readonly HashSet<(ushort, byte)> _pairs = new();
+        private readonly HashSet<(ushort, byte)> _readOnly = new(); // declared, and not writable on the bus
         private readonly Dictionary<int, SrvtDeclaration> _srvtDeclarations = new(); // declared communication records only
         private readonly Dictionary<(ushort, byte), DescribedEntry> _mapped = new();
 
@@ -190,7 +192,11 @@ internal sealed partial class CanOpenNode
             foreach (var (index, entries) in description.Ordered(static i =>
                          i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.StoreParameters))
             {
-                foreach (var entry in entries) _pairs.Add((index, entry.Subindex));
+                foreach (var entry in entries)
+                {
+                    _pairs.Add((index, entry.Subindex));
+                    if ((MapAccess(entry.Access) & OdAccess.WriteOnly) == 0) _readOnly.Add((index, entry.Subindex));
+                }
                 if (SrdoRecords.IsCommunicationRecord(index))
                     _srvtDeclarations[index - SrdoRecords.CommunicationBase] = SrvtDeclarationOf(entries);
             }
@@ -218,6 +224,12 @@ internal sealed partial class CanOpenNode
 
         /// <summary>The pair as declared at the start; a transaction transfers the safety objects, 1018h and 1010h only.</summary>
         public bool Declares(ushort index, byte subindex) => _pairs.Contains((index, subindex));
+
+        /// <summary>Whether the file declared the pair at the start with an access type the bus
+        /// cannot write — <c>ro</c> or <c>const</c> (CiA 306): a device that honours its file
+        /// refuses a download there with 0601 0002h. False for a pair the file does not declare,
+        /// an implied record entry included: what the file does not say is the peer's to judge.</summary>
+        public bool DeclaresReadOnly(ushort index, byte subindex) => _readOnly.Contains((index, subindex));
 
         /// <summary>What the file declares for sub-index 3 of the communication record of SRDO
         /// <paramref name="srdoNumber"/> — what the file says, nothing more. CiA 319 v2.0.0 §6.2

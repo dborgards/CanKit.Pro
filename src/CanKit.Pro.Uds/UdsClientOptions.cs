@@ -111,6 +111,12 @@ public sealed class UdsClientOptions
     /// repeated at once, with a fresh P2 budget. Set it where the server's documentation asks
     /// for a delay before the repeat; the client does not derive one (#354).
     /// </summary>
+    /// <remarks>
+    /// The zero default is not taken from ISO 14229-1. A review recalled, from memory, that the
+    /// standard has the repeat delayed by a time given in the implementation documents; that has
+    /// not been checked against the text, and the default stays zero until it is (#354). A
+    /// non-zero default would change when every caller's repeat goes out.
+    /// </remarks>
     public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
 
     /// <summary>

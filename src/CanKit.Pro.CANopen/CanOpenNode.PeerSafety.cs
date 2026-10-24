@@ -67,6 +67,7 @@ internal sealed partial class CanOpenNode
             var identity = ExpectedIdentity(peerNodeId, binding);
             EnsureMappingsFitDescription(configuration, binding);
             EnsureValidationTimesFitDescription(configuration, binding, nameof(configuration));
+            EnsureWritesFitDescription(peerNodeId, binding, FixedConfigurationWrites(configuration, binding), "Nothing was sent.");
             // CiA 319 §5.2: "Prior to the configuration of an SRD, the configuration entity shall
             // perform a verification of the identity of the SRD" — the first frames of the transaction.
             var mismatches = await VerifyPeerIdentityAsync(peerNodeId, identity, binding, cancellationToken).ConfigureAwait(false);
@@ -75,6 +76,7 @@ internal sealed partial class CanOpenNode
             EnsureConfigurationFitsPeer(configuration, peerCount, nameof(configuration));
             EnsureFixedTransfersFitDescription(peerNodeId, binding, CountedConfigurationTransfers(peerCount));
             var writes = SafetyWrites(configuration, peerCount, binding, nameof(configuration)).ToList();
+            EnsureWritesFitDescription(peerNodeId, binding, WrittenPairs(writes), "Nothing was written.");
             // §9.2 "write all safety-relevant parameter incl. checksums"; CiA 319 §5.3 step 1: the
             // SRDO configuration data, then the checksums to 13FFh.
             var declined = new HashSet<(ushort, byte)>(); // optional writes the peer does not implement
@@ -252,6 +254,53 @@ internal sealed partial class CanOpenNode
         foreach (var (index, subindex) in transfers)
             EnsurePeerSdoAccess(peerNodeId, index, subindex, binding);
     }
+
+    /// <summary>The downloads a configuration makes whatever the peer answers, known before the
+    /// first frame: the §9.2 list up to the highest SRDO it names — the peer's count is at least
+    /// that, or the call ends at the count — then 13FEh and the 1010h sub-index asked for.</summary>
+    private static IEnumerable<(ushort Index, byte Subindex)> FixedConfigurationWrites(PeerSafetyConfiguration configuration, PeerDescriptionBinding binding)
+    {
+        int highestNamed = configuration.Srdos.Keys.DefaultIfEmpty(0).Max();
+        foreach (var pair in WrittenPairs(SafetyWrites(configuration, highestNamed, binding, nameof(configuration)))) yield return pair;
+        yield return (SrdoRecords.ConfigurationValid, 0x00);
+        if (configuration.Storage != PeerSafetyStorage.None) yield return (Co.StoreParameters, (byte)configuration.Storage);
+    }
+
+    /// <summary>The pairs of <paramref name="writes"/> that are downloaded: a ReadbackOnly SRVT is not.</summary>
+    private static IEnumerable<(ushort Index, byte Subindex)> WrittenPairs(IEnumerable<SafetyWrite> writes)
+        => writes.Where(w => w.Kind != SafetyTransfer.ReadbackOnly).Select(w => (w.Index, w.Subindex));
+
+    /// <summary>A pair the bound file declares <c>ro</c> or <c>const</c> is one a device that
+    /// honours its file refuses with 0601 0002h — 13FFh:n among them, whose access a description
+    /// may restrict (#289). The transaction downloads every value of the §9.2 list (CiA 319 §5.3
+    /// step 1), then 13FEh (step 3) and the 1010h sub-index (step 5), so such a refusal would
+    /// come mid-transaction, after the delete-first pass of §9.2 had deleted the
+    /// peer's SRDOs and cleared its 13FEh. Refused before that instead, with the gate: the writes
+    /// the configuration fixes before the first frame, those of the SRDOs it does not name once the
+    /// count is read (#343). A pair the file does not declare is the peer's to judge.</summary>
+    private static void EnsureWritesFitDescription(byte peerNodeId, PeerDescriptionBinding binding,
+        IEnumerable<(ushort Index, byte Subindex)> writes, string nothingDone)
+    {
+        foreach (var (index, subindex) in writes)
+        {
+            if (!binding.DeclaresReadOnly(index, subindex)) continue;
+            throw new InvalidOperationException(
+                $"The description bound for node 0x{peerNodeId:X2} declares {index:X4}h:{subindex:X2}h read-only (AccessType ro or const), " +
+                $"and the configuration downloads it ({DownloadStepOf(index)}): the peer would refuse that write with 0601 0002h part-way through, " +
+                $"after CiA DSP 304 §9.2 had deleted its SRDOs and cleared its 13FEh. {nothingDone}");
+        }
+    }
+
+    /// <summary>The step that downloads a pair of <see cref="EnsureWritesFitDescription"/>: 1300h is
+    /// of the §9.2 list but no SRDO configuration data (CiA 319 §3.2), 13FEh = A5h is step 3 of
+    /// CiA 319 §5.3 and the store step 5; the records and the checksums are step 1.</summary>
+    private static string DownloadStepOf(ushort index) => index switch
+    {
+        SrdoRecords.GfcParameter => "CiA DSP 304 §9.2",
+        SrdoRecords.ConfigurationValid => "CiA 319 §5.3 step 3",
+        Co.StoreParameters => "CiA 319 §5.3 step 5",
+        _ => "CiA 319 §5.3 step 1",
+    };
 
     /// <summary>What CiA 319 §5.2 compares the peer with: the file's own 1018h:01–03 — "the
     /// entries in the EDS corresponding to the SRD" — as declared (ParameterValue, DefaultValue
