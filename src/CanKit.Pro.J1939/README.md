@@ -59,8 +59,8 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   claim for the node's address is processed, or a re-claim starts, the
   address is no longer the node's, and the TP sessions running under it end
   without a TP.Conn_Abort: an abort sent from that address would itself be a
-  frame under an address the node no longer holds, and the null address 0xFE
-  cannot carry one. A multi-frame send in flight fails with
+  frame under an address the node no longer holds, and this stack sends
+  nothing from the null address 0xFE but Cannot Claim. A multi-frame send in flight fails with
   `J1939NoAddressException`, a reassembly in progress is dropped, and the
   peer ends its side when its own T1..T4 timer expires. This is intended
   (#355); no session starts under an address the node has lost (#347).
