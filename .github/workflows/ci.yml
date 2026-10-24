@@ -393,12 +393,18 @@ jobs:
       # its subjects). Only the script moves to the runner's temp directory; the working
       # directory stays the checkout, whose `origin/<base>..HEAD` is the range checked. A base
       # that has no checker yet (a pull request stacked on an older branch) has nothing to judge
-      # by, so the step says so and passes.
+      # by, so the step says so and passes; a base ref that does not resolve at all fails.
       - name: Check commit subjects
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           checker="$RUNNER_TEMP/check-commit-subjects.py"
+          # A missing base ref is a broken checkout, not a base without a checker: fail on it
+          # rather than let the notice below pass it.
+          if ! git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" >/dev/null; then
+            echo "::error::origin/${BASE_REF} does not resolve in this checkout."
+            exit 1
+          fi
           if ! git cat-file -e "origin/${BASE_REF}:eng/check-commit-subjects.py" 2>/dev/null; then
             echo "::notice::origin/${BASE_REF} has no eng/check-commit-subjects.py; nothing to check against."
             exit 0
