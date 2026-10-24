@@ -1386,6 +1386,54 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         datagram.Payload.Should().Equal(secondPayload);
     }
 
+    // #356 (T-6, decided on #390 as option (a)): an abort ends the ReceiveAllAsync enumeration
+    // that meets it; the channel stays open and the datagram after it goes to the next
+    // enumeration -- which is how the J1939 node keeps receiving (#195). IJ1939TpChannel and the
+    // README document it; this pins it, so a change to it is a deliberate one.
+    [Fact]
+    public async Task ReceiveAllAsync_Ends_On_An_Abort_And_The_Next_Enumeration_Gets_The_Next_Datagram()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte receiverSa = 0xA3;
+        const byte peerSa = 0xA4;
+        const uint firstPgn = 0xFEA3u;
+        const uint secondPgn = 0xFEA4u;
+        var firstPayload = RandomPayload(14, seed: 356);
+        var secondPayload = RandomPayload(9, seed: 357);
+
+        // Long T1: the abort is the superseding BAM's, not a timer's.
+        var opts = new J1939TpOptions().With(t1: TimeSpan.FromSeconds(30));
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        await using var first = receiver.ReceiveAllAsync().GetAsyncEnumerator();
+        var firstItem = first.MoveNextAsync().AsTask();
+
+        var bamId = J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, J1939Pgn.GlobalAddress);
+        var dtId = J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, J1939Pgn.GlobalAddress);
+        peerBus.Transmit(CanFrame.Classic((int)bamId,
+            J1939TpFrames.BuildBam(totalBytes: 14, totalPackets: 2, dataPgn: firstPgn), isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic((int)dtId,
+            J1939TpFrames.BuildDt(sn: 1, pdu: firstPayload, offset: 0), isExtendedFrame: true));
+        // Same source, another PGN: the first transfer is aborted (J1939-21 §5.10.3), and the
+        // second one completes behind the abort.
+        peerBus.Transmit(CanFrame.Classic((int)bamId,
+            J1939TpFrames.BuildBam(totalBytes: 9, totalPackets: 2, dataPgn: secondPgn), isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic((int)dtId,
+            J1939TpFrames.BuildDt(sn: 1, pdu: secondPayload, offset: 0), isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic((int)dtId,
+            J1939TpFrames.BuildDt(sn: 2, pdu: secondPayload, offset: 7), isExtendedFrame: true));
+
+        Func<Task> awaitFirst = () => firstItem.WithTimeout(ShortTimeout);
+        (await awaitFirst.Should().ThrowAsync<J1939TpAbortException>()).Which.Pgn.Should().Be(firstPgn);
+        (await first.MoveNextAsync()).Should().BeFalse("the abort ended the enumeration that met it");
+
+        var next = await CollectAsync(receiver, 1, ShortTimeout);
+        next.Should().ContainSingle("the channel stays open and kept the datagram that followed the abort")
+            .Which.Pgn.Should().Be(secondPgn);
+    }
+
     private static async Task<List<J1939TpDatagram>> CollectAsync(IJ1939TpChannel channel, int count, TimeSpan timeout)
     {
         var list = new List<J1939TpDatagram>();
