@@ -164,10 +164,22 @@ Deliberate omissions, each checked against the norm text:
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
   periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
   that callback between them. The callback must retune the channel this master is already
-  reading; it must not dispose that bus. The second delay, and a waiting frame after a zero
-  delay, still go out on it. An adapter that cannot change rate while open is left alone:
-  omit `returnToWaiting`, dispose this master after the call returns, and send switch state
-  global from a new master on the new bus.
+  reading; it must not dispose that bus. The second delay, and the waiting frame
+  `returnToWaiting` then sends after both periods, still go out on it. An adapter that cannot
+  change rate while open is left alone: omit `returnToWaiting`, dispose this master after the
+  call returns, and send switch state global from a new master on the new bus.
+* **Switch state global (waiting) inside the first switch delay** — CiA 305 §6.4.4 and Figure 15
+  keep the master and every slave silent until the second `switch_delay` has elapsed. With a
+  host switch (`bitsPerSecond` and `BitRateSwitch`) `returnToWaiting` keeps to that: waiting goes
+  out after both periods, on the new rate. The slaves switch whatever the caller does, so once
+  the activation is confirmed the master follows through on its own lifetime: a caller that
+  cancels gets control back at once, the host still switches and sends waiting, and later
+  commands, the commissioning release among them, wait for that. Without a host switch the
+  master would be left on the old rate, so a positive delay sends waiting before the first
+  period ends instead — a deliberate departure from §6.4.4. If its confirmation comes back at or
+  after the first deadline, the call fails after both periods. 2.0 is planned to require a host
+  switch for `returnToWaiting` with a delay; the conforming alternative today is the one in the
+  previous item.
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
@@ -1197,7 +1209,10 @@ application") and the safe state a safety controller enters are the device's to 
 
 `CanOpenLss.OpenMaster` is an LSS master (FR-CO-047). It transmits on `7E5h` and receives on
 `7E4h`. Exactly one LSS master may be active in a CANopen network; this type does not police
-other processes. Commands run one at a time. A confirmed service that draws no response within
+other processes. Commands run one at a time. The master may share one `ICanBusService` with a
+node in the same process that runs the LSS slave: it receives frames the adapter flags as this
+host's echo, as the node and discovery do. It only transmits on `7E5h`, so an echo on `7E4h` is
+always a slave's reply and never its own request. A confirmed service that draws no response within
 `LssMasterOptions.ResponseTimeout` throws `LssTimeoutException`. Switch state selective, the
 identify services and the Fastscan reset step treat that silence as "no slave matched".
 
@@ -1238,12 +1253,20 @@ on every activation path; a missing callback is rejected before any frame is sen
 the slave's error code (`LssCommand.NodeIdOutOfRange`, or `LssCommand.ManufacturerSpecific`
 with `LssServiceResult.SpecError`) can be observed. `FFh` is a legal pending node-id: the
 slave is then not configured. Inquire node-id reports the active node-id, or the pending one
-when the slave has no active node-id yet.
+when the slave has no active node-id yet. The slave in this package's node never has such a
+pending value: it activates a node-id in 1..127 as soon as configure node-id writes one, so
+without an active node-id it reports `FFh`.
 
 Fastscan walks vendor-id, product code, revision and serial. Bit 0 has priority over bit 1, so
 the slave found is the numerically smallest address among the unconfigured slaves that take
 part. A field can be scanned, matched (the number is already known) or skipped. The vendor-id
 cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
+Skipping the serial number is allowed by CiA 305 §6.7.1. The last number that is not skipped is
+confirmed with BitCheck 0, LSSSub naming that number and LSSNext 0, and per §6.7.3 that message
+switches the identified slave into configuration whatever the LSSSub; the slave in this package's
+node does. A slave that ties the switch to the serial number does not conform: it answers every
+step and still stays in waiting, so the scan reports success and the services after it reach no
+slave. Against such a slave, scan or match the serial number.
 `KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
 Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
 extra gap before the next Fastscan request, including the reset of a new scan. A completed scan
@@ -1258,14 +1281,15 @@ description with `LSS_Supported=1` does the same when `Lss` is left unset; an ex
 `LssSlaveOptions.Enabled = false` wins over the file. `node.LssState()` is waiting or
 configuration. It is an extension, so `ICanOpenNode` itself did not grow a member.
 
-The node-id passed to `OpenNode` is the persistent and pending node-id. `0xFF` is legal only
-while LSS is on: the node then stays in NMT Initializing, sends no boot-up and serves no SDO,
-until configure node-id gives it a value in 1..127. That value becomes active at once and the
-node boots, and it stays in LSS configuration. A node that already has an active node-id keeps
-it until the next NMT reset communication, which copies the pending node-id into the active one
-and retargets pre-defined COB-IDs, and the direction of SRDO 1 (EN 50325-5:2010 Table 5), that
-still name the old one; a direction of a committed SRDO stays. Reset node copies the persistent
-node-id back into the pending one first. Neither reset reloads the bit timing.
+The node-id passed to `OpenNode` is the persistent and pending node-id, unless
+`LssSlaveOptions.Store` loads one: a stored node-id replaces it, and the argument is then only
+validated. `0xFF` is legal only while LSS is on: the node then stays in NMT Initializing, sends no
+boot-up and serves no SDO, until configure node-id gives it a value in 1..127. That value becomes
+active at once and the node boots, and it stays in LSS configuration. A node that already has an
+active node-id keeps it until the next NMT reset communication, which copies the pending node-id
+into the active one and retargets pre-defined COB-IDs, and the direction of SRDO 1 (EN 50325-5:2010
+Table 5), that still name the old one; a direction of a committed SRDO stays. Reset node copies
+the persistent node-id back into the pending one first. Neither reset reloads the bit timing.
 An identity change closes the transmit gate and drains old-ID reservations before publishing
 the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs
 resolve their COB-ID after the change. A bit-rate switch already holding the gate stays silent.
@@ -1278,10 +1302,12 @@ pending timing becomes active; the callback can reconfigure the channel. The nod
 until both the second switch delay and the callback complete successfully, including for a zero
 delay. While the node is active, failed or cancelled callbacks are reported on
 `BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
-Repeated activations serialize the callbacks. An LSS command that arrives during the silence is
-performed at once; its reply is held like the other frames that may not go out yet and sent once
-the slave may transmit — every reply, not only the last one, and the replies keep the order of
-the commands, across a further silence too and while the held ones are still going out.
+Repeated activations serialize the callbacks. An activation that arrives during the silence does not
+end it: the node stays silent until that activation's second delay and callback have completed, and
+the earlier activation's end of silence is dropped. An LSS command that arrives during the silence
+is performed at once; its reply is held like the other frames that may not go out yet and sent once
+the slave may transmit — every reply, not only the last one, and the replies keep the order of the
+commands, across a further silence too and while the held ones are still going out.
 
 A new activation requests cancellation of the previous callback as soon as it is received,
 including during the first switch delay. Disposal also requests cancellation. Neither waits for
@@ -1318,7 +1344,8 @@ node-id parks each unconfigured slave in configuration so Fastscan does not retu
 then switches every slave back to waiting. A scan that assigns node-ids switches every slave
 to waiting first, then configures the slave Fastscan left in configuration. Switch state
 selective is not repeated after Fastscan. The scan switches back to waiting after each slave,
-unless activation already sent that frame before the switch delay. Bit timing is activated
+unless activation already sent that frame: after both switch delays with `ActivateBitRate`, before
+the first one ends without it (see [Not built, and why](#not-built-and-why) for that departure from CiA 305 §6.4.4). Bit timing is activated
 during a scan only when `Limit` is 1. A scan that can select more than one slave configures
 the table and leaves the rate unchanged, so a slave that already has a node-id stays on the
 bitrate the next Fastscan still uses. Activating one selectively switched slave is valid when
@@ -1340,7 +1367,11 @@ not overlap a commissioning sequence.
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
 from a node that has already booted. A missing later sub-index is 0. A timeout or any other
 abort is not reported as a zero LSS number. Switching the slaves back to waiting after a
-service is best-effort: if that frame fails, the configuration result is still returned.
+service is best-effort: if that frame fails, the configuration result is still returned. It is
+not cut short, though: the release ignores the caller's token and has no time budget of its
+own, so a cancelled or failed sequence returns only once that frame was sent or failed. It
+first waits out whatever the master has reserved. After an abandoned activation that is both
+switch-delay periods, up to 2 × 65 535 ms. Disposing the master ends that wait.
 
 ```csharp
 var tool = new LssCommissioning(master);

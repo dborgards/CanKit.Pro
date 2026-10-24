@@ -42,9 +42,11 @@ public sealed class LssMasterOptions
     /// <summary>
     /// Called from <see cref="ILssMaster.ActivateBitTimingAsync"/> after the first switch-delay
     /// period, with the bit rate the caller named. The callback retunes the channel this master
-    /// is already reading. It must not dispose that bus: the second delay, and a waiting frame
-    /// sent after a zero delay, still use it. Specifying a bit rate on the call requires this
-    /// callback. Leave both unset to leave the adapter alone. A caller whose
+    /// is already reading. It must not dispose that bus: the second delay, and the waiting frame
+    /// <c>returnToWaiting</c> sends after both periods, still use it. With <c>returnToWaiting</c>
+    /// and a positive delay the token is the master's lifetime, not the caller's: the switch
+    /// follows the slaves even when the caller has cancelled, and disposing the master cancels
+    /// it. Specifying a bit rate on the call requires this callback. Leave both unset to leave the adapter alone. A caller whose
     /// adapter cannot change rate while open omits <c>returnToWaiting</c>, disposes this master
     /// after the call returns, and sends switch state global from a new master on the new bus.
     /// </summary>

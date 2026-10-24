@@ -906,6 +906,25 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         relayed.Should().BeSameAs(fault, "the adapter's exception is relayed as itself, not wrapped");
     }
 
+    // #381: a multicast Invoke stops at the first listener that throws, and a single try around it
+    // kept dispatch alive but hid the relayed fault -- the one signal that the bus is dead -- from
+    // every listener registered after a throwing one. The relay is synchronous, as above.
+    [Fact]
+    public void A_Throwing_Fault_Listener_Does_Not_Hide_The_Fault_From_Later_Listeners()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+
+        Exception? second = null;
+        service.BackgroundExceptionOccurred += (_, _) => throw new InvalidOperationException("the logging listener failed");
+        service.BackgroundExceptionOccurred += (_, ex) => second = ex;
+
+        var fault = new InvalidOperationException("poll loop died");
+        sender.RaiseFault(fault);
+
+        second.Should().BeSameAs(fault, "every listener hears of the fault, whatever an earlier one does");
+    }
+
     // Codex on #369: the relay runs before the bus-off sweep, and a listener may answer "the bus
     // is dead" by disposing the bus -- after which the PCAN, Kvaser, SocketCAN and ZLG BusState
     // getters throw CanBusDisposedException (ThrowIfDisposed). The state the sweep decides

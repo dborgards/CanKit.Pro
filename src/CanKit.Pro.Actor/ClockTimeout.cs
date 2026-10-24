@@ -5,6 +5,18 @@ using System.Threading.Tasks;
 namespace CanKit.Pro.Actor;
 
 /// <summary>A cancellation deadline driven by the same clock as the operation it bounds.</summary>
+/// <remarks>
+/// The clock-driven forms (<see cref="ClockTimeout(ProtocolActor, long)"/> and
+/// <see cref="WaitUntilAsync"/>) are timers on <c>clock</c>, and disposing that actor discards
+/// every timer not yet due. After that, <see cref="Token"/> is never cancelled and
+/// <see cref="WaitUntilAsync"/> never completes on its own: only the caller's token can end
+/// the wait. A caller whose operation may outlive the actor must therefore link a token that
+/// the actor's owner cancels on disposal (a lifetime token), as <c>UdsClientImpl</c> and
+/// <c>LssMaster</c> do; the deadline alone does not bound it. On an actor that is already
+/// disposed, arming the timer is refused instead: the constructor throws
+/// <see cref="ObjectDisposedException"/>, and <see cref="WaitUntilAsync"/> returns a task faulted
+/// with it unless the deadline has already passed.
+/// </remarks>
 internal sealed class ClockTimeout : IDisposable
 {
     private readonly CancellationTokenSource _cts;

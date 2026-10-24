@@ -151,7 +151,9 @@ public class ProtocolActorTests
     }
 
     // A cancelled-while-queued task that is never released would otherwise hang the run instead of
-    // failing it. Task.WaitAsync does not exist on every target framework this suite runs on.
+    // failing it. Not Task.WaitAsync, which Polyfill provides on every target this suite runs on:
+    // its TimeoutException says only that the wait timed out, and this one names what was not
+    // released.
     private static async Task WithinTenSeconds(Task task)
     {
         var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(10)));
@@ -208,6 +210,40 @@ public class ProtocolActorTests
         // FR-RAW-023: one failing item must never take down the whole actor.
         var stillWorks = await actor.PostAsync(() => 42);
         stillWorks.Should().Be(42);
+    }
+
+    // #381: a multicast Invoke stops at the first handler that throws, so one try around it kept
+    // the loop alive but hid the exception from every subscriber registered after a throwing one.
+    // Post runs before the PostAsync behind it, and the report is raised inside the failing item,
+    // so by the time the ask completes both subscribers have been called -- nothing waits on a clock.
+    [Fact]
+    public async Task A_Throwing_BackgroundException_Subscriber_Does_Not_Hide_The_Exception_From_Later_Ones()
+    {
+        using var actor = new ProtocolActor();
+        var boom = new InvalidOperationException("background boom");
+        Exception? second = null;
+        actor.BackgroundExceptionOccurred += (_, _) => throw new InvalidOperationException("the first subscriber failed");
+        actor.BackgroundExceptionOccurred += (_, ex) => second = ex;
+
+        actor.Post(() => throw boom);
+        await actor.PostAsync(() => { });
+
+        second.Should().BeSameAs(boom, "every subscriber hears of the exception, whatever an earlier one does");
+    }
+
+    // FR-RAW-023 with nobody listening: the exception has nowhere to go and is dropped, and the loop
+    // keeps running and stops on request. ThreadPool mode, because a raise that threw would end the
+    // loop by faulting its task there -- after which this Dispose throws -- instead of taking the
+    // test host down with a dedicated loop thread.
+    [Fact]
+    public async Task A_Background_Exception_With_No_Subscriber_Is_Dropped_And_The_Loop_Keeps_Running()
+    {
+        using var actor = new ProtocolActor(ActorExecutionMode.ThreadPool);
+
+        actor.Post(() => throw new InvalidOperationException("nobody listens"));
+        (await actor.PostAsync(() => 42)).Should().Be(42);
+
+        actor.Invoking(a => a.Dispose()).Should().NotThrow("the loop survived the unheard exception and stops cleanly");
     }
 
     [Fact]

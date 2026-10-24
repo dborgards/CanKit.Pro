@@ -249,8 +249,18 @@ namespace CanKit.Pro.RawCan
         /// </summary>
         internal void RaiseBackgroundException(Exception ex)
         {
-            try { BackgroundExceptionOccurred?.Invoke(this, ex); }
-            catch { /* a fault listener must not break dispatch either */ }
+            var handler = BackgroundExceptionOccurred;
+            if (handler is null) return;
+
+            // One listener at a time, as CanOpenNode does: a multicast Invoke stops at the first
+            // listener that throws, so a single try around it protected dispatch but hid the
+            // exception from every listener registered after the throwing one -- for a relayed
+            // bus fault, the only signal that the bus is dead (#381).
+            foreach (var listener in handler.GetInvocationList())
+            {
+                try { ((EventHandler<Exception>)listener)(this, ex); }
+                catch { /* a fault listener must not break dispatch either */ }
+            }
         }
 
         /// <inheritdoc />
