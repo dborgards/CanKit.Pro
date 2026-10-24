@@ -145,7 +145,11 @@ public interface ICanOpenSafety
     /// longer one is not cut to its low byte), or the count is above 64 (§8.4.2.2) or above the
     /// bound description's highest SRDO record (the gate implies no record above it, so the
     /// SRDOs the peer has beyond the file could not be deleted) — refused before any further
-    /// frame, nothing written.</exception>
+    /// frame, nothing written; or the bound description declares <c>ro</c> or <c>const</c> a pair
+    /// the configuration downloads — 13FFh:n, 13FEh, 1300h, a record entry, the 1010h sub-index
+    /// asked for — which a peer honouring its file refuses with 0601 0002h: refused before the
+    /// first frame, or for an SRDO the configuration does not name once the count is read, before
+    /// the first write. A sub-index 3 declared read-only is no download (above).</exception>
     /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
     /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
     /// with another width or with a type without a fixed width (a string, a domain: an SRDO maps

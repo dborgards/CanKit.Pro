@@ -138,10 +138,11 @@ Deliberate omissions, each checked against the norm text:
   "by two different ways" and entering the safe state are the device's.
 * **SRDO details V1.0 leaves open** — the checksum's initial value (EN 50325-5:2010 §6.4.1.5 gives
   0000h), its byte order (neither text names it; CRC-16/XMODEM with multi-byte fields
-  little-endian, as CANopenNode feeds them — to be confirmed against a real SRD's `13FFh`, #289)
-  and the `ro`/`rw` conflict of `13FFh` (EN 50325-5:2010 Table 11: `rw` in Pre-operational, `ro`
-  in Operational — the records' rule, which this implementation applies: always writable
-  locally, on the bus with `WritableCommunicationParameters` or a file that declares it `rw`).
+  little-endian, as CANopenNode feeds them — the maintainer's decision on #289) and the
+  `ro`/`rw` conflict of `13FFh` (EN 50325-5:2010 Table 11: `rw` in Pre-operational, `ro` in
+  Operational — the records' rule, which this implementation applies: always writable locally,
+  on the bus with `WritableCommunicationParameters` or a file that declares it `rw`; a file that
+  declares `13FFh:n` `ro` or `const` is honoured, #289).
 * **Bit-granular SRDO mapping and more than 8 objects per SRDO** — the safety mapping retains its own narrower limits; the PDO extensions do not widen them.
 * **The safety application layer of CiA 319 clauses 7 and 8** — the *Safety application
   configuration valid* and *… signature* objects a CiA profile or a manufacturer-specific profile
@@ -746,7 +747,10 @@ sends one frame per server response, and an upload's segments come from the serv
 The binding is **CiA DSP 304 version 1.0** (1 January 2001), the safety-relevant communication
 on top of CiA 301: SRDOs, the global failsafe command (GFC) and the objects `1300h`–`13FFh`.
 Version 1.1 moved into EN 50325-5:2010; where this implementation follows that text instead of
-V1.0 it says so (the defaults of `1301h:01` and the role of `1300h`, #289). Sections cited here
+V1.0 it says so (the defaults of `1301h:01` and the role of `1300h`, #289). Where the text
+compared with it gives no figure — the first cyclic transmission delayed 0.5 ms × node-id, the
+DLC rule of the GFC, V1.0's formulas (1) and (2) — V1.0 stands, as the maintainer decided on
+#289. Sections cited here
 are those of DSP 304 V1.0. Everything lives in the
 namespace `CanKit.Pro.CANopen.Safety` and is reached through `node.Safety()`, an extension on
 `ICanOpenNode` (the interface is not widened); on a node this library did not create it throws
@@ -754,7 +758,8 @@ namespace `CanKit.Pro.CANopen.Safety` and is reached through `node.Safety()`, an
 
 The tool side — configuring a device as its *configuration entity* — follows **CiA 319 version
 2.0.0** (draft specification proposal, 2 December 2025), the implementation and configuration
-specification for safety-related devices: the identity verification of its §5.2, the sequence of
+specification for safety-related devices — a draft, not a released specification, so a later
+version may still change what is built on it here: the identity verification of its §5.2, the sequence of
 §5.3 with the storage of step 5, and the rule of §6.2 for the checksum of an SRVT the device does
 not implement. What it says the device does — step 4 of §5.3, the download indication, the
 periodic recalculation and the start-up check of §5.4 — is built as described under
@@ -824,7 +829,13 @@ DSP 304 §8.4.2.2 Table 6, created at these defaults:
 | | `01h`–`10h` | 0 | Byte-aligned 8..64 bits, an existing mappable object outside `1000h`–`1FFFh` of a fixed width equal to that width — no string or domain, this implementation's rule — no dummy (`0607 0010h`, `0602 0000h`, `0604 0041h`). Mapping writes while the SRDO exists, and slot writes while the count is not 0, `0601 0000h`. |
 | `13FEh` configuration valid | `00h` | 0 | Any value; only `A5h` means valid. |
 | `13FFh` safety configuration checksum | `00h` | `SrdoCount` | Constant (`0601 0002h`). |
-| | `01h`–n | 0 | UNSIGNED16, the checksum of SRDO n. |
+| | `01h`–n | 0 | UNSIGNED16, the checksum of SRDO n. Bus access as for the records (below); a description that declares it `ro` or `const` is honoured — a download is refused with `0601 0002h` and leaves `13FEh` as it was (CiA 319 §5.3). |
+
+The defaults and value ranges of `1301h`–`1340h`, `1381h`–`13C0h` and `13FEh` in this table are
+those of DSP 304 V1.0, except the default direction of `1301h:01`, which follows EN 50325-5:2010
+Table 5. Whether EN 50325-5:2010 changes any other of them is not checked: its text is not part of
+this repository, and only the clauses cited in this section were compared with it (#289). Until
+it is, these values stay as V1.0 gives them.
 
 The records, `13FEh` and `13FFh` refuse every write in Operational with `0800 0022h` (§8.3.2.4,
 note 1); reading stays allowed. The transition into Operational takes the dictionary's write gate,
@@ -1082,7 +1093,13 @@ of a data type with a fixed width (no string or domain, as locally; an entry wit
 width cannot be known) and as wide as it, and readable for a producer or writable for a consumer
 (`AccessType`). What the bound file lets the tool see is refused locally; what only the peer can
 judge — a rule of its own beyond its file — is the peer's (`ArgumentException`, nothing sent).
-Then it writes
+A pair the configuration downloads that the bound file declares `ro` or `const` — `13FFh:n`, whose
+access a description may restrict, `13FEh`, `1300h`, a record entry, the `1010h` sub-index asked
+for — is one a peer honouring its file refuses with `0601 0002h`, so it is refused here
+(`InvalidOperationException`) at the same two moments: before the first frame when the
+configuration alone fixes the write, once the count is read for an SRDO it does not name — never
+mid-transaction, after the delete-first pass. A tx SRDO's sub-index `03h` declared read-only is
+not downloaded (below) and is no such pair. Then it writes
 sub-index `01h` = 0 for every SRDO of the peer — so that two SRDOs can exchange their COB-IDs —
 then per SRDO the record in delete-first order (an SRDO the configuration does not name stays
 deleted), then `1300h`, then every checksum. The mapping is its count and the slots its objects
