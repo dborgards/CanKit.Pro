@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,9 +46,15 @@ internal sealed partial class CanOpenNode
     // (or a device description) put into 1001h through the dictionary since. Actor loop only.
     private byte _applicationErrorRegister;
 
-    // The value the node last wrote to 1001h; -1 before the first write, so the value 1001h was
-    // created or described with is taken as the application's. Actor loop only.
-    private int _nodeWrittenErrorRegister = -1;
+    // 1 when 1001h was written by someone other than the node since the node last took it; 1 from
+    // the start, so the value 1001h was created or described with is the application's. Set from
+    // the dictionary's write notification on the writer's thread, taken on the actor.
+    private int _applicationWroteErrorRegister = 1;
+
+    // The managed thread id of the node's own write to 1001h while it runs, else 0. The
+    // dictionary raises EntryWritten synchronously on the writing thread, under its write gate,
+    // so this tells the node's write from any other, whatever the value (Codex on #417).
+    private int _errorRegisterWriterThread;
 
     // The communication errors the node reported and whose cause has not ended. Actor loop only.
     private readonly HashSet<int> _communicationErrors = new();
@@ -147,14 +154,30 @@ internal sealed partial class CanOpenNode
     /// #417). Actor loop only.</summary>
     private byte TakeApplicationErrorRegister()
     {
-        var current = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
-        if (current != _nodeWrittenErrorRegister) _applicationErrorRegister = current;
+        if (Interlocked.Exchange(ref _applicationWroteErrorRegister, 0) != 0)
+            _applicationErrorRegister = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
         return _applicationErrorRegister;
     }
 
     private void WriteErrorRegister(byte value)
     {
-        _od.WriteUnsigned(Co.ErrorRegister, 0x00, value);
-        _nodeWrittenErrorRegister = value;
+        Volatile.Write(ref _errorRegisterWriterThread, Environment.CurrentManagedThreadId);
+        try
+        {
+            _od.WriteUnsigned(Co.ErrorRegister, 0x00, value);
+        }
+        finally
+        {
+            Volatile.Write(ref _errorRegisterWriterThread, 0);
+        }
+    }
+
+    /// <summary>EntryWritten, on the writer's thread: a write of <c>1001h</c> that is not the
+    /// node's own makes the value the application's part at the next step of the EMCY chain.</summary>
+    private void NoteErrorRegisterWritten(ushort index, byte subindex)
+    {
+        if (index == Co.ErrorRegister && subindex == 0x00
+            && Volatile.Read(ref _errorRegisterWriterThread) != Environment.CurrentManagedThreadId)
+            Volatile.Write(ref _applicationWroteErrorRegister, 1);
     }
 }

@@ -415,5 +415,14 @@ public partial class CanOpenPdoEngineTests
         await Inject(device, Rpdo1, 1, 2, 3, 4);
         await ExpectEmcyAsync(wire, 4, ErrorReset, 0x08);
         device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x08u);
+
+        // Codex on #417: a write of exactly the value the node last wrote is the application's
+        // too — its own communication error, which the node's error reset does not clear.
+        await Inject(device, Rpdo1, 0x03);
+        await ExpectEmcyAsync(wire, 5, 0x8210, 0x19);
+        device.ObjectDictionary.WriteUnsigned(0x1001, 0, 0x19);
+        await Inject(device, Rpdo1, 1, 2, 3, 4);
+        await ExpectEmcyAsync(wire, 6, ErrorReset, 0x19);
+        device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x19u);
     }
 }

@@ -530,6 +530,7 @@ internal sealed partial class CanOpenNode
 
     private void OnOdEntryWrittenForCommunicationProfile(ushort index, byte subindex)
     {
+        NoteErrorRegisterWritten(index, subindex);
         if (Volatile.Read(ref _disposed) != 0) return;
         if (index is >= 0x1FA0 and <= 0x1FCF)
         {
