@@ -91,6 +91,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private long _enqueueOrdinal;
     private readonly int[] _pendingEmcyPerProducer = new int[256];
     private readonly bool[] _emcyOverflowReported = new bool[256];
+    // Producers whose EMCY shorter than eight bytes has been reported (HandleEmcy). Actor-only.
+    private readonly bool[] _shortEmcyReported = new bool[256];
     private long _coalescedEventCount;
     private long _emcyOverflowCount;
     private bool _eventPumpCompleted;
@@ -1687,8 +1689,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // =========================================================================================
     private void HandleEmcy(uint cobId, byte[] data)
     {
-        if (data.Length < EmcyMessage.WireSize) return;
         byte producer = (byte)(cobId - CanOpenCobId.EmcyBase);
+        if (data.Length < EmcyMessage.WireSize)
+        {
+            // CiA 301 §7.2.7.3.1, Figure 38 lays the EMCY out over bytes 0..7: error code, error
+            // register, manufacturer field. A shorter frame is not decoded: padding it would invent
+            // the register or the manufacturer bytes. It is reported, though, once per producer
+            // for the life of the node, so a device that sends such frames is visible without a
+            // misbehaving one flooding the report (#357 C-11). Actor-only, so no lock.
+            if (!_shortEmcyReported[producer])
+            {
+                _shortEmcyReported[producer] = true;
+                RaiseBackgroundException(new CanOpenTransportException(
+                    $"EMCY on COB-ID 0x{cobId:X3} (producer 0x{producer:X2}) carried {data.Length} byte(s) instead of {EmcyMessage.WireSize} and was dropped; further short EMCYs from this producer are dropped without a report."));
+            }
+            return;
+        }
         var msg = EmcyMessage.Decode(producer, data);
         RaiseEmcyReceived(msg, DateTime.UtcNow);
     }

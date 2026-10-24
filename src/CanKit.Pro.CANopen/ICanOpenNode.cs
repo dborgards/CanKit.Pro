@@ -111,7 +111,10 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="BackgroundExceptionOccurred"/>. The producer is the COB-ID minus <c>080h</c>,
     /// the pre-defined connection set: for a peer whose <c>1014h</c> was moved off that set,
     /// <see cref="EmcyMessage.ProducerNodeId"/> is not the peer's node-id, and the folding above
-    /// is keyed on it as well.</summary>
+    /// is keyed on it as well. An EMCY frame shorter than eight bytes (CiA 301 §7.2.7.3.1) raises
+    /// no event: it is dropped, not padded, and the first one from each producer is reported on
+    /// <see cref="BackgroundExceptionOccurred"/> as a <see cref="CanOpenTransportException"/>;
+    /// later ones from that producer are dropped without a report.</summary>
     event EventHandler<EmcyReceivedEventArgs>? EmcyReceived;
 
     /// <summary>Raised whenever a SYNC frame is received on the configured SYNC COB-ID

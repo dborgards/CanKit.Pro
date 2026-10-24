@@ -653,8 +653,12 @@ three events), and a producer with `EventQueueCapacity` distinct emergencies wai
 discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundExceptionOccurred`
 is not queued.
 
-**Emergency.** An EMCY frame shorter than eight bytes is dropped without a report: it is
-neither padded, as an SDO frame is, nor surfaced anywhere. `EmcyMessage.ProducerNodeId` is the
+**Emergency.** CiA 301 §7.2.7.3.1, Figure 38 lays an EMCY out over eight bytes. A shorter
+frame is dropped rather than padded, as an SDO frame would be — padding would invent the error
+register or the manufacturer field — and raises no `EmcyReceived`. The first one from each
+producer is reported on `BackgroundExceptionOccurred` (a `CanOpenTransportException` naming the
+COB-ID and the length); later ones from that producer are dropped without a report, for the
+life of the node. `EmcyMessage.ProducerNodeId` is the
 COB-ID minus `080h`, the pre-defined connection set: for a peer whose `1014h` was moved off that
 set it is not the peer's node-id, and the per-producer backlog above is keyed on it too.
 
