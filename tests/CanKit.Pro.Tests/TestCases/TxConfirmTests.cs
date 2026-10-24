@@ -393,6 +393,31 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => classic);
     }
 
+    // #352 (Q7): what SendConfirmedAsync documents for a CAN-FD length no frame carries -- it is
+    // sent, not refused, and an echo of the frame padded to the next valid length (as an adapter
+    // rebuilding the echo from its DLC delivers it) does not confirm it, so the call times out.
+    // The timeout is tripped by hand once the padded echo has been offered: had it matched, the
+    // confirmation would already be set and the trip would change nothing.
+    [Fact]
+    public async Task A_Non_Canonical_Fd_Length_Is_Sent_And_Its_Padded_Echo_Does_Not_Confirm_It()
+    {
+        using var sender = OpenEcho();
+        sender.EchoAcceptedFrames = false;
+        using var service = new CanBusService(sender);
+        CancellationTokenSource? armed = null;
+        service.ArmConfirmTimeout = (source, _) => armed = source;
+
+        var payload = Enumerable.Range(1, 10).Select(i => (byte)i).ToArray();
+        var send = service.SendConfirmedAsync(CanFrame.Fd(0x675, payload), ShortTimeout);
+        sender.TransmitCount.Should().Be(1, "a non-canonical length is not refused");
+
+        sender.RaiseObserved(CanFrame.Fd(0x675, payload.Concat(new byte[2]).ToArray()), isEcho: true);
+        armed.Should().NotBeNull("the echo wait is armed before the call returns");
+        armed!.Cancel();
+
+        (await send.WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+    }
+
     // FR-RAW-033: a send whose echo will never arrive fails observably (Confirmed = false,
     // FailureReason = Timeout) within the configured timeout, not an indefinite hang.
     [Fact]
@@ -710,6 +735,70 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = async () => await pendingTask;
         await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // #352 (R-2): the same on the approximated path, for a bus whose TransmitAsync is genuinely
+    // asynchronous. The call returns its task only once the send is parked on the pending
+    // transmit -- everything before that wait runs on this thread -- so Dispose lands on a tracked
+    // send. No timeout is armed -- the seam swallows it -- so only Dispose can end the call: the
+    // outcome does not depend on the runtime's timer, and the hang bound only turns a missing
+    // cancellation into a failure instead of a hung run.
+    [Fact]
+    public async Task Disposing_Service_Cancels_An_Approximated_Send_Whose_Transmit_Is_Pending()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus); // Dispose is idempotent: the explicit call below is the one under test
+        service.ArmConfirmTimeout = (_, _) => { }; // arms nothing: only Dispose ends it
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x672, new byte[] { 1 }), TimeSpan.FromMinutes(5));
+        service.Dispose();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        send.IsCanceled.Should().BeTrue("a disposal is a cancellation, as on the echo path");
+        (await bus.FirstAsyncTransmitToken.WaitAsync(ShortTimeout)).IsCancellationRequested
+            .Should().BeTrue("the driver is asked to stop the transmit the send abandoned");
+        bus.ReleaseStalledTransmits();
+    }
+
+    // #352 (R-2): Dispose landing after the driver was handed the frame but before the send is
+    // tracked. Arming the timeout is that instant, and the seam disposes the service there. The
+    // send finds the sweep done and ends at once instead of waiting out its timeout.
+    [Fact]
+    public async Task Dispose_Before_A_Pending_Approximated_Send_Is_Tracked_Still_Cancels_It()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        service.ArmConfirmTimeout = (_, _) => service.Dispose(); // arms nothing: only Dispose ends it
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x673, new byte[] { 1 }), TimeSpan.FromMinutes(5));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        send.IsCanceled.Should().BeTrue();
+        bus.ReleaseStalledTransmits();
+    }
+
+    // #352 (R-2): a send whose timeout had already run out when Dispose reached it reports the
+    // timeout, not a cancellation -- Dispose ends only a wait that is still running. The seam trips
+    // the timeout and then disposes, both before the send is tracked.
+    [Fact]
+    public async Task An_Approximated_Send_That_Timed_Out_Before_Dispose_Reports_The_Timeout()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        service.ArmConfirmTimeout = (source, _) =>
+        {
+            source.Cancel();
+            service.Dispose();
+        };
+
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x674, new byte[] { 1 }), TimeSpan.FromMinutes(5))
+            .WaitAsync(ShortTimeout);
+
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        bus.ReleaseStalledTransmits();
     }
 
     // #352 (mutation R-M2): Dispose landing between SendConfirmedAsync's eager disposed check and

@@ -318,6 +318,23 @@ public class IsoTpFrameCodecTests
         IsoTpFrameCodec.DecodeStMin(raw).Should().Be(TimeSpan.FromTicks(microseconds * 10));
     }
 
+    // #353: the rounding EncodeStMin's remarks and the README's open norm question 5 describe --
+    // 1 ms and more rounded to the nearest millisecond, half up, capped at 127 ms; less truncated
+    // down to its 100 µs step but not below 100 µs; under 1 µs is 0. Pinned so the text cannot
+    // drift from the code while the question (round a minimum separation up?) is open.
+    [Theory]
+    [InlineData(1_900, 0xF1)]      // 190 µs -> 100 µs
+    [InlineData(9_990, 0xF9)]      // 999 µs -> 900 µs
+    [InlineData(500, 0xF1)]        // 50 µs -> 100 µs, the smallest step
+    [InlineData(5, 0x00)]          // 0.5 µs -> 0
+    [InlineData(14_000, 0x01)]     // 1.4 ms -> 1 ms
+    [InlineData(15_000, 0x02)]     // 1.5 ms -> 2 ms
+    [InlineData(1_280_000, 0x7F)]  // 128 ms -> 127 ms
+    public void EncodeStMin_Rounds_As_Documented(int ticks, byte expectedRaw)
+    {
+        IsoTpFrameCodec.EncodeStMin(TimeSpan.FromTicks(ticks)).Should().Be(expectedRaw);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Defect #6 / FR-TP-007 / FR-RAW-052: reserved STmin bands decode to 127 ms.
     // ---------------------------------------------------------------------------------------------
