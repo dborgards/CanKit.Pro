@@ -79,14 +79,20 @@ Not-yet-due `Schedule` callbacks are discarded, not fired. `Dispose` waits up to
 the loop to actually finish; if a callback is still running when that elapses it returns anyway
 (so `Dispose` never becomes the thing that hangs) and reports a `TimeoutException` through
 `BackgroundExceptionOccurred` — a silent give-up would leave the caller unable to tell a clean
-shutdown from a loop still mutating state it believes it now owns. That wait holds for every
-caller, not only the first: a second `Dispose` — the owner's `using` after a callback disposed
-the actor from the loop, or two owners racing — also returns only once the loop has stopped (or
-the same timeout has elapsed; it is reported once). Two calls do not wait: the reentrant one from
-inside a callback, which would otherwise deadlock on its own loop, and one a
-`BackgroundExceptionOccurred` subscriber makes from inside that `TimeoutException` report — also
-when another actor's report has nested inside it since — which would otherwise stretch the
-reporting `Dispose` to twice the timeout.
+shutdown from a loop still mutating state it believes it now owns. Unlike the reports of failing
+callbacks, this one is raised on the thread calling `Dispose`, not on the loop: the loop is still
+inside the callback that would not finish, so a subscriber must not touch loop-owned state from
+it. That wait holds for every caller, not only the first: a second `Dispose` — the owner's
+`using` after a callback disposed the actor from the loop, or two owners racing — also returns
+only once the loop has stopped (or the same timeout has elapsed; it is reported once). Two calls
+do not wait: the reentrant one from inside a callback, which would otherwise deadlock on its own
+loop, and one a `BackgroundExceptionOccurred` subscriber makes from inside that
+`TimeoutException` report — also when another actor's report has nested inside it since — which
+would otherwise stretch the reporting `Dispose` to twice the timeout. `Dispose` makes one other
+report, also once and also off the loop's callbacks: in the two task-based modes, a loop that ended
+by throwing outside every callback — a defect, not a shutdown path — is reported instead of
+dropped, on the thread calling `Dispose`, or, if the loop only fails after `Dispose` gave up on
+it, on the thread the loop ends on.
 
 `IsOnCurrentActor` answers "is *this thread* currently running one of my callbacks?", which is
 what makes a public sync API able to run inline instead of dead-locking on its own loop. It is

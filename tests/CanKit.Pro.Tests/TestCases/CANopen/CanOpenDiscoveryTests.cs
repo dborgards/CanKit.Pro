@@ -380,6 +380,47 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
             .Should().ThrowAsync<CanOpenTransportException>();
     }
 
+    // Deep review 2026-10-21, §2 (#359): cancelling a bus-level scan ends every probe still waiting
+    // for an answer and frees its channel, so the next scan asks those node-ids again instead of
+    // reporting them absent as "already in flight". The client's SDO timeout runs on a clock that
+    // nothing moves, so only the cancellation can end the first scan; the wall-clock bounds below
+    // detect a hang and decide nothing.
+    [Fact]
+    public async Task A_Cancelled_Scan_Ends_Its_Probes_And_The_Next_Scan_Asks_Those_Node_Ids_Again()
+    {
+        var hang = TimeSpan.FromSeconds(30);
+        var session = $"canopen-discovery-cancel-{Guid.NewGuid():N}";
+        using var clientBus = Open(session, 0);
+        using var watchBus = Open(session, 1);
+        using var peerBus = Open(session, 2);
+        var asked = new ConcurrentDictionary<uint, byte>();
+        var bothAsked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        watchBus.FrameObserved += (_, e) =>
+        {
+            uint id = (uint)e.CanFrame.ID;
+            if (id != CanOpenCobId.SdoRx(0x30) && id != CanOpenCobId.SdoRx(0x31)) return;
+            asked.TryAdd(id, 0);
+            if (asked.Count == 2) bothAsked.TrySetResult(true);
+        };
+        using var client = new CanOpenNode(new CanBusService(clientBus), 0x7F, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
+
+        using var cancel = new CancellationTokenSource();
+        var first = CanOpenDiscovery.ScanAsync(client, Skip(except: new byte[] { 0x30, 0x31 }), cancel.Token);
+        await bothAsked.Task.WithTimeoutAsync(hang);
+        first.IsCompleted.Should().BeFalse("the premise: nobody answers, and the SDO timeout never elapses");
+        cancel.Cancel();
+        await FluentActions.Awaiting(() => first.WithTimeoutAsync(hang))
+            .Should().ThrowAsync<OperationCanceledException>("the cancellation reaches every probe in flight");
+
+        using var answering = CanOpen.OpenNode(peerBus, 0x30);
+        await WaitForStateAsync(answering, NmtState.PreOperational);
+        var again = await CanOpenDiscovery.ScanAsync(client, Skip(except: new byte[] { 0x30 }))
+            .WithTimeoutAsync(hang);
+        again.Select(n => n.NodeId).Should().Equal(new byte[] { 0x30 },
+            "the cancelled probe released its channel, so 0x30 is asked again and answers");
+    }
+
     private static IEnumerable<byte> Skip(IEnumerable<byte> except)
     {
         var keep = new HashSet<byte>(except);

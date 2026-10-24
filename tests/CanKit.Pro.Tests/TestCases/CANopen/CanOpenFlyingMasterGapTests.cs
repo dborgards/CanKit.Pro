@@ -776,7 +776,9 @@ public partial class CanOpenFlyingMasterTests
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Detecting,
             "a claim in the cold-reset window must not move the node to standby");
 
-        await Task.Delay(200);
+        // The second half (#359): disposal releases the held send after the actor is gone, and the
+        // outcome that would post back onto it is swallowed rather than left to fault unobserved.
+        await AssertResetOutcomeSwallowedOnDisposeAsync(node);
     }
 
     [Fact]
@@ -1340,8 +1342,26 @@ public partial class CanOpenFlyingMasterTests
 
         // Dispose drops the actor and then releases the held send. The completion posts back
         // onto a node that is already gone.
+        await AssertResetOutcomeSwallowedOnDisposeAsync(node);
+    }
+
+    /// <summary>
+    /// Disposes <paramref name="node"/> while its cold or forced Reset Communication is held in the
+    /// adapter, and checks that the send's outcome, which then has no actor to post to, ends
+    /// without a fault. An unobserved fault would leave xunit green, so the continuation is
+    /// awaited through the node's seam; the wall-clock bound only detects a hang.
+    /// </summary>
+    private static async Task AssertResetOutcomeSwallowedOnDisposeAsync(CanOpenNode node)
+    {
+        // The held send can reach the adapter before the actor has stored its continuation.
+        await node.PostToActorAsync(static () => { }).WaitAsync(TimeSpan.FromSeconds(30));
+        var outcome = node.ResetOutcomeForTests;
+        outcome.IsCompleted.Should().BeFalse("the premise: the reset is still held in the adapter");
         node.Dispose();
-        await Task.Delay(200);
+        (await Task.WhenAny(outcome, Task.Delay(TimeSpan.FromSeconds(30)))).Should().BeSameAs(outcome,
+            "disposal releases the held send");
+        outcome.Status.Should().Be(TaskStatus.RanToCompletion, "the outcome posted onto the disposed node is swallowed: {0}",
+            outcome.Exception);
     }
 
     [Fact]

@@ -505,9 +505,13 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivation?.Dispose();
         _lssActivation = null;
         _lssDelayElapsed = false;
-        // The node may transmit again. Disposal must not put a frame on a bus that is going away.
-        if (Volatile.Read(ref _disposed) != 0 || _lssBitRateSwitch.Status == TaskStatus.RanToCompletion)
-            CompleteLssTransmitHold();
+        // Disposal drops what is held: no frame goes onto a bus that is going away. A superseding
+        // activate does not end a silence that is in progress (L-3, #359): it used to, whenever
+        // the previous switch had finished, which flushed the held frames and let the node
+        // transmit until the replacement's own silence began. The node stays silent instead, and
+        // the silence ends where the replacement's would -- after its second delay and its switch.
+        if (Volatile.Read(ref _disposed) != 0)
+            DropHeldTransmits();
     }
 
     // Actor thread. Invalid or unsupported commands draw no response (§7.3), except store,

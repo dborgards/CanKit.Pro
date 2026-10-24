@@ -64,7 +64,9 @@ public sealed class LssSlaveOptions
     /// Handles a manufacturer-specific command (specifier 128..255, §7.3) while the slave is in
     /// configuration. The memory is the seven parameter bytes. Returns the response frame (at
     /// most 8 bytes; shorter frames are padded with zeros) or <see langword="null"/> to stay silent.
-    /// <see langword="null"/> (the default) stays silent for every such command.
+    /// <see langword="null"/> (the default) stays silent for every such command. Unlike
+    /// <see cref="BitRateSwitch"/>, the handler runs on the node's actor: while it blocks, every
+    /// other CANopen service of the node waits, so it must return promptly.
     /// </summary>
     public Func<byte, ReadOnlyMemory<byte>, byte[]?>? Manufacturer { get; init; }
 
