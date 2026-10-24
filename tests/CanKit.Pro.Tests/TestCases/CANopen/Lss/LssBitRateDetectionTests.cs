@@ -253,6 +253,52 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Bus_That_Reports_Listen_Only_On_An_Adapter_That_Does_Not_Apply_It_Fails()
+    {
+        // #345: on CanKit 0.5.6 the Kvaser adapter reports the requested listen-only mode and
+        // advertises the feature, but never makes the controller silent. CiA 801 has no software
+        // search for that case (§5.2.1, §5.2.4), so the detection refuses before it listens.
+        var opened = new List<DetectionProbeBus>();
+        var factory = DetectionProbeBus.Factory(NewSession(), opened,
+            reportOptions: options => new CanKit.Adapter.Kvaser.KvaserBusRtConfigurator(options));
+        var listened = 0;
+        Func<TimeSpan, CancellationToken, Task> delay = (_, _) =>
+        {
+            listened++;
+            return Task.CompletedTask;
+        };
+
+        var detect = () => LssBitRateDetection.DetectCoreAsync(factory,
+            new LssBitRateDetectionOptions { Candidates = new[] { 500_000 } }, delay, CancellationToken.None);
+
+        await detect.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*reports listen-only*CanKit.Adapter.Kvaser*does not put the controller into listen-only*§5.2.4*");
+        var bus = opened.Should().ContainSingle().Which;
+        bus.Options.WorkMode.Should().Be(ChannelWorkMode.ListenOnly, "the bus reports the mode the factory asked for");
+        bus.Options.Features.Should().HaveFlag(CanFeature.ListenOnly, "the adapter advertises the feature it does not apply");
+        bus.IsDisposed.Should().BeTrue("the bus is disposed even when the probe rejects it");
+        listened.Should().Be(0, "the probe is refused before it listens");
+    }
+
+    [Fact]
+    public async Task Listen_Only_Can_Be_Waived_For_An_Adapter_That_Does_Not_Apply_It()
+    {
+        // CiA 801 §5.2.4: external hardware holding the transmit line recessive makes such a
+        // controller silent, after which the Figure 1 search runs unchanged.
+        var opened = new List<DetectionProbeBus>();
+        var options = new LssBitRateDetectionOptions
+        {
+            Candidates = new[] { 500_000 },
+            RequireListenOnly = false,
+        };
+        var factory = DetectionProbeBus.Factory(NewSession(), opened,
+            reportOptions: inner => new CanKit.Adapter.Kvaser.KvaserBusRtConfigurator(inner));
+        var result = await DetectAsync(factory, options, new[] { Frame() });
+
+        result.BitsPerSecond.Should().Be(500_000);
+    }
+
+    [Fact]
     public async Task Listen_Only_Can_Be_Waived_For_An_Adapter_That_Is_Silent_In_Normal_Mode()
     {
         var opened = new List<DetectionProbeBus>();
