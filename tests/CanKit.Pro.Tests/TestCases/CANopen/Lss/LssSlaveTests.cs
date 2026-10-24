@@ -2462,7 +2462,10 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             await slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
             slave.IsLssSilentForTests.Should().BeTrue("the switch has not finished");
 
-            blocked = slave.PostToActorAsync(() => release.Wait(LssTestTiming.SchedulingBudget));
+            // Held until the finally releases it, not for a budget: the assertions below are true
+            // only while the actor is held, and a hold that runs out lets a switch completion that
+            // arrives late, behind a starved thread pool, end the silence first.
+            blocked = slave.PostToActorAsync(() => release.Wait());
             hook.TrySetResult(true);
             await slave.LssBitRateSwitchCompletion.WaitAsync(LssTestTiming.SchedulingBudget);
             slave.IsLssSettledForTests.Should().BeFalse("the finished switch has not reached the held actor yet");
