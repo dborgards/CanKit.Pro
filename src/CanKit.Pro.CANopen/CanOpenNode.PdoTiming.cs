@@ -46,6 +46,9 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
             {
                 rt!.SyncStarted = false;
                 rt.SyncCounter = 0;
+                // The gate is armed again for every synchronous type (§7.5.2.37): an FCh sample
+                // taken before it is not the new first counted SYNC's and answers no RTR.
+                if (rt.SyncStartValue != 0) rt.RtrBuffer = null;
             }
         }
         var window = TimeSpan.FromTicks(_od.ReadUnsigned(Co.SyncWindow, 0) * (TimeSpan.TicksPerMillisecond / 1000));
