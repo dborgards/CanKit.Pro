@@ -111,7 +111,10 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="BackgroundExceptionOccurred"/>. The producer is the COB-ID minus <c>080h</c>,
     /// the pre-defined connection set: for a peer whose <c>1014h</c> was moved off that set,
     /// <see cref="EmcyMessage.ProducerNodeId"/> is not the peer's node-id, and the folding above
-    /// is keyed on it as well.</summary>
+    /// is keyed on it as well. An EMCY frame shorter than eight bytes (CiA 301 §7.2.7.3.1) raises
+    /// no event: it is dropped, not padded, and the first one from each producer is reported on
+    /// <see cref="BackgroundExceptionOccurred"/> as a <see cref="CanOpenTransportException"/>;
+    /// later ones from that producer are dropped without a report.</summary>
     event EventHandler<EmcyReceivedEventArgs>? EmcyReceived;
 
     /// <summary>Raised whenever a SYNC frame is received on the configured SYNC COB-ID
@@ -147,7 +150,10 @@ public interface ICanOpenNode : IDisposable
 
     /// <summary>Raised whenever a node-guarding response (data frame on <c>0x700 + producer</c>
     /// with the toggle bit in bit 7 and the NMT state in bits 0..6) is received for a
-    /// configured node-guarding consumer (FR-CO-009 / CiA 301 §7.2.8.3.2.1).</summary>
+    /// configured node-guarding consumer (FR-CO-009 / CiA 301 §7.2.8.3.2.1). A response whose
+    /// toggle bit repeats the previous one is "handled as if it was not received"
+    /// (§7.2.8.3.2.1): it raises no event and does not re-arm the life time, so a producer that
+    /// stops alternating is reported through <see cref="NodeGuardingTimeout"/>.</summary>
     event EventHandler<NodeGuardingReceivedEventArgs>? NodeGuardingReceived;
 
     /// <summary>Raised when a configured node-guarding consumer's life-time
@@ -367,7 +373,7 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="SdoTransferMode.Auto"/> uses the classic client because the payload length is
     /// unknown until the server replies — whether that reply is expedited or segmented is the
     /// server's choice and is handled transparently. Pass <see cref="SdoTransferMode.Block"/> to
-    /// force block transfer (CiA 301 §7.2.4.3.15).
+    /// force block transfer (CiA 301 §7.2.4.3.12–7.2.4.3.15).
     /// (FR-CO-002 / FR-CO-003 / FR-CO-004). Refused locally with
     /// <see cref="PeerSdoAccessException"/> when the pair is not allowed for
     /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.
@@ -402,8 +408,16 @@ public interface ICanOpenNode : IDisposable
     /// One transfer per server is in flight at a time: with one in flight — a safety transaction
     /// with that server counts as one for its whole length — the call fails with
     /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
-    /// <remarks>Not gated by this node's NMT state, as
-    /// <see cref="SdoUploadAsync(byte, ushort, byte, SdoTransferMode, CancellationToken)"/>.</remarks>
+    /// <remarks>
+    /// <para>Not gated by this node's NMT state, as
+    /// <see cref="SdoUploadAsync(byte, ushort, byte, SdoTransferMode, CancellationToken)"/>.</para>
+    /// <para>Cancelling <paramref name="cancellationToken"/> ends the returned task as cancelled and
+    /// sends the server an abort (<c>0800 0000h</c>). During a block download the sub-block
+    /// being sent stops before its next segment, but the segment it had already started to hand to
+    /// the bus is not recalled: it can reach the bus after the abort, and after the initiate of a
+    /// transfer to the same server started right after the cancellation (#377). The task does not
+    /// wait for the abort to be on the wire.</para>
+    /// </remarks>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,

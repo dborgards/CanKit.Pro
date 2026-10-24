@@ -49,7 +49,7 @@ maintainer decision does.
 | FR-CO-001 | Local object dictionary with typed read/write, data-type enforcement and per-entry PDO mappability |
 | FR-CO-002 | SDO expedited transfer (payloads ≤ 4 bytes) |
 | FR-CO-003 | SDO segmented transfer (payloads > 4 bytes, toggle-bit protocol) |
-| FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.15) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
+| FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.8–7.2.4.3.16) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
 | FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`17FFh` / `1A00h`–`1BFFh`: bit-granular, up to 64 bits, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
 | FR-CO-006 | Event-driven, timer-driven and SYNC-triggered TPDO transmission; change-of-state emission on application OD writes (`CanOpenNodeOptions.EnableChangeOfStateTpdo`, default on; bus-originated writes never re-trigger, so no echo loops) |
 | FR-CO-007 | NMT master + slave state machine (Start / Stop / Pre-Op / Reset Node / Reset Communication) |
@@ -234,6 +234,14 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0609 0030h` | Reserved transmission type; bit 29 set on SYNC/EMCY; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time or SYNC start changed while the PDO is valid; reserved mapping count `41h`–`FDh`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
 | `0800 0020h` | Wrong signature written to `1010h:01` / `1011h:01` |
 | `0800 0022h` | SDO server session open when the node entered Stopped or was reset; `1F82h` written while this node is not the active NMT master |
+
+**Expedited download without a size.** CiA 301 §7.2.4.3.3 permits `e = 1, s = 0` (command byte
+`22h`): "d contains unspecified number of bytes to be downloaded". The server then takes the
+object's own width: a fixed-width object of 1..4 bytes gets the first bytes of `d`, an object
+without a fixed width (a string or a `DOMAIN`) gets all four, and an object wider than four bytes,
+which an expedited frame cannot carry, is refused with `0607 0013h`. The client side does not
+apply a width: for an expedited upload response without a size (§7.2.4.3.6, "e = 1, s = 0: d
+contains unspecified number of bytes to be uploaded") `SdoUploadAsync` returns all four bytes.
 
 **Read-only by default.** `CanOpenNodeOptions.WritableCommunicationParameters` (default
 `false`) decides whether a master may write the PDO communication and mapping records over SDO.
@@ -649,15 +657,24 @@ is not queued here: it is delivered on the thread pool, never on the actor or th
 report at a time in the order they were made, each handler on its own, so a handler may wait on
 the node -- an SDO transfer, `StoreParameters`, `Dispose` -- without deadlocking it (#356, #381).
 
-**Emergency.** An EMCY frame shorter than eight bytes is dropped without a report: it is
-neither padded, as an SDO frame is, nor surfaced anywhere. `EmcyMessage.ProducerNodeId` is the
+**Emergency.** CiA 301 §7.2.7.3.1, Figure 38 lays an EMCY out over eight bytes. A shorter
+frame is dropped rather than padded, as an SDO frame would be — padding would invent the error
+register or the manufacturer field — and raises no `EmcyReceived`. The first one from each
+producer is reported on `BackgroundExceptionOccurred` (a `CanOpenTransportException` naming the
+COB-ID and the length); later ones from that producer are dropped without a report, for the
+life of the node. `EmcyMessage.ProducerNodeId` is the
 COB-ID minus `080h`, the pre-defined connection set: for a peer whose `1014h` was moved off that
 set it is not the peer's node-id, and the per-producer backlog above is keyed on it too.
 
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after
-`guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A boot-up from the
-producer resets the toggle baseline rather than counting as a reply.
+`guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A reply that repeats
+the previous toggle is dropped without an event and does not re-arm the life time, as CiA 301
+§7.2.8.3.2.1 prescribes: "If a response is received with the same value of the toggle-bit as in
+the preceding response then the new response is handled as if it was not received." The
+indication of a producer that stops alternating is therefore `NodeGuardingTimeout`, one life
+time after the last reply received. A boot-up from the producer resets the toggle baseline
+rather than counting as a reply.
 
 **Life guarding (producer side).** With `100Ch` (guard time) and `100Dh` (life time factor)
 both non-zero, the node supervises the master that guards it: guarding starts with the first
@@ -712,6 +729,17 @@ downward). CRC-16/XMODEM is exchanged when both endpoints set the "cc" / "sc" bi
 timeout (`CanOpenNodeOptions.SdoServerTimeout`, default 5 s) matching the block transfer guard,
 and block transfer retransmits from the first unconfirmed segment on a partial sub-block ACK
 (bounded by `CanOpenNodeOptions.SdoBlockMaxRetransmissions`, default 3).
+
+**Cancelling a block download.** The caller's task ends as cancelled without waiting for the
+abort (`0800 0000h`) to be on the wire, and the sub-block being sent stops before its next segment. The abort and
+the sub-block leave on separate sending tasks, though, and the sub-block checks only between two
+segments, so the one segment it had already started to hand to the bus when the cancellation
+took effect can reach the bus after the abort — and, if the caller starts the next transfer with
+that server at once, after that transfer's initiate as well. The server then reads it as whatever
+its first byte means as a command specifier. This narrow window is accepted (#377): closing it
+would mean completing the cancellation only once the abort is on the wire, which changes when a
+cancelled call returns. No other transfer has the window: an expedited or segmented download
+sends one frame per server response, and an upload's segments come from the server.
 
 ## CANopen Safety (CiA 304)
 
