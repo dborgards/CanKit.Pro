@@ -789,13 +789,46 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         node.StopNodeGuardingConsumer(Producer);
     }
 
+    // #357 C-8, producer side, kept as decided: RespondToNodeGuardingRtr = false also keeps life
+    // guarding off. Guarding "starts for the NMT slave when the first RTR for its guarding CAN-ID
+    // is received" (§7.2.8.2.2), and a node told not to answer is not taking part in the
+    // protocol: it must not report a master lost for a supervision it opted out of. Configured
+    // and polled exactly as in LifeGuarding_Starts_With_The_First_Rtr_..., where the same clock
+    // movement yields Occurred.
+    [Fact]
+    public async Task LifeGuarding_Stays_Off_When_The_Node_Does_Not_Answer_Guarding_Rtrs()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 1);
+        using var masterBus = Open(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, NodeId, clock,
+            new CanOpenNodeOptions { RespondToNodeGuardingRtr = false });
+        var witness = new ActorWitness(node, masterBus, clock);
+        var events = new AsyncQueue<LifeGuardingEventArgs>();
+        node.LifeGuardingEvent += (_, e) => events.Add(e);
+
+        node.ObjectDictionary.WriteUnsigned(GuardTimeIndex, 0x00, 50);
+        node.ObjectDictionary.WriteUnsigned(LifeTimeFactorIndex, 0x00, 3);
+        await witness.SettleAsync();
+
+        SendRtr(masterBus, NodeId);
+        await witness.SettleAsync();
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(150));
+        await witness.AdvanceAsync(TimeSpan.FromHours(1));
+
+        events.Count.Should().Be(0,
+            "an RTR the node does not answer does not start life guarding, whatever 100Ch and 100Dh hold");
+    }
+
     // =========================================================================================
     // Helpers.
     // =========================================================================================
 
     /// <summary>The node under test on the clock the test drives (#113).</summary>
-    private static CanOpenNode OpenClockedNode(ICanBus bus, byte nodeId, ManualTimeSource clock)
-        => new(new CanBusService(bus), nodeId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+    private static CanOpenNode OpenClockedNode(ICanBus bus, byte nodeId, ManualTimeSource clock,
+        CanOpenNodeOptions? options = null)
+        => new(new CanBusService(bus), nodeId, options ?? new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
 
     /// <summary>A node-guarding poll: an RTR on <c>0x700 + nodeId</c>. Same shape the node's own
     /// consumer sends (CanOpenNode.NodeGuarding.cs, SendNodeGuardingRtr), DLC 0 included.</summary>
