@@ -125,7 +125,9 @@ await uds.DownloadAsync(
 * NRC 0x21 (busyRepeatRequest) is what it says: the request is repeated, up to
   `UdsClientOptions.MaxBusyRepeatRequests` times (default 3, after `BusyRepeatRequestDelay`,
   default zero), each with a fresh P2; the negative response surfaces only once the repeats are
-  used up (#57).
+  used up (#57). The zero delay is not taken from ISO 14229-1: whether the standard asks for a
+  delay before the repeat has not been checked against its text, and the default stays zero until
+  it is (#354).
 * `UdsTimeoutException.Elapsed` is the budget of the timer that expired (P2 or P2*) on every
   path, never a measurement of how late the client noticed (#57).
 * `DiagnosticSessionControlAsync(byte)` rejects 0x00 and any value with bit 7 set rather than
