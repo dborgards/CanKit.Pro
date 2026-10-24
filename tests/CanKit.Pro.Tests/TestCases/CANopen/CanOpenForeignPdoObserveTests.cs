@@ -1430,10 +1430,9 @@ PDOMapping=1
                 lock (_gate)
                 {
                     _uploads.Add((index, data[3]));
-                    foreach (var awaited in _awaited)
-                    {
-                        if (awaited.Upload == (index, data[3])) awaited.Seen.TrySetResult(true);
-                    }
+                    var upload = (index, data[3]);
+                    foreach (var awaited in _awaited.Where(a => a.Upload == upload))
+                        awaited.Seen.TrySetResult(true);
                 }
             };
         }
