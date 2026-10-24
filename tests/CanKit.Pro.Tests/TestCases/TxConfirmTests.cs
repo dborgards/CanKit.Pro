@@ -825,9 +825,9 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
     // #430: the same race on the approximated path. A send that passed the eager disposed check
     // and reached the driver only after Dispose had finished used to hand its frame over anyway;
-    // the check and the hand-off are now one step under the gate Dispose sets _pendingDisposed
-    // under, so the send is refused with ObjectDisposedException -- what the echo path throws --
-    // and the driver is never called. The double declares the Echo capability but reports Normal
+    // the send now re-checks the flag Dispose sets, after counting itself in the hand-offs Dispose
+    // waits for, so it is refused with ObjectDisposedException -- what the echo path throws -- and
+    // the driver is never called. The double declares the Echo capability but reports Normal
     // mode, so the send takes the approximated path and still reads WorkMode, which is the instant
     // between the two checks; the double disposes the service there, on the sending thread, so
     // Dispose has completed before the send goes on. Both driver kinds: one whose TransmitAsync
@@ -856,17 +856,17 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
     // #430, the other half: the disposed check and the driver call are one step with respect to a
     // Dispose on *another* thread. The test above disposes before the check, so it pins that the
-    // check exists, not that it is atomic with the hand-off -- a lock-free re-check right before
-    // TransmitAsync passes it and still lets a Dispose that lands between the two finish while
-    // the frame is on its way to the driver. Here the driver call itself starts a Dispose on a
+    // check exists, not that it is atomic with the hand-off -- a re-check right before
+    // TransmitAsync that Dispose does not wait behind passes it and still lets a Dispose that
+    // lands between the two finish while the frame is on its way to the driver. Here the driver call itself starts a Dispose on a
     // second thread and holds still until that Dispose has either returned or blocked: blocked is
-    // the only outcome when the call is inside the gate, returned is the race. No clock decides
+    // the only outcome when Dispose waits for the hand-off in progress, returned is the race. No clock decides
     // it; the wait ends on one of the two states (or on the thread dying), never on a timeout.
     [Fact]
     public async Task Dispose_On_Another_Thread_Waits_For_An_Approximated_Handoff_In_Progress()
     {
         // Dispose's code path is run once beforehand so a JIT or type-load wait on the second
-        // thread cannot be mistaken for it waiting on the gate.
+        // thread cannot be mistaken for it waiting on the hand-off.
         using (var warmUpBus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm")))
             new CanBusService(warmUpBus).Dispose();
 
