@@ -9,6 +9,7 @@ import importlib.util
 import io
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +100,28 @@ class BranchRange(unittest.TestCase):
         code, output = self.run_in_repo([])
         self.assertEqual(0, code)
         self.assertIn('0 commit subject(s) checked', output)
+
+
+class RunFromOutsideTheCheckout(unittest.TestCase):
+    """ci.yml runs the base branch's copy from the runner's temp directory, with the checkout as the
+    working directory. So the script has to stand alone -- no sibling file from eng/ to import, which
+    the in-process tests above would not notice because discovery puts eng/ on sys.path -- and the
+    range has to come from the working directory, not from the script's location."""
+
+    def test_a_copy_elsewhere_checks_the_repository_it_is_run_in(self):
+        with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as elsewhere:
+            git(repo, 'init', '-q', '-b', 'main')
+            git(repo, 'commit', '-q', '--allow-empty', '-m', 'Initial commit that is not conventional')
+            git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+            git(repo, 'commit', '-q', '--allow-empty', '-m', 'feat: a')
+            git(repo, 'commit', '-q', '--allow-empty', '-m', 'Fixed stuff')
+            copy = Path(elsewhere) / 'check-commit-subjects.py'
+            copy.write_bytes(Path(__file__).with_name('check-commit-subjects.py').read_bytes())
+            result = subprocess.run([sys.executable, '-I', str(copy), 'main'], cwd=repo,
+                                    capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn("'Fixed stuff'", result.stdout)
+        self.assertIn('1 of 2 commit subject(s)', result.stdout)
 
 
 class Usage(unittest.TestCase):
