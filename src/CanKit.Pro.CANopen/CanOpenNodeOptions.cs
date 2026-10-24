@@ -93,9 +93,10 @@ public sealed class CanOpenNodeOptions
 
     /// <summary>
     /// Auto-select threshold (bytes) at or above which the SDO client uses block transfer
-    /// (FR-CO-004 / CiA 301 §7.2.4.3.15) for an <see cref="Sdo.SdoTransferMode.Auto"/> download
-    /// instead of the segmented protocol. Below the threshold the payload length picks the
-    /// codec: expedited for 1..4 bytes, segmented above that. Uploads never auto-switch to block
+    /// (FR-CO-004 / CiA 301 §7.2.4.3.8–7.2.4.3.11, block download) for an
+    /// <see cref="Sdo.SdoTransferMode.Auto"/> download instead of the segmented protocol. Below
+    /// the threshold the payload length picks the codec: expedited for 1..4 bytes, segmented
+    /// above that. Uploads never auto-switch to block
     /// because the length is unknown until the server replies; callers can bypass the threshold
     /// in either direction by explicitly passing <see cref="Sdo.SdoTransferMode.Block"/>.
     /// Defaults to 128 bytes.
@@ -105,7 +106,8 @@ public sealed class CanOpenNodeOptions
     /// <summary>
     /// Preferred block size (segments per sub-block, 1..127) that this node advertises when it
     /// acts as a block-transfer receiver (server for download, client for upload). CiA 301
-    /// §7.2.4.3.15 permits the receiver to choose any value in [1,127]; peers with a smaller
+    /// §7.2.4.3.9 (download) and §7.2.4.3.13 (upload) bound blksize to 0 &lt; blksize &lt; 128, so the
+    /// receiver may choose any value in [1,127]; peers with a smaller
     /// window will re-negotiate downward via their own initiate. Defaults to 127.
     /// </summary>
     public byte SdoBlockSize { get; init; } = 127;
@@ -113,15 +115,17 @@ public sealed class CanOpenNodeOptions
     /// <summary>
     /// When <c>true</c> this node advertises CRC-16/XMODEM support on block-transfer initiates
     /// (cc / sc bit) and both computes and validates the CRC on the end-of-block frame. The peer
-    /// must also set its CRC bit for the CRC to be exchanged (per CiA 301 §7.2.4.3.15 the CRC is
-    /// only carried when both endpoints advertise support). Defaults to <c>true</c>.
+    /// must also set its CRC bit for the CRC to be exchanged (per CiA 301 §7.2.4.3.11 and
+    /// §7.2.4.3.15 the CRC is only valid when both endpoints set cc and sc in the initiate, and is
+    /// 0 otherwise). Defaults to <c>true</c>.
     /// </summary>
     public bool SdoBlockCrcSupported { get; init; } = true;
 
     /// <summary>
     /// Maximum number of sub-block retransmissions per block transfer before the node aborts
-    /// (CiA 301 §7.2.4.3.15): on a partial sub-block ACK (ackseq &lt; segments sent) the sender
-    /// rewinds to the first unconfirmed segment and resends, up to this many times per transfer
+    /// (CiA 301 §7.2.4.3.10 for download, §7.2.4.3.14 for upload): on a partial sub-block ACK
+    /// (ackseq &lt; segments sent) the sender rewinds to the first unconfirmed segment and resends,
+    /// up to this many times per transfer
     /// — a bound against peers that never confirm progress. Applies to the download client and
     /// the upload server alike. <c>0</c> restores the previous MVP behavior (abort on the first
     /// partial ACK). Defaults to 3.
@@ -362,7 +366,7 @@ public sealed class CanOpenNodeOptions
                 "SdoBlockThresholdBytes must be >= 1.");
         if (SdoBlockSize is < 1 or > 127)
             throw new ArgumentOutOfRangeException(nameof(SdoBlockSize), SdoBlockSize,
-                "SdoBlockSize must be in [1, 127] per CiA 301 §7.2.4.3.15.");
+                "SdoBlockSize must be in [1, 127] per CiA 301 §7.2.4.3.9 and §7.2.4.3.13 (0 < blksize < 128).");
         if (SdoBlockMaxRetransmissions < 0)
             throw new ArgumentOutOfRangeException(nameof(SdoBlockMaxRetransmissions), SdoBlockMaxRetransmissions,
                 "SdoBlockMaxRetransmissions must be >= 0.");

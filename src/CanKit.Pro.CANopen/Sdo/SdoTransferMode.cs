@@ -13,7 +13,7 @@ namespace CanKit.Pro.CANopen.Sdo;
 /// <list type="bullet">
 ///   <item><description><b>Download.</b> Payloads at or above
 ///   <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> switch to block transfer
-///   (CiA 301 §7.2.4.3.15). <em>Below</em> that threshold the payload length picks the codec:
+///   (CiA 301 §7.2.4.3.8–7.2.4.3.11). <em>Below</em> that threshold the payload length picks the codec:
 ///   1..4 bytes expedited, 5 bytes and up segmented. The threshold is tested first, so it bounds
 ///   the expedited range too — the options permit a threshold of 1..4, and such a node sends even
 ///   a one-byte payload by block transfer.</description></item>
@@ -38,7 +38,7 @@ public enum SdoTransferMode
     /// </summary>
     Auto = 0,
 
-    /// <summary>Force block transfer (CiA 301 §7.2.4.3.15).</summary>
+    /// <summary>Force block transfer (CiA 301 §7.2.4.3.8–7.2.4.3.16).</summary>
     /// <remarks>
     /// The value stays <c>3</c>, the gap left by the removed members notwithstanding. Renumbering
     /// it to <c>1</c> would silently reuse the value <c>Expedited</c> carried in 1.2.x: an
