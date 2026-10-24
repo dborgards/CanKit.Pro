@@ -39,6 +39,18 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     private static void Send(ICanBus bus, uint cobId, byte[] payload)
         => bus.Transmit(CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false));
 
+    /// <summary>
+    /// A node whose timers run on a clock nothing moves (#362, #405). A test that plays the peer
+    /// with raw frames otherwise races the node's SDO timeout: a runner that stalls the test for
+    /// longer than <see cref="CanOpenNodeOptions.SdoTimeout"/> (1 s) or
+    /// <see cref="CanOpenNodeOptions.SdoServerTimeout"/> (5 s) between two frames gets that
+    /// timeout's abort (0x80) instead of the frame the test asserts on. Frozen, no deadline can
+    /// come due, so every abort the test reads is the protocol's answer to a frame it sent.
+    /// </summary>
+    private static CanOpenNode OpenOnStoppedClock(ICanBus bus, byte nodeId)
+        => new(new CanBusService(bus), nodeId, new CanOpenNodeOptions(), ownsService: true,
+            timeSource: new ManualTimeSource());
+
     // -----------------------------------------------------------------------------------------
     // FR-CO-004 — CiA 301 v4.2.0 §7.2.4.3.16 defines the block-transfer CRC by its parameters
     // (x^16 + x^12 + x^5 + 1, 16 bit, initial value 0000h) and supplies one check value: the CRC
@@ -482,7 +494,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var master = OpenOnStoppedClock(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
@@ -494,8 +506,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         var stray = new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 };
         // In the jump table (SendingSegments = 1) and past it (AwaitEnd = 5).
-        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
-        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEnd, stray);
+        await master.DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
+        await master.DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEnd, stray);
         download.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the download");
 
         Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
@@ -521,7 +533,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var master = OpenOnStoppedClock(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
@@ -531,9 +543,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
 
         var stray = new byte[] { 0x43, 0x01, 0x20, 0x00, 0xAA, 0xBB, 0xCC, 0xDD };
-        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
-        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitSubBlockAck, stray);
-        await ((CanOpenNode)master).DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEndResponse, stray);
+        await master.DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.SendingSegments, stray);
+        await master.DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitSubBlockAck, stray);
+        await master.DeliverBlockClientResponseInPhaseForTests(0x11, CanOpenNode.SdoBlockClientPhase.AwaitEndResponse, stray);
         upload.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the upload");
 
         var payload = new byte[] { 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77 };
@@ -1331,7 +1343,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 1);
         using var rawBus = Open(session, 2);
-        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var client = OpenOnStoppedClock(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(client, 0x02);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
 
@@ -1355,7 +1367,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 1);
         using var rawBus = Open(session, 2);
-        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var client = OpenOnStoppedClock(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(client, 0x02);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
 
@@ -1379,7 +1391,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busB = Open(session, 1);
         using var rawBus = Open(session, 2);
-        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        using var server = OpenOnStoppedClock(busB, nodeId: 0x02);
         server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[20]);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
 
@@ -1405,7 +1417,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 1);
         using var rawBus = Open(session, 2);
-        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var client = OpenOnStoppedClock(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(client, 0x02);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
 
