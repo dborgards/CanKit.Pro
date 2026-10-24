@@ -4098,13 +4098,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // #375, a consequence of the fix above: the teardown now waits for the node's actor, and the
-    // TP channel raises a transport fault -- a reassembly abort -- on its own actor. Forwarded
-    // from there as it was, a handler that disposed the node made the channel's actor wait for
-    // the node's, which was disposing the channel and so joining the very thread waiting for it:
-    // Dispose stalled for the actors' shutdown bound. The node forwards transport faults from its
-    // own actor, where a Dispose tears down in place and waits on nothing.
+    // TP channel raised a transport fault -- a reassembly abort -- on its own actor. Forwarded
+    // from there, a handler that disposed the node made the channel's actor wait for the node's,
+    // which was disposing the channel and so joining the very thread waiting for it: Dispose
+    // stalled for the actors' shutdown bound. #375 forwarded the fault from the node's actor, where
+    // a Dispose tears down in place; since #356 (T-2) neither layer raises it on an actor at all,
+    // and a Dispose from the handler waits for the teardown like any other caller's. The wait is
+    // unbounded here, so a handler back on either actor would hang this test rather than return
+    // after the bound.
     [Fact]
-    public async Task Disposing_The_Node_From_A_Transport_Fault_Handler_Tears_Down_In_Place()
+    public async Task Disposing_The_Node_From_A_Transport_Fault_Handler_Does_Not_Stall()
     {
         const byte peerSa = 0x77;
         var session = NewSession();
@@ -4113,7 +4116,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var node = new J1939NodeImpl(new CanBusService(busNode), new J1939NodeOptions(Name(1))
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
-        }, ownsService: true);
+        }, ownsService: true)
+        {
+            TransportTeardownTimeout = Timeout.InfiniteTimeSpan,
+        };
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
 
         int posted = 0;
@@ -4134,8 +4140,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
 
         await disposed.Task.AsTaskWithTimeout(ShortTimeout + ShortTimeout);
-        Volatile.Read(ref posted).Should().Be(0,
-            "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
+        Volatile.Read(ref posted).Should().Be(1,
+            "the handler ran off the node's actor, so the teardown was queued there and waited for");
     }
 
     // The same forwarding with an injected actor its owner has already disposed: there is no

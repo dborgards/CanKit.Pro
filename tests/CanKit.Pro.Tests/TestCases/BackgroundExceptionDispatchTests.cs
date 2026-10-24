@@ -331,4 +331,50 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
         (await Within(second.Task)).Should().BeOfType<IsoTpException>()
             .Which.Message.Should().Contain("sequence-number mismatch");
     }
+
+    // =========================================================================================
+    // J1939 node
+    // =========================================================================================
+
+    private static J1939Name NodeName() => new(identityNumber: 0x0000B6, manufacturerCode: 0x100, ecuInstance: 0,
+        functionInstance: 0, function: 0x81, reserved: false, vehicleSystem: 0, vehicleSystemInstance: 0,
+        industryGroup: 0, arbitraryAddressCapable: false);
+
+    // A failure on the node's actor -- here a work item that throws -- used to be reported there,
+    // so a handler that waited for the actor waited for itself.
+    [Fact]
+    public async Task J1939Node_A_Handler_That_Waits_For_The_Actor_Does_Not_Deadlock_It()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(NodeName()), ownsService: false, actor);
+        var waited = NewSignal<bool>();
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex.Message != "posted work failed") return;
+            waited.TrySetResult(actor.PostAsync(() => { }).Wait(HangGuard));
+        };
+
+        actor.Post(() => throw new InvalidOperationException("posted work failed"));
+
+        (await Within(waited.Task)).Should().BeTrue("the handler did not run on the actor it waited for");
+    }
+
+    [Fact]
+    public async Task J1939Node_A_Throwing_Handler_Does_Not_Hide_The_Report_From_The_Next()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(NodeName()), ownsService: false, actor);
+        var second = NewSignal<Exception>();
+        node.BackgroundExceptionOccurred += (_, _) => throw new InvalidOperationException("first handler");
+        node.BackgroundExceptionOccurred += (_, ex) => second.TrySetResult(ex);
+        var failure = new InvalidOperationException("posted work failed");
+
+        actor.Post(() => throw failure);
+
+        (await Within(second.Task)).Should().BeSameAs(failure);
+    }
 }
