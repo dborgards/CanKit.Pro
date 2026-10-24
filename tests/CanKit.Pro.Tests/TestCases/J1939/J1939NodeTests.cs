@@ -4349,15 +4349,15 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = Open(NewSession(), 0);
         using var service = new CanBusService(bus);
+        using var release = new ManualResetEventSlim(); // declared first, so it outlives the node
         var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, shutdownTimeout: TimeSpan.FromMilliseconds(50));
-        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor,
-            openTransport: sa => new ScriptedTpChannel(sa), ownsActor: true);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor,
+            openTransport: sa => new ScriptedTpChannel(sa), ownsActor: true); // disposes the actor it owns
         node.TransportTeardownTimeout = TimeSpan.Zero;
         var reported = new List<Exception>();
         node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
 
         var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var release = new ManualResetEventSlim();
         try
         {
             actor.Post(() =>
@@ -4375,7 +4375,6 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         finally
         {
             release.Set();
-            node.Dispose(); // idempotent; disposes the node, and so its actor, on every path
         }
     }
 
