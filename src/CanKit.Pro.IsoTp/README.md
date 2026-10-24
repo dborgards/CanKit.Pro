@@ -170,6 +170,42 @@ foreach (var r in responses)
   it hears the fastest reply, and what arrives between two collections is buffered for the
   next. Dispose it to end the subscription.
 
+## Open ISO 15765-2 questions
+
+These behaviours of the package depend on what ISO 15765-2 says, and its text has not been
+checked for them — the reviews that raised them cited it from memory (#353). Until it is, each
+behaves as described here and nothing is changed:
+
+1. **No N_Ar.** A Flow Control this channel sends while receiving is sent on its own, with
+   `NAs` as its confirmation timeout; if it is not confirmed, an `IsoTpException` is raised through
+   `BackgroundExceptionOccurred` and the reception goes on, bounded by `NCr` as any other. Open:
+   whether an unconfirmed Flow Control has to abort the reception (N_Ar).
+2. **Where N_Cr starts.** After a Flow Control, `NCr` runs from the moment the channel queues that
+   Flow Control for sending, not from its confirmation, so the peer's time includes the Flow
+   Control's own way to the wire. Open: whether N_Cr starts at the Flow Control's confirmation.
+3. **Reserved FlowStatus.** A Flow Control with a FlowStatus above 2 does not parse
+   (`TryParsePci` returns false) and is dropped without notice; the transfer it was meant for
+   keeps waiting and ends with `IsoTpTimeoutException` when `NBs` runs out. Open: whether it has to
+   abort the transfer at once (N_INVALID_FS).
+4. **Escape First Frame beyond `int.MaxValue`.** A CAN-FD escape First Frame whose FF_DL is above
+   `int.MaxValue` does not parse and is dropped without a Flow Control, while one above
+   `MaxReceivePduLength` but within `int.MaxValue` is answered with `FC(OVFLW)`. Open: whether the
+   larger one has to be answered with `FC(OVFLW)` too.
+5. **STmin rounding.** `EncodeStMin` rounds a value of 1 ms or more to the nearest millisecond
+   (half up, capped at 127 ms) and truncates a smaller one down to its 100 µs step, but not below
+   100 µs (under 1 µs encodes as 0). So `LocalStMin` = 190 µs advertises 100 µs, 999 µs advertises
+   900 µs and 1.4 ms advertises 1 ms: less separation than was asked for. Open: whether a minimum separation has to be rounded up.
+6. **No TX_DL, no BRS.** With `UseCanFd` the sender fills frames up to 64 bytes; no smaller TX_DL
+   can be configured. The channel never sets a frame's bit-rate-switch (BRS) flag. Open: whether
+   either has to be configurable.
+7. **Section numbers.** The ISO 15765-2 clauses cited in this package's XML docs and comments
+   (`IsoTpChannelOptions`, `IsoTpChannel`, the codec) have not been reconciled to one edition of the
+   standard or checked against its text; read them as pointers, not as references.
+8. **STmin before the first Consecutive Frame.** After every `FC(CTS)` — the first of a transfer
+   and each one after a block — the sender waits STmin before the first Consecutive Frame, not only
+   between Consecutive Frames. That is the conservative reading. Open: whether the first
+   Consecutive Frame after a Flow Control may go out at once.
+
 ## Non-scope (yet)
 
 - Multi-frame (FF/CF) response reassembly in functional sessions (requires caller to supply a

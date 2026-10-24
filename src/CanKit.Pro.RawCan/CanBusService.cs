@@ -60,6 +60,11 @@ namespace CanKit.Pro.RawCan
         // register a pending entry after Dispose's final sweep has already canceled everything.
         private bool _pendingDisposed;
 
+        // Approximated sends whose driver transmit is still pending, guarded by _pendingGate like
+        // the echo path's pending list, so Dispose can end them as it ends those (#352, R-2).
+        // Only a bus whose TransmitAsync is genuinely asynchronous ever puts an entry here.
+        private readonly HashSet<InFlightTransmit> _inFlightTransmits = new();
+
         // Cheap lock-free fast path: skip the _pendingGate lock (and the PendingKey hashing) in
         // OnFrameObserved entirely for services where nobody has ever called SendConfirmedAsync. Same
         // "no cost for callers who don't use the feature" discipline as the subscription snapshot.
@@ -312,9 +317,37 @@ namespace CanKit.Pro.RawCan
                     p.Node = null;
                 _pending.Clear();
                 Volatile.Write(ref _pendingCount, 0);
+
+                // The approximated path's in-flight sends end the same way (#352, R-2): each
+                // wait is cancelled, and the send ends in OperationCanceledException as an echo
+                // wait swept above does. Cancelled inside the lock, because the send removes its
+                // entry under it before it disposes the source, so a source reached here is never
+                // a disposed one. The only callback on that token is the send's own, which
+                // completes a TaskCompletionSource that runs its continuations asynchronously --
+                // nothing that could re-enter this lock or run the caller's code on this thread.
+                foreach (var inFlight in _inFlightTransmits)
+                    inFlight.EndByDispose();
+                _inFlightTransmits.Clear();
             }
             foreach (var p in pending)
                 p.Tcs.TrySetCanceled();
+        }
+
+        // Registers an approximated send whose transmit is pending, or -- when Dispose has already
+        // swept -- ends its wait at once, so a send that reaches this point after the sweep is
+        // not left to wait out its timeout either.
+        private void TrackInFlight(InFlightTransmit inFlight)
+        {
+            lock (_pendingGate)
+            {
+                if (_pendingDisposed) inFlight.EndByDispose();
+                else _inFlightTransmits.Add(inFlight);
+            }
+        }
+
+        private void UntrackInFlight(InFlightTransmit inFlight)
+        {
+            lock (_pendingGate) _inFlightTransmits.Remove(inFlight);
         }
 
         /// <inheritdoc />
@@ -451,24 +484,44 @@ namespace CanKit.Pro.RawCan
                 // Ends on the timeout or on the caller's own cancellation, whichever is first: a
                 // caller who cancels a stalled send must not have to wait the timeout out and then
                 // be told "timed out" (Bugbot on #216).
+                //
+                // Or on Dispose (#352, R-2): the wait is tracked under _pendingGate, and Dispose
+                // ends it as it ends an echo wait. Tracked only here, on the branch a pending
+                // transmit takes, so a send that completes synchronously -- every v0.5.6
+                // adapter's -- pays no lock and no allocation for it.
                 using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 ArmConfirmTimeout(waitCts, timeout);
                 var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 using var registration = waitCts.Token.Register(
                     static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), expired);
-                var winner = await Task.WhenAny(transmit, expired.Task).ConfigureAwait(false);
-                if (!ReferenceEquals(winner, transmit))
+                var inFlight = new InFlightTransmit(waitCts);
+                TrackInFlight(inFlight);
+                try
                 {
-                    // Nobody will await the abandoned task; observe its fault so a late driver
-                    // failure does not surface as an unobserved task exception.
-                    _ = transmit.ContinueWith(
-                        t => AbandonedTransmitFaultObserved.Invoke(t.Exception!.GetBaseException()),
-                        CancellationToken.None,
-                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-                        TaskScheduler.Default);
-                    transmitCts.Cancel();
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Timeout };
+                    var winner = await Task.WhenAny(transmit, expired.Task).ConfigureAwait(false);
+                    if (!ReferenceEquals(winner, transmit))
+                    {
+                        // Nobody will await the abandoned task; observe its fault so a late driver
+                        // failure does not surface as an unobserved task exception.
+                        _ = transmit.ContinueWith(
+                            t => AbandonedTransmitFaultObserved.Invoke(t.Exception!.GetBaseException()),
+                            CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                            TaskScheduler.Default);
+                        transmitCts.Cancel();
+                        cancellationToken.ThrowIfCancellationRequested();
+                        // Disposed: a cancellation, as on the echo path, not a timeout -- the owner of
+                        // the operation went away, and no time limit ran out (#352, R-2).
+                        if (inFlight.EndedByDispose)
+                            throw new OperationCanceledException(
+                                "The CanBusService was disposed while the send was waiting for the driver.");
+                        return new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Timeout };
+                    }
+                }
+                finally
+                {
+                    // Before waitCts is disposed: Dispose cancels only sources it finds tracked.
+                    UntrackInFlight(inFlight);
                 }
 
                 accepted = await transmit.ConfigureAwait(false);
@@ -829,6 +882,35 @@ namespace CanKit.Pro.RawCan
             public long Value;
 
             public long Now() => _now();
+        }
+
+        /// <summary>
+        /// An approximated send waiting for a pending driver transmit, as Dispose reaches it
+        /// (#352, R-2). Tracked in <see cref="_inFlightTransmits"/> under <see cref="_pendingGate"/>.
+        /// </summary>
+        private sealed class InFlightTransmit
+        {
+            private readonly CancellationTokenSource _wait;
+            private volatile bool _endedByDispose;
+
+            public InFlightTransmit(CancellationTokenSource wait) => _wait = wait;
+
+            /// <summary>
+            /// Whether Dispose, and not the timeout or the caller, ended the wait. Set before the
+            /// cancellation that wakes the send, so the send reads it once it is awake.
+            /// </summary>
+            public bool EndedByDispose => _endedByDispose;
+
+            /// <summary>
+            /// Under <see cref="_pendingGate"/>. Ends the wait unless the timeout or the caller's
+            /// token already has, so a send that had timed out still reports the timeout.
+            /// </summary>
+            public void EndByDispose()
+            {
+                if (_wait.IsCancellationRequested) return;
+                _endedByDispose = true;
+                _wait.Cancel();
+            }
         }
     }
 }
