@@ -70,6 +70,8 @@ namespace CanKit.Pro.J1939
         public byte DefaultPriority { get; init; }
         public bool? EnableArbitraryAddressClaiming { get; init; }
         public CanKit.Pro.Addressing.J1939Name Name { get; }
+        [System.Obsolete("Not used: the node keeps no receive buffer; receive through IJ1939Node.MessageRec" +
+            "eived. Removed in 2.0 (#299).")]
         public int ReceiveBufferCapacity { get; init; }
         public CanKit.Pro.J1939Tp.J1939TpOptions TransportOptions { get; init; }
     }
