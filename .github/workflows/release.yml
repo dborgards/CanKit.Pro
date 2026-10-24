@@ -281,7 +281,7 @@ jobs:
       #
       # `NUGET_API_KEY` is then empty, which is harmless: publishCmd does not run in either case.
       - name: NuGet login (OIDC -> temp API key)
-        if: ${{ !fromJSON(inputs.dry_run) && needs.verify.outputs.version != '' }}
+        if: ${{ !inputs.dry_run && needs.verify.outputs.version != '' }}
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget_login
         with:
@@ -292,7 +292,7 @@ jobs:
       # pushes them to nuget.org, writes CHANGELOG.md back to main, tags vX.Y.Z and opens the
       # GitHub Release.
       - name: Release
-        run: npx semantic-release ${{ fromJSON(inputs.dry_run) && '--dry-run' || '' }}
+        run: npx semantic-release ${{ inputs.dry_run && '--dry-run' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
@@ -314,7 +314,7 @@ jobs:
   attest:
     name: attest ${{ matrix.package }}
     needs: [verify, release]
-    if: ${{ !fromJSON(inputs.dry_run) && needs.verify.outputs.version != '' && needs.release.result == 'success' }}
+    if: ${{ !inputs.dry_run && needs.verify.outputs.version != '' && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
