@@ -106,7 +106,13 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         // through: the peer already has the request, and the tap must already have it too.
         using var stall = stallTheServersDelivery ? new DeliveryStall(peerBus, Peer, 0x1A00, 0x00) : null;
         stall?.Watch(uploads);
-        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        // The tool's SDO deadline on a clock nobody advances: a delivery the stall holds keeps its
+        // request inside the driver call, and the thread pool takes its time to bring another
+        // worker for the peer's answer. On the wall clock the deadline could expire meanwhile, and
+        // a timed-out request still in the driver waits for its send outcome -- the held delivery
+        // -- while ignoring the answer (OnSdoClientTimeout). Nothing here asserts a timeout.
+        using var tool = new CanOpenNode(new CanBusService(toolBus), Tool, new CanOpenNodeOptions(),
+            ownsService: true, new ManualTimeSource());
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ConfigureTpdo(1, new PdoMapping()
             .Add(0x0005, 0x00, 8)
@@ -155,7 +161,11 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         tool.ObjectDictionary.ContainsIndex(0x2001).Should().BeFalse();
         background.Should().BeEmpty();
 
-        if (stall is not null) stall.Stalled.Should().BeTrue("the stall must have held a delivery for the forced interleaving to exist");
+        if (stall is not null)
+        {
+            (await stall.Released.WithTimeoutAsync(ShortTimeout)).Should().BeTrue(
+                "the stall must have held a delivery until the next request, or no interleaving was forced");
+        }
         uploads.Uploads.Should().Equal(
             ((ushort)0x1800, (byte)0x01),
             ((ushort)0x1803, (byte)0x01),
@@ -1404,6 +1414,7 @@ PDOMapping=1
     {
         private readonly List<(ushort Index, byte Sub)> _uploads = new();
         private readonly object _gate = new();
+        private TaskCompletionSource<bool>? _next;
 
         public SdoTap(ICanBus bus, byte server)
         {
@@ -1418,7 +1429,9 @@ PDOMapping=1
                 lock (_gate)
                 {
                     _uploads.Add((index, data[3]));
-                    Monitor.PulseAll(_gate);
+                    var next = _next;
+                    _next = null;
+                    next?.TrySetResult(true);
                 }
             };
         }
@@ -1431,24 +1444,14 @@ PDOMapping=1
             }
         }
 
-        public int Count
-        {
-            get
-            {
-                lock (_gate) return _uploads.Count;
-            }
-        }
-
-        /// <summary>Blocks until more than <paramref name="count"/> uploads are recorded.</summary>
-        public bool WaitForMoreThan(int count, TimeSpan hangGuard)
+        /// <summary>Completes when the tap records its next upload, the one after those it has
+        /// now.</summary>
+        public Task NextRecord()
         {
             lock (_gate)
             {
-                while (_uploads.Count <= count)
-                {
-                    if (!Monitor.Wait(_gate, hangGuard)) return false;
-                }
-                return true;
+                _next ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                return _next.Task;
             }
         }
     }
@@ -1477,9 +1480,13 @@ PDOMapping=1
             bus.FrameObserved += OnFrame;
         }
 
-        /// <summary>Whether a delivery was held and then released by a further request reaching
-        /// the tap -- false if the hang guard ran out first, i.e. no interleaving was forced.</summary>
-        public bool Stalled { get; private set; }
+        private readonly TaskCompletionSource<bool> _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Completes when the held delivery is let go: true if a further request
+        /// reaching the tap released it, false if the hang guard ran out first, i.e. no
+        /// interleaving was forced. A task rather than a flag, because the delivering thread
+        /// sets it after the wait, and the test can get there first.</summary>
+        public Task<bool> Released => _released.Task;
 
         /// <summary>The tap whose next record releases the held delivery. Set apart from the
         /// constructor so that where this stall subscribes does not depend on where the tap
@@ -1495,7 +1502,10 @@ PDOMapping=1
             if ((ushort)(data[1] | (data[2] << 8)) != _index || data[3] != _sub) return;
             var tap = Volatile.Read(ref _tap);
             if (tap is null || Interlocked.Exchange(ref _armed, 0) == 0) return;
-            Stalled = tap.WaitForMoreThan(tap.Count, ShortTimeout);
+            // Task.Wait rather than a monitor: a pool thread blocked in it is one the pool replaces
+            // at once, so the peer's answer and the client's next request -- both queued to the
+            // pool -- do not wait for its starvation heuristic to add a worker.
+            _released.TrySetResult(tap.NextRecord().Wait(ShortTimeout));
         }
 
         public void Dispose() => _bus.FrameObserved -= OnFrame;
