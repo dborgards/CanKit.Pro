@@ -91,6 +91,8 @@ namespace CanKit.Pro.RawCan
         [ThreadStatic]
         private static List<CanBusService>? t_handoffs;
 
+        private static List<CanBusService> HandoffsOnThisThread() => t_handoffs ??= new List<CanBusService>();
+
         // Host arrival and transmit stamps. Production reads Stopwatch; a test passes the same
         // counter the protocol window is measured on, so a frame and the deadline that admits it
         // are not two clocks (#171).
@@ -361,12 +363,7 @@ namespace CanKit.Pro.RawCan
         // TryMatchEcho), and nothing here needs it.
         private void WaitForHandoffs()
         {
-            var own = 0;
-            if (t_handoffs is { } mine)
-            {
-                foreach (var service in mine)
-                    if (ReferenceEquals(service, this)) own++;
-            }
+            var own = t_handoffs?.Count(service => ReferenceEquals(service, this)) ?? 0;
 
             lock (_handoffDrain)
             {
@@ -515,7 +512,7 @@ namespace CanKit.Pro.RawCan
                 // adapters ignore the token inside TransmitAsync, so this is the last point at
                 // which a cancellation can still stop the frame.
                 cancellationToken.ThrowIfCancellationRequested();
-                var handoffs = t_handoffs ??= new List<CanBusService>();
+                var handoffs = HandoffsOnThisThread();
                 handoffs.Add(this);
                 try
                 {
