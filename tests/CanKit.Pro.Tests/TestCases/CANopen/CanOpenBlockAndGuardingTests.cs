@@ -360,6 +360,24 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------------
+    // FR-CO-004: blksize is "0 < blksize < 128" in the download initiate response (CiA 301
+    // §7.2.4.3.9, Figure 27) and the upload initiate request (§7.2.4.3.13, Figure 31). The
+    // option's validation message names exactly those two clauses.
+    // -----------------------------------------------------------------------------------------
+    [Theory]
+    [InlineData((byte)0)]
+    [InlineData((byte)128)]
+    public void SdoBlockSize_Outside_1_To_127_Is_Rejected_Citing_The_Initiate_Clauses(byte blkSize)
+    {
+        var act = () => new CanOpenNodeOptions().With(sdoBlockSize: blkSize);
+
+        act.Should().Throw<ArgumentOutOfRangeException>()
+            .WithParameterName("SdoBlockSize")
+            .Which.Message.Should().Contain("§7.2.4.3.9").And.Contain("§7.2.4.3.13")
+            .And.NotContain("§7.2.4.3.15");
+    }
+
+    // -----------------------------------------------------------------------------------------
     // FR-CO-004 (CiA 301 §7.2.4.3.10): on a partial sub-block ACK the download client must
     // rewind to the first unconfirmed segment and retransmit with the ORIGINAL sub-block
     // seqnos — resending with a restarted seqno=1 would make a compliant peer NACK forever.
