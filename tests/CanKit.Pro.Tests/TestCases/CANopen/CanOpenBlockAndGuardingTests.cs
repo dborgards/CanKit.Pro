@@ -360,7 +360,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------------
-    // FR-CO-004 (CiA 301 §7.2.4.3.15): on a partial sub-block ACK the download client must
+    // FR-CO-004 (CiA 301 §7.2.4.3.10): on a partial sub-block ACK the download client must
     // rewind to the first unconfirmed segment and retransmit with the ORIGINAL sub-block
     // seqnos — resending with a restarted seqno=1 would make a compliant peer NACK forever.
     // Driven by a raw-frame fake server on the third bus.
@@ -399,7 +399,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         // (and re-mark the payload's last segment).
         var resent = tap.Next(ShortTimeout);
         (resent[0] & 0x7F).Should().Be(3,
-            "the rewind must keep the original sub-block seqno numbering (CiA 301 §7.2.4.3.15)");
+            "the rewind must keep the original sub-block seqno numbering (CiA 301 §7.2.4.3.10)");
         (resent[0] & 0x80).Should().Be(0x80, "the payload's final segment must be re-marked as last");
 
         // Full ACK for the sub-block; client then sends End; fake server confirms it.
@@ -421,7 +421,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------------
-    // FR-CO-004 (CiA 301 §7.2.4.3.15): the upload server applies the same rewind-with-original-
+    // FR-CO-004 (CiA 301 §7.2.4.3.14): the upload server applies the same rewind-with-original-
     // seqnos rule when the client partially ACKs a sub-block. Driven by a raw-frame fake client.
     // -----------------------------------------------------------------------------------------
     [Fact]
@@ -475,7 +475,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
 
     // -----------------------------------------------------------------------------------------
     // FR-CO-004 (#134): the blksize a sub-block confirm carries is for "the following block"
-    // (CiA 301 §7.2.4.3.15). A partial confirm that also shrinks it below ackseq + 1 must not
+    // (CiA 301 §7.2.4.3.10). A partial confirm that also shrinks it below ackseq + 1 must not
     // shrink the retransmission — the client resends the rest of the current sub-block with its
     // original bound and numbering, and only the following sub-block is the smaller one.
     // Before the fix the retransmission loop found nothing to send and the transfer waited for
