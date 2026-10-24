@@ -371,7 +371,7 @@ jobs:
     steps:
       # The pull request's own head, not the synthetic merge commit GitHub checks out by default:
       # `origin/<base>..HEAD` is then exactly the branch's commits. Full history, so that
-      # `origin/<base>` exists to compare with.
+      # `origin/<base>` exists to compare with and to take the checker from.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -386,7 +386,28 @@ jobs:
       # Deliberately NOT a required check of the `main` ruleset, and not listed in
       # .github/rulesets/main.json: it reports, the maintainer decides. It only runs on pull
       # requests, so it is absent -- not red -- on `main`.
+      #
+      # The checker is the base branch's copy, not the head's: a pull request does not get to
+      # change the rule it is judged by, and a branch cut before the checker existed has no
+      # eng/check-commit-subjects.py to run (every such branch failed with exit 2 here, whatever
+      # its subjects). Only the script moves to the runner's temp directory; the working
+      # directory stays the checkout, whose `origin/<base>..HEAD` is the range checked. A base
+      # that has no checker yet (a pull request stacked on an older branch) has nothing to judge
+      # by, so the step says so and passes; a base ref that does not resolve at all fails.
       - name: Check commit subjects
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: python3 eng/check-commit-subjects.py "$BASE_REF"
+        run: |
+          checker="$RUNNER_TEMP/check-commit-subjects.py"
+          # A missing base ref is a broken checkout, not a base without a checker: fail on it
+          # rather than let the notice below pass it.
+          if ! git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" >/dev/null; then
+            echo "::error::origin/${BASE_REF} does not resolve in this checkout."
+            exit 1
+          fi
+          if ! git cat-file -e "origin/${BASE_REF}:eng/check-commit-subjects.py" 2>/dev/null; then
+            echo "::notice::origin/${BASE_REF} has no eng/check-commit-subjects.py; nothing to check against."
+            exit 0
+          fi
+          git show "origin/${BASE_REF}:eng/check-commit-subjects.py" > "$checker"
+          python3 -I "$checker" "$BASE_REF"
