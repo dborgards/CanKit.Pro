@@ -28,25 +28,31 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Lss;
 internal sealed class DetectionProbeBus : ICanBus
 {
     private readonly ICanBus _configurationSource;
+    private readonly IBusRTOptionsConfigurator _options;
     private int _disposed;
 
-    private DetectionProbeBus(ICanBus configurationSource)
+    private DetectionProbeBus(ICanBus configurationSource, IBusRTOptionsConfigurator options)
     {
         _configurationSource = configurationSource;
+        _options = options;
         BusState = BusState.ErrActive;
     }
 
     /// <summary>
     /// Opens a probe bus whose <see cref="Options"/> report <paramref name="bitsPerSecond"/> and
     /// <paramref name="workMode"/>, each on its own channel of <paramref name="session"/>.
+    /// <paramref name="reportOptions"/>, when given, replaces the loopback configurator with the
+    /// one it returns for it — how a test presents the options of another adapter.
     /// </summary>
     public static DetectionProbeBus Open(string session, int channel, int bitsPerSecond,
-        ChannelWorkMode workMode = ChannelWorkMode.ListenOnly, bool failErrorSubscription = false)
+        ChannelWorkMode workMode = ChannelWorkMode.ListenOnly, bool failErrorSubscription = false,
+        Func<IBusRTOptionsConfigurator, IBusRTOptionsConfigurator>? reportOptions = null)
     {
         var source = CanKit.Core.CanBus.Open(
             $"virtual://{session}/{channel}",
             cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitsPerSecond).SetWorkMode(workMode));
-        return new DetectionProbeBus(source) { FailErrorSubscription = failErrorSubscription };
+        var options = reportOptions is null ? source.Options : reportOptions(source.Options);
+        return new DetectionProbeBus(source, options) { FailErrorSubscription = failErrorSubscription };
     }
 
     /// <summary>The last probe bus the factory handed out, for the test to raise events on.</summary>
@@ -65,12 +71,13 @@ internal sealed class DetectionProbeBus : ICanBus
     /// </summary>
     public static Func<int, ICanBus> Factory(string session, List<DetectionProbeBus> opened,
         ChannelWorkMode workMode = ChannelWorkMode.ListenOnly, int? reportRate = null,
-        bool failErrorSubscription = false)
+        bool failErrorSubscription = false,
+        Func<IBusRTOptionsConfigurator, IBusRTOptionsConfigurator>? reportOptions = null)
     {
         var channel = 0;
         return rate =>
         {
-            var bus = Open(session, ++channel, reportRate ?? rate, workMode, failErrorSubscription);
+            var bus = Open(session, ++channel, reportRate ?? rate, workMode, failErrorSubscription, reportOptions);
             opened.Add(bus);
             Last = bus;
             return bus;
@@ -99,7 +106,7 @@ internal sealed class DetectionProbeBus : ICanBus
     /// <summary>Raises <see cref="FaultOccurred"/>.</summary>
     public void RaiseFault(Exception error) => FaultOccurred?.Invoke(this, error);
 
-    public IBusRTOptionsConfigurator Options => _configurationSource.Options;
+    public IBusRTOptionsConfigurator Options => _options;
 
     public BusState BusState { get; set; }
 
