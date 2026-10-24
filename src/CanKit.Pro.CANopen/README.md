@@ -645,7 +645,9 @@ timeout is already waiting is folded into it, an EMCY identical to one already w
 (only while nothing else about that producer was queued in between: error, reset, error stays
 three events), and a producer with `EventQueueCapacity` distinct emergencies waiting has its further ones
 discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundExceptionOccurred`
-is not queued.
+is not queued here: it is delivered on the thread pool, never on the actor or this pump, one
+report at a time in the order they were made, each handler on its own, so a handler may wait on
+the node -- an SDO transfer, `StoreParameters`, `Dispose` -- without deadlocking it (#356, #381).
 
 **Emergency.** An EMCY frame shorter than eight bytes is dropped without a report: it is
 neither padded, as an SDO frame is, nor surfaced anywhere. `EmcyMessage.ProducerNodeId` is the

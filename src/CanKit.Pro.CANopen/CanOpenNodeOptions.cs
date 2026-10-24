@@ -71,8 +71,8 @@ public sealed class CanOpenNodeOptions
     /// Each EMCY producer may have at most this many distinct emergencies waiting; the surplus
     /// from it is discarded until its backlog drains, and one
     /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> report is raised per such burst.
-    /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> is dispatched
-    /// synchronously and is not queued.
+    /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> is not part of this queue and not
+    /// bounded by it: it is delivered on the thread pool, one report at a time.
     /// </summary>
     public int EventQueueCapacity { get; init; } = 64;
 

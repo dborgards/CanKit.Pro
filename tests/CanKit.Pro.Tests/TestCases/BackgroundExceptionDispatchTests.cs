@@ -377,4 +377,25 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
 
         (await Within(second.Task)).Should().BeSameAs(failure);
     }
+
+    // =========================================================================================
+    // CANopen node (its per-subscriber isolation predates #381; CanOpenDisposeTests covers it)
+    // =========================================================================================
+
+    [Fact]
+    public async Task CanOpenNode_A_Handler_That_Waits_For_The_Actor_Does_Not_Deadlock_It()
+    {
+        var service = new StarvedReaderBusService();
+        using var node = new CanOpenNode(service, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
+        var waited = NewSignal<bool>();
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex.Message != "posted work failed") return;
+            waited.TrySetResult(node.PostToActorAsync(() => { }).Wait(HangGuard));
+        };
+
+        node.ActorForTests.Post(() => throw new InvalidOperationException("posted work failed"));
+
+        (await Within(waited.Task)).Should().BeTrue("the handler did not run on the actor it waited for");
+    }
 }

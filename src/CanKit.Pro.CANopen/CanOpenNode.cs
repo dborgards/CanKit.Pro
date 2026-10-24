@@ -71,8 +71,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // distinct EMCYs waiting has the surplus discarded and counted, reported once per burst on
     // BackgroundExceptionOccurred. The wake-up is a single coalesced signal, not one token per
     // event: a drop removes the event and leaves no token behind, and a burst while the pump is
-    // busy does not allocate. BackgroundExceptionOccurred stays synchronous and is not part of
-    // this queue.
+    // busy does not allocate. BackgroundExceptionOccurred is not part of this queue: it has a
+    // dispatcher of its own, on the thread pool (_backgroundReports, #356 T-2).
     private readonly object _eventLock = new();
     private readonly LinkedList<PendingEvent> _pendingEvents = new();
     private readonly SemaphoreSlim _eventWake = new(0, 1);
@@ -196,6 +196,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     public event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent;
     /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
+
+    // BackgroundExceptionOccurred goes out through this, on the thread pool and in order, never
+    // on the actor's loop or the event pump (#356, T-2).
+    private readonly BackgroundExceptionDispatcher _backgroundReports = new();
 
     internal CanOpenNode(ICanBusService service, byte nodeId, CanOpenNodeOptions options,
         bool ownsService, ITimeSource? timeSource = null, CanOpenDeviceDescription? description = null)
@@ -2954,22 +2958,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
     }
 
+    // Delivered on the thread pool, off the actor's loop and the event pump, so a subscriber that
+    // waits on the node -- an SDO transfer, StoreParameters, Dispose -- does not wait on the loop
+    // it would be blocking (#356, T-2); each subscriber on its own (#381).
     private void RaiseBackgroundException(Exception ex)
     {
         var handler = BackgroundExceptionOccurred;
         if (handler is null) return;
         // Nothing is reported once the disposal has finished: a subscriber or a timed-out send that
-        // outlived it and fails late has nobody to tell.
+        // outlived it and fails late has nobody to tell. Decided here, where the failure happens,
+        // not where it is delivered: one that happened before the disposal finished is reported.
         if (_disposeDone.Task.IsCompleted) return;
-        // One subscriber that disposes the node ends the round for the rest, as for the other
-        // events; a node that was disposed before the report still reports it to all.
-        bool disposedBefore = Volatile.Read(ref _disposed) != 0;
-        foreach (var subscriber in handler.GetInvocationList())
+        _backgroundReports.Post(() =>
         {
-            if (!disposedBefore && Volatile.Read(ref _disposed) != 0) break;
-            try { ((EventHandler<Exception>)subscriber)(this, ex); }
-            catch { /* subscriber must not tear down the node */ }
-        }
+            // One subscriber that disposes the node ends the round for the rest, as for the other
+            // events; a node that was disposed before the round still reports it to all.
+            bool disposedBefore = Volatile.Read(ref _disposed) != 0;
+            BackgroundExceptionDispatcher.InvokeEach(handler, this, ex,
+                endsRound: () => !disposedBefore && Volatile.Read(ref _disposed) != 0);
+        });
     }
 
     private void RaiseHeartbeatReceived(byte producer, NmtState state, DateTime ts)
