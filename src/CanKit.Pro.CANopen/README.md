@@ -49,7 +49,7 @@ maintainer decision does.
 | FR-CO-001 | Local object dictionary with typed read/write, data-type enforcement and per-entry PDO mappability |
 | FR-CO-002 | SDO expedited transfer (payloads ≤ 4 bytes) |
 | FR-CO-003 | SDO segmented transfer (payloads > 4 bytes, toggle-bit protocol) |
-| FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.15) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
+| FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.8–7.2.4.3.16) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
 | FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`17FFh` / `1A00h`–`1BFFh`: bit-granular, up to 64 bits, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
 | FR-CO-006 | Event-driven, timer-driven and SYNC-triggered TPDO transmission; change-of-state emission on application OD writes (`CanOpenNodeOptions.EnableChangeOfStateTpdo`, default on; bus-originated writes never re-trigger, so no echo loops) |
 | FR-CO-007 | NMT master + slave state machine (Start / Stop / Pre-Op / Reset Node / Reset Communication) |

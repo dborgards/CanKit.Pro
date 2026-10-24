@@ -1265,9 +1265,11 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // is not padded into an EmcyReceived -- that would invent its register or manufacturer bytes --
     // but it is no longer dropped without a trace either: the first one from each producer is
     // reported on BackgroundExceptionOccurred, and further ones from that producer are not, so a
-    // device that keeps sending them does not flood the report. The well-formed EMCY sent last is
-    // the ordering witness: the reports are raised on the actor while it handles each frame, so
-    // by the time the witness's event is delivered every earlier frame has been handled.
+    // device that keeps sending them does not flood the report. Each channel has its own ordering
+    // witness, so the test does not depend on how BackgroundExceptionOccurred is delivered
+    // relative to EmcyReceived: the well-formed EMCY is the last frame on EmcyReceived, and the
+    // short EMCY of a third producer sent after it is the last report, which arrives only after
+    // the reports of every frame the actor handled before it.
     [Fact]
     public async Task An_Emcy_Shorter_Than_Eight_Bytes_Is_Reported_Once_Per_Producer_And_Not_Raised()
     {
@@ -1280,7 +1282,12 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var emergencies = new List<EmcyMessage>();
         var gate = new object();
         var witness = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        node.BackgroundExceptionOccurred += (_, ex) => { lock (gate) reports.Add(ex); };
+        var reportWitness = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            lock (gate) reports.Add(ex);
+            if (ex.Message.Contains("0x0A3", StringComparison.Ordinal)) reportWitness.TrySetResult(true);
+        };
         node.EmcyReceived += (_, e) =>
         {
             lock (gate) emergencies.Add(e.Message);
@@ -1293,18 +1300,21 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         SendEmcy(0x21, 0x10, 0x81, 0x02);                         // DLC 3
         SendEmcy(0x21, 0x10, 0x81, 0x02, 0, 0, 0, 0);             // DLC 7, same producer
         SendEmcy(0x22, 0x00, 0x50);                               // DLC 2, another producer
-        SendEmcy(0x21, 0x00, 0x10, 0x01, 0, 0, 0, 0, 0);          // DLC 8: the witness
+        SendEmcy(0x21, 0x00, 0x10, 0x01, 0, 0, 0, 0, 0);          // DLC 8: the EmcyReceived witness
+        SendEmcy(0x23, 0x00);                                     // DLC 1: the report witness
         await witness.Task.WithTimeoutAsync(ShortTimeout);
+        await reportWitness.Task.WithTimeoutAsync(ShortTimeout);
 
         lock (gate)
         {
             emergencies.Should().ContainSingle("only the eight-byte frame is an EMCY to report")
                 .Which.ProducerNodeId.Should().Be((byte)0x21);
             var shortEmcy = reports.Where(r => r.Message.StartsWith("EMCY on COB-ID", StringComparison.Ordinal)).ToList();
-            shortEmcy.Should().HaveCount(2, "one report per producer, not one per frame");
+            shortEmcy.Should().HaveCount(3, "one report per producer, not one per frame");
             shortEmcy.Should().AllBeOfType<CanOpenTransportException>();
             shortEmcy[0].Message.Should().Contain("0x0A1").And.Contain("3 byte(s)");
             shortEmcy[1].Message.Should().Contain("0x0A2").And.Contain("2 byte(s)");
+            shortEmcy[2].Message.Should().Contain("0x0A3").And.Contain("1 byte(s)");
         }
     }
 
