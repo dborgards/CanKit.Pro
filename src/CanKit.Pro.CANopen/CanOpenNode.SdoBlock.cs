@@ -8,7 +8,7 @@ using CanKit.Pro.Reliability;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// SDO block-transfer (CiA 301 §7.2.4.3.15, FR-CO-004) partial of <see cref="CanOpenNode"/>.
+/// SDO block-transfer (CiA 301 §7.2.4.3.8–7.2.4.3.16, FR-CO-004) partial of <see cref="CanOpenNode"/>.
 /// Implements both client and server sides for block download and block upload, using the
 /// same actor loop / deadline scheduler / <see cref="CanKit.Pro.RawCan.ICanBusService"/> as
 /// the rest of the node.
@@ -286,7 +286,7 @@ internal sealed partial class CanOpenNode
                 {
                     var (ackseq, nextBlkSize) = SdoBlockFrames.ReadSubBlockAck(data);
                     // ackseq counts cumulatively from the start of the current sub-block
-                    // (CiA 301 §7.2.4.3.15). Acknowledging more than we sent is a protocol
+                    // (CiA 301 §7.2.4.3.10, Figure 28). Acknowledging more than we sent is a protocol
                     // violation; acknowledging less asks us to retransmit from ackseq + 1.
                     if (ackseq > session.SubBlockLastSeqno)
                     {
@@ -302,7 +302,7 @@ internal sealed partial class CanOpenNode
                     {
                         // Partial ACK: rewind to the first unconfirmed segment and retransmit
                         // from there with the ORIGINAL sub-block seqnos, instead of aborting.
-                        // The advertised blksize is for "the following block" (§7.2.4.3.15): the
+                        // The advertised blksize is for "the following block" (§7.2.4.3.10): the
                         // current sub-block keeps its bound through the retransmission, or a
                         // size below ackseq + 1 would leave nothing to resend and the transfer
                         // waiting for a confirm that cannot come (#134). The peer restates the
@@ -1056,7 +1056,7 @@ internal sealed partial class CanOpenNode
         RearmBlockServer(session);
         var (ackseq, nextBlkSize) = SdoBlockFrames.ReadSubBlockAck(data);
         // ackseq counts cumulatively from the start of the current sub-block
-        // (CiA 301 §7.2.4.3.15). More than sent is a protocol violation; less asks for
+        // (CiA 301 §7.2.4.3.14, Figure 32). More than sent is a protocol violation; less asks for
         // retransmission from ackseq + 1 with the original seqnos. "Sent" is what the batch has
         // handed to the bus, not what it was given: an ack that arrives while the batch is
         // still going cannot confirm a segment that never left (Codex on #392), and taking it
@@ -1082,7 +1082,7 @@ internal sealed partial class CanOpenNode
         if (ackseq < session.SubBlockLastSeqno)
         {
             // Partial ACK: rewind to the first unconfirmed segment and retransmit from there
-            // with the original sub-block seqnos (CiA 301 §7.2.4.3.15), bounded by
+            // with the original sub-block seqnos (CiA 301 §7.2.4.3.14), bounded by
             // CanOpenNodeOptions.SdoBlockMaxRetransmissions (0 restores the old abort behavior).
             // The advertised blksize is for the following sub-block, not this retransmission
             // (#134, see the download client).
@@ -1366,7 +1366,7 @@ internal sealed partial class CanOpenNode
         public byte NegotiatedBlockSize;
         public byte LastSegmentUnusedBytes;
 
-        // Retransmission state (CiA 301 §7.2.4.3.15): the sub-block sequence numbering is
+        // Retransmission state (CiA 301 §7.2.4.3.10): the sub-block sequence numbering is
         // cumulative per sub-block and must survive a partial-ACK rewind — resending with a
         // fresh seqno=1 would make the peer NACK forever.
         public int SubBlockStartOffset;      // payload offset where the current sub-block began
@@ -1415,7 +1415,7 @@ internal sealed partial class CanOpenNode
         public bool SizeIndicated { get; set; }
         public IDeadline? Deadline { get; set; }
 
-        // Retransmission state (CiA 301 §7.2.4.3.15) for the upload-server send path: the
+        // Retransmission state (CiA 301 §7.2.4.3.14) for the upload-server send path: the
         // sub-block sequence numbering is cumulative per sub-block and must survive a
         // partial-ACK rewind (the download-server receive path counts via NextExpectedSeq /
         // SegmentsInSubBlock above instead).
