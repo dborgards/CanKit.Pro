@@ -407,13 +407,15 @@ internal sealed partial class CanOpenNode : ILssSlave
                 _lssTxInFlight++;
             }
             await SendHeldAsync(item).ConfigureAwait(false);
-            BetweenHeldSendsForTests?.Invoke();
+            if (BetweenHeldSendsForTests is { } between) await between().ConfigureAwait(false);
         }
     }
 
     /// <summary>Test seam: runs after each held frame has completed and before the next is taken
-    /// from the queue — the window in which a new silence can begin (Codex on #331).</summary>
-    internal Action? BetweenHeldSendsForTests;
+    /// from the queue — the window in which a new silence can begin (Codex on #331). The flush
+    /// awaits what it returns, so a test holds the flush there without holding a thread: when the
+    /// send was already confirmed, the flush is still on the actor at this point (#399).</summary>
+    internal Func<Task>? BetweenHeldSendsForTests;
 
     private async Task SendHeldAsync(HeldTransmit item)
     {
