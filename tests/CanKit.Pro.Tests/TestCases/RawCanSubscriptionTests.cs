@@ -623,6 +623,31 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         DrainIds(sub).Should().Equal(0x100, 0x201);
     }
 
+    // #352 (R-6): what the CanIdFilter docs say of default(CanIdFilter) -- accepted by Subscribe and
+    // by Reconfigure, and a filter for the standard ID 0 only, not "no filter". Pinned so the
+    // docs cannot drift from it; refusing it is the 2.0 item (#299).
+    [Fact]
+    public void A_Default_CanIdFilter_Is_Accepted_And_Matches_The_Standard_Id_0_Only()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        void RaiseProbes()
+        {
+            bus.RaiseObserved(CanFrame.Classic(0x000, new byte[] { 1 }), isEcho: false);
+            bus.RaiseObserved(CanFrame.Classic(0x001, new byte[] { 2 }), isEcho: false);
+            bus.RaiseObserved(CanFrame.Classic(0x7FF, new byte[] { 3 }), isEcho: false);
+            bus.RaiseObserved(CanFrame.Classic(0x000, new byte[] { 4 }, isExtendedFrame: true), isEcho: false);
+        }
+
+        using var subscribed = service.Subscribe(default(CanIdFilter));
+        using var reconfigured = service.Subscribe(CanIdFilter.Range(0x001, 0x7FF, CanFilterIDType.Standard));
+        reconfigured.Reconfigure(default(CanIdFilter));
+        RaiseProbes();
+
+        DrainIds(subscribed).Should().Equal(new[] { 0x000 }, "the default is Range(0, 0, Standard)");
+        DrainIds(reconfigured).Should().Equal(new[] { 0x000 }, "Reconfigure takes it the same way");
+    }
+
     // FR-RAW-012/014: a disposed subscription is not a silently inert one. Reconfigure after
     // Dispose must throw ObjectDisposedException -- reconfiguring a subscription that will never
     // deliver another frame is a caller bug, and swallowing it would hide it.

@@ -79,9 +79,11 @@ namespace CanKit.Pro.RawCan
         /// The echo choice made at <c>Subscribe</c> time is not part of the filter and is not
         /// affected by reconfiguring one.
         /// </remarks>
-        /// <param name="filter">The new filter. Must not be a default-initialized struct when a
-        /// meaningful filter is required — use <see cref="Reconfigure(Func{CanFrameEvent, bool})"/>
-        /// with <c>null</c> to accept all frames.</param>
+        /// <param name="filter">The new filter. A default-initialized struct
+        /// (<c>default(CanIdFilter)</c>, or a field never assigned) is accepted and matches the
+        /// standard ID 0 only -- see <see cref="CanIdFilter"/> -- so it is not "no filter": use
+        /// <see cref="Reconfigure(Func{CanFrameEvent, bool})"/> with <c>null</c> to accept all
+        /// frames.</param>
         void Reconfigure(CanIdFilter filter);
 
         /// <summary>

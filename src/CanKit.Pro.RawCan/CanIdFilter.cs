@@ -21,6 +21,17 @@ namespace CanKit.Pro.RawCan
     /// range/mask check itself is a couple of integer comparisons, so replicating it is both
     /// simpler and cheaper than converting a view back into a frame per match. The
     /// <see cref="CanFilterIDType"/> vocabulary is reused as-is.
+    /// <para>
+    /// <b><c>default(CanIdFilter)</c> is a filter for the standard ID 0, not "no filter".</b> A
+    /// default-initialized value -- <c>default</c>, <c>new CanIdFilter()</c>, or a field never
+    /// assigned -- reads as <c>Range(0, 0, CanFilterIDType.Standard)</c>: it matches a standard
+    /// frame with ID 0 and nothing else. <see cref="ICanBusService.Subscribe(CanIdFilter, int?, bool)"/>
+    /// and <see cref="ISubscription.Reconfigure(CanIdFilter)"/> accept it without complaint, so a
+    /// filter that was meant to be set and was not shows up as a subscription that receives
+    /// (almost) nothing. To accept every frame, subscribe or reconfigure with a <c>null</c>
+    /// predicate instead. Refusing a default value is a behaviour change, kept for the next major
+    /// version (#352, #299).
+    /// </para>
     /// </remarks>
     public readonly struct CanIdFilter
     {

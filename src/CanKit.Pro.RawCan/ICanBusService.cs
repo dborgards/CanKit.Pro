@@ -138,7 +138,10 @@ namespace CanKit.Pro.RawCan
         /// Registers a subscription using the allocation-free ID-range/mask fast path
         /// (FR-RAW-010/013).
         /// </summary>
-        /// <param name="filter">ID-range or acceptance-code/mask filter.</param>
+        /// <param name="filter">ID-range or acceptance-code/mask filter. A default-initialized
+        /// struct (<c>default(CanIdFilter)</c>, or a field never assigned) is accepted and matches
+        /// the standard ID 0 only -- see <see cref="CanIdFilter"/>; the predicate overload with a
+        /// <c>null</c> predicate is the one that accepts every frame.</param>
         /// <param name="bufferCapacity">
         /// Bounded buffer capacity for this subscription; null uses
         /// <see cref="CanBusService.DefaultBufferCapacity"/>.
