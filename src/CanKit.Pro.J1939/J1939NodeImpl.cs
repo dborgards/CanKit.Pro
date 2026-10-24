@@ -190,9 +190,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// channel of its own, and the real channel refuses on its own loop a session that would
     /// start after the address was lost (#347). A substitute opened through the seam is not
     /// told; a test of that refusal opens the real one.
+    /// <paramref name="ownsActor"/> hands an injected <paramref name="actor"/> to the node to
+    /// dispose, as the one it creates for itself: a seam for a test that needs the node's own
+    /// disposal of its actor on a loop with a short shutdown bound.
     /// </remarks>
     internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService,
-        ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null)
+        ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null, bool ownsActor = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -201,7 +204,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         _name = options.Name;
         _openTransport = openTransport;
 
-        _ownsActor = actor is null;
+        _ownsActor = actor is null || ownsActor;
         _actor = actor ?? new ProtocolActor();
         _time = _actor.TimeSource;
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
@@ -1948,9 +1951,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
             try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* likewise */ }
 
             _subscription.Dispose();
-            // An injected actor is not ours to dispose; the handler is, either way.
-            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            // An injected actor is not ours to dispose; the handler is, either way. It comes off
+            // only after an owned actor's Dispose: that is where the actor reports a callback that
+            // outlived its shutdown bound, as a TimeoutException through its
+            // BackgroundExceptionOccurred, and unsubscribed first the node's subscribers never
+            // heard of it (#355, from the review of #397).
             if (_ownsActor) _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             _readerCts.Dispose();
             if (_ownsService) _service.Dispose();
         }

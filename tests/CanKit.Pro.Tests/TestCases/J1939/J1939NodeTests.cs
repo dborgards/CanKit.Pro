@@ -4178,6 +4178,46 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
     }
 
+    // From the review of #397: the node took its handler off its own actor's
+    // BackgroundExceptionOccurred before disposing that actor, and the actor's Dispose is where
+    // it reports a callback that outlived its shutdown bound. The node's subscribers never heard
+    // of it. A callback is held on the actor across the disposal, so the bound is exceeded by
+    // construction; the actor's bound is short and the node's own wait for the teardown is driven
+    // to zero through its seam, so nothing here waits on a clock for the outcome.
+    [Fact]
+    public async Task The_Shutdown_Timeout_Of_The_Nodes_Own_Actor_Reaches_Its_Subscribers()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, shutdownTimeout: TimeSpan.FromMilliseconds(50));
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor,
+            openTransport: sa => new ScriptedTpChannel(sa), ownsActor: true);
+        node.TransportTeardownTimeout = TimeSpan.Zero;
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        actor.Post(() =>
+        {
+            held.TrySetResult(true);
+            release.Wait(ShortTimeout);
+        });
+        try
+        {
+            await held.Task.AsTaskWithTimeout(ShortTimeout);
+            node.Dispose(); // the actor's join gives up on the held callback and reports it
+
+            lock (reported)
+                reported.Should().Contain(e => e is TimeoutException,
+                    "the node owns that actor, and its shutdown timeout is a background failure of the node's");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
     // The same forwarding with an injected actor its owner has already disposed: there is no
     // loop to hand the fault to, and it is still reported, from where it arrived.
     [Fact]
