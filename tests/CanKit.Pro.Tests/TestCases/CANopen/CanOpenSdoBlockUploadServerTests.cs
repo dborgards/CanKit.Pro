@@ -140,8 +140,10 @@ public class CanOpenSdoBlockUploadServerTests
         {
             if ((uint)frame.ID == CanOpenCobId.SdoTx(ServerNodeId)) lock (toClient) toClient.Add(frame.Data.ToArray());
         };
+        // SdoServerTimeout runs on a clock nothing moves (#362, #405): a stall between the test's
+        // frames longer than its 5 s would otherwise abort the session the test is driving.
         using var server = new CanOpenNode(new CanBusService(bus), ServerNodeId,
-            new CanOpenNodeOptions(), ownsService: true);
+            new CanOpenNodeOptions(), ownsService: true, timeSource: new ManualTimeSource());
         var nmtSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         server.NmtCommandReceived += (_, e) =>
         {

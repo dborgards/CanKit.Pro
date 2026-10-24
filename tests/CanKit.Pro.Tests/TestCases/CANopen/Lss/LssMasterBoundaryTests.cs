@@ -666,6 +666,84 @@ public class LssMasterBoundaryTests
     }
 
     /// <summary>
+    /// Passes every call through to the master and hands the test the task of the first
+    /// activation, the moment it is started, so the test can tell when the caller's wait has ended
+    /// without moving the clock.
+    /// </summary>
+    private sealed class ActivationWatch : ILssMaster
+    {
+        private readonly ILssMaster _inner;
+
+        public ActivationWatch(ILssMaster inner) => _inner = inner;
+
+        public TaskCompletionSource<Task> Activation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public LssMasterOptions Options => _inner.Options;
+
+        public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
+        {
+            var activation = _inner.ActivateBitTimingAsync(switchDelayMilliseconds, bitsPerSecond, returnToWaiting,
+                cancellationToken);
+            Activation.TrySetResult(activation);
+            return activation;
+        }
+
+        public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
+            => _inner.SwitchStateGlobalAsync(state, cancellationToken);
+
+        public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
+            => _inner.SwitchStateSelectiveAsync(address, cancellationToken);
+
+        public Task<LssServiceResult> ConfigureNodeIdAsync(byte nodeId, CancellationToken cancellationToken = default)
+            => _inner.ConfigureNodeIdAsync(nodeId, cancellationToken);
+
+        public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
+            CancellationToken cancellationToken = default)
+            => _inner.ConfigureBitTimingAsync(tableSelector, tableIndex, cancellationToken);
+
+        public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
+            => _inner.StoreConfigurationAsync(cancellationToken);
+
+        public Task<uint> InquireVendorIdAsync(CancellationToken cancellationToken = default)
+            => _inner.InquireVendorIdAsync(cancellationToken);
+
+        public Task<uint> InquireProductCodeAsync(CancellationToken cancellationToken = default)
+            => _inner.InquireProductCodeAsync(cancellationToken);
+
+        public Task<uint> InquireRevisionNumberAsync(CancellationToken cancellationToken = default)
+            => _inner.InquireRevisionNumberAsync(cancellationToken);
+
+        public Task<uint> InquireSerialNumberAsync(CancellationToken cancellationToken = default)
+            => _inner.InquireSerialNumberAsync(cancellationToken);
+
+        public Task<LssAddress> InquireAddressAsync(CancellationToken cancellationToken = default)
+            => _inner.InquireAddressAsync(cancellationToken);
+
+        public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default)
+            => _inner.InquireNodeIdAsync(cancellationToken);
+
+        public Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default)
+            => _inner.IdentifyRemoteSlavesAsync(range, cancellationToken);
+
+        public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
+            => _inner.IdentifyNonConfiguredSlavesAsync(cancellationToken);
+
+        public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
+            CancellationToken cancellationToken = default)
+            => _inner.FastscanAsync(request, cancellationToken);
+
+        public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
+            CancellationToken cancellationToken = default)
+            => _inner.TransceiveManufacturerAsync(commandSpecifier, parameters, cancellationToken);
+
+        // The rig owns the master.
+        public void Dispose() { }
+
+        public ValueTask DisposeAsync() => default;
+    }
+
+    /// <summary>
     /// Records every frame the master sends and every host switch, by command specifier and the
     /// virtual millisecond, and cancels <paramref name="cancelAfterActivation"/> once the
     /// activation's confirmation has returned.
@@ -813,36 +891,61 @@ public class LssMasterBoundaryTests
     {
         // The review's scenario: LssCommissioning's release after a cancelled activation waits out
         // the reservation. It must then go out on the rate the slave switched to.
+        //
+        // The clock is moved by hand, one period at a time, and only once what the period's end
+        // depends on has happened (#406). Driven by rig.RunAsync it moved whenever the master had a
+        // timer armed, with the master's continuations still in flight: past the first period
+        // before the follow-through had retuned (retune@200), or through both periods before the
+        // abandoned activation had looked at its token, so it returned as completed and nothing
+        // was cancelled.
         using var cancel = new CancellationTokenSource();
+        var retuned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         Func<int, CancellationToken, Task>? retune = null;
         using var rig = new ClockedLssRig(new LssMasterOptions
         {
-            BitRateSwitch = (rate, token) => retune!(rate, token),
+            BitRateSwitch = async (rate, token) =>
+            {
+                await retune!(rate, token);
+                retuned.TrySetResult(true);
+            },
         });
         var address = new LssAddress(1, 1, 1, 1);
         var slave = rig.Add(address, nodeId: 5);
         var events = RecordWire(rig, cancel, out retune);
+        var watched = new ActivationWatch(rig.Master);
 
-        var configure = new LssCommissioning(rig.Master).ConfigureSlaveAsync(address, new LssSlaveConfiguration
+        var configure = new LssCommissioning(watched).ConfigureSlaveAsync(address, new LssSlaveConfiguration
         {
             BitTimingSelector = LssBitTiming.Cia301Table,
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 100,
             ActivateBitRate = 250_000,
         }, cancel.Token);
-        var cancelled = async () => await rig.RunAsync(configure);
+
+        // Selection and configure bit timing are answered at once, so the activation is reached on
+        // a clock that has not moved; with the clock still there, the follow-through cannot have
+        // finished, and the caller's wait ends on its token.
+        var activation = await watched.Activation.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+        var abandoned = async () => await activation.WaitAsync(LssTestTiming.SchedulingBudget);
+        await abandoned.Should().ThrowAsync<OperationCanceledException>("the premise: the caller gave up after the activation");
+
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        // The follow-through retunes on the master's continuation, off the timer actor.
+        await retuned.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        var cancelled = async () => await configure.WaitAsync(LssTestTiming.SchedulingBudget);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
-        // RunAsync moves the clock to the next master timer without waiting for the follow-through's
-        // continuation, so the instants can come late; the order and the lower bounds cannot.
-        static (string What, double At) Parse(string e) => (e.Substring(0, e.IndexOf('@')),
-            double.Parse(e.Substring(e.IndexOf('@') + 1), System.Globalization.CultureInfo.InvariantCulture));
-        var activation = events.Select(Parse).Single(e => e.What == $"{LssCommand.ActivateBitTiming:X2}");
-        var after = events.Select(Parse).SkipWhile(e => e != activation).Skip(1).ToList();
-        string waiting = $"{LssCommand.SwitchStateGlobal:X2}";
-        after.Select(e => e.What).Should().Equal("retune", waiting, waiting);
-        after[0].At.Should().BeGreaterThanOrEqualTo(activation.At + 100, "the host follows the slaves' switch");
-        after[1].At.Should().BeGreaterThanOrEqualTo(activation.At + 200, "nothing is sent in the second period");
+        string activate = $"{LssCommand.ActivateBitTiming:X2}@0";
+        string waiting = $"{LssCommand.SwitchStateGlobal:X2}@200";
+        string[] recorded;
+        lock (events) recorded = events.ToArray();
+        recorded.Should().Contain(activate);
+        recorded.SkipWhile(e => e != activate).Skip(1).Should().Equal(new[] { "retune@100", waiting, waiting },
+            "the host follows the slaves' switch at the end of the first period, and both waiting frames, "
+            + "the follow-through's and the release's, go out once the second period has ended");
         slave.State.Should().Be(LssState.Waiting);
     }
 
