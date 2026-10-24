@@ -55,16 +55,21 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
     // The dispatcher itself
     // =========================================================================================
 
+    // Made inside an actor callback, as most reports are, and delivered outside it. Not compared by
+    // thread id: once the raising thread awaits it goes back to the pool and may well be the one
+    // that runs the delivery (Codex and Bugbot on #418). Whether the delivery is inside the
+    // callback is what matters, and the actor can say so.
     [Fact]
-    public async Task A_Report_Is_Delivered_Off_The_Thread_That_Made_It()
+    public async Task A_Report_Is_Delivered_Outside_The_Actor_Callback_That_Made_It()
     {
         var dispatcher = new BackgroundExceptionDispatcher();
-        var deliveredOn = NewSignal<int>();
-        EventHandler<Exception> handler = (_, _) => deliveredOn.TrySetResult(Environment.CurrentManagedThreadId);
+        using var actor = new ProtocolActor();
+        var onActor = NewSignal<bool>();
+        EventHandler<Exception> handler = (_, _) => onActor.TrySetResult(actor.IsOnCurrentActor);
 
-        dispatcher.Raise(this, handler, new InvalidOperationException("report"));
+        await actor.PostAsync(() => dispatcher.Raise(this, handler, new InvalidOperationException("report")));
 
-        (await Within(deliveredOn.Task)).Should().NotBe(Environment.CurrentManagedThreadId);
+        (await Within(onActor.Task)).Should().BeFalse();
     }
 
     [Fact]
