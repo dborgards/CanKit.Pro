@@ -823,6 +823,37 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.TransmitCount.Should().Be(0, "a send refused at the gate never reaches the driver");
     }
 
+    // #430: the same race on the approximated path. A send that passed the eager disposed check
+    // and reached the driver only after Dispose had finished used to hand its frame over anyway;
+    // the check and the hand-off are now one step under the gate Dispose sets _pendingDisposed
+    // under, so the send is refused with ObjectDisposedException -- what the echo path throws --
+    // and the driver is never called. The double declares the Echo capability but reports Normal
+    // mode, so the send takes the approximated path and still reads WorkMode, which is the instant
+    // between the two checks; the double disposes the service there, on the sending thread, so
+    // Dispose has completed before the send goes on. Both driver kinds: one whose TransmitAsync
+    // completes at once, as every v0.5.6 adapter's does, and one whose transmit stays pending.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dispose_Between_The_Disposed_Check_And_The_Handoff_Refuses_An_Approximated_Send(bool stalledTransmit)
+    {
+        using var bus = ControllableBus.FlaggedEchoInNormalMode(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = stalledTransmit;
+        var service = new CanBusService(bus);
+        bus.OnWorkModeRead = () =>
+        {
+            bus.OnWorkModeRead = null;
+            service.Dispose();
+        };
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x675, new byte[] { 1 }), TimeSpan.FromMinutes(5));
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        bus.FirstAsyncTransmit.IsCompleted.Should().BeFalse("no frame is handed to the driver once Dispose has completed");
+        bus.TransmitCount.Should().Be(0);
+        bus.ReleaseStalledTransmits();
+    }
+
     // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
     // is the only thing that refuses it; on the echo path the gate check above would as well.
     [Theory]

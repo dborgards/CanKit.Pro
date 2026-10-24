@@ -414,7 +414,6 @@ namespace CanKit.Pro.RawCan
             // runtime declines to inline it, the continuation is queued and the reading is taken one
             // scheduling hop later -- still no later than resuming this method would take it.
             var stamp = new HandoffStamp(_hostTimestamp);
-            var handoffStart = stamp.Now();
             //
             // The driver is handed a private copy, never the caller's frame (Codex and Bugbot on
             // #216): the contract lets the caller dispose its TX lease as soon as this call
@@ -446,12 +445,36 @@ namespace CanKit.Pro.RawCan
             // would bring back the hang this bound exists to remove (#202); the timed-out result
             // is what tells the caller the frame may or may not have gone out.
             using var transmitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            // The caller's token, consulted immediately before the driver call (#294): a send
-            // cancelled up to here is abandoned and nothing reaches the driver. The v0.5.6
-            // adapters ignore the token inside TransmitAsync, so this is the last point at
-            // which a cancellation can still stop the frame.
-            cancellationToken.ThrowIfCancellationRequested();
-            var transmit = _bus.TransmitAsync(detached, transmitCts.Token)
+            long handoffStart;
+            Task<int> handedOver;
+            // The disposed check and the hand-off as one step under _pendingGate, as on the echo
+            // path (#430). SendConfirmedAsync's eager check alone leaves a window: a send that
+            // passed it and reached the driver only after Dispose had finished still put its
+            // frame on the wire. Dispose sets _pendingDisposed under this lock, so a send either
+            // hands its frame over before Dispose sweeps -- and Dispose, which waits for the
+            // lock, has not completed until the driver call returns -- or is refused here with
+            // ObjectDisposedException, which is what the echo path's gate throws. Only the
+            // driver call itself is inside: the continuation below and the wait after it are
+            // not, and an uncontended Monitor is the whole price on the synchronous path.
+            // Monitor is reentrant, so a driver that disposes the service from inside its own
+            // TransmitAsync -- on a fault, say -- does not deadlock here.
+            lock (_pendingGate)
+            {
+                if (_pendingDisposed)
+                    throw new ObjectDisposedException(nameof(CanBusService));
+
+                // Taken inside the lock, as on the echo path: no wait for it sits between this
+                // reading and the driver call (Codex on #147).
+                handoffStart = stamp.Now();
+                // The caller's token, consulted immediately before the driver call (#294): a send
+                // cancelled up to here is abandoned and nothing reaches the driver. The v0.5.6
+                // adapters ignore the token inside TransmitAsync, so this is the last point at
+                // which a cancellation can still stop the frame.
+                cancellationToken.ThrowIfCancellationRequested();
+                handedOver = _bus.TransmitAsync(detached, transmitCts.Token);
+            }
+
+            var transmit = handedOver
                 .ContinueWith(
                     static (completed, state) =>
                     {
@@ -488,7 +511,7 @@ namespace CanKit.Pro.RawCan
                 // Or on Dispose (#352, R-2): the wait is tracked under _pendingGate, and Dispose
                 // ends it as it ends an echo wait. Tracked only here, on the branch a pending
                 // transmit takes, so a send that completes synchronously -- every v0.5.6
-                // adapter's -- pays no lock and no allocation for it.
+                // adapter's -- pays no second lock and no allocation for it.
                 using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 ArmConfirmTimeout(waitCts, timeout);
                 var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

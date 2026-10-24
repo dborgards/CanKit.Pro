@@ -108,8 +108,8 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// The host-monotonic <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading
-        /// taken immediately <em>before</em> the driver call -- on the echo path inside the
-        /// service's send lock; the approximated path has no such lock. Comparable with
+        /// taken immediately <em>before</em> the driver call, inside the service's send lock on
+        /// either path. Comparable with
         /// <see cref="HostTransmitTimestamp"/> and with the demux's <c>HostArrivalTimestamp</c>.
         /// Carried by exactly the results that carry <see cref="HostTransmitTimestamp"/>, and zero
         /// on the others.
@@ -120,9 +120,8 @@ namespace CanKit.Pro.RawCan
         /// includes the peer's answer, and on an asynchronous adapter a completion callback -- so
         /// a fast peer's response can be stamped by the demux before it. A caller deciding
         /// whether a received frame can be a response to this transmission at all needs an
-        /// instant no later than the frame's wire instant: this one. On the echo path it is taken
-        /// inside the lock, so no wait for another sender's driver call sits between it and the
-        /// handoff.
+        /// instant no later than the frame's wire instant: this one. It is taken inside the lock,
+        /// so no wait for another sender's driver call sits between it and the handoff.
         /// </remarks>
         public long HostHandoffTimestamp { get; init; }
     }

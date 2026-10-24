@@ -233,6 +233,15 @@ namespace CanKit.Pro.RawCan
         /// while an asynchronous <see cref="ICanBus.TransmitAsync(CanFrame, System.Threading.CancellationToken)"/>
         /// is still pending -- and it ends in <see cref="OperationCanceledException"/> (#352).
         /// </param>
+        /// <exception cref="ObjectDisposedException">
+        /// The service is disposed, or is disposed while the call is still on its way to the
+        /// driver. On either path the disposed check and the hand-off to the driver are one step
+        /// with respect to <see cref="IDisposable.Dispose"/>: once <c>Dispose</c> has returned, no
+        /// send's frame is handed to the driver any more, and a send that loses that race fails
+        /// with this exception -- on the approximated path since #430, as the echo path always
+        /// did. A send that won it has handed its frame over; if that transmit is still pending,
+        /// <c>Dispose</c> cancels the call as described under <paramref name="cancellationToken"/>.
+        /// </exception>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }
 }
