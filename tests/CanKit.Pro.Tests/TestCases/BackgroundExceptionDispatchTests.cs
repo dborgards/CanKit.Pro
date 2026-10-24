@@ -28,9 +28,7 @@ namespace CanKit.Pro.Tests.TestCases;
 /// is in place, and to each subscriber on its own (#356 T-2, #381).
 /// </summary>
 /// <remarks>
-/// Every wait below is a signal; <see cref="HangGuard"/> bounds a hang and measures nothing. The
-/// one negative window (<see cref="Reports_Do_Not_Overlap"/>) can only pass falsely on a slow
-/// host, never fail falsely.
+/// Every wait below is a signal; <see cref="HangGuard"/> bounds a hang and measures nothing.
 /// </remarks>
 public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixture>
 {
@@ -138,25 +136,39 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
         lock (seen) seen.Should().Equal(Enumerable.Range(0, Count));
     }
 
-    // A report made from inside a subscriber is delivered after that subscriber has returned, not
-    // beside it: the reports made on an actor loop never overlapped, and a subscriber written for
-    // that may rely on it. A negative window: it can only pass falsely on a slow host.
+    // A report made from inside a delivery is delivered after that delivery has returned, by the
+    // same drain, not beside it: the reports made on an actor loop never overlapped, and a
+    // subscriber written for that may rely on it. Counted, not timed: the test starts the drains
+    // itself, so a second drain started while one runs is a count, where a window on the thread
+    // pool could pass falsely whenever the pool was slow to start it.
     [Fact]
-    public async Task Reports_Do_Not_Overlap()
+    public void Reports_Do_Not_Overlap()
     {
-        var dispatcher = new BackgroundExceptionDispatcher();
-        using var secondRan = new ManualResetEventSlim();
-        var overlapped = NewSignal<bool>();
-        EventHandler<Exception> second = (_, _) => secondRan.Set();
+        var drains = new Queue<Action>();
+        var dispatcher = new BackgroundExceptionDispatcher(drains.Enqueue);
+        var log = new List<string>();
+        EventHandler<Exception> second = (_, _) => log.Add("second");
 
         dispatcher.Post(() =>
         {
+            log.Add("first begins");
             dispatcher.Raise(this, second, new InvalidOperationException("made during the first"));
-            overlapped.TrySetResult(secondRan.Wait(TimeSpan.FromMilliseconds(300)));
+            log.Add("first ends");
         });
+        dispatcher.Post(() => log.Add("queued behind the first"));
 
-        (await Within(overlapped.Task)).Should().BeFalse();
-        secondRan.Wait(HangGuard).Should().BeTrue("it is delivered once the first has returned");
+        drains.Should().ContainSingle("a report made while one is queued joins its drain");
+        drains.Dequeue()();
+
+        drains.Should().BeEmpty("the report made during the first was delivered by the same drain");
+        log.Should().Equal("first begins", "first ends", "queued behind the first", "second");
+
+        // The drain that emptied the queue has ended: the next report starts one of its own
+        // instead of waiting for a drain that is gone.
+        dispatcher.Post(() => log.Add("after the drain"));
+        drains.Should().ContainSingle();
+        drains.Dequeue()();
+        log.Should().EndWith("after the drain");
     }
 
     // =========================================================================================

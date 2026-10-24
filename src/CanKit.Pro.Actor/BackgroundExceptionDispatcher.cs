@@ -32,7 +32,21 @@ internal sealed class BackgroundExceptionDispatcher
 {
     private readonly object _gate = new();
     private readonly Queue<Action> _pending = new();
+    private readonly Action<Action>? _startDrain;
     private bool _draining;
+
+    /// <summary>Starts each drain on the thread pool.</summary>
+    internal BackgroundExceptionDispatcher()
+    {
+    }
+
+    /// <summary>
+    /// A seam for tests: <paramref name="startDrain"/> is handed the drain to start instead of
+    /// the thread pool, so a test can count how many drains were started and run them where it
+    /// chooses -- whether two reports can be delivered at once is then a count, not a race.
+    /// </summary>
+    internal BackgroundExceptionDispatcher(Action<Action> startDrain)
+        => _startDrain = startDrain;
 
     /// <summary>
     /// Queues the report of <paramref name="exception"/> to the subscribers of
@@ -55,6 +69,12 @@ internal sealed class BackgroundExceptionDispatcher
             _pending.Enqueue(delivery);
             if (_draining) return;
             _draining = true;
+        }
+
+        if (_startDrain is not null)
+        {
+            _startDrain(Drain);
+            return;
         }
 
         // No ExecutionContext is flowed: one drain serves reports made on many threads, and the
