@@ -5,6 +5,7 @@ using AwesomeAssertions;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -45,7 +46,7 @@ public class CanOpenSdoServerStrayFrameTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-block-{Guid.NewGuid():N}");
         using var toClient = TapResponses(bus);
-        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        using var server = OpenOnStoppedClock(bus);
         server.ObjectDictionary.AddDomain(Index, 0x00,
             Enumerable.Range(0, 20).Select(i => (byte)(0x60 + i)).ToArray()); // three segments
 
@@ -104,7 +105,7 @@ public class CanOpenSdoServerStrayFrameTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-classic-{Guid.NewGuid():N}");
         using var toClient = TapResponses(bus);
-        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        using var server = OpenOnStoppedClock(bus);
         var value = Enumerable.Range(0, 20).Select(i => (byte)(0x60 + i)).ToArray();
         server.ObjectDictionary.AddDomain(Index, 0x00, value, OdAccess.ReadOnly);
 
@@ -144,7 +145,7 @@ public class CanOpenSdoServerStrayFrameTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-direction-{Guid.NewGuid():N}");
         using var toClient = TapResponses(bus);
-        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        using var server = OpenOnStoppedClock(bus);
         server.ObjectDictionary.AddDomain(Index, 0x00, new byte[20], OdAccess.ReadOnly);
 
         FromClient(bus, SdoFrames.BuildUploadInit(Index, 0x00));
@@ -187,7 +188,7 @@ public class CanOpenSdoServerStrayFrameTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-initiate-{Guid.NewGuid():N}");
         using var toClient = TapResponses(bus);
-        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        using var server = OpenOnStoppedClock(bus);
         var value = Enumerable.Range(0, 20).Select(i => (byte)(0x60 + i)).ToArray();
         server.ObjectDictionary.AddDomain(Index, 0x00, value, OdAccess.ReadOnly);
 
@@ -237,6 +238,14 @@ public class CanOpenSdoServerStrayFrameTests
         Next(toClient)[0].Should().Be(SdoFrames.ScsUploadInitSegmented,
             "the abort ended the session, so there is none left to supersede");
     }
+
+    // The server's session timeout (SdoServerTimeout, 5 s) runs on a clock nothing moves (#362,
+    // #405). On the wall clock a runner that stalls the test between two frames for longer than
+    // that aborts the open session with 0504 0000h, and the test reads that abort, or finds no
+    // session, where it asserts the answer to its own frame.
+    private static CanOpenNode OpenOnStoppedClock(ControllableBus bus)
+        => new(new CanBusService(bus), ServerNodeId, new CanOpenNodeOptions(), ownsService: true,
+            timeSource: new ManualTimeSource());
 
     private static BlockingCollection<byte[]> TapResponses(ControllableBus bus)
     {
