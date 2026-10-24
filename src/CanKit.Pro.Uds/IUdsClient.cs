@@ -317,6 +317,18 @@ public interface IUdsClient : IDisposable
     /// <paramref name="data"/> is the encoded payload this client forwards unchanged, so
     /// their lengths are not compared.
     /// </summary>
+    /// <remarks>
+    /// No block is retried. Beyond the repeat after NRC 0x21 (busyRepeatRequest) that every
+    /// request gets (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>), the first failure of
+    /// a TransferData -- a negative response such as NRC 0x73 (wrongBlockSequenceCounter), a
+    /// timeout, a transport error -- ends the call with that exception, and no
+    /// RequestTransferExit follows, so the server's download is
+    /// left where the failed block left it. This is a scope limit of this convenience method, not
+    /// a reading of ISO 14229-1: whether and how the standard has a client repeat a block has not
+    /// been checked against the text (#354). A caller that wants to repeat blocks drives
+    /// <see cref="RequestDownloadAsync"/>, <see cref="TransferDataAsync"/> and
+    /// <see cref="RequestTransferExitAsync"/> itself.
+    /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="dataFormatIdentifier"/> is
     /// <c>0x00</c> and <paramref name="memorySize"/> does not decode to the length of
     /// <paramref name="data"/>.</exception>

@@ -128,6 +128,12 @@ await uds.DownloadAsync(
   used up (#57). The zero delay is not taken from ISO 14229-1: whether the standard asks for a
   delay before the repeat has not been checked against its text, and the default stays zero until
   it is (#354).
+* `DownloadAsync` retries no block: apart from the NRC 0x21 repeat above, the first failed
+  TransferData — NRC 0x73 (wrongBlockSequenceCounter), a timeout, a transport error — ends the
+  call with its exception and sends no RequestTransferExit. That is a scope limit of the
+  convenience method, not a reading of ISO 14229-1 (not checked against the text); a caller that
+  wants to repeat blocks drives `RequestDownloadAsync` / `TransferDataAsync` /
+  `RequestTransferExitAsync` itself (#354).
 * `UdsTimeoutException.Elapsed` is the budget of the timer that expired (P2 or P2*) on every
   path, never a measurement of how late the client noticed (#57).
 * `DiagnosticSessionControlAsync(byte)` rejects 0x00 and any value with bit 7 set rather than
