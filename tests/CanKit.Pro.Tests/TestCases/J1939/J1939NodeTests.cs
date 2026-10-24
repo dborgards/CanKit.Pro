@@ -2763,6 +2763,24 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await seen).DestinationAddress.Should().Be((byte)0x80, "the directed request still reaches the application");
     }
 
+    // #355 (J12, decided on #397 as option (b)): ReceiveBufferCapacity sized an inbox no public
+    // member read, so a node retained up to that many payloads for nobody. The inbox is gone, and
+    // the option is [Obsolete] until 2.0 removes it (#299). It is still validated: a
+    // configuration that was refused is not quietly accepted now.
+    [Fact]
+    public void ReceiveBufferCapacity_Is_Obsolete_And_Still_Validated()
+    {
+        var obsolete = typeof(J1939NodeOptions).GetProperty("ReceiveBufferCapacity")!.GetCustomAttribute<ObsoleteAttribute>();
+        obsolete.Should().NotBeNull();
+        obsolete!.Message.Should().Contain("MessageReceived").And.Contain("2.0");
+
+#pragma warning disable CS0618 // the obsolete option is what is under test
+        var refused = new J1939NodeOptions(Name(1)) { ReceiveBufferCapacity = 0 };
+#pragma warning restore CS0618
+        Action validate = () => refused.Validate();
+        validate.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("ReceiveBufferCapacity");
+    }
+
     // ---------------------------------------------------------------------------------------
     // #35 (SAE J1939-81 §4.5): a node that loses its address after a successful claim moves to
     // another address when it is arbitrary-address capable — the same scan a contested first

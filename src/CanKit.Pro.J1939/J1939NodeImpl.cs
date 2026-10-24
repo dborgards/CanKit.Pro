@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -96,7 +95,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private Task _transportReaderTask = null!;
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _readerCts = new();
-    private readonly Channel<J1939Message> _rxInbox;
 
     private PendingClaim? _pendingClaim;
     private int _disposed;
@@ -202,14 +200,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
         _ownsService = ownsService;
         _name = options.Name;
         _openTransport = openTransport;
-
-        var inboxOpts = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
-        {
-            SingleReader = false,
-            SingleWriter = true,
-            FullMode = BoundedChannelFullMode.DropOldest,
-        };
-        _rxInbox = Channel.CreateBounded<J1939Message>(inboxOpts);
 
         _ownsActor = actor is null;
         _actor = actor ?? new ProtocolActor();
@@ -1867,7 +1857,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             RaiseBackgroundException(ex);
         }
-        _rxInbox.Writer.TryWrite(message);
+        // No copy is kept: MessageReceived is the receive path. An internal inbox nothing read
+        // used to retain up to ReceiveBufferCapacity payloads per node (#355, J12).
     }
 
     // =========================================================================================
@@ -1942,7 +1933,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void DisposeCore()
     {
         try { _readerCts.Cancel(); } catch { }
-        _rxInbox.Writer.TryComplete();
 
         var transportReader = Volatile.Read(ref _transportReaderTask);
         try
@@ -2098,9 +2088,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // =========================================================================================
     // Diagnostics helpers
     // =========================================================================================
-
-    internal IAsyncEnumerable<J1939Message> InboxAll(CancellationToken cancellationToken)
-        => _rxInbox.Reader.ReadAllAsync(cancellationToken);
 
     private void RaiseBackgroundException(Exception ex)
     {
