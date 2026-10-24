@@ -318,4 +318,27 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(wire, 2, 0x8210, 0x91);
         device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x91u);
     }
+
+    // Bugbot on #417: an error decided after an application EMCY was queued, but before that
+    // EMCY is transmitted, still carries the application's new part — it follows it on the chain.
+    // The loop is held so that both calls run in one drain, ahead of the queued transmission.
+    [Fact]
+    public async Task An_Error_Decided_Behind_A_Queued_Application_Emcy_Carries_Its_Bits()
+    {
+        using var device = OpenWithRpdo(NewSession(), out var wire, out _);
+        using var _w = wire;
+        await StartAsync(wire, device);
+        var node = (CanOpenNode)device;
+        using var release = new System.Threading.ManualResetEventSlim();
+        var held = node.PostToActorAsync(() => release.Wait(ShortTimeout));
+        var application = device.SendEmcyAsync(0xFF00, 0x81);
+        var shortFrame = Inject(device, Rpdo1, 0x01);
+        release.Set();
+        await held;
+        await shortFrame;
+        await application;
+        await ExpectEmcyAsync(wire, 1, 0xFF00, 0x81); // decided before the error
+        await ExpectEmcyAsync(wire, 2, 0x8210, 0x91);
+        device.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x91u);
+    }
 }

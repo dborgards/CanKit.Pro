@@ -46,20 +46,17 @@ internal sealed partial class CanOpenNode
     // The communication errors the node reported and whose cause has not ended. Actor loop only.
     private readonly HashSet<int> _communicationErrors = new();
 
-    // The register the last queued EMCY or register write carries, null before the first: once
-    // one was queued, a reset and a held EMCY discarded with the EMCY off write the register they
-    // leave behind, in their place on the chain. Actor loop only.
-    private byte? _queuedErrorRegister;
+    // Whether an EMCY or a register write was ever queued: from then on, a reset and a held EMCY
+    // discarded with the EMCY off write the register they leave behind, in their place on the
+    // chain. Before, 1001h holds what the node created it with. Actor loop only.
+    private bool _errorRegisterQueued;
 
     private static int CommunicationErrorKey(CommunicationError kind, int number = 0) => ((int)kind << 16) | number;
 
-    /// <summary>The register an EMCY decided now carries: the application's bits, and bits 0
-    /// and 4 while a communication error is active.</summary>
-    private byte ComposeErrorRegister() => ComposeErrorRegister(_applicationErrorRegister);
-
-    private byte ComposeErrorRegister(byte applicationErrorRegister)
-        => (byte)(applicationErrorRegister
-                  | (_communicationErrors.Count > 0 ? GenericErrorBit | CommunicationErrorBit : 0));
+    /// <summary>The node's part of the register: bits 0 and 4 while a communication error is
+    /// active. An EMCY carries it ORed with the application's part.</summary>
+    private byte CommunicationErrorBits
+        => _communicationErrors.Count > 0 ? (byte)(GenericErrorBit | CommunicationErrorBit) : (byte)0;
 
     /// <summary>Reports a communication error once per error event. Nothing is raised, and the
     /// event is not used up, while the EMCY is switched off (bit 31 of <c>1014h</c>), as before
@@ -92,7 +89,7 @@ internal sealed partial class CanOpenNode
         // must not keep reading an error that has ended.
         if (!_emcyValid)
         {
-            QueueErrorRegisterWrite(ComposeErrorRegister());
+            QueueErrorRegisterWrite(CommunicationErrorBits);
             return;
         }
         EmitNodeEmcy(ErrorResetCode);
@@ -100,7 +97,8 @@ internal sealed partial class CanOpenNode
 
     private void EmitNodeEmcy(ushort errorCode)
     {
-        var msg = new EmcyMessage(_nodeId, errorCode, ComposeErrorRegister());
+        // The register byte is filled in when the frame is transmitted (EmitEmcy).
+        var msg = new EmcyMessage(_nodeId, errorCode, 0);
         if (_state == NmtState.Stopped)
         {
             // §7.3.2.2.4, as for the application's EMCY: held, the most recent one goes out after
@@ -116,11 +114,6 @@ internal sealed partial class CanOpenNode
     // which the node takes when the EMCY is transmitted. Actor loop only.
     private bool _pendingEmcyIsApplications;
 
-    /// <summary>An EMCY carries the register of the moment it is decided: the application's
-    /// part it brings (or the one already taken) and the node's bits.</summary>
-    private EmcyMessage WithCurrentErrorRegister(EmcyMessage msg, byte applicationErrorRegister)
-        => new(msg.ProducerNodeId, msg.ErrorCode, ComposeErrorRegister(applicationErrorRegister), msg.ManufacturerSpecific);
-
     /// <summary>Leaving Stopped (§7.3.2.2.4): the held EMCY goes out with the register of that
     /// moment. With the EMCY switched off meanwhile it is discarded, but an error that ended
     /// while it was held must still leave <c>1001h</c>.</summary>
@@ -130,12 +123,10 @@ internal sealed partial class CanOpenNode
         _pendingEmcyIsApplications = false;
         if (!_emcyValid)
         {
-            if (_queuedErrorRegister is not null) QueueErrorRegisterWrite(ComposeErrorRegister());
+            if (_errorRegisterQueued) QueueErrorRegisterWrite(CommunicationErrorBits);
             return;
         }
-        byte application = applications ? pending.ErrorRegister : _applicationErrorRegister;
-        _ = EmitEmcy(WithCurrentErrorRegister(pending, application),
-            applicationErrorRegister: applications ? application : null);
+        _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
 
     /// <summary>NMT reset: transitions 5 and 0 of Figure 37 — the node is error free, "No error
@@ -143,18 +134,19 @@ internal sealed partial class CanOpenNode
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
-        if (_queuedErrorRegister is not null) QueueErrorRegisterWrite(_applicationErrorRegister);
+        if (_errorRegisterQueued) QueueErrorRegisterWrite(0);
     }
 
     /// <summary>Writes <c>1001h</c> without a frame, in its place on the EMCY chain, so an EMCY
-    /// queued before it cannot overwrite it afterwards.</summary>
-    private void QueueErrorRegisterWrite(byte errorRegister)
+    /// queued before it cannot overwrite it afterwards: the node's bits as now, the application's
+    /// part as of that place.</summary>
+    private void QueueErrorRegisterWrite(byte nodeBits)
     {
-        _queuedErrorRegister = errorRegister;
+        _errorRegisterQueued = true;
         var link = _emcySendChain.ContinueWith(
             _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(() =>
             {
-                _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
+                _od.WriteUnsigned(Co.ErrorRegister, 0x00, (byte)(_applicationErrorRegister | nodeBits));
                 return Task.CompletedTask;
             }),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();

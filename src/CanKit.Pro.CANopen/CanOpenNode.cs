@@ -505,7 +505,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             }
             // errorRegister is the application's part of 1001h; the node adds its communication
             // errors, and takes the application's part only when this EMCY is transmitted (#379).
-            return EmitEmcy(WithCurrentErrorRegister(msg, errorRegister), cancellationToken, errorRegister);
+            return EmitEmcy(msg, cancellationToken, errorRegister);
         }).Unwrap();
     }
 
@@ -566,8 +566,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
-        byte errorRegister = msg.ErrorRegister;
-        _queuedErrorRegister = errorRegister;
+        // The node's bits are those of the moment the EMCY is decided; the application's part is
+        // read when it is transmitted, so it is the part of the last application EMCY before it
+        // on this chain (#379). msg.ErrorRegister is not used.
+        byte nodeBits = CommunicationErrorBits;
+        _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
         // the previous send can retarget the dictionary before this queued emergency starts.
         Func<Task> transmit = () =>
@@ -576,6 +579,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
             if (applicationErrorRegister is { } application) _applicationErrorRegister = application;
+            byte errorRegister = (byte)(_applicationErrorRegister | nodeBits);
+            frame[2] = errorRegister;
             _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
