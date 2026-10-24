@@ -740,13 +740,16 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // #352 (R-2): the same on the approximated path, for a bus whose TransmitAsync is genuinely
     // asynchronous. The call returns its task only once the send is parked on the pending
     // transmit -- everything before that wait runs on this thread -- so Dispose lands on a tracked
-    // send. The timeout is far beyond the hang bound: only Dispose can end the call in time.
+    // send. No timeout is armed -- the seam swallows it -- so only Dispose can end the call: the
+    // outcome does not depend on the runtime's timer, and the hang bound only turns a missing
+    // cancellation into a failure instead of a hung run.
     [Fact]
     public async Task Disposing_Service_Cancels_An_Approximated_Send_Whose_Transmit_Is_Pending()
     {
         using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
         bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus); // Dispose is idempotent: the explicit call below is the one under test
+        service.ArmConfirmTimeout = (_, _) => { }; // arms nothing: only Dispose ends it
 
         var send = service.SendConfirmedAsync(CanFrame.Classic(0x672, new byte[] { 1 }), TimeSpan.FromMinutes(5));
         service.Dispose();
