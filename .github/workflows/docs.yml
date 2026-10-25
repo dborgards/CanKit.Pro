@@ -86,7 +86,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.403 # Exact version bypasses the broken aka.ms redirect (#456).
 
       # Compiles the solution and turns the XML documentation comments into docs/api/. Must run
       # before mkdocs: the API tab's pages and its navigation file do not exist until it has.
