@@ -203,15 +203,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// so substituting the actor puts all of them on the one clock the test controls. The
     /// <c>Stopwatch</c> readings that remain here are arrival and transmit *instants* on the
     /// wire (#112), which are facts about the host and deliberately not on the actor's clock.
+    /// <para>
+    /// <paramref name="ownsActor"/> hands an injected <paramref name="actor"/> to the channel to
+    /// dispose, as the one it creates for itself: a seam for a test that needs the channel's own
+    /// disposal of its actor on a loop with a short shutdown bound (#449).
+    /// </para>
     /// </remarks>
     internal IsoTpChannel(ICanBusService service, IsoTpEndpoint endpoint,
-        IsoTpChannelOptions options, bool ownsService, IProtocolActor? actor = null)
+        IsoTpChannelOptions options, bool ownsService, IProtocolActor? actor = null, bool ownsActor = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _endpoint = endpoint;
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _ownsService = ownsService;
-        _ownsActor = actor is null;
+        _ownsActor = actor is null || ownsActor;
         // Encode once: EncodeStMin throws on negative values; surfacing at Open keeps the RX
         // path free of codec throws that ProtocolActor would only raise as BackgroundException.
         _localStMinRaw = IsoTpFrameCodec.EncodeStMin(_options.LocalStMin);
@@ -771,9 +776,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // SendAsync can leave its await and enter WaitForBusTxIdleAsync / Release. An injected
         // actor is not ours to dispose -- the caller may still be running other channels on it --
         // but the handler is, so it comes off either way rather than outliving this channel on a
-        // loop that keeps going.
-        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+        // loop that keeps going. For an owned actor only after its Dispose: that is where the
+        // actor reports a callback that outlived its shutdown bound, as a TimeoutException through
+        // its BackgroundExceptionOccurred, and unsubscribed first the channel's subscribers never
+        // heard of it (#449, as #437 for the J1939-TP channel).
         if (_ownsActor) _actor.Dispose();
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
         _readerCts.Dispose();
 
         // _sendGate is deliberately not disposed, and not waited for either (#339): the wait
