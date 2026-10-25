@@ -28,6 +28,11 @@ A TP.CM or TP.DT from source address 0xFE (null) or 0xFF (global) is not filtere
 
 Sends are serialized per destination: a send whose destination is busy waits behind the one on the wire, and at most `MaxQueuedSendsPerDestination` (default 8, counting sends the channel has accepted but not yet started; every BAM goes to the global address, so this bounds the waiting BAMs too) may wait per destination. One more faults at the call, before anything is queued, with `J1939TpSendRejectedException` instead of growing memory and latency against a peer that answers slowly or never (#204). A queued send has no deadline of its own — a peer may legitimately hold the session ahead of it with CTS(0) — so cancel its token to bound the wait; a cancelled send leaves the queue at once.
 
+Cancelling an active CM send completes its task on the actor without waiting for the Connection
+Abort's service hand-off. The destination remains reserved until that hand-off, so the next
+send's RTS is handed to the bus service after the Abort. If the original RTS is still
+unconfirmed and unanswered, the Abort first waits for it to settle.
+
 The channel ships on nuget.org alongside the other `CanKit.Pro.*` L2/L3 building blocks. It re-uses:
 
 - `CanKit.Pro.RawCan` — one `ICanBusService` per channel to demultiplex the TP.CM / TP.DT frames back out of the shared bus stream and to confirm outbound frames.
