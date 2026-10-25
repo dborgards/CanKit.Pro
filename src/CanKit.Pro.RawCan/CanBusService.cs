@@ -84,11 +84,12 @@ namespace CanKit.Pro.RawCan
         // What Dispose waits on while _handoffsInFlight drains; pulsed by the last hand-off out.
         private readonly object _handoffDrain = new();
 
-        // The services whose approximated hand-off this thread is inside of, innermost last. A
-        // Dispose reached from inside a driver call on the same thread -- a driver disposing the
-        // service on a fault, say -- must not wait for that call or for the hand-offs that may
-        // be queued behind it; see WaitForHandoffs. One list per thread, reused, so a send
-        // allocates nothing for it.
+        // The services whose driver call this thread is inside of, innermost last: an
+        // approximated hand-off, or the echo path's Transmit under its gate. A Dispose reached
+        // from inside any such call on the same thread -- a driver disposing a service on a
+        // fault, say, this one or another -- must not wait for that call or for the hand-offs
+        // that may be queued behind it; see WaitForHandoffs. One list per thread, reused, so a
+        // send allocates nothing for it.
         [ThreadStatic]
         private static List<CanBusService>? t_handoffs;
 
@@ -362,17 +363,20 @@ namespace CanKit.Pro.RawCan
         // purpose: a driver call in progress may need that lock (an echo it raises reaches
         // TryMatchEcho), and nothing here needs it.
         //
-        // Not at all when this thread is itself inside one of this service's driver calls -- a
-        // driver disposing the service on a fault, say. That call cannot return before this one
-        // does, and neither can any other hand-off that waits for it: a driver that serializes
-        // its transmits behind an internal lock holds the others there (Codex on #438). Which
-        // of them depend on the current call is not knowable from here, so a Dispose reached
-        // that way waits for none; a send already past its check may then still reach the
-        // driver after it returns, which is the price of not deadlocking a driver that was
-        // already mid-call when it asked for disposal.
+        // Not at all when this thread is itself inside a driver call of *any* CanBusService --
+        // approximated or echo path, this service or another (a driver disposing on a fault,
+        // say). That call cannot return before this one does, and neither can any hand-off that
+        // waits for it: a driver that serializes its transmits behind an internal lock holds
+        // the others there (Codex on #438), and two services on one physical adapter share that
+        // lock, so the hand-off held may well be this service's while the call holding it is
+        // another's. Which hand-offs depend on the current call is not knowable from here, so a
+        // Dispose reached that way waits for none. The #430 guarantee is given up in exactly
+        // that case: a send already past its check may still reach the driver after Dispose
+        // returns -- the price of not deadlocking a driver that was mid-call when disposal was
+        // asked for (maintainer decision on #438, option C).
         private void WaitForHandoffs()
         {
-            if (t_handoffs?.Contains(this) == true) return;
+            if (t_handoffs is { Count: > 0 }) return;
 
             lock (_handoffDrain)
             {
@@ -507,7 +511,7 @@ namespace CanKit.Pro.RawCan
             // sends do not wait for each other's driver call, and a driver call that waits for
             // another send through this service -- a delivery held on the sending thread until
             // the next request goes out (#439) -- does not deadlock it. Only Dispose waits, and
-            // not when it is called from inside one of this service's driver calls.
+            // not when it is called from inside a driver call of any service (WaitForHandoffs).
             Interlocked.Increment(ref _handoffsInFlight);
             try
             {
@@ -684,7 +688,19 @@ namespace CanKit.Pro.RawCan
                         RemovePending(pending);
                         cancellationToken.ThrowIfCancellationRequested();
                     }
-                    accepted = _bus.Transmit(in frame);
+                    // Registered as a driver call on this thread, like an approximated hand-off,
+                    // so a Dispose of any service reached from inside it does not wait for
+                    // hand-offs that may be queued behind it (see WaitForHandoffs).
+                    var handoffs = HandoffsOnThisThread();
+                    handoffs.Add(this);
+                    try
+                    {
+                        accepted = _bus.Transmit(in frame);
+                    }
+                    finally
+                    {
+                        handoffs.RemoveAt(handoffs.Count - 1);
+                    }
 
                     // Taken here, inside the lock and immediately after the driver call returns:
                     // this is the closest observable instant to the frame reaching the wire.
