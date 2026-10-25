@@ -1271,6 +1271,66 @@ transaction, a call in flight — makes every live read of that observation "alr
 so the whole snapshot is the file's; the live COB-ID of one configuration is never combined with
 the file's mapping of another.
 
+### Read-only peer safety inspection
+
+`node.Safety().ReadPeerSafetyConfigurationAsync(peer, expected: null, token)` (FR-CO-060)
+acquires a tool-side `PeerSafetySnapshot` without a target DCF. Bind a peer EDS/DCF first with
+`BindPeerDeviceDescription`: it still governs every SDO upload. This optional operation uses
+`ICanOpenSafetyInspection`; existing implementations of `ICanOpenSafety` need no new members.
+The extension reports `NotSupportedException` for implementations without inspection support.
+
+```csharp
+node.BindPeerDeviceDescription(peer, peerEds);
+var image = await node.Safety().ReadPeerSafetyConfigurationAsync(peer, cancellationToken: token);
+foreach (var srdo in image.Srdos)
+    Console.WriteLine($"SRDO {srdo.Number}: CRC {srdo.SignatureComparison}, usable input {srdo.EligibleForMonitoring}");
+foreach (var finding in image.Findings)
+    Console.WriteLine($"{finding.Index:X4}:{finding.Subindex:X2} {finding.Kind}: {finding.Message}");
+```
+
+The operation reserves this client's peer-SDO channel, then copies the binding and optional
+expectation. It reads identity `1018h:01..04`, `1300h`, `13FEh`, `13FFh` and the peer's described
+communication/mapping records. The live count cannot expand the scan beyond the description
+or 64 SRDOs. Each mapping's advertised slots are retained up to the bounded 128-slot record
+range, through the existing access gate; interpretation retains this implementation's fixed,
+byte-aligned, 8-byte mapping limit. Missing entries, aborts (with code and origin), wrong widths,
+unsupported mappings and optional expected-value failures are structured per-entry findings.
+It sends uploads only, no downloads, NMT, store/commit, SRDO or GFC commands, and never changes
+the peer's state to make an entry readable. Cancellation can send the SDO client's normal abort;
+cancellation and node disposal propagate rather than returning a completed partial result.
+
+`Entries` retains owned raw bytes and provenance; `RecheckEntries` retains the repeated uploads.
+An explicitly declared ParameterValue (otherwise DefaultValue) is retained as `DeviceDescription`
+when a live read fails, never as live evidence. Such fallback values cannot complete a live
+image or satisfy its signature/expected comparison. An undeclared producer SRVT answered by
+the peer with `0609 0011h` is represented explicitly as `CiA319Default` (20 ms), with the abort
+retained, following the existing CiA 319 rule. A local timeout or another abort does not establish
+that rule. A live producer SRVT outside the existing non-writable-parameter rule is retained
+unchanged and diagnosed, rather than silently replaced. CRC serialization and mapped-object
+validation reuse the configuration/verification implementation. The unresolved version and
+byte-order interoperability questions in [#289](https://github.com/dborgards/CanKit.Pro/issues/289)
+remain visible in `Findings`.
+
+`DeviceConfigurationValid` is only the live `13FEh` flag. Each `SignatureComparison` compares
+the live `13FFh:n` with an independently recomputed signature, using live fields and the explicit
+SRVT rule only. Deleted records' stale signatures are not assessed. `ExpectedComparison` is
+separate and only requested when a configuration was supplied. A complete acquisition without
+observed changes is required for `Match`; a known difference can still report `Mismatch` in a
+partial image. A true flag cannot replace either
+comparison. `IsComplete` describes the bounded acquisition and successful required rechecks;
+it does not imply valid parameters. A mapping must also pass the existing declared-object,
+fixed-width, access-direction and COB-ID uniqueness checks to be eligible for monitoring.
+
+Holding this client's channel prevents local interleaving, not device changes or other tools'
+writes. The operation repeats every captured entry: different live/SRVT-rule evidence yields `ChangeObserved`
+and disqualify pending monitoring input. Identical answers still mean `Unconfirmed`, never an
+atomic device image. Missing or malformed required recheck evidence disqualifies input too. `ConfigurationId` is a new
+identity for every acquisition, not a device-provided version; `StartedAtUtc` and monotonic
+`Duration` record the acquisition interval. The returned collections and bytes are immutable.
+Replacing a monitor's snapshot must begin a new evaluation period. Continuous receive-only
+supervision and its protocol recovery policy are separate work in #401; none of these diagnostics
+is safety approval.
+
 ### What this is not
 
 This library is not developed to IEC 61508 / DIN V VDE 0801 and claims no safety integrity level.

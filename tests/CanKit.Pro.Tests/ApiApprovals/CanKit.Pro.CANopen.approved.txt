@@ -874,6 +874,7 @@ namespace CanKit.Pro.CANopen.Safety
 {
     public static class CanOpenSafetyExtensions
     {
+        public static System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.PeerSafetySnapshot> ReadPeerSafetyConfigurationAsync(this CanKit.Pro.CANopen.Safety.ICanOpenSafety safety, byte peerNodeId, CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration? expected = null, System.Threading.CancellationToken cancellationToken = default) { }
         public static CanKit.Pro.CANopen.Safety.ICanOpenSafety Safety(this CanKit.Pro.CANopen.ICanOpenNode node) { }
     }
     public sealed class ForeignSrdoObserveResult
@@ -904,6 +905,10 @@ namespace CanKit.Pro.CANopen.Safety
         System.Threading.Tasks.Task TriggerSrdoAsync(int srdoNumber, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration expected, System.Threading.CancellationToken cancellationToken = default);
     }
+    public interface ICanOpenSafetyInspection
+    {
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.PeerSafetySnapshot> ReadPeerSafetyConfigurationAsync(byte peerNodeId, CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration? expected = null, System.Threading.CancellationToken cancellationToken = default);
+    }
     public sealed class PeerSafetyConfiguration
     {
         public PeerSafetyConfiguration() { }
@@ -916,6 +921,36 @@ namespace CanKit.Pro.CANopen.Safety
         public CanKit.Pro.CANopen.Safety.PeerSafetyStorage Storage { get; set; }
         public CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration Add(int srdoNumber, CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter parameter, CanKit.Pro.CANopen.Safety.SrdoMapping mapping) { }
         public static CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration FromDeviceDescription(CanKit.Pro.CANopen.CanOpenDeviceDescription description, byte nodeId) { }
+    }
+    public sealed class PeerSafetyEntry
+    {
+        public uint? AbortCode { get; }
+        public CanKit.Pro.CANopen.Sdo.SdoAbortOrigin? AbortOrigin { get; }
+        public ushort Index { get; }
+        public CanKit.Pro.CANopen.Safety.SafetyValueOrigin Origin { get; }
+        public System.Collections.Generic.IReadOnlyList<byte> RawValue { get; }
+        public byte Subindex { get; }
+        public uint? UnsignedValue { get; }
+    }
+    public sealed class PeerSafetyFinding
+    {
+        public ushort Index { get; }
+        public CanKit.Pro.CANopen.Safety.PeerSafetyFindingKind Kind { get; }
+        public string Message { get; }
+        public byte Subindex { get; }
+    }
+    public enum PeerSafetyFindingKind
+    {
+        SdoAbort = 0,
+        AccessRefused = 1,
+        Unavailable = 2,
+        InvalidValue = 3,
+        InvalidMapping = 4,
+        SignatureMismatch = 5,
+        ExpectedMismatch = 6,
+        ExpectedUnavailable = 7,
+        ConfigurationChanged = 8,
+        NormativeUncertainty = 9,
     }
     public sealed class PeerSafetyMismatch
     {
@@ -932,11 +967,55 @@ namespace CanKit.Pro.CANopen.Safety
         public bool Stored { get; }
         public bool Succeeded { get; }
     }
+    public sealed class PeerSafetySnapshot
+    {
+        public System.Guid ConfigurationId { get; }
+        public CanKit.Pro.CANopen.Safety.PeerSafetySnapshotConsistency Consistency { get; }
+        public bool? DeviceConfigurationValid { get; }
+        public System.TimeSpan Duration { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetyEntry> Entries { get; }
+        public CanKit.Pro.CANopen.Safety.SafetyComparison ExpectedComparison { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetyFinding> Findings { get; }
+        public bool IsComplete { get; }
+        public byte PeerNodeId { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetyEntry> RecheckEntries { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetySrdoSnapshot> Srdos { get; }
+        public System.DateTimeOffset StartedAtUtc { get; }
+    }
+    public enum PeerSafetySnapshotConsistency
+    {
+        Unconfirmed = 0,
+        ChangeObserved = 1,
+    }
+    public sealed class PeerSafetySrdoSnapshot
+    {
+        public ushort? ComputedSignature { get; }
+        public bool EligibleForMonitoring { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Mapping { get; }
+        public int Number { get; }
+        public CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter? Parameter { get; }
+        public CanKit.Pro.CANopen.Safety.SafetyComparison SignatureComparison { get; }
+        public ushort? StoredSignature { get; }
+    }
     public enum PeerSafetyStorage : byte
     {
         None = 0,
         AllParameters = 1,
         CommunicationParameters = 2,
+    }
+    public enum SafetyComparison
+    {
+        NotRequested = 0,
+        Unavailable = 1,
+        Match = 2,
+        Mismatch = 3,
+    }
+    public enum SafetyValueOrigin
+    {
+        Unavailable = 0,
+        Live = 1,
+        DeviceDescription = 2,
+        CiA319Default = 3,
     }
     public readonly struct SrdoCommunicationParameter : System.IEquatable<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter>
     {
