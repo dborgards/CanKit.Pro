@@ -243,10 +243,12 @@ namespace CanKit.Pro.RawCan
         /// such a send is still inside the driver call -- and if that transmit is still pending,
         /// <c>Dispose</c> cancels the call as described under <paramref name="cancellationToken"/>.
         /// Sends do not wait for each other's driver call on the approximated path; only
-        /// <c>Dispose</c> does. The exception is a <c>Dispose</c> called from inside one of the
-        /// service's own approximated driver calls, on that call's thread (a driver disposing on
-        /// a fault): it waits for no send, since sends queued behind that call may depend on it,
-        /// so one already past the check may still reach the driver after it returns.
+        /// <c>Dispose</c> does. The exception is a <c>Dispose</c> called on a thread that is
+        /// inside a driver call of any <see cref="CanBusService"/> -- this one or another, on
+        /// either path (a driver disposing on a fault): it waits for no send, since sends queued
+        /// behind that call -- behind a lock the driver shares between services, say -- may
+        /// depend on it. In that case the guarantee above does not hold: a send already past the
+        /// check may still reach the driver after <c>Dispose</c> has returned.
         /// </exception>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }

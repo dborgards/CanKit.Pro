@@ -999,6 +999,67 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             "it passed the disposed check before Dispose, and a reentrant Dispose does not wait for it");
     }
 
+    // Maintainer decision on #438 (option C): a Dispose waits for no hand-off when its thread is
+    // inside a driver call of *any* service, not only its own. Two services over one physical
+    // adapter share the driver's internal lock; here a driver call of the first disposes the
+    // second while the second has a send past its disposed check parked on that lock. Waiting for
+    // that send would wait for the call this thread is inside of. Both paths of the first service:
+    // its approximated hand-off and its echo path's Transmit under the gate. The disposal happens
+    // only once the queued send has entered the driver and is parked on the lock (or gone), so no
+    // clock decides which state is reached; ShortTimeout only bounds the deadlock this would be.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dispose_From_Inside_Another_Services_Driver_Call_Does_Not_Wait_For_A_Send_Queued_Behind_It(bool echoPath)
+    {
+        using var firstBus = echoPath
+            ? ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("txconfirm"))
+            : ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var secondBus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        // Not `using`: under a regression the first send never leaves its driver call, and a Dispose
+        // of the first service at the end of the scope would wait for it instead of reporting red.
+        var first = new CanBusService(firstBus);
+        var second = new CanBusService(secondBus);
+        var driverLock = new object();
+        var queuedEnteredDriver = 0;
+        Task<TxConfirmation>? queued = null;
+        Thread? sender = null;
+        secondBus.OnTransmitting = _ =>
+        {
+            Volatile.Write(ref queuedEnteredDriver, 1);
+            lock (driverLock) { }
+        };
+        firstBus.OnTransmitting = _ =>
+        {
+            firstBus.OnTransmitting = null;
+            lock (driverLock)
+            {
+                sender = new Thread(() =>
+                    queued = second.SendConfirmedAsync(CanFrame.Classic(0x67D, new byte[] { 2 }), TimeSpan.FromMinutes(5)))
+                { IsBackground = true };
+                sender.Start();
+                while (sender.IsAlive
+                       && (Volatile.Read(ref queuedEnteredDriver) == 0
+                           || (sender.ThreadState & System.Threading.ThreadState.WaitSleepJoin) == 0))
+                    Thread.Yield();
+                second.Dispose();
+            }
+        };
+
+        var result = await Task.Run(() => first.SendConfirmedAsync(CanFrame.Classic(0x67C, new byte[] { 1 }), TimeSpan.FromMinutes(5)))
+            .WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue("the first service's send is unaffected by disposing the second");
+        Volatile.Read(ref queuedEnteredDriver).Should().Be(1, "the second service's send was inside its driver call when Dispose ran");
+        sender!.Join(ShortTimeout).Should().BeTrue("the queued send gets the driver's lock once the first call returns");
+        queued.Should().NotBeNull();
+        (await queued!.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue(
+            "it passed the disposed check before Dispose, and a Dispose from inside a driver call waits for no hand-off");
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => second.SendConfirmedAsync(CanFrame.Classic(0x67D, new byte[] { 3 })));
+        first.Dispose();
+    }
+
     // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
     // is the only thing that refuses it; on the echo path the gate check above would as well.
     [Theory]
