@@ -192,7 +192,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// <summary>
     /// Builds a channel on <paramref name="service"/>. A null <paramref name="actor"/> -- the only
     /// value production passes -- makes the channel create and own its own loop; an injected one
-    /// stays the caller's to dispose.
+    /// stays the caller's to dispose unless the test explicitly transfers ownership.
     /// </summary>
     /// <remarks>
     /// The actor parameter is a seam for tests, not a feature: substituting a loop built on a
@@ -205,13 +205,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// wire (#112), which are facts about the host and deliberately not on the actor's clock.
     /// </remarks>
     internal IsoTpChannel(ICanBusService service, IsoTpEndpoint endpoint,
-        IsoTpChannelOptions options, bool ownsService, IProtocolActor? actor = null)
+        IsoTpChannelOptions options, bool ownsService, IProtocolActor? actor = null, bool ownsActor = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _endpoint = endpoint;
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _ownsService = ownsService;
-        _ownsActor = actor is null;
+        _ownsActor = actor is null || ownsActor;
         // Encode once: EncodeStMin throws on negative values; surfacing at Open keeps the RX
         // path free of codec throws that ProtocolActor would only raise as BackgroundException.
         _localStMinRaw = IsoTpFrameCodec.EncodeStMin(_options.LocalStMin);
@@ -772,8 +772,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // actor is not ours to dispose -- the caller may still be running other channels on it --
         // but the handler is, so it comes off either way rather than outliving this channel on a
         // loop that keeps going.
-        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+        // Keep forwarding through the owned actor's shutdown: Dispose itself can report a
+        // callback that exceeded its join timeout (FR-RAW-023, #449).
         if (_ownsActor) _actor.Dispose();
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
         _readerCts.Dispose();
 
         // _sendGate is deliberately not disposed, and not waited for either (#339): the wait

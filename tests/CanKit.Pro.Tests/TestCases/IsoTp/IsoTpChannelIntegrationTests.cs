@@ -3445,6 +3445,39 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         cfs.Should().Be(4);
     }
 
+    // FR-RAW-023, #449: the owned actor reports a shutdown timeout during Dispose itself.
+    // The callback remains held until finally, so the timeout cannot race its release.
+    [Fact]
+    public async Task The_Shutdown_Timeout_Of_The_Channels_Own_Actor_Reaches_Its_Subscribers()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var release = new ManualResetEventSlim();
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null,
+            shutdownTimeout: TimeSpan.FromMilliseconds(50));
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x700, 0x708),
+            new IsoTpChannelOptions(), ownsService: false, actor, ownsActor: true);
+        var timedOut = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => { if (ex is TimeoutException) timedOut.TrySetResult(ex); };
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            actor.Post(() =>
+            {
+                held.TrySetResult(true);
+                release.Wait();
+            });
+            await held.Task.WaitAsync(ShortTimeout);
+            channel.Dispose();
+
+            (await timedOut.Task.WaitAsync(ShortTimeout)).Should().BeOfType<TimeoutException>();
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
     // #56 -- DiscardPendingPdus called from a BackgroundExceptionOccurred handler, which runs on
     // the actor: the post-and-wait would wait for the loop it is on. It runs inline there.
     [Fact]
