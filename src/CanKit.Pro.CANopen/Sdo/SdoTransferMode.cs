@@ -7,7 +7,7 @@ namespace CanKit.Pro.CANopen.Sdo;
 /// <remarks>
 /// <para>
 /// <see cref="Auto"/> is the recommended default. The choice between the expedited codec
-/// (CiA 301 §7.2.4.3.3) and the segmented codec (CiA 301 §7.2.4.3.5..14) is <b>not</b> a caller
+/// (CiA 301 §7.2.4.3.3) and the segmented codec (CiA 301 §7.2.4.3.2–7.2.4.3.7) is <b>not</b> a caller
 /// decision — it follows from the payload length, exactly as CiA 301 prescribes:
 /// </para>
 /// <list type="bullet">

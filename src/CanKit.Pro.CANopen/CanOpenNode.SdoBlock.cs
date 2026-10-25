@@ -21,7 +21,7 @@ namespace CanKit.Pro.CANopen;
 /// <para>Session lifecycle mirrors the classical SDO client / server: at most one client-side
 /// transfer per remote server (keyed by node-id), and at most one server-side transfer for
 /// our own OD. A stale server-side transfer is superseded on any fresh initiate (CiA 301
-/// §7.2.4.3.4) — matching what the plain SDO server already does.</para>
+/// §7.2.4.3.2 / §7.2.4.3.5) — matching what the plain SDO server already does.</para>
 /// </remarks>
 internal sealed partial class CanOpenNode
 {

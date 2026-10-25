@@ -386,7 +386,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // Regression for Bugbot Medium (comment 3600499105): a new SDO initiate must abort the
     // previously open server session ON THE WIRE, not just clear it locally. Without this the
     // remote client for the superseded transfer waits until its own SDO timeout instead of
-    // hearing about the supersede immediately (CiA 301 §7.2.4.3.4).
+    // hearing about the supersede immediately (CiA 301 §7.2.4.3.2 / §7.2.4.3.5).
     [Fact]
     public async Task Sdo_ServerSupersede_EmitsWireAbort_ForPriorTransfer()
     {
@@ -433,7 +433,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         // Push a raw segmented-download initiate for 0x2100:00 onto the wire from busA so the
         // slave installs a server-side segmented session against that (index, subindex) — the
-        // "previously open transfer" from CiA 301 §7.2.4.3.4.
+        // transfer that the next initiate supersedes (CiA 301 §7.2.4.3.2 / §7.2.4.3.5).
         var priorInit = new byte[8]
         {
             0x21,                   // ccs=1 (init download, segmented)

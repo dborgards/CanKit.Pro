@@ -1333,7 +1333,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
     }
 
-    // #357 C-13: the toggle bit alternates per segment (CiA 301 §7.2.4.3.5, §7.2.4.3.7), and a
+    // #357 C-13: the toggle bit alternates per segment (CiA 301 §7.2.4.3.4, §7.2.4.3.7), and a
     // segment or segment ack carrying the wrong one is answered with 0503 0000h. The server's
     // download direction had a test (Sdo_Segmented_Download_Wrong_Toggle_Aborts); the client's
     // two checks and the server's upload direction had none, and each survived `if (false)`.
