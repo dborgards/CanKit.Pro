@@ -58,6 +58,12 @@ namespace CanKit.Pro.RawCan
         CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false);
         CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false);
     }
+    public interface ILossAwareSubscription : CanKit.Pro.RawCan.ISubscription, System.IDisposable
+    {
+        long DroppedFrameCount { get; }
+        System.Collections.Generic.IAsyncEnumerable<CanKit.Pro.RawCan.SubscriptionFrame> FramesWithSequence { get; }
+        bool TryReadWithSequence(out CanKit.Pro.RawCan.SubscriptionFrame frame);
+    }
     public interface ISubscription : System.IDisposable
     {
         System.Collections.Generic.IAsyncEnumerable<CanKit.Pro.RawCan.CanFrameEvent> Frames { get; }
@@ -72,6 +78,12 @@ namespace CanKit.Pro.RawCan
         public const CanKit.Core.Exceptions.CanKitErrorCode ProtocolNegativeResponse = 6004;
         public const CanKit.Core.Exceptions.CanKitErrorCode ProtocolPeerAbort = 6003;
         public const CanKit.Core.Exceptions.CanKitErrorCode ProtocolTimeout = 6002;
+    }
+    public readonly struct SubscriptionFrame
+    {
+        public SubscriptionFrame(CanKit.Pro.RawCan.CanFrameEvent frameEvent, ulong sequenceNumber) { }
+        public CanKit.Pro.RawCan.CanFrameEvent FrameEvent { get; }
+        public ulong SequenceNumber { get; }
     }
     public enum TxConfirmFailureReason
     {
