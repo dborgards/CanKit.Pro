@@ -1313,7 +1313,8 @@ remain visible in `Findings`.
 
 `DeviceConfigurationValid` is only the live `13FEh` flag. Each `SignatureComparison` compares
 the live `13FFh:n` with an independently recomputed signature, using live fields and the explicit
-SRVT rule only. Deleted records' stale signatures are not assessed. `ExpectedComparison` is
+SRVT rule only. Deleted records' stale signatures are not assessed. Their inactive timing/COB-ID values do not
+produce active communication errors; raw values and unavailable reads remain visible. `ExpectedComparison` is
 separate and only requested when a configuration was supplied. A complete acquisition without
 observed changes is required for `Match`; a known difference can still report `Mismatch` in a
 partial image. A true flag cannot replace either

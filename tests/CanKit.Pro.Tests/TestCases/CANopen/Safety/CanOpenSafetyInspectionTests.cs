@@ -617,4 +617,28 @@ public class CanOpenSafetyInspectionTests : IClassFixture<VirtualAdapterFixture>
         snapshot.Findings.Should().Contain(f => f.Kind == PeerSafetyFindingKind.ExpectedUnavailable);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unused_Records_With_Zero_CobIds_Are_Not_Reported_As_Active_Communication_Errors(bool missingCycle)
+    {
+        using var r = new Rig(); await r.Start();
+        r.Values[(0x13FF, 0)] = new byte[] { 2 };
+        foreach (var entry in Image().Where(e => e.Key.Item1 is 0x1301 or 0x1381))
+            r.Values[((ushort)(entry.Key.Item1 + 1), entry.Key.Item2)] = entry.Value;
+        r.Values[(0x1302, 1)] = new byte[] { 0 };
+        r.Values[(0x1302, 5)] = r.Values[(0x1302, 6)] = ObjectDictionary.EncodeU32(0);
+        r.Values[(0x1382, 0)] = new byte[] { 0 };
+        r.Values[(0x13FF, 2)] = new byte[] { 0, 0 };
+        if (missingCycle) r.Aborts[(0x1302, 2)] = 0x06090011;
+        var snapshot = await r.Read(Expected());
+        snapshot.Findings.Should().NotContain(f => f.Kind == PeerSafetyFindingKind.InvalidValue && f.Index == 0x1302);
+        snapshot.IsComplete.Should().Be(!missingCycle);
+        snapshot.Srdos[0].EligibleForMonitoring.Should().Be(!missingCycle);
+        snapshot.Srdos[1].SignatureComparison.Should().Be(SafetyComparison.NotRequested);
+        snapshot.Srdos[1].EligibleForMonitoring.Should().BeFalse();
+        if (missingCycle) snapshot.Srdos[1].Parameter.Should().BeNull();
+        else snapshot.Srdos[1].Parameter!.Value.Direction.Should().Be(SrdoDirection.None);
+    }
+
 }

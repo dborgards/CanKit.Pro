@@ -35,15 +35,12 @@ internal static class PeerSafetyDiagnostics
         bool Evidence(PeerSafetyEntry e) => e.Origin is SafetyValueOrigin.Live or SafetyValueOrigin.CiA319Default;
         bool Required(PeerSafetyEntry e) => e.Index >= SrdoRecords.CommunicationBase;
         var consistency = PeerSafetySnapshotConsistency.Unconfirmed;
-        foreach (var e in entries)
+        foreach (var e in entries.Where(e => again.TryGetValue((e.Index, e.Subindex), out var later) &&
+                     Evidence(e) && Evidence(later) &&
+                     (e.Origin != later.Origin || !e.RawValue.SequenceEqual(later.RawValue))))
         {
-            if (again.TryGetValue((e.Index, e.Subindex), out var later) &&
-                Evidence(e) && Evidence(later) &&
-                (e.Origin != later.Origin || !e.RawValue.SequenceEqual(later.RawValue)))
-            {
-                consistency = PeerSafetySnapshotConsistency.ChangeObserved;
-                Find(e.Index, e.Subindex, PeerSafetyFindingKind.ConfigurationChanged, "The repeated live/SRVT-rule evidence differs; start a new acquisition before using this configuration.");
-            }
+            consistency = PeerSafetySnapshotConsistency.ChangeObserved;
+            Find(e.Index, e.Subindex, PeerSafetyFindingKind.ConfigurationChanged, "The repeated live/SRVT-rule evidence differs; start a new acquisition before using this configuration.");
         }
         // A missing optional GFC or identity does not make an SRDO mapping incomplete. It still
         // has an entry-level finding and cannot satisfy an expectation requiring that value.
@@ -88,9 +85,11 @@ internal static class PeerSafetyDiagnostics
             if (direction == 0) comparison = SafetyComparison.NotRequested;
             if (comparison == SafetyComparison.Mismatch)
                 Find(SrdoRecords.Checksum, (byte)n, PeerSafetyFindingKind.SignatureMismatch, "Stored signature differs from the independently recomputed signature (implementation rules; #289 remains open).");
+            // Like the existing verification path, a deleted record is identified by direction
+            // alone; its stale timing/COB-ID values are not active communication parameters.
             bool communicationValid = highest == 6 && direction is 0 or 1 or 2 &&
-                transmission == SrdoRecords.TransmissionType && cycle is > 0 && srvt is > 0 &&
-                cob1.HasValue && cob2.HasValue && SrdoFrames.IsCobIdPair(cob1.Value, cob2.Value);
+                (direction == 0 || transmission == SrdoRecords.TransmissionType && cycle is > 0 && srvt is > 0 &&
+                    cob1.HasValue && cob2.HasValue && SrdoFrames.IsCobIdPair(cob1.Value, cob2.Value));
             if (!communicationValid)
                 Find(comm, 0, PeerSafetyFindingKind.InvalidValue, "Communication record is incomplete or outside this implementation's direction, timing, transmission-type or COB-ID rules.");
             var mapping = new SrdoMapping();
@@ -123,7 +122,7 @@ internal static class PeerSafetyDiagnostics
                 }
             if (!mappingValid && direction != 0)
                 Find(map, 0, PeerSafetyFindingKind.InvalidMapping, "Mapping is incomplete, has invalid plain/inverted slots or exceeds this implementation's byte-aligned 8-byte mapping limits.");
-            SrdoCommunicationParameter? parameter = communicationValid
+            SrdoCommunicationParameter? parameter = communicationValid && rawCommunication
                 ? new SrdoCommunicationParameter((SrdoDirection)direction!.Value, TimeSpan.FromMilliseconds(cycle!.Value),
                     TimeSpan.FromMilliseconds(srvt!.Value), cob1!.Value, cob2!.Value)
                 : null;
