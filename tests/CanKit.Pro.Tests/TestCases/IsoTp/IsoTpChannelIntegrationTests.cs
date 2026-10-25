@@ -1337,6 +1337,47 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #449: the channel's own actor, disposed while a callback still holds its loop, gives up on
+    // the join after its shutdown bound and reports that as a TimeoutException through its own
+    // BackgroundExceptionOccurred. The channel forwards it only while its handler is still
+    // attached, so the handler comes off after that Dispose, not before (as #437 for the J1939-TP
+    // channel). The callback is held until the finally, so the bound is always exceeded: nothing
+    // is asserted against the clock.
+    [Fact]
+    public async Task The_Shutdown_Timeout_Of_The_Channels_Own_Actor_Reaches_Its_Subscribers()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var release = new ManualResetEventSlim(); // declared first, so it outlives the channel
+        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, shutdownTimeout: TimeSpan.FromMilliseconds(50));
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor, ownsActor: true); // disposes the actor it owns
+        // Reported on the thread pool (#356, T-2), so possibly after Dispose has returned: awaited
+        // on a signal. A report the channel never forwards leaves the signal unset and the wait fails.
+        var timedOut = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => { if (ex is TimeoutException) timedOut.TrySetResult(ex); };
+
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            actor.Post(() =>
+            {
+                held.TrySetResult(true);
+                release.Wait(TimeSpan.FromSeconds(30));
+            });
+            await held.Task.WaitAsync(ShortTimeout);
+            channel.Dispose(); // the actor's join gives up on the held callback and reports it
+
+            (await timedOut.Task.WaitAsync(ShortTimeout)).Should().BeOfType<TimeoutException>(
+                "the channel owns that actor, and its shutdown timeout is a background failure of the channel's");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
     // Review on #275: the inbox's writer stays open now, so a producer callback that passed the
     // disposed guard before the disposal and writes after it must not put anything in it. The
     // callback is simulated by calling the producers directly after the disposal.
