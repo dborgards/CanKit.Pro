@@ -1018,16 +1018,19 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var secondBus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
         // Not `using`: under a regression the first send never leaves its driver call, and a Dispose
         // of the first service at the end of the scope would wait for it instead of reporting red.
+        // The finally below disposes it only once that send has completed.
         var first = new CanBusService(firstBus);
-        var second = new CanBusService(secondBus);
+        using var second = new CanBusService(secondBus);
         var driverLock = new object();
         var queuedEnteredDriver = 0;
+        var queuedPassedDriverLock = 0;
         Task<TxConfirmation>? queued = null;
         Thread? sender = null;
         secondBus.OnTransmitting = _ =>
         {
             Volatile.Write(ref queuedEnteredDriver, 1);
-            lock (driverLock) { }
+            lock (driverLock)
+                Interlocked.Increment(ref queuedPassedDriverLock);
         };
         firstBus.OnTransmitting = _ =>
         {
@@ -1046,18 +1049,25 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             }
         };
 
-        var result = await Task.Run(() => first.SendConfirmedAsync(CanFrame.Classic(0x67C, new byte[] { 1 }), TimeSpan.FromMinutes(5)))
-            .WaitAsync(ShortTimeout);
+        var firstSend = Task.Run(() => first.SendConfirmedAsync(CanFrame.Classic(0x67C, new byte[] { 1 }), TimeSpan.FromMinutes(5)));
+        try
+        {
+            var result = await firstSend.WaitAsync(ShortTimeout);
 
-        result.Confirmed.Should().BeTrue("the first service's send is unaffected by disposing the second");
-        Volatile.Read(ref queuedEnteredDriver).Should().Be(1, "the second service's send was inside its driver call when Dispose ran");
-        sender!.Join(ShortTimeout).Should().BeTrue("the queued send gets the driver's lock once the first call returns");
-        queued.Should().NotBeNull();
-        (await queued!.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue(
-            "it passed the disposed check before Dispose, and a Dispose from inside a driver call waits for no hand-off");
-        await Assert.ThrowsAsync<ObjectDisposedException>(
-            () => second.SendConfirmedAsync(CanFrame.Classic(0x67D, new byte[] { 3 })));
-        first.Dispose();
+            result.Confirmed.Should().BeTrue("the first service's send is unaffected by disposing the second");
+            Volatile.Read(ref queuedEnteredDriver).Should().Be(1, "the second service's send was inside its driver call when Dispose ran");
+            sender!.Join(ShortTimeout).Should().BeTrue("the queued send gets the driver's lock once the first call returns");
+            Volatile.Read(ref queuedPassedDriverLock).Should().Be(1);
+            queued.Should().NotBeNull();
+            (await queued!.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue(
+                "it passed the disposed check before Dispose, and a Dispose from inside a driver call waits for no hand-off");
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => second.SendConfirmedAsync(CanFrame.Classic(0x67D, new byte[] { 3 })));
+        }
+        finally
+        {
+            if (firstSend.IsCompleted) first.Dispose();
+        }
     }
 
     // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
