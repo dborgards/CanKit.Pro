@@ -227,8 +227,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
         catch
         {
-            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            // Unsubscribe only after an owned actor's Dispose, as Dispose does (#414, #437): that
+            // is where the actor reports a callback that outlived its shutdown bound.
             if (_ownsActor) _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             throw;
         }
         _transport.BackgroundExceptionOccurred += OnTransportBackgroundException;
@@ -254,8 +256,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         catch
         {
             _transport.Dispose();
-            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            // Unsubscribe only after an owned actor's Dispose, as Dispose does (#414, #437): that
+            // is where the actor reports a callback that outlived its shutdown bound.
             if (_ownsActor) _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             throw;
         }
 
