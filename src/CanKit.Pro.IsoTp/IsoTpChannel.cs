@@ -262,8 +262,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         catch
         {
-            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            // Unsubscribe only after an owned actor's Dispose, as the J1939 constructors do
+            // (#442): that is where the actor reports a callback that outlived its shutdown bound.
             if (_ownsActor) _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
             throw;
         }
 
