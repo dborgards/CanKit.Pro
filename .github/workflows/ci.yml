@@ -53,7 +53,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.403 # Exact version bypasses the broken aka.ms redirect (#456).
 
       # Deliberately allowed to fail. GitVersion cannot version every git shape — a branch with no
       # merge base against a release branch, for one — and "we could not name this build" is not a
@@ -105,7 +105,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.403 # Exact version bypasses the broken aka.ms redirect (#456).
 
       - name: Restore
         run: dotnet restore CanKit.Pro.sln
@@ -220,7 +220,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.403 # Exact version bypasses the broken aka.ms redirect (#456).
 
       # Proves the packing the release workflow's `verify` job will do still works, on every pull
       # request rather than only when someone cuts a release.
@@ -347,7 +347,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.403 # Exact version bypasses the broken aka.ms redirect (#456).
 
       # `dotnet format` was never run in CI, so import ordering and whitespace drifted on `main`
       # until three separate agents tripped over the same three files. The formatter's own rules
