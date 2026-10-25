@@ -763,6 +763,57 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         next.IsCompleted.Should().BeFalse("the queued send is on the wire now, waiting for its CTS");
     }
 
+    // FR-TP-031/034, #356: a peer answer proves the RTS reached the wire even if its
+    // confirmation is still pending. Cancellation must keep the destination occupied until
+    // its Abort has crossed the service hand-off, before the successor's RTS is started.
+    [Fact]
+    public async Task A_Cm_Send_Cancelled_After_The_Peer_Answered_Hands_Off_Its_Abort_Before_The_Next_Rts()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new HeldConfirmationBusService(new CanBusService(bus));
+        var options = new J1939TpOptions();
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10, options,
+            ownsService: false, actor);
+        const byte peerSa = 0x20;
+        const uint cancelledPgn = 0xFEC6u, nextPgn = 0xFEC7u;
+        using var cts = new CancellationTokenSource();
+        var send = sender.SendCmAsync(cancelledPgn, peerSa, RandomPayload(14, seed: 361), cts.Token);
+        await service.WaitForHandedAsync(1, ShortTimeout);
+
+        var hold = J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: cancelledPgn);
+        hold[1] = 0; // CTS(0): answer the RTS without asking for any DT yet.
+        bus.RaiseObserved(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, 0x10), hold, isExtendedFrame: true), isEcho: false);
+        await clock.WaitUntilTimerArmedAsync(actor, options.T4, ShortTimeout);
+        var next = sender.SendCmAsync(nextPgn, peerSa, RandomPayload(14, seed: 362));
+        (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(1);
+
+        service.HoldHandOffOf(data => data[0] == J1939TpFrames.ControlAbort);
+        try
+        {
+            cts.Cancel();
+            await send.Invoking(t => t.WithTimeout(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+            var handed = await service.WaitForHandedAsync(2, ShortTimeout);
+            handed[1][0].Should().Be(J1939TpFrames.ControlAbort);
+            J1939TpFrames.ReadDataPgn(handed[1]).Should().Be(cancelledPgn);
+            (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(1,
+                "the next RTS must wait while the cancelled send's Abort is inside the service hand-off");
+
+            service.ReleaseHandOff();
+            handed = await service.WaitForHandedAsync(3, ShortTimeout);
+            handed[2][0].Should().Be(J1939TpFrames.ControlRts);
+            J1939TpFrames.ReadDataPgn(handed[2]).Should().Be(nextPgn);
+            (await actor.PostAsync(() => sender.QueuedSendCount)).Should().Be(0);
+            next.IsCompleted.Should().BeFalse("its own CTS has not arrived");
+        }
+        finally
+        {
+            service.ReleaseHandOff();
+        }
+    }
+
     // The same wait when the RTS is not confirmed: rejected by the driver, or failing inside the
     // service. Either way it is no longer on its way to the wire, so the abort goes out then --
     // a peer that did see the RTS is told -- and the destination is given back.
@@ -5229,7 +5280,7 @@ internal sealed class HeldConfirmationBusService : ICanBusService
         lock (_gate) _handed.Add((data, confirmation));
         _signal.Release();
         if (Volatile.Read(ref _holdHandOff)?.Invoke(data) == true)
-            _handOffGate.Wait(TimeSpan.FromSeconds(30));
+            _handOffGate.Wait(); // released by the test or Dispose, never by a wall-clock deadline
         return confirmation.Task;
     }
 

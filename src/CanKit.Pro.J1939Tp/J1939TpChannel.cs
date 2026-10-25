@@ -83,11 +83,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // leaves in O(1): a list would shift every remaining entry per send drained (#204).
     private readonly Dictionary<TxCompletion, LinkedListNode<PendingTx>> _queuedNodes = new();
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
-    // CM sends cancelled while their RTS was still unconfirmed, by destination. Their Connection
-    // Abort waits for that confirmation, so it cannot overtake the RTS it ends, and the
-    // destination stays taken until the abort has been handed to the service, so the RTS of a
-    // send queued behind it cannot be handed over first (#356, T-7; Codex on #390). Actor-loop
-    // state.
+    // Cancelled CM sends, by destination. Their Connection Abort waits for the RTS to settle
+    // if necessary, and the destination stays taken until that abort has been handed to the
+    // service. This also orders a successor's RTS behind the abort when the cancelled RTS
+    // was already confirmed or answered by the peer (#356, T-7). Actor-loop state.
     private readonly Dictionary<byte, TxSession> _abortsAwaitingRts = new();
 
     // Sends admitted per destination and not yet completed: posted to the actor and not yet run,
@@ -369,27 +368,18 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             session.Deadline?.Dispose();
             session.Deadline = null;
-            if (session.IsCm && !session.RtsSettled)
+            if (session.IsCm)
             {
-                // The RTS has not been confirmed yet, so it may not have reached the driver: every
-                // frame goes out from its own pool work item, and an abort queued now could
-                // overtake it -- a peer that sees Abort, then RTS, holds a session nobody serves
-                // for T2 (#356, T-7). The abort goes out from the RTS's confirmation instead
-                // (OnRtsSettled). The send is cancelled now; the destination stays taken until
-                // the abort has been handed to the service, so a queued send cannot hand its RTS
-                // over ahead of it.
+                // Every control frame goes out from its own pool work item: the Abort must wait
+                // for an unsettled RTS, and a successor's RTS must wait for this Abort's hand-off.
+                // Keep the destination occupied through that hand-off even when the original
+                // RTS was already confirmed or answered. The caller's cancellation completes now.
                 tcs.TrySetCanceled(token);
                 _txSessions.Remove(key);
                 session.AbortAwaitingRts = true;
                 _abortsAwaitingRts[key.DestinationAddress] = session;
+                if (session.RtsSettled) OnRtsSettled(session);
                 return;
-            }
-            if (session.IsCm)
-            {
-                // Peer already has (or is about to have) an open CM session with us — tell it to
-                // tear down. Reason 2 ("resources needed for another task") is the closest
-                // standard code for an application-initiated local cancel.
-                SendTpCm(CancelAbort(key), destinationAddress: key.DestinationAddress);
             }
             // Complete with the caller's token (do not go through TxSession.Cancel, which would
             // TrySetCanceled() without the token and win the race against this call).
