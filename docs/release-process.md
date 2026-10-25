@@ -312,10 +312,12 @@ nuget.org, under the account's *Trusted Publishing* settings, and names this rep
 workflow.
 
 **`main` — `RELEASE_TOKEN`.** A fine-grained PAT (Contents: read and write, scoped to this
-repository) from an account holding the repo-owner role. The default `GITHUB_TOKEN` cannot push
-to `main`: the ruleset requires a pull request and only bypasses for that role, which the Actions
-bot does not hold. `@semantic-release/git` needs the push for the changelog commit, and
-`@semantic-release/github` uses the same token to create the Release.
+repository) from an account covered by the active `main` ruleset's bypass. The committed
+`.github/rulesets/main.json` export configures `RepositoryRole` id `2` (Maintain), not an
+owner-specific bypass. Check the token identity against the active ruleset before a release;
+the default `GITHUB_TOKEN` is not covered and cannot push through the pull-request requirement.
+`@semantic-release/git` needs the push for the changelog commit, and `@semantic-release/github`
+uses the same token to create the Release.
 
 The PAT is passed **only** in the `env:` of the release step. The checkout runs with
 `persist-credentials: false`, so it never reaches `.git/config` while `npm ci` executes
@@ -330,8 +332,9 @@ first.
 
 - **`NUGET_USER`** and **`RELEASE_TOKEN`** as repository secrets.
 - **Trusted Publishing** configured on nuget.org for this repository and `release.yml`.
-- **The ruleset on `main`** must let the `RELEASE_TOKEN` identity push. That is the repo-owner
-  bypass, not a `github-actions[bot]` bypass — the bot is not what pushes.
+- **The ruleset on `main`** must let the `RELEASE_TOKEN` identity push. The exported ruleset
+  uses the Maintain-role bypass (`RepositoryRole` id `2`); this is not an owner-specific or
+  `github-actions[bot]` bypass. The PAT identity is what pushes.
 
 Historical note: the first release landed on `1.0.0` because semantic-release starts there when
 it finds no tag, and the `v0.1.0` seed tag this document used to recommend was never pushed. See

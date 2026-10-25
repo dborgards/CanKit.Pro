@@ -51,7 +51,7 @@
 - name: "upstream: cankit"
   color: "e99695"
   description: Belongs in pkuyo/CanKit, not here
-- name: "breaking"
+- name: "BREAKING"
   color: "b60205"
   description: Requires a major version bump
 - name: "good first issue"

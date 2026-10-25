@@ -231,7 +231,7 @@ jobs:
           # semantic-release does not need one here either: it builds its own authenticated push
           # URL from the token it is given in the release step's `env`. That is where
           # RELEASE_TOKEN -- a fine-grained PAT scoped to this repo (Contents: R/W) from an
-          # account holding the repo-owner role, which the ruleset on `main` bypasses for --
+          # account covered by the Maintain-role bypass (RepositoryRole 2) on `main` --
           # enters, and nowhere else.
           persist-credentials: false
 
