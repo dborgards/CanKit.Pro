@@ -233,6 +233,21 @@ namespace CanKit.Pro.RawCan
         /// while an asynchronous <see cref="ICanBus.TransmitAsync(CanFrame, System.Threading.CancellationToken)"/>
         /// is still pending -- and it ends in <see cref="OperationCanceledException"/> (#352).
         /// </param>
+        /// <exception cref="ObjectDisposedException">
+        /// The service is disposed, or is disposed while the call is still on its way to the
+        /// driver. On either path the disposed check and the hand-off to the driver are one step
+        /// with respect to <see cref="IDisposable.Dispose"/>: once <c>Dispose</c> has returned, no
+        /// send's frame is handed to the driver any more, and a send that loses that race fails
+        /// with this exception -- on the approximated path since #430, as the echo path always
+        /// did. A send that won it has handed its frame over -- <c>Dispose</c> does not return while
+        /// such a send is still inside the driver call -- and if that transmit is still pending,
+        /// <c>Dispose</c> cancels the call as described under <paramref name="cancellationToken"/>.
+        /// Sends do not wait for each other's driver call on the approximated path; only
+        /// <c>Dispose</c> does. The exception is a <c>Dispose</c> called from inside one of the
+        /// service's own approximated driver calls, on that call's thread (a driver disposing on
+        /// a fault): it waits for no send, since sends queued behind that call may depend on it,
+        /// so one already past the check may still reach the driver after it returns.
+        /// </exception>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }
 }

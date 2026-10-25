@@ -56,8 +56,9 @@ namespace CanKit.Pro.RawCan
         private readonly object _pendingGate = new();
         private readonly Dictionary<PendingKey, LinkedList<PendingSend>> _pending = new();
 
-        // Guarded by _pendingGate; set once by Dispose so a racing SendConfirmedAsync call can never
+        // Written under _pendingGate; set once by Dispose so a racing SendConfirmedAsync call can never
         // register a pending entry after Dispose's final sweep has already canceled everything.
+        // The approximated path reads it without the lock, paired with _handoffsInFlight (#430).
         private bool _pendingDisposed;
 
         // Approximated sends whose driver transmit is still pending, guarded by _pendingGate like
@@ -71,6 +72,27 @@ namespace CanKit.Pro.RawCan
         private int _pendingCount;
 
         private int _disposed;
+
+        // Approximated sends between their disposed check and the return of their driver call
+        // (#430). Dispose waits for this to drain, so once it has returned no such send hands a
+        // frame to the driver; nothing else waits for it, so concurrent sends never serialize
+        // behind one another's driver call (#439's stalled delivery is exactly such a call).
+        // Incremented before the check and read by Dispose after it sets _pendingDisposed, both
+        // with a full fence, so a send either sees the flag or is counted by Dispose.
+        private int _handoffsInFlight;
+
+        // What Dispose waits on while _handoffsInFlight drains; pulsed by the last hand-off out.
+        private readonly object _handoffDrain = new();
+
+        // The services whose approximated hand-off this thread is inside of, innermost last. A
+        // Dispose reached from inside a driver call on the same thread -- a driver disposing the
+        // service on a fault, say -- must not wait for that call or for the hand-offs that may
+        // be queued behind it; see WaitForHandoffs. One list per thread, reused, so a send
+        // allocates nothing for it.
+        [ThreadStatic]
+        private static List<CanBusService>? t_handoffs;
+
+        private static List<CanBusService> HandoffsOnThisThread() => t_handoffs ??= new List<CanBusService>();
 
         // Host arrival and transmit stamps. Production reads Stopwatch; a test passes the same
         // counter the protocol window is measured on, so a frame and the deadline that admits it
@@ -331,6 +353,34 @@ namespace CanKit.Pro.RawCan
             }
             foreach (var p in pending)
                 p.Tcs.TrySetCanceled();
+
+            WaitForHandoffs();
+        }
+
+        // Blocks until every approximated hand-off that passed its disposed check before
+        // _pendingDisposed was set has returned from the driver (#430). Outside _pendingGate on
+        // purpose: a driver call in progress may need that lock (an echo it raises reaches
+        // TryMatchEcho), and nothing here needs it.
+        //
+        // Not at all when this thread is itself inside one of this service's driver calls -- a
+        // driver disposing the service on a fault, say. That call cannot return before this one
+        // does, and neither can any other hand-off that waits for it: a driver that serializes
+        // its transmits behind an internal lock holds the others there (Codex on #438). Which
+        // of them depend on the current call is not knowable from here, so a Dispose reached
+        // that way waits for none; a send already past its check may then still reach the
+        // driver after it returns, which is the price of not deadlocking a driver that was
+        // already mid-call when it asked for disposal.
+        private void WaitForHandoffs()
+        {
+            if (t_handoffs?.Contains(this) == true) return;
+
+            lock (_handoffDrain)
+            {
+                // The CompareExchange is the full fence that pairs with the send's increment:
+                // _pendingDisposed is already written, so a send not counted here sees it.
+                while (Interlocked.CompareExchange(ref _handoffsInFlight, 0, 0) > 0)
+                    Monitor.Wait(_handoffDrain);
+            }
         }
 
         // Registers an approximated send whose transmit is pending, or -- when Dispose has already
@@ -414,7 +464,6 @@ namespace CanKit.Pro.RawCan
             // runtime declines to inline it, the continuation is queued and the reading is taken one
             // scheduling hop later -- still no later than resuming this method would take it.
             var stamp = new HandoffStamp(_hostTimestamp);
-            var handoffStart = stamp.Now();
             //
             // The driver is handed a private copy, never the caller's frame (Codex and Bugbot on
             // #216): the contract lets the caller dispose its TX lease as soon as this call
@@ -446,12 +495,56 @@ namespace CanKit.Pro.RawCan
             // would bring back the hang this bound exists to remove (#202); the timed-out result
             // is what tells the caller the frame may or may not have gone out.
             using var transmitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            // The caller's token, consulted immediately before the driver call (#294): a send
-            // cancelled up to here is abandoned and nothing reaches the driver. The v0.5.6
-            // adapters ignore the token inside TransmitAsync, so this is the last point at
-            // which a cancellation can still stop the frame.
-            cancellationToken.ThrowIfCancellationRequested();
-            var transmit = _bus.TransmitAsync(detached, transmitCts.Token)
+            long handoffStart;
+            Task<int> handedOver;
+            // The disposed check and the hand-off as one step with respect to Dispose (#430).
+            // SendConfirmedAsync's eager check alone leaves a window: a send that passed it and
+            // reached the driver only after Dispose had finished still put its frame on the wire.
+            // The send is counted in _handoffsInFlight before it checks _pendingDisposed, and
+            // Dispose waits for that count to drain after setting the flag, so a send either hands
+            // its frame over before Dispose returns or is refused here with
+            // ObjectDisposedException -- what the echo path's gate throws. No lock: concurrent
+            // sends do not wait for each other's driver call, and a driver call that waits for
+            // another send through this service -- a delivery held on the sending thread until
+            // the next request goes out (#439) -- does not deadlock it. Only Dispose waits, and
+            // not when it is called from inside one of this service's driver calls.
+            Interlocked.Increment(ref _handoffsInFlight);
+            try
+            {
+                if (Volatile.Read(ref _pendingDisposed))
+                    throw new ObjectDisposedException(nameof(CanBusService));
+
+                // No wait of ours sits between this reading and the driver call (Codex on #147).
+                handoffStart = stamp.Now();
+                // The caller's token, consulted immediately before the driver call (#294): a send
+                // cancelled up to here is abandoned and nothing reaches the driver. The v0.5.6
+                // adapters ignore the token inside TransmitAsync, so this is the last point at
+                // which a cancellation can still stop the frame.
+                cancellationToken.ThrowIfCancellationRequested();
+                var handoffs = HandoffsOnThisThread();
+                handoffs.Add(this);
+                try
+                {
+                    handedOver = _bus.TransmitAsync(detached, transmitCts.Token);
+                }
+                finally
+                {
+                    handoffs.RemoveAt(handoffs.Count - 1);
+                }
+            }
+            finally
+            {
+                // The decrement is a full fence: a Dispose whose flag this read misses reads the
+                // drained count itself and needs no pulse.
+                Interlocked.Decrement(ref _handoffsInFlight);
+                if (Volatile.Read(ref _pendingDisposed))
+                {
+                    lock (_handoffDrain)
+                        Monitor.PulseAll(_handoffDrain);
+                }
+            }
+
+            var transmit = handedOver
                 .ContinueWith(
                     static (completed, state) =>
                     {
