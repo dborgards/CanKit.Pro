@@ -107,7 +107,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     // SDO server: at most one outstanding segmented transfer against our own OD at a time (a
     // second Initiate from the same peer supersedes any previous open transfer per CiA 301
-    // §7.2.4.3.4).
+    // §7.2.4.3.2 / §7.2.4.3.5).
     private SdoServerSession? _sdoServer;
 
     // SDO client: at most one in-flight client-side transfer per remote server (keyed by the
@@ -768,7 +768,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         //   * Auto and payload ≥ SdoBlockThresholdBytes → block.
         //   * Auto and payload < threshold → classic client, which picks expedited for 1..4
         //     bytes and segmented above that in BuildDownloadInit. That split is dictated by
-        //     CiA 301 §7.2.4.3.3/§7.2.4.3.5 and is deliberately not caller-selectable.
+        //     CiA 301 §7.2.4.3.3/§7.2.4.3.6 and is deliberately not caller-selectable.
         bool useBlock = mode == SdoTransferMode.Block
                         || (mode == SdoTransferMode.Auto && payload.Length >= _options.SdoBlockThresholdBytes);
         if (useBlock)
@@ -1896,7 +1896,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void HandleServerUploadInit(ushort index, byte subindex, OdEntry? entry)
     {
-        // Per CiA 301 §7.2.4.3.4 a fresh initiate implicitly supersedes any previously open
+        // Per CiA 301 §7.2.4.3.2 / §7.2.4.3.5 a fresh initiate implicitly supersedes any previously open
         // server-side transfer. Emit an abort on the wire for that stale (index, subindex) so
         // its remote client does not have to wait for its own SDO timeout to notice the
         // supersede. Done up-front so this holds even when we go on to reject the new initiate
@@ -2002,7 +2002,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void HandleServerDownloadInit(ushort index, byte subindex, OdEntry? entry, byte cs, byte[] data)
     {
-        // Per CiA 301 §7.2.4.3.4 a fresh initiate implicitly supersedes any previously open
+        // Per CiA 301 §7.2.4.3.2 / §7.2.4.3.5 a fresh initiate implicitly supersedes any previously open
         // server-side transfer. Emit an abort on the wire for that stale (index, subindex) so
         // its remote client does not have to wait for its own SDO timeout to notice the
         // supersede. Done up-front so this holds even when we go on to reject the new initiate
@@ -2241,7 +2241,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <summary>
     /// Aborts any currently-open SDO server transfer on the wire and clears the local session.
     /// Called before installing or omitting a new server session on any client-initiated
-    /// initiate (upload or download, expedited or segmented). Per CiA 301 §7.2.4.3.4 the new
+    /// initiate (upload or download, expedited or segmented). Per CiA 301 §7.2.4.3.2 / §7.2.4.3.5 the new
     /// initiate implicitly supersedes the previously open transfer, but staying silent leaves
     /// the remote client blocked on its own SDO timer for that superseded transfer. Emitting a
     /// General abort against the previously open (index, subindex) unblocks that peer
@@ -2450,8 +2450,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             var (idx, sub) = SdoFrames.ReadIndex(data);
             uint code = SdoFrames.ReadAbortCode(data);
-            // The abort may target a DIFFERENT transfer than ours: a compliant CiA 301 §7.2.4.3.4
-            // server emits an abort for a previously open transfer (potentially from another
+            // The abort may target a DIFFERENT transfer than ours: a server superseding a transfer
+            // (CiA 301 §7.2.4.3.2 / §7.2.4.3.5) may emit an abort for a previously open transfer (potentially from another
             // client, or an abandoned older initiate from us) when a new initiate supersedes it.
             // Only fail our own session when the abort references the (index, subindex) we are
             // actually asking about; otherwise it is bookkeeping for a transfer that is not ours
@@ -2473,7 +2473,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             // Every legitimate frame in this phase carries the object it answers for in bytes
             // 1..3 — the download initiate response (CiA 301 §7.2.4.3.3, Figure 21), the upload
-            // initiate response, expedited or segmented (§7.2.4.3.6, Figure 23). A frame naming
+            // initiate response, expedited or segmented (§7.2.4.3.6, Figure 24). A frame naming
             // another object is somebody else's response: a late answer to a request of ours
             // that already timed out, or the reply to a second client on the same server (the
             // default SDO channel 0x580 + id is seen by every client on the bus). Accepting it
