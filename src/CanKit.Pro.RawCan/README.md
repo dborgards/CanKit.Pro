@@ -50,6 +50,53 @@ runtime without recreating the subscription (FR-RAW-014); only frames observed a
 the new criterion. This layer is built purely on the public `ICanBus.FrameObserved` surface, so it
 works identically for every adapter.
 
+### Known capture gaps
+
+Built-in subscriptions also implement the optional `ILossAwareSubscription` (FR-RAW-016).
+`DroppedFrameCount` counts only frames evicted by that subscription's bounded buffer. A slow
+subscriber cannot increase another subscriber's count; filters, echo exclusion, reads,
+cancellation and disposal do not increase it. Zero local drops say nothing about losses in an
+adapter, driver or upstream pipe. Other `ISubscription` implementations remain compatible and
+may omit this interface: missing diagnostics mean unavailable information, not zero losses.
+
+`SubscriptionFrame` contains the original `CanFrameEvent` and a subscription-local
+`SequenceNumber`. The first accepted enqueue is 1; numbers continue across reconfiguration and
+wrap modulo 2^64. For one exclusive reader, a number other than the expected successor marks
+missing input before that frame, including loss before the first read. Numbers describe enqueue
+order under concurrent dispatch, not hardware timestamp order, and cannot be compared across
+subscriptions. Both projections consume the same buffer; competing readers can create sequence
+gaps without incrementing the overflow counter.
+
+```csharp
+using var capture = service.Subscribe(bufferCapacity: 64);
+if (capture is ILossAwareSubscription loss)
+{
+    ulong expected = 1;
+    await foreach (var item in loss.FramesWithSequence.WithCancellation(token))
+    {
+        if (item.SequenceNumber != expected)
+        {
+            // Invalidate pending pair/timing evidence here; qualify capture separately.
+            Console.WriteLine($"Capture gap before #{item.SequenceNumber}; known local drops: {loss.DroppedFrameCount}");
+        }
+        expected = unchecked(item.SequenceNumber + 1);
+        Console.WriteLine($"#{item.SequenceNumber}: CAN-ID {item.FrameEvent.Frame.ID:X}");
+    }
+}
+```
+
+`TryReadWithSequence` and the inherited `WaitToReadAsync` provide the same metadata to a
+pull-style consumer. The lifetime count is a separate instantaneous sample: an enqueue can
+finish updating it after a concurrent reader has obtained a retained frame. Use sequence
+numbers to order a gap. The count saturates at `long.MaxValue`, after which it is a lower bound;
+start a new subscription when exact counting is required.
+
+Across a known gap, discard any pending pair and timing evidence. A fresh contiguous run can
+start a new observation period under the consuming protocol's recovery rules; the lifetime
+counter does not reset. A locally observed timeout is not proof of remote failure when capture
+is incomplete. Continuous SRDO supervision and its recovery policy are separate from this
+RawCan capture contract (#401).
+
 ### Echoes
 
 A bus opened with `WorkMode == ChannelWorkMode.Echo` reports the host's own transmissions back

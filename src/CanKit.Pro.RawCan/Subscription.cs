@@ -13,7 +13,7 @@ namespace CanKit.Pro.RawCan
     /// its independent RX buffer (FR-RAW-011) and applies this subscription's filter on the
     /// service's dispatch hot path.
     /// </summary>
-    internal sealed class Subscription : ISubscription
+    internal sealed class Subscription : ILossAwareSubscription
     {
         private sealed class FilterCriteria
         {
@@ -30,7 +30,10 @@ namespace CanKit.Pro.RawCan
         }
 
         private readonly CanBusService _service;
-        private readonly Channel<CanFrameEvent> _channel;
+        private readonly Channel<SubscriptionFrame> _channel;
+        private readonly object _writeGate = new();
+        private long _droppedFrameCount;
+        private ulong _sequenceNumber;
 
         // Fixed at Subscribe time and never reconfigurable: "do I want to see my own
         // transmissions?" is a property of what the subscriber *is*, not of which IDs it happens
@@ -64,10 +67,16 @@ namespace CanKit.Pro.RawCan
             CanIdFilter? idFilter,
             Func<CanFrameEvent, bool>? predicate,
             int capacity,
-            bool includeEcho)
+            bool includeEcho,
+            long initialDroppedFrameCount = 0,
+            ulong initialSequenceNumber = 0)
         {
             _service = service;
             _includeEcho = includeEcho;
+            // Internal seeds let tests exercise saturation and wrap without an impractical
+            // number of frames. Every service-created subscription starts both at zero.
+            _droppedFrameCount = initialDroppedFrameCount;
+            _sequenceNumber = initialSequenceNumber;
             _criteria = idFilter is { } filter
                 ? new FilterCriteria(filter, null)
                 : predicate is { } p
@@ -83,10 +92,22 @@ namespace CanKit.Pro.RawCan
             {
                 SingleReader = false,
                 SingleWriter = false,
+                AllowSynchronousContinuations = false,
                 FullMode = BoundedChannelFullMode.DropOldest,
             };
-            _channel = Channel.CreateBounded<CanFrameEvent>(options);
+            _channel = Channel.CreateBounded<SubscriptionFrame>(options, _ => RecordDrop());
         }
+
+        private void RecordDrop()
+        {
+            // Called only by TryWrite under _writeGate, so writers cannot race this saturation
+            // check. This callback records a fact; no consumer handler runs on dispatch.
+            if (Interlocked.Read(ref _droppedFrameCount) < long.MaxValue)
+                Interlocked.Increment(ref _droppedFrameCount);
+        }
+
+        /// <inheritdoc />
+        public long DroppedFrameCount => Interlocked.Read(ref _droppedFrameCount);
 
         // A plain assignment to a volatile field, not Interlocked.Exchange: the whole criteria
         // object is swapped in one reference write, no caller reads the previous value, and the
@@ -179,15 +200,39 @@ namespace CanKit.Pro.RawCan
 
             ownedPayload ??= view.Data.ToArray();
             var owned = new CanFrameView(view.FrameKind, view.ID, ownedPayload, view.Flags);
-            _channel.Writer.TryWrite(new CanFrameEvent(owned, isEcho, receiveTimestamp,
-                hostArrivalTimestamp));
+            var frameEvent = new CanFrameEvent(owned, isEcho, receiveTimestamp, hostArrivalTimestamp);
+            // Assign and publish in the same short writer section. Assigning with Interlocked
+            // before TryWrite would let concurrent writers enqueue 2 before 1, hiding which
+            // buffered frames an overflow removed. No predicate or consumer runs in this section;
+            // a full buffer evicts rather than waiting for a reader.
+            lock (_writeGate)
+            {
+                var sequence = unchecked(_sequenceNumber + 1);
+                if (_channel.Writer.TryWrite(new SubscriptionFrame(frameEvent, sequence)))
+                    _sequenceNumber = sequence;
+            }
         }
 
         /// <inheritdoc/>
         public IAsyncEnumerable<CanFrameEvent> Frames => ReadAsync();
 
         /// <inheritdoc/>
-        public bool TryRead(out CanFrameEvent frameEvent) => _channel.Reader.TryRead(out frameEvent);
+        public bool TryRead(out CanFrameEvent frameEvent)
+        {
+            if (_channel.Reader.TryRead(out var captured))
+            {
+                frameEvent = captured.FrameEvent;
+                return true;
+            }
+            frameEvent = default;
+            return false;
+        }
+
+        /// <inheritdoc />
+        public IAsyncEnumerable<SubscriptionFrame> FramesWithSequence => ReadWithSequenceAsync();
+
+        /// <inheritdoc />
+        public bool TryReadWithSequence(out SubscriptionFrame frame) => _channel.Reader.TryRead(out frame);
 
         /// <inheritdoc/>
         public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
@@ -199,8 +244,19 @@ namespace CanKit.Pro.RawCan
             var reader = _channel.Reader;
             while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                while (reader.TryRead(out var frameEvent))
-                    yield return frameEvent;
+                while (reader.TryRead(out var captured))
+                    yield return captured.FrameEvent;
+            }
+        }
+
+        private async IAsyncEnumerable<SubscriptionFrame> ReadWithSequenceAsync(
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            var reader = _channel.Reader;
+            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (reader.TryRead(out var captured))
+                    yield return captured;
             }
         }
 

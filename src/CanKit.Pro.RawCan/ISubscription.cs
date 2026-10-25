@@ -13,6 +13,9 @@ namespace CanKit.Pro.RawCan
     /// Each subscription owns its own bounded buffer, so a slow (or never-drained) consumer only
     /// drops its own oldest frames and can never delay delivery to other subscriptions or to the
     /// underlying bus's own <c>FrameObserved</c> event (FR-RAW-011).
+    /// Subscriptions created by <see cref="CanBusService"/> additionally implement the optional
+    /// <see cref="ILossAwareSubscription"/> for known buffer losses and ordered capture gaps.
+    /// Other implementations need not implement that extension.
     /// <para>
     /// Disposing the subscription deterministically deregisters it from the service (it stops
     /// receiving frames) and completes <see cref="Frames"/>, so any in-flight
