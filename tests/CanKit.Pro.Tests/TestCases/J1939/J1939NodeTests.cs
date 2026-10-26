@@ -16,6 +16,7 @@ using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939;
 using CanKit.Pro.J1939Tp;
 using CanKit.Pro.RawCan;
+using CanKit.Pro.Reliability;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -6028,6 +6029,82 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await actor.NextTimerDelayAsync()).Should().BeNull("the tick was stopped before cancellation");
         Action readToken = () => _ = cancellation.Token;
         readToken.Should().Throw<ObjectDisposedException>("cleanup releases the CTS despite the failing callback");
+    }
+
+    [Fact]
+    public async Task A_Failed_Periodic_Start_Cleans_Up_Before_Any_Tick_Was_Armed()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+        actor.Dispose();
+
+        Action start = () => node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1 }), TimeSpan.FromMilliseconds(100));
+        start.Should().Throw<ObjectDisposedException>("arming failed and cleanup must preserve that failure");
+    }
+
+    [Fact]
+    public async Task A_Periodic_Emission_Can_Release_Its_Cts_Before_Dispose_Cancels_It()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var inner = new CanBusService(bus);
+        var parking = new ParkingSendService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(parking, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        await WaitForAnnouncesAsync(() => parking.Parked, 1);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        var tickField = schedule.GetType().GetField("_tick", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var tick = (IDeadline)tickField.GetValue(schedule)!;
+        var send = (Task)schedule.GetType().GetField("_sendTask", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(schedule)!;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        tickField.SetValue(schedule, new PauseOnDisposeDeadline(tick, () =>
+        {
+            entered.TrySetResult(true);
+            release.Wait();
+        }));
+
+        var disposal = Task.Run(schedule.Dispose);
+        try
+        {
+            await entered.Task.WaitAsync(ShortTimeout);
+            parking.Release();
+            await send.WaitAsync(ShortTimeout); // its finally released the schedule's CTS
+        }
+        finally
+        {
+            parking.Release();
+            release.Set();
+            await disposal.WaitAsync(ShortTimeout);
+        }
+        node.PeriodicEmissionsCompleted.Should().Be(1);
+        (await actor.NextTimerDelayAsync()).Should().BeNull("the schedule was stopped despite the CTS race");
+    }
+
+    private sealed class PauseOnDisposeDeadline : IDeadline
+    {
+        private readonly IDeadline _inner;
+        private readonly Action _pause;
+        public PauseOnDisposeDeadline(IDeadline inner, Action pause) { _inner = inner; _pause = pause; }
+        public bool IsExpired => _inner.IsExpired;
+        public bool IsCompleted => _inner.IsCompleted;
+        public bool IsCancelled => _inner.IsCancelled;
+        public bool Rearm(TimeSpan timeout) => _inner.Rearm(timeout);
+        public bool Complete() => _inner.Complete();
+        public void Dispose() { _inner.Dispose(); _pause(); }
     }
 
     // The other order (Codex on #397): a Dispose that lands while StartPeriodicSend is between its
