@@ -1329,6 +1329,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         get { lock (_eventLock) return _submittedEventCount; }
     }
 
+    /// <summary>Test seam: completes after the dispatcher has stopped and discarded its queue.</summary>
+    internal Task EventPumpCompletionForTests => _eventPumpTask;
+
     /// <summary>Test seam: events waiting for the dispatcher, not including one whose handler
     /// is already running.</summary>
     internal int QueuedEventCount
