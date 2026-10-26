@@ -165,7 +165,7 @@ internal sealed class ScriptedLssSlave : IDisposable
         _subscription.Dispose();
         try
         {
-            _reader.Wait(LssTestTiming.SchedulingBudget);
+            _reader.Wait();
         }
         catch (AggregateException)
         {
