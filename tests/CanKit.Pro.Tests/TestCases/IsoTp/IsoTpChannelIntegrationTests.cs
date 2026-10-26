@@ -2631,6 +2631,26 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     public Task A_Send_Queued_On_The_Gate_That_Its_Caller_Cancels_Reports_The_Callers_Token_However_Late_The_Disposal_Runs()
         => CallerCancelsASendQueuedOnTheGateAsync(disposeAsLateAsPossible: true);
 
+    [Fact]
+    public async Task A_Reader_Cancellation_Callback_Failure_Is_Reported_Without_Skipping_Channel_Cleanup()
+    {
+        using var bus = OpenClassic(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), ownsService: false);
+        var cancellation = (CancellationTokenSource)typeof(IsoTpChannel)
+            .GetField("_readerCts", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(channel)!;
+        var failure = new InvalidOperationException("subscription cancellation callback failed");
+        using var registration = cancellation.Token.Register(() => throw failure);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+
+        channel.Dispose();
+
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeOfType<AggregateException>()
+            .Which.InnerExceptions.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        service.SubscriptionCount.Should().Be(0, "the callback failure must not bypass subscription disposal");
+    }
+
     private static async Task CallerCancelsASendQueuedOnTheGateAsync(bool disposeAsLateAsPossible)
     {
         var session = NewSession();

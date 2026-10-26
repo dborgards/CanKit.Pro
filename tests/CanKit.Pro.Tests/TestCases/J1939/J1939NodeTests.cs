@@ -4586,6 +4586,33 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         channel.Disposed.Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Reader_Cancellation_Callback_Failure_Is_Observable_After_Node_Teardown(bool asynchronously)
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        var cancellation = (CancellationTokenSource)typeof(J1939NodeImpl)
+            .GetField("_readerCts", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(node)!;
+        var failure = new InvalidOperationException("reader cancellation callback failed");
+        using var registration = cancellation.Token.Register(() => throw failure);
+
+        AggregateException reported;
+        if (asynchronously)
+            reported = await Assert.ThrowsAsync<AggregateException>(() => node.DisposeAsync().AsTask());
+        else
+            reported = Assert.Throws<AggregateException>(node.Dispose);
+
+        reported.InnerExceptions.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        channels.Single().Disposed.Should().BeTrue("cancellation failure must not skip transport teardown");
+        service.SubscriptionCount.Should().Be(0, "the node still releases its subscription");
+        (await Assert.ThrowsAsync<AggregateException>(() => node.DisposeAsync().AsTask())).Should().BeSameAs(reported);
+    }
+
     // A channel whose Dispose throws fails the disposal with that exception, as it did when the
     // disposing thread called it itself: the teardown's wait does not wrap it.
     [Fact]
@@ -5975,6 +6002,32 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await actor.NextTimerDelayAsync()).Should().BeNull("the node's teardown cancelled the schedule's armed tick");
         await clock.AdvanceAsync(period);
         node.PeriodicEmissionsCompleted.Should().Be(0, "no tick fired on the disposed node");
+    }
+
+    [Fact]
+    public async Task A_Periodic_Cancellation_Callback_Failure_Is_Observable_After_Stopping_The_Timer()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        var cancellation = (CancellationTokenSource)schedule.GetType()
+            .GetField("_cts", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(schedule)!;
+        var failure = new InvalidOperationException("periodic cancellation callback failed");
+        using var registration = cancellation.Token.Register(() => throw failure);
+
+        Assert.Throws<AggregateException>(schedule.Dispose).InnerExceptions.Should().ContainSingle()
+            .Which.Should().BeSameAs(failure);
+        (await actor.NextTimerDelayAsync()).Should().BeNull("the tick was stopped before cancellation");
+        Action readToken = () => _ = cancellation.Token;
+        readToken.Should().Throw<ObjectDisposedException>("cleanup releases the CTS despite the failing callback");
     }
 
     // The other order (Codex on #397): a Dispose that lands while StartPeriodicSend is between its

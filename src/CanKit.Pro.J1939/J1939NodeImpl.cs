@@ -1957,12 +1957,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void DisposeCore()
     {
-        try { _readerCts.Cancel(); } catch { }
-
         var transportReader = Volatile.Read(ref _transportReaderTask);
         try
         {
-            transportReader = TearDownOnActor();
+            try { _readerCts.Cancel(); }
+            finally
+            {
+                // A failing cancellation callback is a disposal failure too. The transport
+                // and the remaining resources must still be torn down before it propagates.
+                transportReader = TearDownOnActor();
+            }
         }
         finally
         {
@@ -2372,19 +2376,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             lock (_owner._schedulesGate) _owner._schedules.Remove(this);
-            try { _tick?.Dispose(); } catch { }
-            try { _cts.Cancel(); }
-            catch (Exception ex) when (ex is AggregateException or ObjectDisposedException) { /* a callback threw, or the emission that ended first released it */ }
-
-            // From the actor (a callback of the node disposing its schedule) the emission in
-            // flight may be waiting for that very actor: waiting for it here would hold the
-            // actor for the whole timeout. It ends on its own, the token being cancelled, and
-            // releases the token source when it does (the emission cannot fault: it reports its
-            // failures itself).
-            var send = _sendTask;
-            if (send is null) { _cts.Dispose(); return; }
-            if (_owner._actor.IsOnCurrentActor) return;
-            if (send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
+            try { _tick?.Dispose(); }
+            finally
+            {
+                try { _cts.Cancel(); }
+                catch (ObjectDisposedException) { /* the emission that ended first released it */ }
+                finally
+                {
+                    // Also runs when a cancellation callback fails. From the actor the send
+                    // may be awaiting that same actor, so the emission releases its own CTS.
+                    var send = _sendTask;
+                    if (send is null) _cts.Dispose();
+                    else if (!_owner._actor.IsOnCurrentActor && send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
+                }
+            }
         }
 
 
