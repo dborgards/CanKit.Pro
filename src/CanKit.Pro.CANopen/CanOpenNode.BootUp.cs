@@ -346,6 +346,23 @@ internal sealed partial class CanOpenNode
         return false;
     }
 
+    /// <summary>Test seam, actor loop only: pending verification peers and active transfer
+    /// identities. An active transfer needs a settled round; a queued worker needs scheduling.</summary>
+    internal (byte[] PendingPeers, object[] ActiveTransfers) CaptureBootVerificationWorkForTests()
+    {
+        var active = new HashSet<byte>(_sdoClients.Keys);
+        active.UnionWith(_sdoBlockClients.Keys);
+        var transfers = new List<object>();
+        transfers.AddRange(_sdoClients.Values);
+        transfers.AddRange(_sdoBlockClients.Values);
+        var pending = new List<byte>();
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
+            if (_slaveVerifying[id] && !active.Contains(id)) pending.Add(id);
+        }
+        return (pending.ToArray(), transfers.ToArray());
+    }
+
     private void BeginSlaveVerification(byte nodeId)
     {
         _slaveVerifying[nodeId] = true;
