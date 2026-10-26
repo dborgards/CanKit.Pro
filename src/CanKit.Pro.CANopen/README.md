@@ -1328,9 +1328,101 @@ and disqualify pending monitoring input. Identical answers still mean `Unconfirm
 atomic device image. Missing or malformed required recheck evidence disqualifies input too. `ConfigurationId` is a new
 identity for every acquisition, not a device-provided version; `StartedAtUtc` and monotonic
 `Duration` record the acquisition interval. The returned collections and bytes are immutable.
-Replacing a monitor's snapshot must begin a new evaluation period. Continuous receive-only
-supervision and its protocol recovery policy are separate work in #401; none of these diagnostics
-is safety approval.
+Replacing a monitor's snapshot begins a new evaluation period. None of these diagnostics is
+safety approval.
+
+### Continuous passive SRDO and GFC monitoring
+
+`ForeignSrdoMonitor` (#401) receives individual frames from a private RawCan subscription and
+supervises independent SRDO pairs on one capture bus. Open one monitor per bus. It requires no
+local CANopen node, NMT state, safety object dictionary or process-data sink. It has no send path:
+no SDO, NMT, heartbeat, EMCY, SRDO or GFC is transmitted. Prepare configuration separately using
+a known EDS/DCF mapping or an explicit read-only acquisition described above.
+
+```csharp
+// SCT and SRVT are explicit observer limits, not a producer's refresh period or CRC default.
+var input = ForeignSrdoConfiguration.FromSnapshot(image, number: 1,
+    validationTime: TimeSpan.FromMilliseconds(10),
+    safeguardCycleTime: TimeSpan.FromMilliseconds(100));
+using var monitor = ForeignSrdoMonitor.Open(service, "adapter/channel-1", new[] { input });
+var result = monitor.Poll();
+foreach (var item in result.Observations)
+    Console.WriteLine($"{item.BusIdentity} {item.HostTimestamp}: {item.Status}, {item.CaptureQuality}");
+foreach (var state in result.States)
+    Console.WriteLine($"SRDO {state.Configuration.Number}: current={state.IsCurrent}, age={state.Age}");
+// If HasBacklog is true, poll again until caught up before displaying current values.
+```
+
+`ForeignSrdoConfiguration` copies and validates a byte-aligned mapping (up to eight bytes),
+consecutive standard odd/even COB-IDs and positive observer limits (SRVT up to 255 ms, SCT up
+to 65535 ms). Its provenance is mandatory. Invalid configuration throws before monitoring;
+invalid replacement leaves the existing session intact. `FromSnapshot` requires an eligible
+record and preserves the whole immutable acquisition, raw provenance and its configuration ID.
+A receiver record supplies its consumer SCT/SRVT unless overridden. A producer record requires
+**both explicit observer limits**: its refresh time and checksum SRVT/default are not inferred
+as monitoring deadlines. Configuration node IDs associate a mapping; they do not authenticate
+the sender of a received frame. Duplicate peer/number keys or overlapping COB-IDs on one bus
+are rejected as ambiguous. An empty configuration still monitors GFCs.
+
+The pairing rules follow the existing local consumer, using its inversion and mapping helpers:
+an initial lone inverted frame is reported as `StartupInverted`, with the initial SCT still
+running. A normal frame replaces a pending normal and restarts SRVT; values are unavailable
+while waiting. Equal-length inverse pairs are decoded only if long enough for the mapping;
+extra bytes within classic CAN's eight-byte limit participate in inversion but are not decoded.
+Short pairs, mismatches, wrong order and invalid formats discard pending/current values without
+resetting SCT. SRVT expires at the boundary; SCT also expires at its boundary and wins a tie
+with that SRDO's SRVT. Expiry items retain the logical deadline timestamp. A fresh usable pair
+recovers and restarts SCT. No received values are written to an object dictionary.
+
+Timing uses `CanFrameEvent.HostArrivalTimestamp`, captured by RawCan before buffering, on the
+same process's `Stopwatch` clock. Adapter `ReceiveTimestamp` is retained for trace correlation;
+it is not used for arithmetic or comparisons across buses. `Poll` advances deadlines between
+captured frames, then to the current clock only after draining. UI refresh rate or delayed
+delivery therefore does not turn an on-time buffered pair into a late pair. A bounded batch
+reports `HasBacklog` conservatively even if the final input exactly filled it, with no current
+signals until a subsequent drain. Missing/zero, future, backward, or already-assessed late host
+timestamps produce `TimingUnavailable`, discard pending/current values and suspend timing until
+fresh input establishes a new baseline. This cannot measure unknown driver/adapter delays.
+The new window also treats lone inverted frames as a mid-pair join (`StartupInverted`), after
+either a gap or insufficient timing. It cannot assert a producer ordering fault when the normal
+half may have been unobserved. Repeated inverted halves remain startup observations until a
+pair is seen or a fresh window deadline expires; capture quality remains independently qualified.
+States have `AsOfTimestamp`; retained instances are historical. `Age` describes the last valid
+pair, including after a fault; `Signals` is empty unless the state is current. A fault never
+silently reuses the last process value.
+
+`ReplaceConfigurations` starts a fresh evaluation period and clears all previous values and
+timers. Queued SRDO frames older than replacement are reported as `BeforeEvaluationPeriod`;
+they cannot be decoded with the new mapping. Frames stamped exactly at replacement belong to
+the new period; the host clock cannot distinguish events within one tick. Every observation
+and state retains configuration/evaluation identities so an application can correlate changes.
+
+With `ILossAwareSubscription` (#402), enqueue gaps and durable drop counts qualify capture
+separately from SRDO status. A gap discards every pending pair/current value and starts a new
+window; it cannot assemble a normal frame before a gap with an inverted frame after it. A
+stable fresh complete pair can restore that SRDO window to `Contiguous`; the session trace
+remains `Incomplete`, because lost GFCs or other frames cannot be recovered. A counter change
+that cannot be located by sequence, or occurs during a poll, conservatively invalidates even
+a pair reconstructed in that poll. A later stable fresh pair recovers. Counter saturation
+does not defeat sequence checks. An externally supplied subscription must have one exclusive
+reader from its creation; shared readers make gaps ambiguous. Legacy inputs retain `Unknown`
+quality and a null drop count. `Contiguous` means no detected subscription loss, never proof
+of complete driver or bus capture. An expiry reports absence in this capture window, never
+a confirmed remote device failure, especially with incomplete input.
+
+Each captured classic, base-ID `001h`, non-RTR, non-error, zero-length GFC produces a distinct
+`GfcObserved` trace item with bus identity and capture timestamps, including host echoes. CAN FD,
+extended, RTR, error or non-empty candidates yield `MalformedGfc`. GFCs have no associated
+configuration/node: the wire format carries no sender identity. They are independent of SRDO
+pair state and never imply that a device entered its safe state. All items are returned directly
+in bounded poll results; there is no secondary event buffer silently dropping repetitions.
+Disposal stops analysis and closes only an owned subscription; the shared service stays alive.
+
+The local consumer remains the device-role implementation with NMT, OD actuation and EMCY.
+`ObserveForeignSrdoAsync` remains the existing one-pair decoder with optional SDO preparation
+and caller-owned timing. The continuous monitor consumes already prepared input. These
+diagnostic observations make no safety approval or SIL claim; unresolved interoperability
+questions tracked in #289 remain open.
 
 ### What this is not
 

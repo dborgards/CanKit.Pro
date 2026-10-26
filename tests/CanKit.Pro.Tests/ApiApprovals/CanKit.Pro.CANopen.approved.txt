@@ -877,11 +877,97 @@ namespace CanKit.Pro.CANopen.Safety
         public static System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.PeerSafetySnapshot> ReadPeerSafetyConfigurationAsync(this CanKit.Pro.CANopen.Safety.ICanOpenSafety safety, byte peerNodeId, CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration? expected = null, System.Threading.CancellationToken cancellationToken = default) { }
         public static CanKit.Pro.CANopen.Safety.ICanOpenSafety Safety(this CanKit.Pro.CANopen.ICanOpenNode node) { }
     }
+    public enum ForeignSrdoCaptureQuality
+    {
+        Unknown = 0,
+        Contiguous = 1,
+        Incomplete = 2,
+    }
+    public sealed class ForeignSrdoConfiguration
+    {
+        public ForeignSrdoConfiguration(byte peerNodeId, int number, uint cobId1, uint cobId2, System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> mapping, System.TimeSpan validationTime, System.TimeSpan safeguardCycleTime, string provenance) { }
+        public uint CobId1 { get; }
+        public uint CobId2 { get; }
+        public System.Guid ConfigurationId { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Mapping { get; }
+        public int Number { get; }
+        public byte PeerNodeId { get; }
+        public string Provenance { get; }
+        public System.TimeSpan SafeguardCycleTime { get; }
+        public CanKit.Pro.CANopen.Safety.PeerSafetySnapshot? SourceSnapshot { get; }
+        public System.TimeSpan ValidationTime { get; }
+        public static CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration FromSnapshot(CanKit.Pro.CANopen.Safety.PeerSafetySnapshot snapshot, int number, System.TimeSpan? validationTime = default, System.TimeSpan? safeguardCycleTime = default) { }
+    }
+    public sealed class ForeignSrdoMonitor : System.IDisposable
+    {
+        public ForeignSrdoMonitor(CanKit.Pro.RawCan.ISubscription subscription, string busIdentity, System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration> configurations, bool ownsSubscription = false) { }
+        public void Dispose() { }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoPollResult Poll(int maxFrames = 4096) { }
+        public void ReplaceConfigurations(System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration> configurations) { }
+        public static CanKit.Pro.CANopen.Safety.ForeignSrdoMonitor Open(CanKit.Pro.RawCan.ICanBusService service, string busIdentity, System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration> configurations, int? bufferCapacity = default) { }
+    }
+    public sealed class ForeignSrdoObservation
+    {
+        public string BusIdentity { get; }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoCaptureQuality CaptureQuality { get; }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration? Configuration { get; }
+        public System.Guid EvaluationPeriodId { get; }
+        public long HostTimestamp { get; }
+        public System.TimeSpan? ReceiveTimestamp { get; }
+        public ulong? SequenceNumber { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.ForeignSrdoSignal> Signals { get; }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoStatus Status { get; }
+        public bool TimingAvailable { get; }
+    }
     public sealed class ForeignSrdoObserveResult
     {
         public uint CobId1 { get; }
         public CanKit.Pro.CANopen.ForeignPdoObservation? Observation { get; }
         public string? Reason { get; }
+    }
+    public sealed class ForeignSrdoPollResult
+    {
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoCaptureQuality CaptureQuality { get; }
+        public long? DroppedFrameCount { get; }
+        public bool HasBacklog { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.ForeignSrdoObservation> Observations { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.ForeignSrdoState> States { get; }
+    }
+    public sealed class ForeignSrdoSignal
+    {
+        public ushort Index { get; }
+        public byte Subindex { get; }
+        public System.Collections.Generic.IReadOnlyList<byte> Value { get; }
+    }
+    public sealed class ForeignSrdoState
+    {
+        public System.TimeSpan? Age { get; }
+        public long AsOfTimestamp { get; }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoCaptureQuality CaptureQuality { get; }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration Configuration { get; }
+        public System.Guid EvaluationPeriodId { get; }
+        public bool IsCurrent { get; }
+        public long? LastValidTimestamp { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.ForeignSrdoSignal> Signals { get; }
+        public CanKit.Pro.CANopen.Safety.ForeignSrdoStatus Status { get; }
+    }
+    public enum ForeignSrdoStatus
+    {
+        NotReceived = 0,
+        Valid = 1,
+        WaitingForInverted = 2,
+        StartupInverted = 3,
+        OutOfOrder = 4,
+        Mismatch = 5,
+        ShortPayload = 6,
+        InvalidFormat = 7,
+        ValidationTimeExpired = 8,
+        SafeguardCycleExpired = 9,
+        CaptureGap = 10,
+        TimingUnavailable = 11,
+        BeforeEvaluationPeriod = 12,
+        GfcObserved = 13,
+        MalformedGfc = 14,
     }
     public sealed class GlobalFailsafeCommandReceivedEventArgs : System.EventArgs
     {
