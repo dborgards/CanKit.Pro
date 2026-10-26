@@ -1957,35 +1957,28 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void DisposeCore()
     {
-        var transportReader = Volatile.Read(ref _transportReaderTask);
-        try
-        {
-            try { _readerCts.Cancel(); }
-            finally
-            {
-                // A failing cancellation callback is a disposal failure too. The transport
-                // and the remaining resources must still be torn down before it propagates.
-                transportReader = TearDownOnActor();
-            }
-        }
+        try { _readerCts.Cancel(); }
         finally
         {
-            // A channel that throws on Dispose is this disposal's failure, not a reason to leave
-            // the rest running: the subscription, the actor and an owned service are released
-            // all the same before it propagates (Codex and Bugbot on #397).
-            try { _readerTask.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* the reader reports its own faults */ }
-            try { transportReader.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* likewise */ }
+            // Cancellation callback failures still run every teardown step. Capture the
+            // fallback here: TearDownOnActor can throw before returning its reader task.
+            var transportReader = Volatile.Read(ref _transportReaderTask);
+            try { transportReader = TearDownOnActor(); }
+            finally
+            {
+                // A channel that throws on Dispose is this disposal's failure, not a reason
+                // to leave the readers, subscription, actor or owned service running.
+                try { _readerTask.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* the reader reports its own faults */ }
+                try { transportReader.Wait(ReaderJoinTimeout); } catch (AggregateException) { /* likewise */ }
 
-            _subscription.Dispose();
-            // An injected actor is not ours to dispose; the handler is, either way. It comes off
-            // only after an owned actor's Dispose: that is where the actor reports a callback that
-            // outlived its shutdown bound, as a TimeoutException through its
-            // BackgroundExceptionOccurred, and unsubscribed first the node's subscribers never
-            // heard of it (#355, from the review of #397).
-            if (_ownsActor) _actor.Dispose();
-            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
-            _readerCts.Dispose();
-            if (_ownsService) _service.Dispose();
+                _subscription.Dispose();
+                // An injected actor is not ours to dispose; the handler is, either way. It
+                // stays attached through owned-actor disposal so shutdown failures are heard.
+                if (_ownsActor) _actor.Dispose();
+                _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+                _readerCts.Dispose();
+                if (_ownsService) _service.Dispose();
+            }
         }
     }
 
