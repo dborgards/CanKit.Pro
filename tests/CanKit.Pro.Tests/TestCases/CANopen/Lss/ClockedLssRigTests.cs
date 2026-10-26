@@ -72,8 +72,22 @@ public class ClockedLssRigTests
         finally
         {
             stop.Cancel();
-            try { await operation.WaitAsync(Watchdog); } catch (OperationCanceledException) { }
-            try { await run.WaitAsync(Watchdog); } catch (Exception ex) when (ex is TimeoutException or OperationCanceledException) { }
+            try { await operation.WaitAsync(Watchdog); }
+            catch (OperationCanceledException)
+            {
+                operation.IsCanceled.Should().BeTrue("cleanup cancels the timer loop");
+            }
+            try { await run.WaitAsync(Watchdog); }
+            catch (OperationCanceledException)
+            {
+                run.IsCanceled.Should().BeTrue("the loop cancellation may finish the rig operation");
+            }
+            catch (TimeoutException error)
+            {
+                run.IsFaulted.Should().BeTrue("cleanup must observe the guard failure, not time out waiting for the rig");
+                run.Exception!.InnerExceptions.Should().Contain(error,
+                    "only the timeout recorded by the guard is expected during cleanup");
+            }
         }
     }
 }
