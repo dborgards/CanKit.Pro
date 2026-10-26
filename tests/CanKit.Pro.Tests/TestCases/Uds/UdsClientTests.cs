@@ -2661,8 +2661,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     // -----------------------------------------------------------------------------------
     // FR-UDS-009 (edge) — MaxResponsePendingCount is how many 0x78s a request waits through:
     // that many and the final answer is returned, one more and the request is given up (#354,
-    // the boundary uds-M3 left unpinned). P2 and P2* are a minute, so neither can end the wait
-    // before the ECU's unpaced 0x78s are in.
+    // the boundary uds-M3 left unpinned). Protocol time stays frozen, so neither P2 nor P2*
+    // can end the wait before the ECU's unpaced 0x78s are in.
     // -----------------------------------------------------------------------------------
     [Theory]
     [InlineData(2, false)]
@@ -2670,30 +2670,28 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task MaxResponsePendingCount_Is_The_Number_Of_Pending_Answers_A_Request_Waits_Through(
         int pendingAnswers, bool givenUp)
     {
-        var (client, _, dispose) = BuildPair(
+        using var pair = new ClockPair(
             e => e.On(0x22, _ => throw new EcuResponsePending(
                 pendingCount: pendingAnswers, finalResponse: new byte[] { 0xF1, 0x90, 0xAA })),
             options: new UdsClientOptions
             {
-                P2ClientMax = TimeSpan.FromMinutes(1),
-                P2StarClientMax = TimeSpan.FromMinutes(1),
+                P2ClientMax = TimeSpan.FromMilliseconds(500),
+                P2StarClientMax = TimeSpan.FromSeconds(1),
                 MaxResponsePendingCount = 2,
             });
-        using (dispose)
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        if (givenUp)
         {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            var read = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
-            if (givenUp)
-            {
-                Func<Task> act = () => read;
-                await act.Should().ThrowAsync<UdsProtocolException>()
-                    .WithMessage("*sent 3 consecutive NRC 0x78*MaxResponsePendingCount=2*");
-            }
-            else
-            {
-                (await read).Should().Equal(0xAA);
-            }
+            Func<Task> act = async () => await read.WaitAsync(ShortTimeout);
+            await act.Should().ThrowAsync<UdsProtocolException>()
+                .WithMessage("*sent 3 consecutive NRC 0x78*MaxResponsePendingCount=2*");
         }
+        else
+        {
+            (await Within(read)).Should().Equal(0xAA);
+        }
+        pair.Clock.Elapsed.Should().Be(TimeSpan.FromMilliseconds(1), "the count is decided without advancing P2 or P2*");
     }
 
     // #354 (U-5): a 0x78 to a suppressed send moves its window out by P2*, and the next
@@ -2753,34 +2751,20 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task ResponsePending_Loop_Aborts_When_Exceeding_MaxResponsePendingCount()
     {
-        var (client, _, dispose) = BuildPair(
+        using var pair = new ClockPair(
             e => e.On(0x22, _ => throw new EcuResponsePending(
-                pendingCount: 5, finalResponse: new byte[] { 0xF1, 0x90 },
-                // No spacing: what bounds this loop is the count, not the gap, and every 0x78
-                // restarts P2* -- so a gap is a wait racing a 1 s budget for no gain. It cost
-                // two red macOS legs (#115, #116) before anyone read which test was failing:
-                // the host stretches the Delay, P2* wins, and the client raises the timeout it
-                // is entitled to raise instead of the abort this test asserts.
-                //
-                // Checked before removing it rather than after: with the P2* restart mutated
-                // away entirely, this test passes at the old 20 ms too, so the gap carried
-                // nothing. Its two neighbours are not the same -- the 60 ms in
-                // ResponsePending_Restarts_P2Star_And_Returns_Final_Response is what pushes that
-                // transfer past P2, and the same mutation passes there once it is zero.
-                delayBetween: TimeSpan.Zero)),
+                pendingCount: 5, finalResponse: new byte[] { 0xF1, 0x90 }, delayBetween: TimeSpan.Zero)),
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(500),
                 P2StarClientMax = TimeSpan.FromSeconds(1),
                 MaxResponsePendingCount = 2,
             });
-        using (dispose)
-        {
-            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190,
-                new CancellationTokenSource(ShortTimeout).Token);
-            await act.Should().ThrowAsync<UdsProtocolException>()
-                .WithMessage("*NRC 0x78*MaxResponsePendingCount=2*");
-        }
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Func<Task> act = async () => await pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token).WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<UdsProtocolException>()
+            .WithMessage("*NRC 0x78*MaxResponsePendingCount=2*");
+        pair.Clock.Elapsed.Should().Be(TimeSpan.FromMilliseconds(1), "host scheduling cannot expire a protocol budget");
     }
 
     // -----------------------------------------------------------------------------------

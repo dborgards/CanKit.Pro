@@ -966,28 +966,33 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(false)]
     public async Task A_Request_The_Client_Refuses_Leaves_No_Window(bool suppressed)
     {
-        var session = NewSession();
-        using var busTester = OpenClassic(session, 0);
-        using var busEcus = OpenClassic(session, 1);
+        using var clock = new WindowClock();
+        using var bus = ControllableBus.Plain(NewSession());
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x7E, 0x00 });
-        busEcus.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) busEcus.Transmit(positive); };
-
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromSeconds(2));
-
+        var transmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.OnTransmitting = frame =>
+        {
+            if (frame.ID != unchecked((int)FunctionalTxId)) return;
+            bus.RaiseObserved(positive, isEcho: false);
+            transmitted.TrySetResult(true);
+        };
+        using var functional = OpenOnClock(bus, clock, responseWindow: TimeSpan.FromSeconds(2));
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var oversized = new byte[] { 0x3E, suppressed ? (byte)0x80 : (byte)0x00, 1, 2, 3, 4, 5, 6 }; // eight bytes: one too many
+        var oversized = new byte[] { 0x3E, suppressed ? (byte)0x80 : (byte)0x00, 1, 2, 3, 4, 5, 6 };
         Func<Task> refused = () => functional.SendRawAsync(oversized, Window, cts.Token);
         await refused.Should().ThrowAsync<InvalidOperationException>();
+        bus.TransmitCount.Should().Be(0, "the refused request never reached the driver");
 
-        // Left with a window, this call would wait 2 s before sending; a loaded host only
-        // makes the call slower, so the bound is wide.
-        var sw = Stopwatch.StartNew();
-        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, TimeSpan.FromMilliseconds(100), cts.Token);
-        sw.Stop();
+        var before = clock.Clock.Elapsed;
+        var collection = TimeSpan.FromMilliseconds(100);
+        var next = functional.TesterPresentAsync(suppressPositiveResponse: false, collection, cts.Token);
+        // A leaked two-second window cannot expire: protocol time stays frozen until the
+        // next request actually reaches the driver. The host timeout is only a hang guard.
+        await transmitted.Task.WaitAsync(ShortTimeout);
+        clock.Clock.Elapsed.Should().Be(before);
+        var responses = await CollectFor(clock, next, collection);
         responses.Should().ContainSingle();
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "nothing was transmitted, so nothing is answered");
+        clock.Clock.Elapsed.Should().Be(before + collection);
     }
 
     // Codex on #150: a 0x78 for the service that arrives after the request's subscription is
