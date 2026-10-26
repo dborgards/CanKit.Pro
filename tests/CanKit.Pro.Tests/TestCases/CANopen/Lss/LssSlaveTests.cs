@@ -2177,16 +2177,24 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         // The boot-up is inside the driver. Silence must not start, and must not drop it,
         // until that send returns.
         var starting = slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromSeconds(5)));
-        await Task.Delay(50);
-        starting.IsCompleted.Should().BeFalse();
-        holding.Release();
-        await starting.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await WaitUntilAsync(() => slave.IsWaitingForLssTransmits);
+            starting.IsCompleted.Should().BeFalse("the actor is draining the held driver reservation");
+            holding.Release();
+            await starting.WaitAsync(LssTestTiming.SchedulingBudget);
 
-        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(30));
-        await bench.AdvanceAsync(TimeSpan.FromMilliseconds(80));
-        heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
-        slave.CompleteLssSilence(0);
-        await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)) >= 2);
+            slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(30));
+            await bench.AdvanceAsync(TimeSpan.FromMilliseconds(80));
+            heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
+            await slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
+            await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)) >= 2);
+        }
+        finally
+        {
+            holding.Release();
+            await starting.WaitAsync(LssTestTiming.SchedulingBudget);
+        }
     }
 
     [Theory]
