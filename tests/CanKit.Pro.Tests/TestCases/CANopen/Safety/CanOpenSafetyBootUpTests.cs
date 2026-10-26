@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -43,8 +44,8 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>The slave: a device opened from the DCF (its 13FFh is what the file says), on
     /// the rig's peer bus, in Pre-Operational.</summary>
-    private static ICanOpenNode OpenSlave(ICanBus peerBus, bool validChecksum)
-        => CanOpen.OpenNode(peerBus, SlaveDcf(validChecksum), new CanOpenNodeOptions { WritableCommunicationParameters = true });
+    private static CanOpenNode OpenSlave(MasterRig rig, bool validChecksum)
+        => rig.OpenPeerNode(Slave, SlaveDcf(validChecksum), new CanOpenNodeOptions { WritableCommunicationParameters = true });
 
     private static List<(FlyingMasterSignal Signal, byte? Other)> Record(CanOpenNode master)
     {
@@ -65,10 +66,155 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     private static int SdoRequests(MasterRig rig) => rig.Log.Snapshot().Count(f => f.Id == 0x600u + Slave && f.Data[0] != 0x80);
 
     [Fact]
+    public async Task An_Sdo_Started_After_Draining_Gets_Another_Peer_Round()
+    {
+        var (rig, gate) = OpenGatedMaster();
+        using var _ = rig;
+        using var peer = rig.OpenPeerNode(Slave, PlainDcf());
+        gate.HoldSdo = true;
+        var peerWitness = rig.Witness.Peers.Single();
+        var marker = peerWitness.MarkerCobId;
+        int observeMarker = 0;
+        int markersSeen = 0;
+        int priorMarkerTarget = int.MaxValue;
+        var priorMarkersObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var markerObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Peer.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame && (uint)e.CanFrame.ID == marker)
+            {
+                // An old callback delayed after publishing the barrier cannot spend the new witness.
+                bool armed = Volatile.Read(ref observeMarker) != 0;
+                int seen = Interlocked.Increment(ref markersSeen);
+                if (armed) markerObserved.TrySetResult(true);
+                if (seen >= Volatile.Read(ref priorMarkerTarget)) priorMarkersObserved.TrySetResult(true);
+            }
+        };
+        using var release = new ManualResetEventSlim();
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<byte[]>? request = null;
+        Task? blocked = null;
+        int rounds = 0;
+        rig.Witness.AfterRound = async () =>
+        {
+            if (Interlocked.Increment(ref rounds) != 1) return;
+            Volatile.Write(ref priorMarkerTarget, peerWitness.MarkersSent);
+            if (Volatile.Read(ref markersSeen) >= Volatile.Read(ref priorMarkerTarget)) priorMarkersObserved.TrySetResult(true);
+            await priorMarkersObserved.Task.WaitAsync(ShortTimeout);
+            request = rig.Node.SdoUploadAsync(Slave, 0x1018, 0x01);
+            await gate.SdoEntered.WaitAsync(ShortTimeout);
+            blocked = peer.PostToActorAsync(() =>
+            {
+                entered.TrySetResult(true);
+                release.Wait();
+            });
+            await entered.Task.WaitAsync(ShortTimeout);
+            Volatile.Write(ref observeMarker, 1);
+        };
+
+        var advance = AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(10));
+        try
+        {
+            (await Task.WhenAny(advance, markerObserved.Task).WaitAsync(ShortTimeout)).Should().BeSameAs(markerObserved.Task,
+                "a newly registered transfer must get a settled peer round before clock advancement completes");
+            advance.IsCompleted.Should().BeFalse("the peer's actor still holds that new round");
+        }
+        finally
+        {
+            release.Set();
+            if (blocked is not null) await blocked.WaitAsync(ShortTimeout);
+            gate.HoldSdo = false;
+            if (gate.SdoHeld > 0) gate.ReleaseSdo(0, transmit: true);
+            await advance.WaitAsync(ShortTimeout);
+            if (request is not null) await request.WaitAsync(ShortTimeout);
+        }
+    }
+
+    [Fact]
+    public async Task The_Next_Protocol_Step_Waits_For_The_Peers_Actor()
+    {
+        using var rig = OpenMaster();
+        using var peer = rig.OpenPeerNode(Other);
+        var marker = rig.Witness.Peers.Single().MarkerCobId;
+        var markerObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Peer.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame && (uint)e.CanFrame.ID == marker) markerObserved.TrySetResult(true);
+        };
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var blocked = peer.PostToActorAsync(() =>
+        {
+            entered.TrySetResult(true);
+            release.Wait();
+        });
+        Task? advance = null;
+        try
+        {
+            await entered.Task.WaitAsync(ShortTimeout);
+            long before = rig.Clock.GetTimestamp();
+            var step = TimeSpan.FromMilliseconds(10);
+            advance = AdvanceAsync(rig.Clock, rig.Witness, null, step);
+            (await Task.WhenAny(advance, markerObserved.Task).WaitAsync(ShortTimeout)).Should().BeSameAs(markerObserved.Task,
+                "the peer's round-trip marker must reach the bus before settling can complete");
+            advance.IsCompleted.Should().BeFalse("the peer actor still holds the marker behind prior work");
+            rig.Clock.GetTimestamp().Should().Be(before + step.Ticks);
+        }
+        finally
+        {
+            release.Set();
+            await blocked.WaitAsync(ShortTimeout);
+            if (advance is not null) await advance.WaitAsync(ShortTimeout);
+        }
+    }
+
+    [Fact]
+    public async Task The_Next_Protocol_Step_Waits_For_A_Verification_Continuation()
+    {
+        using var rig = OpenMaster();
+        using var slave = OpenSlave(rig, validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        rig.Node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        var channels = (System.Collections.Concurrent.ConcurrentDictionary<byte, SemaphoreSlim>)Field(rig.Node, "_peerSdoChannels");
+        var channel = channels.GetOrAdd(Slave, _ => new SemaphoreSlim(1, 1));
+        channel.Wait();
+        using var permittedWait = rig.Witness.AllowPeerVerificationWait(Slave);
+        Task? advance = null;
+        try
+        {
+            rig.Node.StartFlyingMaster(0, Heartbeat);
+            await UntilAsync(rig.Clock, rig.Witness, null, () => SlaveFlag(rig.Node, "_slaveVerifying"), 2000,
+                "the verification worker was queued");
+            // Keep the worker gated, but now treat its wait as host scheduling rather than a
+            // deliberate external protocol wait. A second probe is the positive ordering witness.
+            permittedWait.Dispose();
+            int observations = 0;
+            var observedTwice = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            rig.Witness.ContinuationObserved = () =>
+            {
+                if (Interlocked.Increment(ref observations) == 2) observedTwice.TrySetResult(true);
+            };
+            long before = rig.Clock.GetTimestamp();
+            var step = TimeSpan.FromMilliseconds(10);
+            advance = AdvanceAsync(rig.Clock, rig.Witness, null, step);
+            (await Task.WhenAny(advance, observedTwice.Task).WaitAsync(ShortTimeout)).Should().BeSameAs(observedTwice.Task,
+                "settling must keep probing instead of completing while the continuation is gated");
+            rig.Clock.GetTimestamp().Should().Be(before + step.Ticks, "host scheduling cannot consume more protocol time");
+        }
+        finally
+        {
+            channel.Release();
+            if (advance is not null) await advance.WaitAsync(ShortTimeout);
+        }
+    }
+
+    [Fact]
     public async Task A_Verified_Safety_Slave_Is_Started()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -87,7 +233,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task An_Unverified_Optional_Slave_Is_Skipped_And_Signalled()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        using var slave = OpenSlave(rig, validChecksum: false);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
@@ -109,7 +255,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task An_Unverified_Mandatory_Slave_Halts_The_Boot()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        using var slave = OpenSlave(rig, validChecksum: false);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
@@ -128,7 +274,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Simultaneous_Start_Waits_For_The_Verification()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, 0x02); // bit 1: one NMT Start to all
@@ -153,7 +299,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Simultaneous_Start_Does_Not_Reach_A_Safety_Slave_Before_Its_Verification()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, 0x02); // bit 1: simultaneous start; no mandatory slave
@@ -187,7 +333,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task Step_D_Uses_The_Bound_Description_As_It_Is_Now()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         var dcf = SlaveDcf(validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, dcf);
         var od = rig.Node.ObjectDictionary;
@@ -217,7 +363,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task Step_D_Takes_Its_Expectation_When_It_Owns_The_Peer_Channel()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         var stale = SlaveDcf(validChecksum: true);
         stale.Objects.Objects[0x1301].SubObjects[0x02].ParameterValue = "40";
         rig.Node.BindPeerDeviceDescription(Slave, stale);
@@ -228,14 +374,14 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         var signals = Record(rig.Node);
         var channels = (System.Collections.Concurrent.ConcurrentDictionary<byte, SemaphoreSlim>)Field(rig.Node, "_peerSdoChannels");
         var channel = channels.GetOrAdd(Slave, _ => new SemaphoreSlim(1, 1));
-        channel.Wait(); // a call to the slave in flight: the verification waits for the channel
+        using var heldChannel = rig.Witness.HoldPeerSdoChannel(Slave, channel); // deliberate external wait
         rig.Node.StartFlyingMaster(0, Heartbeat);
         await UntilAsync(rig.Clock, rig.Witness, null, () => SlaveFlag(rig.Node, "_slaveVerifying"), 2000, "the boot queued the verification");
         await QuiesceAsync(rig.Witness, null);
         SdoRequests(rig).Should().Be(0, "the verification is waiting for the channel");
 
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true)); // what the slave holds
-        channel.Release();
+        heldChannel.Dispose();
         await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational || Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid),
             2000, "step D decided");
         signals.Should().NotContain(s => s.Signal == FlyingMasterSignal.SlaveSafetyConfigurationInvalid,
@@ -253,7 +399,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         var (rig, gate) = OpenGatedMaster();
         using var _ = rig;
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -263,7 +409,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         gate.PassResets = 1; // the cold boot's broadcast passes, the forced one is held
         var channels = (System.Collections.Concurrent.ConcurrentDictionary<byte, SemaphoreSlim>)Field(rig.Node, "_peerSdoChannels");
         var channel = channels.GetOrAdd(Slave, _ => new SemaphoreSlim(1, 1));
-        channel.Wait(); // a call to the slave in flight: the verification waits for the channel
+        using var heldChannel = rig.Witness.HoldPeerSdoChannel(Slave, channel); // deliberate external wait
         rig.Node.StartFlyingMaster(0, Heartbeat);
         await UntilAsync(rig.Clock, rig.Witness, null, () => SlaveFlag(rig.Node, "_slaveVerifying"), 2000, "the boot queued the verification");
 
@@ -271,7 +417,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         await gate.ResetEntered.WaitAsync(TimeSpan.FromSeconds(5));
 
         rig.Node.UnbindPeerDeviceDescription(Slave);
-        channel.Release(); // the verification owns the channel now and finds no DCF
+        heldChannel.Dispose(); // the verification owns the channel now and finds no DCF
         await SettleUntilAsync(rig, () => !SlaveFlag(rig.Node, "_slaveVerifying"), "the verification ended inside the hold");
         await QuiesceAsync(rig.Witness, null);
         SdoRequests(rig).Should().Be(0, "nothing to verify: no request was sent");
@@ -295,8 +441,8 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Simultaneous_Start_With_A_Safety_Slave_Starts_Each_Slave_On_Its_Own()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
-        using var other = CanOpen.OpenNode(rig.Peer, Other);
+        using var slave = OpenSlave(rig, validChecksum: true);
+        using var other = rig.OpenPeerNode(Other);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, 0x02); // bit 1: simultaneous start
@@ -332,7 +478,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         var dcf = CanOpenDeviceDescription.ParseDcf(text);
 
         using var rig = OpenMaster();
-        using var slave = CanOpen.OpenNode(rig.Peer, dcf);
+        using var slave = rig.OpenPeerNode(Slave, dcf);
         SrdoRecords.IsConfigurationValid(slave.ObjectDictionary, 3).Should().BeTrue("the file's checksums match its records");
         slave.ObjectDictionary.ReadUnsigned(0x1302, 1).Should().Be(0u);
         rig.Node.BindPeerDeviceDescription(Slave, dcf);
@@ -357,7 +503,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         using var rig = OpenMaster();
         var plain = PlainDcf();
-        using var slave = CanOpen.OpenNode(rig.Peer, plain);
+        using var slave = rig.OpenPeerNode(Slave, plain);
         rig.Node.BindPeerDeviceDescription(Slave, plain);
         rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
         Tighten(rig.Node);
@@ -370,7 +516,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Safety_Halt_Is_Not_Followed_By_The_Boot_Timeout_Reaction()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        using var slave = OpenSlave(rig, validChecksum: false);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
@@ -400,7 +546,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         var (rig, gate) = OpenGatedMaster();
         using var _ = rig;
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -446,7 +592,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         var (rig, gate) = OpenGatedMaster();
         using var _ = rig;
-        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        using var slave = OpenSlave(rig, validChecksum: false);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -485,7 +631,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         var (rig, gate) = OpenGatedMaster();
         using var _ = rig;
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -521,7 +667,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         var (rig, gate) = OpenGatedMaster();
         using var _ = rig;
-        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var slave = OpenSlave(rig, validChecksum: true);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
@@ -548,7 +694,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Verification_That_Throws_Is_Reported_And_Signalled()
     {
         using var rig = OpenMaster();
-        using var slave = CanOpen.OpenNode(rig.Peer, PlainDcf()); // node 5 without 13FFh: the upload aborts
+        using var slave = rig.OpenPeerNode(Slave, PlainDcf()); // node 5 without 13FFh: the upload aborts
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
         Tighten(rig.Node);
@@ -567,7 +713,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Simultaneous_Start_Halts_On_A_Failed_Optional_Slave()
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        using var slave = OpenSlave(rig, validChecksum: false);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, 0x02); // bit 1: one NMT Start to all
@@ -593,7 +739,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Failed_Mandatory_Slave_Applies_The_1F80h_Error_Reaction(uint startup, NmtCommand toAll)
     {
         using var rig = OpenMaster();
-        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        using var slave = OpenSlave(rig, validChecksum: false);
         rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(Startup, 0x00, startup);
@@ -629,7 +775,15 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     /// work already queued (SDO replies, a released send) runs.</summary>
     private static async Task SettleUntilAsync(MasterRig rig, Func<bool> done, string why)
     {
-        for (int i = 0; i < 100 && !done(); i++) await QuiesceAsync(rig.Witness, null);
+        var idle = Stopwatch.StartNew();
+        long progress = rig.Log.SdoFramesObserved;
+        while (!done())
+        {
+            await QuiesceAsync(rig.Witness, null);
+            long now = rig.Log.SdoFramesObserved;
+            if (now != progress) { progress = now; idle.Restart(); }
+            if (!done() && idle.Elapsed > ShortTimeout) throw new TimeoutException(why);
+        }
         done().Should().BeTrue(why);
     }
 
@@ -654,6 +808,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         private readonly object _gate = new();
         private readonly List<TaskCompletionSource<bool>> _heldSdo = new();
         private readonly TaskCompletionSource<bool> _resetEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _sdoEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _resetRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _resetsSeen;
         private volatile bool _holdSdo;
@@ -663,6 +818,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         public bool HoldSdo { get => _holdSdo; set => _holdSdo = value; }
         public int PassResets { get; set; } = int.MaxValue;
         public Task ResetEntered => _resetEntered.Task;
+        public Task SdoEntered => _sdoEntered.Task;
 
         public int SdoHeld
         {
@@ -704,6 +860,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
             {
                 var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 lock (_gate) _heldSdo.Add(held);
+                _sdoEntered.TrySetResult(true);
                 if (!await held.Task.ConfigureAwait(false))
                     return new TxConfirmation { Confirmed = true };
             }

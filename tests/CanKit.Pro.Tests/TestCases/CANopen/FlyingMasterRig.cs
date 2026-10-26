@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -97,6 +98,7 @@ internal static class FlyingMasterRig
             Log = log;
             Peer = peer;
             _nodeBus = nodeBus;
+            Witness.SdoProgress = () => Log.SdoFramesObserved;
         }
 
         public ManualTimeSource Clock { get; }
@@ -104,6 +106,16 @@ internal static class FlyingMasterRig
         public ActorWitness Witness { get; }
         public FrameLog Log { get; }
         public ICanBus Peer { get; }
+
+        /// <summary>A caller-owned peer sharing the rig's clock and actor/send settling.</summary>
+        public CanOpenNode OpenPeerNode(byte nodeId, CanOpenDeviceDescription? description = null,
+            CanOpenNodeOptions? options = null)
+        {
+            var peer = OpenClockedNode(Peer, nodeId, Clock, description, options);
+            // Separate witness IDs prevent one peer's round trip spending another's signal.
+            Witness.Peers.Add(new ActorWitness(peer, _nodeBus, (byte)(0x7C - Witness.Peers.Count)));
+            return peer;
+        }
 
         public void Dispose()
         {
@@ -128,26 +140,49 @@ internal static class FlyingMasterRig
         await QuiesceAsync(left, right);
     }
 
-    /// <summary>Two actor iterations, then until every send those timers started has been handed
-    /// to the bus, then two more so a peer handles that frame before the clock moves again.</summary>
-    /// <remarks>
-    /// The middle step used to be only a 40 ms sleep for <c>SendControlFrame</c>'s send task to
-    /// reach the bus. A thread-pool start later than that let the clock move on with the frame
-    /// still unsent (#362); the witnessed nodes now say when no reserved send is short of the
-    /// driver. The sleep stays for what no witness covers: the safety boot-up tests answer the
-    /// master's SDO reads from a slave on the wall clock, and their settle loops count on each
-    /// step leaving that slave real time. Removing it would trade this false pass for their
-    /// false red.
-    /// </remarks>
+    /// <summary>Settle every actor and its driver handoffs before moving protocol time.
+    /// Between safety-verification reads, let the worker post its next transfer first.</summary>
     internal static async Task QuiesceAsync(ActorWitness left, ActorWitness? right)
     {
-        await left.SettleAsync();
-        if (right is not null) await right.SettleAsync();
-        await left.SendsHandedOverAsync();
-        if (right is not null) await right.SendsHandedOverAsync();
-        await Task.Delay(40);
-        await left.SettleAsync();
-        if (right is not null) await right.SettleAsync();
+        var roots = right is null ? new[] { left } : new[] { left, right };
+        var witnesses = roots.Concat(roots.SelectMany(w => w.Peers)).ToArray();
+        var idle = Stopwatch.StartNew();
+        long progress = roots.Sum(w => w.SdoProgress());
+        while (true)
+        {
+            var before = new List<object[]>();
+            foreach (var witness in roots)
+                before.Add((await witness.CaptureVerificationWorkAsync()).ActiveTransfers);
+            foreach (var witness in witnesses) await witness.SettleAsync();
+            foreach (var witness in witnesses) await witness.SendsHandedOverAsync();
+            foreach (var witness in witnesses) await witness.SettleAsync();
+            foreach (var witness in roots)
+                if (witness.AfterRound is { } afterRound) await afterRound();
+            bool pending = false;
+            bool changed = false;
+            for (int i = 0; i < roots.Length; i++)
+            {
+                var work = await roots[i].CaptureVerificationWorkAsync();
+                pending |= work.Waiting;
+                if (work.Waiting) roots[i].ContinuationObserved?.Invoke();
+                changed |= !SameTransfers(before[i], work.ActiveTransfers);
+            }
+            if (!pending && !changed) return;
+
+            long now = roots.Sum(w => w.SdoProgress());
+            if (now != progress || changed) { progress = now; idle.Restart(); }
+            if (idle.Elapsed > ShortTimeout)
+                throw new TimeoutException("A safety verification continuation made no SDO progress.");
+            await Task.Delay(1); // cooperative host scheduling; protocol time remains frozen
+        }
+    }
+
+    private static bool SameTransfers(object[] before, object[] after)
+    {
+        if (before.Length != after.Length) return false;
+        for (int i = 0; i < before.Length; i++)
+            if (!ReferenceEquals(before[i], after[i])) return false;
+        return true;
     }
 
     /// <summary>Queues data frames observed on one bus.</summary>
@@ -156,6 +191,9 @@ internal static class FlyingMasterRig
         private readonly ICanBus[] _buses;
         private readonly object _gate = new();
         private readonly List<(uint Id, byte[] Data)> _frames = new();
+        private long _sdoFrames;
+
+        public long SdoFramesObserved => Volatile.Read(ref _sdoFrames);
 
         public FrameLog(params ICanBus[] buses)
         {
@@ -177,6 +215,7 @@ internal static class FlyingMasterRig
         {
             var frame = e.CanFrame;
             if (frame.IsExtendedFrame || frame.IsRemoteFrame) return;
+            if (frame.ID is >= 0x580 and <= 0x67F) Interlocked.Increment(ref _sdoFrames);
             lock (_gate) _frames.Add(((uint)frame.ID, frame.Data.ToArray()));
         }
 
@@ -194,6 +233,51 @@ internal static class FlyingMasterRig
         private readonly byte _witnessPeer;
         private readonly CanOpenNode _node;
         private readonly SemaphoreSlim _seen = new(0, int.MaxValue);
+        private readonly HashSet<byte> _heldVerificationPeers = new();
+        private int _markersSent;
+
+        public List<ActorWitness> Peers { get; } = new();
+        public Func<long> SdoProgress { get; set; } = () => 0;
+        public Action? ContinuationObserved { get; set; }
+        public Func<Task>? AfterRound { get; set; }
+        public uint MarkerCobId => CanOpenCobId.Heartbeat(_witnessPeer);
+        public int MarkersSent => Volatile.Read(ref _markersSent);
+
+        public IDisposable HoldPeerSdoChannel(byte peer, SemaphoreSlim channel)
+        {
+            channel.Wait();
+            var permission = AllowPeerVerificationWait(peer);
+            return new ReleaseOnce(() =>
+            {
+                permission.Dispose();
+                channel.Release();
+            });
+        }
+
+        public IDisposable AllowPeerVerificationWait(byte peer)
+        {
+            lock (_heldVerificationPeers) _heldVerificationPeers.Add(peer);
+            return new ReleaseOnce(() =>
+            {
+                lock (_heldVerificationPeers) _heldVerificationPeers.Remove(peer);
+            });
+        }
+
+        public async Task<(bool Waiting, object[] ActiveTransfers)> CaptureVerificationWorkAsync()
+        {
+            (byte[] PendingPeers, object[] ActiveTransfers) work = (Array.Empty<byte>(), Array.Empty<object>());
+            await _node.PostToActorAsync(() => work = _node.CaptureBootVerificationWorkForTests());
+            bool waiting;
+            lock (_heldVerificationPeers) waiting = work.PendingPeers.Any(peer => !_heldVerificationPeers.Contains(peer));
+            return (waiting, work.ActiveTransfers);
+        }
+
+        private sealed class ReleaseOnce : IDisposable
+        {
+            private Action? _release;
+            public ReleaseOnce(Action release) => _release = release;
+            public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
+        }
 
         public ActorWitness(CanOpenNode node, ICanBus peerBus, byte witnessPeer)
         {
@@ -227,8 +311,9 @@ internal static class FlyingMasterRig
 
         private async Task PokeAsync()
         {
-            _peerBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.Heartbeat(_witnessPeer)),
+            _peerBus.Transmit(CanFrame.Classic(unchecked((int)MarkerCobId),
                 new[] { (byte)NmtState.PreOperational }, isExtendedFrame: false));
+            Interlocked.Increment(ref _markersSent);
             if (!await _seen.WaitAsync(ShortTimeout).ConfigureAwait(false))
                 throw new TimeoutException($"The node did not report the witness heartbeat within {ShortTimeout}.");
         }
