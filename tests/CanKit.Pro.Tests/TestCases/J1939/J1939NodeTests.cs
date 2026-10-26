@@ -4602,11 +4602,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var failure = new InvalidOperationException("reader cancellation callback failed");
         using var registration = cancellation.Token.Register(() => throw failure);
 
-        AggregateException reported;
-        if (asynchronously)
-            reported = await Assert.ThrowsAsync<AggregateException>(() => node.DisposeAsync().AsTask());
-        else
-            reported = Assert.Throws<AggregateException>(node.Dispose);
+        var reported = asynchronously
+            ? await Assert.ThrowsAsync<AggregateException>(() => node.DisposeAsync().AsTask())
+            : Assert.Throws<AggregateException>(node.Dispose);
 
         reported.InnerExceptions.Should().ContainSingle().Which.Should().BeSameAs(failure);
         channels.Single().Disposed.Should().BeTrue("cancellation failure must not skip transport teardown");
@@ -6054,7 +6052,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         using var bus = ControllableBus.Plain(NewSession());
         using var inner = new CanBusService(bus);
-        var parking = new ParkingSendService(inner);
+        using var parking = new ParkingSendService(inner);
         var actor = clock.NewActor();
         var announce = TimeSpan.FromMilliseconds(80);
         var period = TimeSpan.FromMilliseconds(100);
