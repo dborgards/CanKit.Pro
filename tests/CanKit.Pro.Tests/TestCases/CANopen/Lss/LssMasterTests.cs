@@ -282,13 +282,16 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Cancelling_And_Disposing_Unblock_A_Wait()
     {
-        var session = VirtualAdapterFixture.NewSession("lss-cancel");
-        using var bus = VirtualAdapterFixture.Open(session, 0);
-        var service = new SendNotifyingService(new CanBusService(bus));
-        await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("lss-cancel"));
+        var service = new SendNotifyingService(new CanBusService(bus, actor.TimeSource.GetTimestamp));
+        var responseWindow = TimeSpan.FromMilliseconds(100);
+        await using var master = new LssMaster(service, new LssMasterOptions
         {
-            ResponseTimeout = LssTestTiming.SchedulingBudget,
-        }, leaveOpen: false);
+            ResponseTimeout = responseWindow,
+        }, ownsService: true, actor);
 
         // Cancelled once the request is on the bus, i.e. while the master waits for the answer
         // (#362). A timer of its own could fire while the send is still in the driver, which is
@@ -297,12 +300,17 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource();
         var waiting = master.InquireVendorIdAsync(cts.Token);
         await service.Sent.WaitAsync(LssTestTiming.SchedulingBudget);
+        await clock.WaitUntilTimerArmedAsync(actor, responseWindow, LssTestTiming.SchedulingBudget);
         cts.Cancel();
         var cancel = async () => await waiting;
         await cancel.Should().ThrowAsync<OperationCanceledException>();
 
+        // Cancellation reserves the old response window. End only that window, then freeze
+        // time again: disposal, rather than the response deadline, must release request two.
+        await clock.AdvanceAsync(responseWindow);
         var hanging = master.InquireProductCodeAsync();
-        await Task.Delay(20);
+        await service.SecondSent.WaitAsync(LssTestTiming.SchedulingBudget);
+        await clock.WaitUntilTimerArmedAsync(actor, responseWindow, LssTestTiming.SchedulingBudget);
         await master.DisposeAsync();
         var disposed = async () => await hanging;
         await disposed.Should().ThrowAsync<ObjectDisposedException>();
@@ -913,10 +921,13 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     {
         private readonly ICanBusService _inner;
         private readonly TaskCompletionSource<bool> _sent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _secondSent = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _sends;
 
         public SendNotifyingService(ICanBusService inner) => _inner = inner;
 
         public Task Sent => _sent.Task;
+        public Task SecondSent => _secondSent.Task;
         public ICanBus Bus => _inner.Bus;
         public int SubscriptionCount => _inner.SubscriptionCount;
         public event EventHandler<Exception>? BackgroundExceptionOccurred
@@ -939,7 +950,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             CancellationToken cancellationToken = default)
         {
             var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
-            _sent.TrySetResult(true);
+            if (Interlocked.Increment(ref _sends) == 1) _sent.TrySetResult(true);
+            else _secondSent.TrySetResult(true);
             return confirmation;
         }
 
