@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -254,26 +255,49 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         var busA = resources.Add(Open(session, 1));
         var rawBus = resources.Add(Open(session, 2));
-        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var node = (CanOpenNode)CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var release = new ManualResetEventSlim();
         var delivered = 0;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.HeartbeatReceived += (_, _) =>
         {
             if (Interlocked.Increment(ref delivered) == 1)
             {
-                Thread.Sleep(300); // the second frame is queued behind this event by now
+                entered.TrySetResult(true);
+                release.Wait();
                 node.Dispose();
                 disposed.TrySetResult(true);
             }
         };
 
-        SendHeartbeat(rawBus, 0x11, 0x05);
-        SendHeartbeat(rawBus, 0x12, 0x05);
-        await disposed.Task.WithTimeoutAsync(ShortTimeout);
+        try
+        {
+            using (node)
+            {
+                try
+                {
+                    SendHeartbeat(rawBus, 0x11, 0x05);
+                    await entered.Task.WithTimeoutAsync(ShortTimeout);
+                    SendHeartbeat(rawBus, 0x12, 0x05);
+                    await WaitForQueuedEventAsync(node);
+                    release.Set();
+                    await disposed.Task.WithTimeoutAsync(ShortTimeout);
+                    await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
 
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
-        Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
-        ((CanOpenNode)node).QueuedEventCount.Should().Be(0, "the events skipped by the stopped pump are not left linked to the node");
+                    Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+                    node.QueuedEventCount.Should().Be(0, "the stopped pump releases queued events");
+                }
+                finally
+                {
+                    release.Set();
+                }
+            }
+        }
+        finally
+        {
+            await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
+        }
     }
 
     // One event, several subscribers: the one that disposes the node ends the round.
@@ -311,7 +335,7 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         var busA = resources.Add(Open(session, 1));
         var rawBus = resources.Add(Open(session, 2));
-        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var node = (CanOpenNode)CanOpen.OpenNode(busA, nodeId: 0x01);
         using var release = new ManualResetEventSlim();
         var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var delivered = 0;
@@ -320,20 +344,49 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
             if (Interlocked.Increment(ref delivered) == 1)
             {
                 inHandler.TrySetResult(true);
-                release.Wait(TimeSpan.FromSeconds(30));
+                release.Wait();
             }
         };
 
-        SendHeartbeat(rawBus, 0x11, 0x05);
-        await inHandler.Task.WithTimeoutAsync(ShortTimeout);
-        SendHeartbeat(rawBus, 0x12, 0x05); // queued behind the blocked subscriber
-        await Task.Delay(TimeSpan.FromMilliseconds(300)); // a negative window again: the frame is queued by now
+        try
+        {
+            using (node)
+            {
+                try
+                {
+                    SendHeartbeat(rawBus, 0x11, 0x05);
+                    await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+                    SendHeartbeat(rawBus, 0x12, 0x05);
+                    await WaitForQueuedEventAsync(node);
 
-        await Task.Run(node.Dispose); // gives up on the pump after its join timeout
-        release.Set();
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
+                    await Task.Run(node.Dispose).WithTimeoutAsync(ShortTimeout); // gives up after its pump join timeout
+                    release.Set();
+                    await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
 
-        Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+                    Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+                    node.QueuedEventCount.Should().Be(0, "the stopped pump releases queued events");
+                }
+                finally
+                {
+                    release.Set();
+                }
+            }
+        }
+        finally
+        {
+            await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
+        }
+    }
+
+    private static async Task WaitForQueuedEventAsync(CanOpenNode node)
+    {
+        var watchdog = Stopwatch.StartNew();
+        while (node.QueuedEventCount == 0)
+        {
+            if (watchdog.Elapsed > ShortTimeout)
+                throw new TimeoutException("The second heartbeat never reached the blocked event queue.");
+            await Task.Delay(1);
+        }
     }
 
     // The disposal itself calls out to the subscription (here: a hook, as the actor's shutdown-timeout
