@@ -658,7 +658,9 @@ while a communication error is active still carries bit 4. An EMCY held in Stopp
 register of the moment it is sent. Reset Node and Reset Communication end the communication
 errors without an EMCY (transitions 5 and 0) and leave the application's bits in `1001h`. With
 the EMCY switched off (bit 31 of `1014h`) no error is raised, and an error that ends meanwhile
-still clears the bits. Heartbeat, node-guarding and life-guarding timeouts and the CAN
+still clears the bits. A run of short RPDO frames or SRDO pairs is not consumed while disabled:
+if it persists after enabling, the next short frame/pair reports `8210h` once. Toggling the
+producer after that report does not start a new error event (#434). Heartbeat, node-guarding and life-guarding timeouts and the CAN
 controller state raise no EMCY (`8110h`–`8140h`); they are events only.
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
