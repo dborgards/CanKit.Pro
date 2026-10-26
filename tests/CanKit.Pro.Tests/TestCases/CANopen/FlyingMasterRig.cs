@@ -156,8 +156,8 @@ internal static class FlyingMasterRig
             foreach (var witness in witnesses) await witness.SettleAsync();
             foreach (var witness in witnesses) await witness.SendsHandedOverAsync();
             foreach (var witness in witnesses) await witness.SettleAsync();
-            foreach (var witness in roots)
-                if (witness.AfterRound is { } afterRound) await afterRound();
+            foreach (var afterRound in roots.Select(w => w.AfterRound).OfType<Func<Task>>())
+                await afterRound();
             bool pending = false;
             bool changed = false;
             for (int i = 0; i < roots.Length; i++)
