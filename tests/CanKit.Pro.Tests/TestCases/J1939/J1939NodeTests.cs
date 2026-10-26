@@ -4919,7 +4919,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
         var senderActor = clock.NewActor();
-        using var sender = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, senderActor);
+        using var sender = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, senderActor)
+        {
+            PeriodicEmissionJoinTimeout = TimeSpan.FromMinutes(10),
+        };
         await clock.RunUntilAsync(sender.ClaimAddressAsync(0xC1),
             step: TimeSpan.FromMilliseconds(50), giveUpAfter: ShortTimeout);
 
@@ -4931,7 +4934,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             if (!frame.IsExtendedFrame) return;
             if (J1939Id.Decompose((uint)frame.ID).Pgn != targetPgn) return;
             stuck.TrySetResult(true);
-            release.Wait(TimeSpan.FromSeconds(30));
+            release.Wait();
         };
         var handle = sender.StartPeriodicSend(
             new J1939Message(targetPgn, new byte[] { 1, 2, 3, 4 }, priority: 6, destinationAddress: 0xFF),
@@ -4941,15 +4944,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         {
             await clock.RunUntilAsync(stuck.Task, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
 
-            var elapsed = await senderActor.PostAsync(() =>
-            {
-                var watch = Stopwatch.StartNew();
-                handle.Dispose();
-                return watch.Elapsed;
-            });
-
-            // The join is two seconds; a call that did not wait takes milliseconds.
-            elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1.5));
+            // A mistaken join cannot finish within the hang guard: the emission stays held,
+            // and its test-only join timeout is ten minutes. Host scheduling has no 1.5 s margin.
+            await senderActor.PostAsync(handle.Dispose).WithTimeout(ShortTimeout);
+            release.IsSet.Should().BeFalse("the actor returned before the emission was released");
         }
         finally
         {
@@ -5066,14 +5064,15 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         using var actor = new ProtocolActor();
         var inside = new J1939NodeImpl(service, new J1939NodeOptions(Name(2)), ownsService: false, actor);
-        var elapsed = await actor.PostAsync(() =>
+        await actor.PostAsync(() =>
         {
-            var watch = Stopwatch.StartNew();
-            inside.DisposeAsync().AsTask().Wait();
-            return watch.Elapsed;
-        });
-
-        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1.5));
+            // The real teardown is queued behind this turn, so waiting for it here would
+            // wait for this very callback. Inspect the returned task before leaving the actor.
+            var disposal = inside.DisposeAsync();
+            disposal.IsCompleted.Should().BeTrue("an actor caller cannot await its queued teardown");
+            disposal.GetAwaiter().GetResult();
+        }).WithTimeout(ShortTimeout);
+        await inside.DisposeAsync().AsTask().WithTimeout(ShortTimeout);
         Action use = () => _ = inside.ClaimState;
         use.Should().NotThrow(); // a disposed node still reports its last state
     }

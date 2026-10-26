@@ -1995,6 +1995,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// </summary>
     internal TimeSpan ReaderJoinTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
+    /// <summary>Test seam: a self-join must exceed the test hang guard rather than look merely slow.</summary>
+    internal TimeSpan PeriodicEmissionJoinTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// A seam for tests, null in production: runs on the disposing thread once the teardown has
     /// been handed to the actor and before that thread waits for it. A test holding the actor in
@@ -2380,7 +2383,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     // may be awaiting that same actor, so the emission releases its own CTS.
                     var send = _sendTask;
                     if (send is null) _cts.Dispose();
-                    else if (!_owner._actor.IsOnCurrentActor && send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
+                    else if (!_owner._actor.IsOnCurrentActor && send.Wait(_owner.PeriodicEmissionJoinTimeout)) _cts.Dispose();
                 }
             }
         }
