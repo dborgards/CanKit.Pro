@@ -250,8 +250,8 @@ public sealed class ForeignSrdoMonitor : IDisposable
 
     private void Advance(long target, List<ForeignSrdoObservation> items)
     {
-        // Process the earliest deadline across all SRDOs; SCT wins an exact tie, as the
-        // existing consumer arms SCT first. Expiry at the boundary precedes a captured frame.
+        // Process the earliest deadline across all SRDOs; within one SRDO, SCT wins an exact
+        // tie as the existing consumer arms SCT first. Expiry precedes a frame at the boundary.
         while (true)
         {
             Runtime? next = null;

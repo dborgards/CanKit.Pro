@@ -14,7 +14,7 @@ public enum ForeignSrdoStatus
     WaitingForInverted,
     /// <summary>A lone inverted frame at startup was ignored, matching local consumer semantics.</summary>
     StartupInverted,
-    /// <summary>A lone inverted frame after startup or a fault.</summary>
+    /// <summary>An inverted frame without a pending normal after a pair, a protocol error or deadline expiry.</summary>
     OutOfOrder,
     /// <summary>Payload lengths or bitwise inversion differ.</summary>
     Mismatch,
