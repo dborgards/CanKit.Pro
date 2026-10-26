@@ -197,7 +197,7 @@ public sealed class ForeignSrdoMonitor : IDisposable
             foreach (var affected in _runtimes)
             {
                 Invalidate(affected, ForeignSrdoStatus.TimingUnavailable);
-                affected.Sct = null; affected.Timing = false;
+                affected.Sct = null; affected.Timing = false; affected.PairSeen = false;
             }
             items.Add(Item(ForeignSrdoStatus.TimingUnavailable, timestamp, input.ReceiveTimestamp,
                 sequence, rt.Config, rt.Quality, false, NoSignals));
@@ -219,7 +219,8 @@ public sealed class ForeignSrdoMonitor : IDisposable
         }
         else if (rt.Pending is not { } normal)
         {
-            if (!rt.PairSeen && rt.Status is ForeignSrdoStatus.NotReceived or ForeignSrdoStatus.StartupInverted)
+            if (!rt.PairSeen && rt.Status is ForeignSrdoStatus.NotReceived or ForeignSrdoStatus.StartupInverted
+                or ForeignSrdoStatus.CaptureGap or ForeignSrdoStatus.TimingUnavailable)
                 rt.Status = ForeignSrdoStatus.StartupInverted;
             else Invalidate(rt, ForeignSrdoStatus.OutOfOrder);
         }

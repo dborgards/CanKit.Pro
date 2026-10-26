@@ -1383,6 +1383,10 @@ reports `HasBacklog` conservatively even if the final input exactly filled it, w
 signals until a subsequent drain. Missing/zero, future, backward, or already-assessed late host
 timestamps produce `TimingUnavailable`, discard pending/current values and suspend timing until
 fresh input establishes a new baseline. This cannot measure unknown driver/adapter delays.
+The new window also treats lone inverted frames as a mid-pair join (`StartupInverted`), after
+either a gap or insufficient timing. It cannot assert a producer ordering fault when the normal
+half may have been unobserved. Repeated inverted halves remain startup observations until a
+pair is seen or a fresh window deadline expires; capture quality remains independently qualified.
 States have `AsOfTimestamp`; retained instances are historical. `Age` describes the last valid
 pair, including after a fault; `Signals` is empty unless the state is current. A fault never
 silently reuses the last process value.

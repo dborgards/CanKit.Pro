@@ -246,6 +246,9 @@ public class ForeignSrdoMonitorTests : IClassFixture<VirtualAdapterFixture>
         var batch = rig.Monitor.Poll();
         batch.Observations.Should().Contain(x => x.Status == ForeignSrdoStatus.CaptureGap);
         batch.Observations.Should().NotContain(x => x.Status == ForeignSrdoStatus.Valid && x.HostTimestamp == rig.At(2));
+        var joined = batch.Observations.Single(x => x.HostTimestamp == rig.At(2));
+        joined.Status.Should().Be(ForeignSrdoStatus.StartupInverted);
+        joined.CaptureQuality.Should().Be(ForeignSrdoCaptureQuality.Incomplete);
         batch.CaptureQuality.Should().Be(ForeignSrdoCaptureQuality.Incomplete); batch.DroppedFrameCount.Should().Be(1);
         var recovered = batch.States.Single();
         recovered.CaptureQuality.Should().Be(ForeignSrdoCaptureQuality.Contiguous); recovered.IsCurrent.Should().BeTrue();
@@ -311,6 +314,33 @@ public class ForeignSrdoMonitorTests : IClassFixture<VirtualAdapterFixture>
         rig.Input.Add(0x101, new byte[] { 1, 2 }, stamp == 0 ? 0 : rig.At(stamp));
         var state = rig.State(); state.Status.Should().Be(ForeignSrdoStatus.TimingUnavailable); state.Signals.Should().BeEmpty();
         rig.Pair(11, 12); rig.Until(12); rig.State().IsCurrent.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Joining_A_New_Window_After_Gap_Or_Timing_Fault_Does_Not_Accuse_The_Producer(bool timingFault)
+    {
+        using var rig = new Rig();
+        rig.Pair(); rig.Until(2); var previous = rig.State();
+        if (timingFault)
+        {
+            rig.Input.Add(0x101, new byte[] { 1, 2 }, 0);
+            rig.State().Status.Should().Be(ForeignSrdoStatus.TimingUnavailable);
+        }
+        else { rig.Input.Next++; rig.Input.Drops++; }
+        rig.Add(0x102, 3, 254, 253); rig.Add(0x102, 4, 254, 253); rig.Until(4);
+        var batch = rig.Monitor.Poll();
+        batch.Observations.Where(x => x.HostTimestamp >= rig.At(3)).Should().OnlyContain(x => x.Status == ForeignSrdoStatus.StartupInverted);
+        var state = batch.States.Single();
+        state.Status.Should().Be(ForeignSrdoStatus.StartupInverted); state.IsCurrent.Should().BeFalse(); state.Signals.Should().BeEmpty();
+        state.EvaluationPeriodId.Should().NotBe(previous.EvaluationPeriodId);
+        state.CaptureQuality.Should().Be(timingFault ? ForeignSrdoCaptureQuality.Contiguous : ForeignSrdoCaptureQuality.Incomplete);
+        rig.Until(103);
+        rig.State().Status.Should().Be(ForeignSrdoStatus.SafeguardCycleExpired);
+        rig.Add(0x102, 104, 254, 253); rig.Until(104);
+        rig.State().Status.Should().Be(ForeignSrdoStatus.OutOfOrder);
+        rig.Pair(105, 106); rig.Until(106); rig.State().IsCurrent.Should().BeTrue();
     }
 
     [Fact]
