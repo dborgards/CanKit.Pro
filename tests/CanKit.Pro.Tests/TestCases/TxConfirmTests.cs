@@ -244,15 +244,15 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // across Transmit at all -- the deliberate decision recorded next to that lock (#53). What is
     // asserted here is the part this change is responsible for.
     //
-    // Causal, not timed: the claim is "Cancel() returned while the other send was still inside
-    // Transmit", not "within N ms" (unmeasurable on a shared runner, see #92). The 2 s allowance
-    // is slack for a slow runner -- with the coupling in place Cancel() cannot return until the
-    // release below, which happens afterwards.
+    // Causal, not timed: Cancel must return while the unrelated driver call is still held.
+    // Neither send has a real confirmation timer, and only the finally releases Transmit:
+    // a coupling therefore fails the hang guard instead of racing a self-release deadline.
     [Fact]
     public async Task Cancelling_One_Send_Does_Not_Block_On_An_Unrelated_Send_Inside_Transmit()
     {
         using var sender = OpenEcho();
         using var service = new CanBusService(sender);
+        service.ArmConfirmTimeout = static (_, _) => { }; // cancellation and the matched echo decide the outcomes
 
         using var cancelFirst = new CancellationTokenSource();
         sender.EchoAcceptedFrames = false;
@@ -266,24 +266,28 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         {
             if (f.ID != 0x611) return;
             reachedTransmit.Set();
-            stuckInTransmit.Wait(TimeSpan.FromSeconds(10));
+            stuckInTransmit.Wait();
         };
         var blocked = Task.Run(() => service.SendConfirmedAsync(
             CanFrame.Classic(0x611, new byte[] { 2 }), ShortTimeout));
 
-        reachedTransmit.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
-            "the second send must actually be parked in Transmit for this test to mean anything");
+        Task? cancelling = null;
+        try
+        {
+            reachedTransmit.Wait(ShortTimeout).Should().BeTrue(
+                "the second send must actually be parked in Transmit for this test to mean anything");
+            cancelling = Task.Run(() => cancelFirst.Cancel());
+            await cancelling.WaitAsync(ShortTimeout);
+            stuckInTransmit.IsSet.Should().BeFalse("Cancel returned before the unrelated driver call was released");
+        }
+        finally
+        {
+            sender.EchoAcceptedFrames = true;
+            stuckInTransmit.Set();
+            if (cancelling is not null) await cancelling.WaitAsync(ShortTimeout);
+            (await blocked.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue("the released second send receives its matching echo");
+        }
 
-        var cancelling = Task.Run(() => cancelFirst.Cancel());
-        var finished = await Task.WhenAny(cancelling, Task.Delay(TimeSpan.FromSeconds(2)));
-        var cancelReturnedWhileBlocked = ReferenceEquals(finished, cancelling);
-
-        stuckInTransmit.Set();
-        await cancelling;
-        await blocked;
-
-        cancelReturnedWhileBlocked.Should().BeTrue(
-            "cancelling one send must not wait on an unrelated send's driver call to return");
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
     }
 
