@@ -6,6 +6,10 @@ namespace CanKit.Pro.CANopen.Safety;
 /// events. All calls arrive on the actor loop. The node implements it; tests record it.</summary>
 internal interface ISrdoEngineHost
 {
+    /// <summary>Whether the host's EMCY producer is enabled. An error run is not consumed
+    /// while disabled, matching the node's RPDO reporting rule (#434). Actor loop only.</summary>
+    bool EmcyEnabled { get; }
+
     /// <summary>A single frame, sent at once: the global failsafe command.</summary>
     void Send(uint cobId, byte[] payload);
 

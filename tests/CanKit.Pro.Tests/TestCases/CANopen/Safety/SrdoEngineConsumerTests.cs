@@ -386,6 +386,35 @@ public class SrdoEngineConsumerTests : IDisposable
         _host.EmcyEnded.Should().Equal(new[] { 1, 1 }, "a rebuild ends the run too");
     }
 
+    [Fact]
+    public void Disabled_Emcy_Does_Not_Consume_A_Short_Run_And_Enabling_Reports_Exactly_Once()
+    {
+        StartConsumer();
+        _host.EmcyEnabled = false;
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.Emcys.Should().BeEmpty();
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "a disabled diagnostic never actuates a short pair");
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _host.EmcyEnabled = true;
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.Emcys.Should().Equal((ushort)0x8210);
+        _host.EmcyEnabled = false;
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.EmcyEnabled = true;
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.Emcys.Should().HaveCount(1, "toggling EMCY does not start a new already-reported error run");
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _host.EmcyEnded.Should().Equal(1);
+        _host.EmcyEnabled = false;
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _host.EmcyEnded.Should().Equal(new[] { 1 }, "an unreported disabled run has no reported cause to end");
+        _host.EmcyEnabled = true;
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
+        _host.Emcys.Should().HaveCount(2, "the completed run allows a fresh error");
+    }
+
     /// <summary>Bugbot on #417: entering Operational re-reads every SRDO without a change of its
     /// own, so it does not end a run of short pairs — the error goes on until a pair fits, as an
     /// RPDO's does — and a short pair after it is the same run.</summary>

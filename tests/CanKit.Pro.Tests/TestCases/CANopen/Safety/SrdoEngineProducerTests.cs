@@ -79,6 +79,7 @@ public class SrdoEngineProducerTests : IDisposable
             Sent.Add((cobId, payload));
             Log.Add($"send:{cobId:X3}");
         }
+        public bool EmcyEnabled { get; set; } = true;
         public void EmitEmcy(int srdoNumber, ushort errorCode) { Emcys.Add(errorCode); Log.Add($"emcy:{errorCode:X4}"); }
         /// <summary>The SRDOs whose reported error ended, in order (<c>emcy-ended:1</c> in <see cref="Log"/>).</summary>
         public readonly List<int> EmcyEnded = new();

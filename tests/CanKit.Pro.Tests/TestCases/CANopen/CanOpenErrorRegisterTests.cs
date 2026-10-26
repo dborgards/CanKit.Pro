@@ -173,6 +173,59 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(wire, 3, 0xFF00, 0x00);
     }
 
+    // #434: the SRDO engine must not latch a disabled error before the node can report it.
+    // RPDO is the existing contract; application EMCYs witness the exact wire sequence.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Length_Error_While_Emcy_Is_Disabled_Is_Reported_After_Enabling_For_Pdo_And_Srdo(bool srdo)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        using var device = OpenClocked(bus, Device, new ManualTimeSource(),
+            new CanOpenNodeOptions { SrdoCount = 1, WritableCommunicationParameters = true });
+        await WaitForStateAsync(device, NmtState.PreOperational);
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0, 0); od.AddU16(0x2001, 0, 0);
+        if (srdo)
+        {
+            device.Safety().ConfigureSrdoConsumer(1, new SrdoMapping().Add(0x2000, 0, 16).Add(0x2001, 0, 16),
+                TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(20), 0x123, 0x124);
+            device.Safety().CommitSafetyConfiguration();
+        }
+        else device.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0, 16).Add(0x2001, 0, 16));
+        await StartAsync(wire, device);
+        async Task Receive(bool shortFrame)
+        {
+            byte[] normal = shortFrame ? new byte[] { 1, 2 } : new byte[] { 1, 2, 3, 4 };
+            await Inject(device, srdo ? 0x123 : Rpdo1, normal);
+            if (srdo) await Inject(device, 0x124, SrdoFrames.Invert(normal));
+        }
+        od.WriteUnsigned(0x1014, 0, EmcyId | CanOpenCobId.InvalidBit);
+        await Receive(shortFrame: true);
+        await Receive(shortFrame: true);
+        od.WriteUnsigned(0x1014, 0, EmcyId);
+        await device.SendEmcyAsync(0xFF00, 0);
+        await ExpectEmcyAsync(wire, 1, 0xFF00, 0);
+        await Receive(shortFrame: true);
+        await device.SendEmcyAsync(0xFF01, 0);
+        await ExpectEmcyAsync(wire, 2, 0x8210, Communication);
+        await ExpectEmcyAsync(wire, 3, 0xFF01, Communication);
+        od.ReadUnsigned(0x2000, 0).Should().Be(0, "short frames remain unprocessed");
+        od.WriteUnsigned(0x1014, 0, EmcyId | CanOpenCobId.InvalidBit);
+        await Receive(shortFrame: true);
+        od.WriteUnsigned(0x1014, 0, EmcyId);
+        await Receive(shortFrame: true);
+        await device.SendEmcyAsync(0xFF02, 0);
+        await ExpectEmcyAsync(wire, 4, 0xFF02, Communication);
+        await Receive(shortFrame: false);
+        await device.SendEmcyAsync(0xFF03, 0);
+        await ExpectEmcyAsync(wire, 5, ErrorReset, 0);
+        await ExpectEmcyAsync(wire, 6, 0xFF03, 0);
+        wire.Count(EmcyId).Should().Be(6, "enabling an already reported run does not report it twice");
+    }
+
     // The rule across sources and the application: each new error is its own EMCY, the register
     // keeps bit 4 while any one is active, the application's bits are ORed in and never cleared by
     // the node, and the 0000h comes when the last communication error ends — with the

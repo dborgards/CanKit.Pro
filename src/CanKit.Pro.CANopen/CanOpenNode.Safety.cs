@@ -756,6 +756,8 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         }
     }
 
+    bool ISrdoEngineHost.EmcyEnabled => _emcyValid;
+
     void ISrdoEngineHost.EmitEmcy(int srdoNumber, ushort errorCode)
         => RaiseCommunicationError(CommunicationError.SrdoLength, srdoNumber, errorCode);
 

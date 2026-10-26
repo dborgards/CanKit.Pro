@@ -150,7 +150,9 @@ internal sealed partial class SrdoEngine
         // Emergency message with error code 8210h shall be produced" — once per run, like RPDOs.
         if (first.Length < rt.TotalBytes)
         {
-            if (!rt.ShortFrameReported)
+            // The node does not consume an RPDO error event while EMCY is disabled.
+            // Keep the SRDO event available too, so enabling mid-run reports the next pair.
+            if (!rt.ShortFrameReported && _host.EmcyEnabled)
             {
                 rt.ShortFrameReported = true;
                 _host.EmitEmcy(rt.Number, 0x8210);
