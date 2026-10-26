@@ -6035,7 +6035,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         using var bus = ControllableBus.Plain(NewSession());
         using var service = new CanBusService(bus);
-        var actor = clock.NewActor();
+        using var actor = clock.NewActor();
         var announce = TimeSpan.FromMilliseconds(80);
         using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
             ownsService: false, actor);
