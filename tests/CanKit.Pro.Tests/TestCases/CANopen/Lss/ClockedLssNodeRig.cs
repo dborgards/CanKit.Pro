@@ -57,27 +57,21 @@ internal sealed class ClockedLssNodeRig : IDisposable
     // SendAsync waits for each node's reply to drain, up to SchedulingBudget per node, and no
     // master timer is armed meanwhile, so the clock cannot move. A send that takes longer than one
     // budget in total while every node stays within its own is slow, not stuck.
-    private static readonly TimeSpan MaxVirtualRun = TimeSpan.FromMinutes(5);
-
     public async Task<T> RunAsync<T>(Task<T> operation, TimeSpan? stallBudget = null)
     {
         // TimeSpan * int does not exist on net48, hence the ticks.
         var stall = stallBudget ?? TimeSpan.FromTicks(LssTestTiming.SchedulingBudget.Ticks * (_nodes.Count + 1));
-        var started = _clock.Elapsed;
-        var lastProgress = DateTime.UtcNow;
+        var guard = new ClockedOperationGuard(MonotonicTimeSource.Instance, _clock.Elapsed, stall);
         while (!operation.IsCompleted)
         {
-            if (DateTime.UtcNow - lastProgress >= stall)
-                throw new TimeoutException("The clocked node scan made no progress.");
-            if (_clock.Elapsed - started >= MaxVirtualRun)
-                throw new TimeoutException("The clocked node scan did not settle in its virtual time budget.");
+            guard.Check(_clock.Elapsed);
             if (await _timers.NextTimerDelayAsync() is { } delay)
             {
                 await _clock.AdvanceAsync(delay);
-                if (delay > TimeSpan.Zero) lastProgress = DateTime.UtcNow;
+                guard.NoteAdvance(delay);
             }
             else
-                await Task.Yield();
+                await Task.Delay(1);
         }
         return await operation;
     }
@@ -112,7 +106,7 @@ internal sealed class ClockedLssNodeRig : IDisposable
             while (node.HasLssTransmitsInFlight)
             {
                 if (DateTime.UtcNow >= limit) throw new TimeoutException("The node reply did not drain.");
-                await Task.Yield();
+                await Task.Delay(1);
             }
         }
         return new TxConfirmation { Confirmed = true, HostHandoffTimestamp = sent, HostTransmitTimestamp = sent };

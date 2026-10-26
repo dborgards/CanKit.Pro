@@ -1942,7 +1942,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var oldSend = ordered
             ? slave.SendOrderedControlFrames(null, null, () =>
             {
-                if (Interlocked.Increment(ref confirmed) == 1) releaseBatch.Wait(LssTestTiming.SchedulingBudget);
+                if (Interlocked.Increment(ref confirmed) == 1) releaseBatch.Wait();
             }, (oldCobId, new byte[] { 1 }), (oldCobId, new byte[] { 2 }))
             : slave.SendEmcyAsync(0x1000, 1);
         Task disposing = Task.CompletedTask;
@@ -2400,7 +2400,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var blocked = slave.PostToActorAsync(() =>
         {
             entered.TrySetResult(true);
-            release.Wait(LssTestTiming.SchedulingBudget);
+            release.Wait();
         });
         try
         {

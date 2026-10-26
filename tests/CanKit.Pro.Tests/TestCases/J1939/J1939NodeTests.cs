@@ -6198,6 +6198,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             await clock.WaitUntilTimerArmedAsync(ownerActor, period, ShortTimeout, TimeSpan.FromMilliseconds(2));
             await clock.AdvanceAsync(period);
             await WaitForAnnouncesAsync(() => Volatile.Read(ref count), i + 1);
+            // The spectator may see the frame before its confirmation releases the schedule's
+            // single-flight gate. Do not advance the next tick while that send is still busy.
+            await WaitForAnnouncesAsync(() => owner.PeriodicEmissionsCompleted, i + 1);
         }
 
         // Peer with lower NAME claims the same SA. HandleIncomingAddressClaim's

@@ -25,13 +25,15 @@ internal sealed class ClockedLssRig : IDisposable
     private readonly List<Task> _deliveries = new();
     private readonly List<IDisposable> _responses = new();
     private readonly ProtocolActor _slaveTimers;
+    private readonly ITimeSource _schedulingTime;
     public VirtualClock Clock { get; } = new();
     public ProtocolActor Timers { get; }
     public LssTestService Service { get; } = new();
     public LssMaster Master { get; }
 
-    public ClockedLssRig(LssMasterOptions? options = null, bool parkReader = false)
+    public ClockedLssRig(LssMasterOptions? options = null, bool parkReader = false, ITimeSource? schedulingTime = null)
     {
+        _schedulingTime = schedulingTime ?? MonotonicTimeSource.Instance;
         Clock.Advance(TimeSpan.FromSeconds(1)); // Zero is reserved for an absent transport stamp.
         Timers = Clock.NewActor();
         _slaveTimers = Clock.NewActor();
@@ -50,10 +52,12 @@ internal sealed class ClockedLssRig : IDisposable
 
     public async Task<T> RunAsync<T>(Task<T> operation)
     {
-        var limit = DateTime.UtcNow + LssTestTiming.SchedulingBudget;
+        // A scan is many hand-offs. Host latency can stretch the total while every step still
+        // progresses. As in ClockedLssNodeRig, bound stalls separately from virtual run length.
+        var guard = new ClockedOperationGuard(_schedulingTime, Clock.Elapsed, LssTestTiming.SchedulingBudget);
         while (!operation.IsCompleted)
         {
-            if (DateTime.UtcNow >= limit) throw new TimeoutException("The clocked LSS operation did not settle.");
+            guard.Check(Clock.Elapsed);
             await FlushRepliesAsync();
             var next = await Timers.NextTimerDelayAsync();
             if (next is { } delay)
@@ -61,10 +65,11 @@ internal sealed class ClockedLssRig : IDisposable
                 var response = await _slaveTimers.NextTimerDelayAsync();
                 if (response is { } earlier && earlier < delay) delay = earlier;
                 await Clock.AdvanceAsync(delay);
+                guard.NoteAdvance(delay);
                 await FlushRepliesAsync();
             }
             else
-                await Task.Yield();
+                await Task.Delay(1);
         }
         return await operation;
     }
