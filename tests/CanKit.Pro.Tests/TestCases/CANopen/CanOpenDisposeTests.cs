@@ -255,7 +255,7 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         var busA = resources.Add(Open(session, 1));
         var rawBus = resources.Add(Open(session, 2));
-        using var node = (CanOpenNode)CanOpen.OpenNode(busA, nodeId: 0x01);
+        var node = (CanOpenNode)CanOpen.OpenNode(busA, nodeId: 0x01);
         using var release = new ManualResetEventSlim();
         var delivered = 0;
         var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -273,21 +273,29 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
 
         try
         {
-            SendHeartbeat(rawBus, 0x11, 0x05);
-            await entered.Task.WithTimeoutAsync(ShortTimeout);
-            SendHeartbeat(rawBus, 0x12, 0x05);
-            await WaitForQueuedEventAsync(node);
-            release.Set();
-            await disposed.Task.WithTimeoutAsync(ShortTimeout);
-            await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
+            using (node)
+            {
+                try
+                {
+                    SendHeartbeat(rawBus, 0x11, 0x05);
+                    await entered.Task.WithTimeoutAsync(ShortTimeout);
+                    SendHeartbeat(rawBus, 0x12, 0x05);
+                    await WaitForQueuedEventAsync(node);
+                    release.Set();
+                    await disposed.Task.WithTimeoutAsync(ShortTimeout);
+                    await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
 
-            Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
-            node.QueuedEventCount.Should().Be(0, "the stopped pump releases queued events");
+                    Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+                    node.QueuedEventCount.Should().Be(0, "the stopped pump releases queued events");
+                }
+                finally
+                {
+                    release.Set();
+                }
+            }
         }
         finally
         {
-            release.Set();
-            node.Dispose();
             await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
         }
     }
@@ -327,7 +335,7 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         var busA = resources.Add(Open(session, 1));
         var rawBus = resources.Add(Open(session, 2));
-        using var node = (CanOpenNode)CanOpen.OpenNode(busA, nodeId: 0x01);
+        var node = (CanOpenNode)CanOpen.OpenNode(busA, nodeId: 0x01);
         using var release = new ManualResetEventSlim();
         var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var delivered = 0;
@@ -342,22 +350,30 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
 
         try
         {
-            SendHeartbeat(rawBus, 0x11, 0x05);
-            await inHandler.Task.WithTimeoutAsync(ShortTimeout);
-            SendHeartbeat(rawBus, 0x12, 0x05);
-            await WaitForQueuedEventAsync(node);
+            using (node)
+            {
+                try
+                {
+                    SendHeartbeat(rawBus, 0x11, 0x05);
+                    await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+                    SendHeartbeat(rawBus, 0x12, 0x05);
+                    await WaitForQueuedEventAsync(node);
 
-            await Task.Run(node.Dispose).WithTimeoutAsync(ShortTimeout); // gives up after its pump join timeout
-            release.Set();
-            await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
+                    await Task.Run(node.Dispose).WithTimeoutAsync(ShortTimeout); // gives up after its pump join timeout
+                    release.Set();
+                    await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
 
-            Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
-            node.QueuedEventCount.Should().Be(0, "the stopped pump releases queued events");
+                    Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+                    node.QueuedEventCount.Should().Be(0, "the stopped pump releases queued events");
+                }
+                finally
+                {
+                    release.Set();
+                }
+            }
         }
         finally
         {
-            release.Set();
-            node.Dispose();
             await node.EventPumpCompletionForTests.WithTimeoutAsync(ShortTimeout);
         }
     }
