@@ -706,7 +706,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // see graceful termination, then tear down the actor (which cancels any pending deadlines
         // by observing ObjectDisposedException on their next actor.Schedule call), then finally
         // release the demux subscription and, if owned, the service.
-        try { _readerCts.Cancel(); } catch { /* nothing else to do */ }
+        try { _readerCts.Cancel(); }
+        catch (AggregateException ex)
+        {
+            // A foreign subscription may register a failing cancellation callback. Report it,
+            // but still release the inbox, actor and service below.
+            RaiseBackgroundException(ex);
+        }
 
         // Consumers awaiting ReceiveAsync/ReadAllAsync are let go before the reader task is torn
         // down -- otherwise a consumer could observe a canceled reader without any end signal. The

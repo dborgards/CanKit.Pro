@@ -599,7 +599,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public void A_Superseded_Switch_Delay_Does_Not_Start_Silence()
     {
         using var bench = NewBench();
-        using var slave = (CanOpenNode)bench.Slave(1, 5);
+        using var slave = bench.Slave(1, 5);
         slave.BeginLssSilence(generation: -1, TimeSpan.FromMilliseconds(10));
         slave.CompleteLssSilence(generation: -1);
         slave.LssState().Should().Be(LssState.Waiting);
@@ -1189,7 +1189,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public void A_Missing_Cob_Id_Is_Left_Alone()
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5);
+        var slave = bench.Slave(1, 5);
         slave.RetargetCobId(0x2000, 0x01, 0x180, 0x181).Should().BeFalse();
     }
 
@@ -1862,7 +1862,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var second = slave.SendEmcyAsync(0x2000, 0x02);
         _ = slave.State;
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
-        await ReleaseOldIdentitySend((CanOpenNode)slave, holding);
+        await ReleaseOldIdentitySend(slave, holding);
         await bench.WaitUntilAsync(() => slave.NodeId == 6 && slave.State == NmtState.PreOperational);
         await first;
         await second;
@@ -1890,7 +1890,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfiguration(bench, slave);
         (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
-        await ReleaseOldIdentitySend((CanOpenNode)slave, holding);
+        await ReleaseOldIdentitySend(slave, holding);
         await bench.WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
         await bench.WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(5)));
         await bench.AdvanceAsync(TimeSpan.FromMilliseconds(50));
@@ -2011,7 +2011,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfiguration(bench, slave);
         (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
-        await ReleaseOldIdentitySend((CanOpenNode)slave, holding);
+        await ReleaseOldIdentitySend(slave, holding);
         await bench.WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
         await first;
         await second;
@@ -2103,12 +2103,11 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false);
         using var cancel = new CancellationTokenSource();
         var first = node.SendEmcyAsync(0x1000, 1);
-        Task second = Task.CompletedTask;
         try
         {
             await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             if (alreadyCancelled) cancel.Cancel();
-            second = node.SendEmcyAsync(0x2000, 2, cancellationToken: cancel.Token);
+            var second = node.SendEmcyAsync(0x2000, 2, cancellationToken: cancel.Token);
             await node.PostToActorAsync(() => { });
             if (!alreadyCancelled) cancel.Cancel();
             release.TrySetResult(new TxConfirmation { Confirmed = true });
@@ -2262,7 +2261,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Held_Heartbeat_Uses_The_Node_Id_Active_After_Reset(byte nextNodeId)
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5);
+        var slave = bench.Slave(1, 5);
         var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
         using var heard = bench.Listen();
         await EnterConfiguration(bench, slave);
@@ -2324,7 +2323,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public async Task An_Ordered_Batch_Is_Suppressed_During_Silence_And_Can_Send_Afterwards()
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5);
+        var slave = bench.Slave(1, 5);
         using var heard = bench.Listen();
         await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
         var suppressed = new[] { (CanOpenCobId.SdoTx(5), new byte[] { 1 }), (CanOpenCobId.SdoTx(5), new byte[] { 2 }) };
@@ -2344,7 +2343,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var switching = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, _) =>
             {
@@ -2487,7 +2486,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public async Task Cancelling_A_Held_Nmt_Completes_It_And_Prevents_Transmission(bool alreadyCancelled)
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5);
+        var slave = bench.Slave(1, 5);
         var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
         using var heard = bench.Listen();
         await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
@@ -2510,7 +2509,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Held_Nmt_With_A_Live_Caller_Token_Is_Sent_And_Completes()
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5);
+        var slave = bench.Slave(1, 5);
         using var heard = bench.Listen();
         using var caller = new CancellationTokenSource();
         await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
@@ -2527,7 +2526,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Gfc_Suppressed_By_Lss_Is_Reported_As_A_Failure()
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, srdoCount: 1);
+        var slave = bench.Slave(1, 5, srdoCount: 1);
         var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
         slave.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
         await peer.SendNmtCommandAsync(NmtCommand.Start, 5);
@@ -2597,7 +2596,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         int calls = 0;
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, _) => Interlocked.Increment(ref calls) == 1 ? switching.Task : Task.CompletedTask,
         });
@@ -2622,7 +2621,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public async Task An_Srdo_Pair_Due_During_Lss_Silence_Is_Dropped_As_A_Unit()
     {
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, srdoCount: 1);
+        var slave = bench.Slave(1, 5, srdoCount: 1);
         var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
         await peer.SendNmtCommandAsync(NmtCommand.Start, 5);
         await WaitUntilAsync(() => slave.State == NmtState.Operational);
@@ -2655,7 +2654,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var secondStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int calls = 0;
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, _) =>
             {
@@ -2710,7 +2709,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         int calls = 0;
         using var bench = NewBench();
         using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = async (_, token) =>
             {
@@ -2778,7 +2777,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         int calls = 0;
         using var bench = NewBench();
         using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, token) =>
             {
@@ -2989,7 +2988,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var releaseHook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseCancellation = new ManualResetEventSlim();
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = async (_, token) =>
             {
@@ -3043,7 +3042,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int calls = 0;
         using var bench = NewBench();
-        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, token) =>
             {

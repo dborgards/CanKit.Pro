@@ -308,12 +308,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
                 // reserves and this subscription otherwise skips. 0x001 is the CiA DSP 304 global
                 // failsafe command, heard only by a node that has SRDOs.
-                return id == CanOpenCobId.NmtCommand
-                    || (id == CanOpenCobId.GlobalFailsafeCommand && _srdoCount > 0)
-                    || id is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
-                        or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce
-                    || (_lssEnabled && id == CanOpenCobId.LssMasterMessage)
-                    || (id >= 0x080 && id <= 0x77F);
+                return id switch
+                {
+                    CanOpenCobId.NmtCommand => true,
+                    CanOpenCobId.GlobalFailsafeCommand => _srdoCount > 0,
+                    CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
+                        or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce => true,
+                    CanOpenCobId.LssMasterMessage => _lssEnabled,
+                    >= 0x080 and <= 0x77F => true,
+                    _ => false,
+                };
             }, includeEcho: true);
         }
         catch
