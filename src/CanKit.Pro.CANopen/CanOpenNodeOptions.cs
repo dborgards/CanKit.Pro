@@ -27,6 +27,17 @@ public sealed class CanOpenNodeOptions
     /// <c>With</c> copy methods preserve this setting.</remarks>
     public bool EmitGuardingErrorEmcy { get; init; }
 
+    /// <summary>
+    /// Emit optional <c>8120h</c> EMCYs when the CAN controller is observed error passive.
+    /// Defaults to <see langword="false"/>. Uses the shared bus-state monitor (50 ms polling
+    /// plus error/fault hints). Once observed, the cause remains active through bus-off or an
+    /// unknown reading until error-active, error-warning or no-error state is observed.
+    /// It contributes bits 4 and 0 to <c>1001h</c>; the last repaired cause emits <c>0000h</c>.
+    /// </summary>
+    /// <remarks>Does not enable overrun or recovered-from-bus-off EMCYs. An initially passive
+    /// controller is reported when the node enters Pre-Operational. Existing <c>With</c> methods preserve this setting.</remarks>
+    public bool EmitControllerErrorEmcy { get; init; }
+
     /// <summary>Client-side SDO transfer timeout, applied to every request (initiate as well as
     /// each segment ack). In a block download it also restarts at every confirmed segment of a
     /// sub-block, so it measures the server's silence and not the time a sub-block takes to send.
@@ -330,6 +341,7 @@ public sealed class CanOpenNodeOptions
         var options = new CanOpenNodeOptions
         {
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
+            EmitControllerErrorEmcy = EmitControllerErrorEmcy,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

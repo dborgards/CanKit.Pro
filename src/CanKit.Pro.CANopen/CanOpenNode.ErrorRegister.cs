@@ -12,7 +12,7 @@ namespace CanKit.Pro.CANopen;
 //
 // One rule for every EMCY the node raises itself — RPDO and MPDO length 8210h, MPDO destination
 // 8230h, SYNC length 8240h, RPDO timeout 8250h, SRDO length 8210h, and opt-in heartbeat/life-
-// guarding timeout 8130h. Each is a communication error
+// guarding timeout 8130h or controller error-passive 8120h. Each is a communication error
 // (Table 26, 81xxh/82xxh under 80xxh "Monitoring"), so while one is active the register
 // carries bit 4, "Communication error", and bit 0, because "The generic error shall be signaled at
 // any error situation" (§7.5.2.2, Table 54). The error is active from the EMCY that reports it —
@@ -44,6 +44,7 @@ internal sealed partial class CanOpenNode
         SrdoLength = 5,
         HeartbeatTimeout = 6,
         LifeGuardingTimeout = 7,
+        ControllerPassive = 8,
     }
 
     // The application's part of 1001h: what its last transmitted SendEmcyAsync passed, or what it
@@ -189,6 +190,7 @@ internal sealed partial class CanOpenNode
     {
         _communicationErrors.Clear();
         _heartbeatEmcyTimeouts.Clear();
+        _controllerEmcyStarted = false;
         _heldNodeEmcy = false;
         if (_errorRegisterQueued) QueueErrorRegisterWrite(nodeBits: 0);
     }

@@ -93,6 +93,7 @@ namespace CanKit.Pro.CANopen
     {
         public CanOpenNodeOptions() { }
         public System.TimeSpan DefaultTpdoEventTimerInterval { get; init; }
+        public bool EmitControllerErrorEmcy { get; init; }
         public bool EmitGuardingErrorEmcy { get; init; }
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }

@@ -733,6 +733,7 @@ internal sealed partial class CanOpenNode
         _emcyCobId = word & CanOpenCobId.CanIdMask;
         _emcyValid = (word & CanOpenCobId.InvalidBit) == 0;
         ReportActiveGuardingErrors();
+        ReportActiveControllerError();
     }
 
     // §7.5.2.20: "The value 0 shall disable the producer heartbeat." The producer module follows
@@ -950,6 +951,7 @@ internal sealed partial class CanOpenNode
         _heartbeatProducer.RestartCycle();
         _ = EmitHeartbeat(0x00);
         if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
+        StartControllerErrorMonitoring();
     }
 
     private void AbortServerSessions(SdoAbortCode code)

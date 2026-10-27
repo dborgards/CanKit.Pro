@@ -671,8 +671,22 @@ producer mode. Multiple causes share the same register: only the last repaired c
 `0000h`, retaining application bits. An active timeout while `1014h` disables the producer is
 reported once if still active when it is enabled; a recovery while disabled is not replayed.
 NMT reset clears this monitoring error state without an error-reset EMCY. Existing options
-copy methods preserve the opt-in. Node-guarding-consumer timeouts and CAN controller states
-still raise events only; the remaining optional `8110h`/`8120h`/`8140h` feature work stays in #423.
+copy methods preserve the opt-in. Node-guarding-consumer timeouts remain event-only.
+
+`CanOpenNodeOptions.EmitControllerErrorEmcy = true` separately opts into `8120h` for an
+observed error-passive CAN controller. The default is `false` and adds no controller monitor.
+When enabled, the existing `BusStateMonitor` observes the bus on the node actor with 50 ms
+polling and error/fault hints. An initially passive controller is reported on entry to
+Pre-Operational. One observed passive lapse is one communication-error cause, shared with
+PDO, SRDO and guarding causes. Error-active, error-warning and no-error readings repair it;
+bus-off or unknown readings do not establish recovery and leave an already observed cause
+active. An initially bus-off controller does not imply an observed passive error. Producer
+disable/re-enable reports only still-active causes once. NMT reset clears the reported error
+history and rechecks the observed controller level on re-entry to Pre-Operational, so a still
+passive controller is reported again without a spurious `0000h`. Disposal (including failed
+construction) removes the monitor's handlers and timer. Existing option-copy methods retain
+this setting. Overrun (`8110h`) clear semantics and recovered-from-bus-off (`8140h`) sequencing
+remain separate scope decisions in #423; this option does not emit either code.
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
