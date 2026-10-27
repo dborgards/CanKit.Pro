@@ -1,3 +1,4 @@
+using System;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.Reliability;
 
@@ -10,6 +11,7 @@ internal sealed partial class CanOpenNode
     private BusStateMonitor? _controllerEmcyMonitor;
     private bool _controllerErrorPassive;
     private bool _controllerEmcyStarted;
+    private IDisposable? _controllerBaselineRetry;
 
     private void InitializeControllerErrorMonitor()
     {
@@ -20,9 +22,33 @@ internal sealed partial class CanOpenNode
 
     private void StartControllerErrorMonitoring()
     {
-        if (_controllerEmcyMonitor is not { } monitor) return;
+        if (_controllerEmcyMonitor is null) return;
+        _controllerBaselineRetry?.Dispose();
+        _controllerBaselineRetry = null;
+        _controllerEmcyStarted = false;
+
+        // A reset starts a new error history. Refresh both the physical sample and the monitor's
+        // comparison baseline: reusing CurrentState could replay a repaired pre-reset lapse, and
+        // sampling only the bus could hide the next passive edge behind the monitor's old cache.
+        BusStateMonitor fresh;
+        try
+        {
+            fresh = new BusStateMonitor(_service.Bus, _actor);
+        }
+        catch (Exception ex)
+        {
+            // A transient status-read failure must neither invent a fresh error nor remove the
+            // existing monitor. Retry on the same actor clock; normal teardown cancels this work.
+            RaiseBackgroundException(ex);
+            _controllerBaselineRetry = _actor.Schedule(System.TimeSpan.FromMilliseconds(50), StartControllerErrorMonitoring);
+            return;
+        }
+        fresh.StateChanged += OnControllerEmcyStateChanged;
+        DisposeControllerErrorMonitor();
+        _controllerEmcyMonitor = fresh;
+        _controllerErrorPassive = false;
         _controllerEmcyStarted = true;
-        ObserveControllerEmcyState(monitor.CurrentState);
+        ObserveControllerEmcyState(fresh.CurrentState);
     }
 
     private void OnControllerEmcyStateChanged(object? sender, BusStateChangedEventArgs e)
@@ -53,6 +79,8 @@ internal sealed partial class CanOpenNode
 
     private void DisposeControllerErrorMonitor()
     {
+        _controllerBaselineRetry?.Dispose();
+        _controllerBaselineRetry = null;
         if (_controllerEmcyMonitor is not { } monitor) return;
         monitor.StateChanged -= OnControllerEmcyStateChanged;
         monitor.Dispose();

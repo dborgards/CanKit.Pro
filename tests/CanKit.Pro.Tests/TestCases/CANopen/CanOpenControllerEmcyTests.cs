@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
@@ -18,6 +21,7 @@ public partial class CanOpenPdoEngineTests
         private readonly ICanBus _forwarder;
         internal readonly ControllableBus Bus;
         internal readonly CanBusService Service;
+        internal readonly ControllerBusService NodeService;
         internal readonly Wire Wire;
         internal readonly ManualTimeSource Clock = new();
         internal readonly ICanOpenNode Node;
@@ -35,7 +39,8 @@ public partial class CanOpenPdoEngineTests
             Service = new CanBusService(Bus);
             BaselineErrors = Bus.ErrorFrameSubscriberCount;
             BaselineFaults = Bus.FaultSubscriberCount;
-            Node = new CanOpenNode(Service, Device, new CanOpenNodeOptions
+            NodeService = new ControllerBusService(Service);
+            Node = new CanOpenNode(NodeService, Device, new CanOpenNodeOptions
             {
                 EmitControllerErrorEmcy = enabled,
                 EmitGuardingErrorEmcy = true,
@@ -57,6 +62,36 @@ public partial class CanOpenPdoEngineTests
             _forwarder.Dispose();
             Bus.Dispose();
         }
+    }
+
+    private sealed class ControllerBusService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        internal bool FailNextBusRead;
+        internal ControllerBusService(ICanBusService inner) => _inner = inner;
+        public ICanBus Bus
+        {
+            get
+            {
+                if (!FailNextBusRead) return _inner.Bus;
+                FailNextBusRead = false;
+                throw new InvalidOperationException("transient controller status read");
+            }
+        }
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        public void Dispose() { }
     }
 
     [Theory]
@@ -183,6 +218,65 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(rig.Wire, 2, 0x8120, Communication);
         rig.Observe(BusState.ErrActive);
         await ExpectEmcyAsync(rig.Wire, 3, ErrorReset, 0);
+        rig.Wire.Count(EmcyId).Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData(BusState.ErrActive, NmtCommand.ResetCommunication)]
+    [InlineData(BusState.ErrWarning, NmtCommand.ResetCommunication)]
+    [InlineData(BusState.None, NmtCommand.ResetCommunication)]
+    [InlineData(BusState.BusOff, NmtCommand.ResetCommunication)]
+    [InlineData(BusState.Unknown, NmtCommand.ResetCommunication)]
+    [InlineData(BusState.ErrActive, NmtCommand.ResetNode)]
+    [InlineData(BusState.ErrWarning, NmtCommand.ResetNode)]
+    [InlineData(BusState.None, NmtCommand.ResetNode)]
+    [InlineData(BusState.BusOff, NmtCommand.ResetNode)]
+    [InlineData(BusState.Unknown, NmtCommand.ResetNode)]
+    public async Task Controller_Emcy_Reset_Takes_A_Fresh_Baseline_Without_A_Poll_Or_Hint(BusState current, NmtCommand command)
+    {
+        using var rig = new ControllerEmcyRig();
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8120, Communication);
+        var beforeReset = rig.Clock.GetTimestamp();
+        rig.Bus.BusState = current;
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)command, Device);
+        await rig.Wire.WaitForCountAsync(CanOpenCobId.Heartbeat(Device), 2);
+        rig.Clock.GetTimestamp().Should().Be(beforeReset);
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1000, 0);
+        // The replacement monitor must also recognize the next passive edge, even if the
+        // pre-reset monitor's cached level was already passive.
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 3, 0x8120, Communication);
+        rig.Wire.Count(EmcyId).Should().Be(3);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Controller_Emcy_Reset_Retries_A_Failed_Baseline_And_Cleans_Up_The_Retry(bool disposeBeforeRetry)
+    {
+        using var rig = new ControllerEmcyRig();
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8120, Communication);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+        rig.NodeService.FailNextBusRead = true;
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        (await reported.Task.WaitAsync(ShortTimeout)).Message.Should().Be("transient controller status read");
+        if (disposeBeforeRetry)
+        {
+            rig.Node.Dispose();
+            rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
+            rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults);
+            return;
+        }
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1000, 0);
+        Advance(rig.Clock, rig.Node, TimeSpan.FromMilliseconds(51));
+        await ExpectEmcyAsync(rig.Wire, 3, 0x8120, Communication);
+        rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors + 1);
+        rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults + 1);
         rig.Wire.Count(EmcyId).Should().Be(3);
     }
 

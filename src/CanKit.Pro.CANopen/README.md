@@ -682,8 +682,11 @@ PDO, SRDO and guarding causes. Error-active, error-warning and no-error readings
 bus-off or unknown readings do not establish recovery and leave an already observed cause
 active. An initially bus-off controller does not imply an observed passive error. Producer
 disable/re-enable reports only still-active causes once. NMT reset clears the reported error
-history and rechecks the observed controller level on re-entry to Pre-Operational, so a still
-passive controller is reported again without a spurious `0000h`. Disposal (including failed
+history and takes a fresh physical sample and monitor baseline on re-entry to Pre-Operational,
+so a still passive controller is reported again without replaying a silently repaired lapse.
+Bus-off/unknown at this new baseline do not inherit a pre-reset passive cause. A failed status
+read is reported through BackgroundExceptionOccurred and retried after 50 ms on the actor
+clock; teardown also cancels this retry. Disposal (including failed
 construction) removes the monitor's handlers and timer. Existing option-copy methods retain
 this setting. Overrun (`8110h`) clear semantics and recovered-from-bus-off (`8140h`) sequencing
 remain separate scope decisions in #423; this option does not emit either code.
