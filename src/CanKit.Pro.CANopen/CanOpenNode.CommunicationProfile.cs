@@ -732,6 +732,7 @@ internal sealed partial class CanOpenNode
         uint word = _od.ReadUnsigned(Co.EmcyCobId, 0x00);
         _emcyCobId = word & CanOpenCobId.CanIdMask;
         _emcyValid = (word & CanOpenCobId.InvalidBit) == 0;
+        ReportActiveGuardingErrors();
     }
 
     // §7.5.2.20: "The value 0 shall disable the producer heartbeat." The producer module follows
@@ -761,6 +762,7 @@ internal sealed partial class CanOpenNode
             desired[nodeId] = TimeSpan.FromMilliseconds(ms);
         }
 
+        ReconcileHeartbeatEmcyWatches(desired);
         _heartbeatConsumer.Replace(desired);
     }
 

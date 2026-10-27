@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Emcy;
@@ -10,8 +11,9 @@ namespace CanKit.Pro.CANopen;
 // FR-CO-011, #379: the error register (1001h) and the EMCY error state of CiA 301 §7.2.7.1.
 //
 // One rule for every EMCY the node raises itself — RPDO and MPDO length 8210h, MPDO destination
-// 8230h, SYNC length 8240h, RPDO timeout 8250h, SRDO length 8210h. Each is a communication error
-// (Table 26, 82xxh "Protocol error" under 80xxh "Monitoring"), so while one is active the register
+// 8230h, SYNC length 8240h, RPDO timeout 8250h, SRDO length 8210h, and opt-in heartbeat/life-
+// guarding timeout 8130h. Each is a communication error
+// (Table 26, 81xxh/82xxh under 80xxh "Monitoring"), so while one is active the register
 // carries bit 4, "Communication error", and bit 0, because "The generic error shall be signaled at
 // any error situation" (§7.5.2.2, Table 54). The error is active from the EMCY that reports it —
 // "transmitted only once per 'error event'" — until its cause ends: a frame that fits, a SYNC of
@@ -40,6 +42,8 @@ internal sealed partial class CanOpenNode
         RpdoTimeout = 3,
         SyncLength = 4,
         SrdoLength = 5,
+        HeartbeatTimeout = 6,
+        LifeGuardingTimeout = 7,
     }
 
     // The application's part of 1001h: what its last transmitted SendEmcyAsync passed, or what it
@@ -58,6 +62,43 @@ internal sealed partial class CanOpenNode
 
     // The communication errors the node reported and whose cause has not ended. Actor loop only.
     private readonly HashSet<int> _communicationErrors = new();
+
+    // Last timeout of each still-silent watched producer; retained while EMCY is disabled so
+    // enabling the producer can report an error that is still active. Actor loop only.
+    private readonly Dictionary<byte, TimeSpan> _heartbeatEmcyTimeouts = new();
+
+    private void NoteHeartbeatForMonitoring(byte producer)
+    {
+        _heartbeatConsumer.NoteReceived(producer);
+        if (!_options.EmitGuardingErrorEmcy) return;
+        _heartbeatEmcyTimeouts.Remove(producer);
+        EndCommunicationError(CommunicationError.HeartbeatTimeout, producer);
+    }
+
+    private void ReconcileHeartbeatEmcyWatches(IReadOnlyDictionary<byte, TimeSpan> desired)
+    {
+        if (!_options.EmitGuardingErrorEmcy) return;
+        foreach (var previous in _heartbeatEmcyTimeouts
+                     .Where(WatchChanged)
+                     .ToList())
+        {
+            _heartbeatEmcyTimeouts.Remove(previous.Key);
+            EndCommunicationError(CommunicationError.HeartbeatTimeout, previous.Key);
+        }
+
+        bool WatchChanged(KeyValuePair<byte, TimeSpan> previous)
+            => !desired.TryGetValue(previous.Key, out var timeout) || timeout != previous.Value;
+    }
+
+    private void ReportActiveGuardingErrors()
+    {
+        if (!_options.EmitGuardingErrorEmcy || !_emcyValid) return;
+        foreach (var producer in _heartbeatEmcyTimeouts.Keys)
+            RaiseCommunicationError(CommunicationError.HeartbeatTimeout, producer, 0x8130);
+        if (_lifeGuardingOccurred)
+            RaiseCommunicationError(CommunicationError.LifeGuardingTimeout, 0, 0x8130);
+    }
+
 
     // Whether an EMCY was ever queued: from then on, a reset writes the register it leaves
     // behind, in its place on the chain. Before, 1001h holds what the node created it with, or
@@ -147,6 +188,7 @@ internal sealed partial class CanOpenNode
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
+        _heartbeatEmcyTimeouts.Clear();
         _heldNodeEmcy = false;
         if (_errorRegisterQueued) QueueErrorRegisterWrite(nodeBits: 0);
     }
