@@ -1116,6 +1116,9 @@ internal sealed partial class CanOpenNode
         SendNextBlockUploadSubBlock(session);
     }
 
+    // Actor-only snapshot: capture before a session ends to observe that batch's completion.
+    internal Task? SdoBlockUploadBatchForTests => _sdoBlockServer?.UploadBatch;
+
     private void SendNextBlockUploadSubBlock(SdoBlockServerSession session)
     {
         // Same ordering caveat as SendNextBlockDownloadSubBlock: send the whole sub-block
@@ -1183,7 +1186,7 @@ internal sealed partial class CanOpenNode
             if (firstSeqno == 1) session.HighestSeqnoHandedOver = 0;
         }
         int next = firstSeqno;
-        _ = SendOrderedControlFrames(onSendCompleted: null,
+        session.UploadBatch = SendOrderedControlFrames(onSendCompleted: null,
             shouldStop: () =>
             {
                 lock (session.SendGate)
@@ -1389,6 +1392,9 @@ internal sealed partial class CanOpenNode
 
     private sealed class SdoBlockServerSession
     {
+        // Written/read on the actor; a captured reference remains usable after session removal.
+        public Task? UploadBatch;
+
         public SdoBlockServerSession(bool inDownload, ushort index, byte subindex, byte[] buffer, int offset)
         {
             InDownload = inDownload;

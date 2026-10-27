@@ -41,6 +41,8 @@ public class CanOpenSdoBlockUploadServerTests
     [MemberData(nameof(SessionEndings))]
     public async Task A_Block_Upload_Whose_Session_Ends_Mid_SubBlock_Sends_No_More_Segments(string ending)
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-server-end-{Guid.NewGuid():N}");
         var toClient = new List<byte[]>();
         bus.OnTransmitting = frame =>
@@ -51,10 +53,12 @@ public class CanOpenSdoBlockUploadServerTests
         // test moves (#92): on the wall clock a short timeout races the thread pool from the
         // start frame to segment 1 -- fired first, it aborts a session with no batch running,
         // segment 1 never comes and the row fails without testing anything.
-        var clock = new ManualTimeSource();
-        var serverTimeout = TimeSpan.FromSeconds(30);
-        using var server = new CanOpenNode(new CanBusService(bus), ServerNodeId,
-            new CanOpenNodeOptions { SdoServerTimeout = serverTimeout }, ownsService: true, timeSource: clock);
+        // The protocol timeout must precede RawCan's unchanged one-second confirmation budget.
+        var serverTimeout = TimeSpan.FromMilliseconds(500);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
+        using var server = new CanOpenNode(service, ServerNodeId,
+            new CanOpenNodeOptions { SdoServerTimeout = serverTimeout }, ownsService: false,
+            timeSource: confirmationActor.TimeSource);
         var nmtSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         server.NmtCommandReceived += (_, e) =>
         {
@@ -64,12 +68,17 @@ public class CanOpenSdoBlockUploadServerTests
             Enumerable.Range(0, 140).Select(i => (byte)i).ToArray(), OdAccess.ReadOnly); // 20 segments
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
+        await server.PostToActorAsync(() => server.SdoBlockUploadBatchForTests.Should().BeNull());
 
         FromClient(bus, SdoBlockFrames.BuildBlockUploadInit(Index, 0x00, clientCrcSupported: false, blockSize: 20, pst: 0));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate response
         bus.DeferredEchoes.ReleaseAll();
+        await server.PostToActorAsync(() => server.SdoBlockUploadBatchForTests.Should().BeNull());
         FromClient(bus, SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, its confirmation held
+        var firstBatch = await CaptureUploadBatchAsync(server);
+        firstBatch.IsCompleted.Should().BeFalse("segment 1 is still waiting for its echo");
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
 
         // Each ending leaves a frame or an event behind that says the node has handled it; the
         // batch is only let go once that has arrived.
@@ -87,7 +96,8 @@ public class CanOpenSdoBlockUploadServerTests
             case "the server times out":
                 // The start frame re-armed the deadline before the batch was handed segment 1, so
                 // it is armed by now. Past it, any frame wakes the actor, which then fires it.
-                clock.Advance(serverTimeout + TimeSpan.FromMilliseconds(1));
+                await clock.AdvanceAsync(serverTimeout + TimeSpan.FromMilliseconds(250));
+                await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromMilliseconds(250), ShortTimeout);
                 bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
                     new byte[] { (byte)NmtCommand.EnterPreOperational, ServerNodeId }), isEcho: false);
                 await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout); // the timeout's abort
@@ -109,15 +119,19 @@ public class CanOpenSdoBlockUploadServerTests
         // The session is over; let the batch carry on. A batch that ignores that sends segment 2
         // at once (and one more at every later release, each waiting for the one before).
         bus.DeferredEchoes.ReleaseAll();
-        // No signal says "nothing more is coming", so this is a negative window: it can only pass
-        // falsely on a slow host, never fail falsely.
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
-        bus.DeferredEchoes.ReleaseAll();
+        await firstBatch.WithTimeoutAsync(ShortTimeout);
+        await server.PostToActorAsync(() => server.SdoBlockUploadBatchForTests.Should().BeNull(
+            "the ended or superseded session has no running upload batch"));
 
         byte[][] sent;
         lock (toClient) sent = toClient.ToArray();
         sent.Length.Should().Be(expected, "nothing follows the end of the session");
         sent.Count(f => (f[0] & 0x80) == 0 && f[0] is >= 2 and <= 20).Should().Be(0, "no further segment was sent");
+        if (ending == "the server times out")
+        {
+            sent[^1][0].Should().Be(SdoFrames.CsAbort);
+            SdoFrames.ReadAbortCode(sent[^1]).Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
+        }
     }
 
     public static TheoryData<string> MidBatchAcks => new() { "a partial ack", "an ack of segments not yet sent" };
@@ -134,6 +148,8 @@ public class CanOpenSdoBlockUploadServerTests
     [MemberData(nameof(MidBatchAcks))]
     public async Task An_Ack_While_The_SubBlock_Is_Still_Being_Sent_Stops_That_Batch(string ack)
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-server-midack-{Guid.NewGuid():N}");
         var toClient = new List<byte[]>();
         bus.OnTransmitting = frame =>
@@ -142,8 +158,9 @@ public class CanOpenSdoBlockUploadServerTests
         };
         // SdoServerTimeout runs on a clock nothing moves (#362, #405): a stall between the test's
         // frames longer than its 5 s would otherwise abort the session the test is driving.
-        using var server = new CanOpenNode(new CanBusService(bus), ServerNodeId,
-            new CanOpenNodeOptions(), ownsService: true, timeSource: new ManualTimeSource());
+        using var service = new ClockedCanBusService(bus, confirmationActor);
+        using var server = new CanOpenNode(service, ServerNodeId,
+            new CanOpenNodeOptions(), ownsService: false, timeSource: confirmationActor.TimeSource);
         var nmtSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         server.NmtCommandReceived += (_, e) =>
         {
@@ -153,12 +170,17 @@ public class CanOpenSdoBlockUploadServerTests
             Enumerable.Range(0, 140).Select(i => (byte)i).ToArray(), OdAccess.ReadOnly); // 20 segments
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
+        await server.PostToActorAsync(() => server.SdoBlockUploadBatchForTests.Should().BeNull());
 
         FromClient(bus, SdoBlockFrames.BuildBlockUploadInit(Index, 0x00, clientCrcSupported: false, blockSize: 20, pst: 0));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate response
         bus.DeferredEchoes.ReleaseAll();
+        await server.PostToActorAsync(() => server.SdoBlockUploadBatchForTests.Should().BeNull());
         FromClient(bus, SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, its confirmation held
+        var firstBatch = await CaptureUploadBatchAsync(server);
+        firstBatch.IsCompleted.Should().BeFalse("segment 1 is still waiting for its echo");
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
 
         // Segment 1 is out: a partial ack confirms it and asks for the rest again; an ack of all
         // 20 claims 19 that have not left. An NMT command behind the ack is handled behind it.
@@ -174,23 +196,33 @@ public class CanOpenSdoBlockUploadServerTests
         // need it would fail for want of scheduling.
         await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
 
-        // Let both sends run. The first batch, still sending, would go on with segment 2 at
-        // once and one more segment at every later release. No signal says "nothing more is
-        // coming", so this is a negative window: it can only pass falsely on a slow host.
-        for (var i = 0; i < 3; i++)
+        if (ack == "a partial ack")
+        {
+            var retransmission = await CaptureUploadBatchAsync(server);
+            retransmission.Should().NotBeSameAs(firstBatch);
+            bus.DeferredEchoes.ReleaseNext().Should().BeTrue(); // original segment 1
+            await firstBatch.WithTimeoutAsync(ShortTimeout);
+            for (var segment = 2; segment <= 20; segment++)
+            {
+                await bus.DeferredEchoes.WaitForEnqueuedAsync(segment + 2, ShortTimeout);
+                bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+            }
+            await retransmission.WithTimeoutAsync(ShortTimeout);
+        }
+        else
         {
             bus.DeferredEchoes.ReleaseAll();
-            await Task.Delay(TimeSpan.FromMilliseconds(100));
+            await firstBatch.WithTimeoutAsync(ShortTimeout);
+            await server.PostToActorAsync(() => server.SdoBlockUploadBatchForTests.Should().BeNull());
         }
-        bus.DeferredEchoes.ReleaseAll();
 
         byte[][] sent;
         lock (toClient) sent = toClient.ToArray();
         var seqnos = sent.Skip(1).Where(f => (f[0] & 0x7F) is >= 1 and <= 20).Select(f => f[0] & 0x7F).ToList();
         if (ack == "a partial ack")
         {
-            seqnos.Should().HaveCountGreaterThan(1, "the retransmission is under way");
-            seqnos.Should().Equal(Enumerable.Range(1, seqnos.Count),
+            seqnos.Should().HaveCount(20, "the retransmission completed the sub-block");
+            seqnos.Should().Equal(Enumerable.Range(1, 20),
                 "the first batch stopped at the ack, so each segment went out once, in order");
             return;
         }
@@ -302,4 +334,12 @@ public class CanOpenSdoBlockUploadServerTests
             throw new TimeoutException($"No frame on COB-ID 0x{CanOpenCobId.SdoTx(ServerNodeId):X3} within {ShortTimeout}.");
         return frame;
     }
+    private static async Task<Task> CaptureUploadBatchAsync(CanOpenNode server)
+    {
+        Task? batch = null;
+        await server.PostToActorAsync(() => batch = server.SdoBlockUploadBatchForTests);
+        batch.Should().NotBeNull("the first segment is on the wire, so its batch has started");
+        return batch!;
+    }
+
 }
