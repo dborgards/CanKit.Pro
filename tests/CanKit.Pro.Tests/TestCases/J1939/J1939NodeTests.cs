@@ -770,7 +770,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         using var clock = new VirtualClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var raw = new CanBusService(bus);
+        var confirmationActor = clock.NewActor();
+        using var raw = new ClockedCanBusService(bus, confirmationActor);
         using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
         var actor = clock.NewActor();
         var announce = TimeSpan.FromMilliseconds(80);
@@ -788,10 +789,18 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> failed = () => first.WithTimeout(ShortTimeout);
         await failed.Should().ThrowAsync<J1939NodeException>();
 
+        // Start the retry inside the predecessor's grace, so that grace can expire while
+        // its real one-second confirmation deadline is still in the future.
+        var halfGrace = TimeSpan.FromTicks(J1939NodeImpl.ClaimEchoGrace.Ticks / 2);
+        await clock.WaitUntilTimerArmedAsync(actor, J1939NodeImpl.ClaimEchoGrace, ShortTimeout);
+        await clock.AdvanceAsync(halfGrace);
+
         var retry = node.ClaimAddressAsync(0x11);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
-        await clock.WaitUntilTimerArmedAsync(actor, J1939NodeImpl.ClaimEchoGrace, ShortTimeout);
-        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, halfGrace, ShortTimeout);
+        await clock.AdvanceAsync(halfGrace);
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, halfGrace, ShortTimeout);
 
         await DrainObservedAsync(node, bus, AddressClaim(sourceAddress: 0x11, nameBytes));
         bus.DeferredEchoes.ReleaseAll().Should().Be(1);
