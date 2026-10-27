@@ -3,8 +3,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Pro.CANopen.Lss;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
+using CanKit.Pro.Tests.TestCases.CANopen.Lss;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases;
@@ -60,6 +62,35 @@ public class ClockedCanBusServiceTests : IClassFixture<VirtualAdapterFixture>
         (await service.Timers.NextTimerDelayAsync()).Should().BeNull("completed sends leave no timer to drive the rig");
         clock.Advance(TimeSpan.FromSeconds(3));
         await SettleAsync(service);
+    }
+
+    [Fact]
+    public async Task A_Confirmation_Removed_After_Timer_Selection_Cannot_Advance_Protocol_Time()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(VirtualAdapterFixture.NewSession("clocked-stale-confirm"));
+        using var bench = new ClockedLssBench("clocked-stale-confirm", new LssMasterOptions());
+        var service = bench.AddServiceForTests(bus);
+        Task<TxConfirmation>? send = null;
+        bool finished = false;
+        var started = bench.Now;
+        bench.AfterSettlingForTests = async () =>
+        {
+            bench.AfterSettlingForTests = null;
+            send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }));
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(1, HangGuard);
+            await ArmedAsync(service, TimeSpan.FromSeconds(1));
+        };
+        bench.AfterTimerSelectionForTests = async () =>
+        {
+            bench.AfterTimerSelectionForTests = null;
+            bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+            (await send!.WaitAsync(HangGuard)).Confirmed.Should().BeTrue();
+            (await service.Timers.NextTimerDelayAsync()).Should().BeNull();
+            finished = true;
+        };
+
+        await bench.WaitUntilAsync(() => finished).WaitAsync(HangGuard);
+        bench.Now.Should().Be(started, "an already removed confirmation deadline cannot choose a clock step");
     }
 
     private static async Task ArmedAsync(ClockedCanBusService service, TimeSpan delay)

@@ -53,18 +53,19 @@ internal sealed class ClockedCanBusService : ICanBusService
     public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        var deadline = new SendDeadline();
         var previous = _deadline.Value;
-        _deadline.Value = deadline;
         Interlocked.Increment(ref _pending);
         try
         {
-            return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+            using (var deadline = new SendDeadline())
+            {
+                _deadline.Value = deadline;
+                return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {
-            // Dispose before publishing quiescence: the next clock step must not see a stale timer.
-            deadline.Dispose();
+            // The using block has removed the timer before publishing quiescence.
             _deadline.Value = previous;
             Interlocked.Decrement(ref _pending);
         }

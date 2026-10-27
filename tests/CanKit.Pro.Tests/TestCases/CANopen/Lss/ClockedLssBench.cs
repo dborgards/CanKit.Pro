@@ -88,6 +88,11 @@ internal sealed class ClockedLssBench : IDisposable
 
     public string Session { get; }
 
+    // Deterministic boundaries for a send starting after settling and ending after timer selection.
+    public Func<Task>? AfterSettlingForTests { get; set; }
+    public Func<Task>? AfterTimerSelectionForTests { get; set; }
+    public ClockedCanBusService AddServiceForTests(ICanBus bus) => Track(NewService(bus, null));
+
     /// <summary>The master; each call drives the clock until it completes.</summary>
     public ILssMaster Master { get; }
 
@@ -345,7 +350,9 @@ internal sealed class ClockedLssBench : IDisposable
                 await EvaluateAsync().ConfigureAwait(false);
                 if (!ReleaseSatisfied()) return;
 
+                if (AfterSettlingForTests is { } afterSettling) await afterSettling().ConfigureAwait(false);
                 var due = await NextDueAsync().ConfigureAwait(false);
+                if (AfterTimerSelectionForTests is { } afterSelection) await afterSelection().ConfigureAwait(false);
                 if (due is not { } next) continue;
                 TimeSpan? cap;
                 lock (_requestGate)
@@ -466,12 +473,9 @@ internal sealed class ClockedLssBench : IDisposable
             if (next.Aborted) return null;
             if (next.Delay is { } delay && (earliest is null || delay < earliest)) earliest = delay;
         }
-        foreach (var service in Services())
-        {
-            var next = await AskAsync(service.Service.Timers).ConfigureAwait(false);
-            if (next.Aborted) return null;
-            if (next.Delay is { } delay && (earliest is null || delay < earliest)) earliest = delay;
-        }
+        // Confirmation deadlines must not choose a protocol step: a send can complete and
+        // remove that deadline after this snapshot. Non-parked sends settle before any advance;
+        // parked sends' timers are still fired by PokeAsync when protocol/test time advances.
         return (earliest, master.Delay is not null);
     }
 
