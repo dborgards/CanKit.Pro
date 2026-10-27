@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Emcy;
@@ -77,12 +78,16 @@ internal sealed partial class CanOpenNode
     private void ReconcileHeartbeatEmcyWatches(IReadOnlyDictionary<byte, TimeSpan> desired)
     {
         if (!_options.EmitGuardingErrorEmcy) return;
-        foreach (var previous in new List<KeyValuePair<byte, TimeSpan>>(_heartbeatEmcyTimeouts))
+        foreach (var previous in _heartbeatEmcyTimeouts
+                     .Where(WatchChanged)
+                     .ToList())
         {
-            if (desired.TryGetValue(previous.Key, out var timeout) && timeout == previous.Value) continue;
             _heartbeatEmcyTimeouts.Remove(previous.Key);
             EndCommunicationError(CommunicationError.HeartbeatTimeout, previous.Key);
         }
+
+        bool WatchChanged(KeyValuePair<byte, TimeSpan> previous)
+            => !desired.TryGetValue(previous.Key, out var timeout) || timeout != previous.Value;
     }
 
     private void ReportActiveGuardingErrors()

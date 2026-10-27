@@ -116,6 +116,27 @@ public partial class CanOpenPdoEngineTests
     }
 
     [Fact]
+    public async Task Heartbeat_Emcy_Rebuilding_Other_Watches_Preserves_An_Unchanged_Active_Lapse()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Device, clock, GuardingEmcyOptions);
+        await StartAsync(wire, node);
+        node.AddHeartbeatConsumer(1, TimeSpan.FromMilliseconds(100));
+        Advance(clock, node, TimeSpan.FromMilliseconds(101));
+        await ExpectEmcyAsync(wire, 1, 0x8130, Communication);
+        node.AddHeartbeatConsumer(2, TimeSpan.FromMilliseconds(200));
+        Settle(node);
+        await node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(wire, 2, 0x1000, Communication);
+        await Inject(node, CanOpenCobId.Heartbeat(1), (byte)NmtState.PreOperational);
+        await ExpectEmcyAsync(wire, 3, ErrorReset, 0);
+        wire.Count(EmcyId).Should().Be(3);
+    }
+
+    [Fact]
     public async Task Heartbeat_Emcy_Reconfiguration_Restarts_The_Watch_But_An_Unchanged_Write_Does_Not()
     {
         var session = NewSession();
