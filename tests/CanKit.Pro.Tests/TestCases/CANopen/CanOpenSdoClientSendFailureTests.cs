@@ -373,15 +373,18 @@ public class CanOpenSdoClientSendFailureTests
     [Fact]
     public async Task A_SubBlock_Longer_Than_The_Sdo_Timeout_Does_Not_Time_Out_Before_Its_Ack()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-long-{Guid.NewGuid():N}");
         var toServer = new List<byte[]>();
         bus.OnTransmitting = frame =>
         {
             if ((uint)frame.ID == CanOpenCobId.SdoRx(0x11)) lock (toServer) toServer.Add(frame.Data.ToArray());
         };
-        var clock = new ManualTimeSource();
-        using var client = new CanOpenNode(new CanBusService(bus), 0x7F,
-            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
+        using var client = new CanOpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(1) }, ownsService: false,
+            timeSource: confirmationActor.TimeSource);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
 
@@ -398,7 +401,9 @@ public class CanOpenSdoClientSendFailureTests
             await bus.DeferredEchoes.WaitForEnqueuedAsync(2 + segment, ShortTimeout);
             _ = client.State; // two actor round-trips: every timer the last step armed is armed
             _ = client.State;
-            clock.Advance(TimeSpan.FromMilliseconds(600));
+            await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
+            await clock.AdvanceAsync(TimeSpan.FromMilliseconds(600));
+            await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromMilliseconds(400), ShortTimeout);
             _ = client.State;
             _ = client.State;
             bus.DeferredEchoes.ReleaseNext();
@@ -423,10 +428,16 @@ public class CanOpenSdoClientSendFailureTests
     [Fact]
     public async Task A_Segment_Confirmed_After_The_Timeout_Does_Not_Revive_The_Block_Download()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-late-{Guid.NewGuid():N}");
-        var clock = new ManualTimeSource();
-        using var client = new CanOpenNode(new CanBusService(bus), 0x7F,
-            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
+        // Let the protocol timeout decide before RawCan's unchanged one-second deadline:
+        // a late but still transport-valid confirmation must not revive the transfer.
+        var sdoTimeout = TimeSpan.FromMilliseconds(500);
+        using var client = new CanOpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = sdoTimeout }, ownsService: false,
+            timeSource: confirmationActor.TimeSource);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
 
@@ -441,7 +452,9 @@ public class CanOpenSdoClientSendFailureTests
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, unconfirmed
         _ = client.State;
         _ = client.State;
-        clock.Advance(TimeSpan.FromMilliseconds(1500));
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
+        await clock.AdvanceAsync(sdoTimeout + TimeSpan.FromTicks(sdoTimeout.Ticks / 2));
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromMilliseconds(250), ShortTimeout);
         _ = client.State;
         _ = client.State;
         bus.DeferredEchoes.ReleaseNext();
