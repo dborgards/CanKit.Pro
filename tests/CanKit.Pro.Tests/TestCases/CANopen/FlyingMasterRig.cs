@@ -46,9 +46,21 @@ internal static class FlyingMasterRig
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
     internal static CanOpenNode OpenClockedNode(ICanBus bus, byte nodeId, ManualTimeSource clock,
-        CanOpenDeviceDescription? description = null, CanOpenNodeOptions? options = null)
-        => new(new CanBusService(bus), nodeId, options ?? new CanOpenNodeOptions(), ownsService: true,
-            timeSource: clock, description: description);
+        out ClockedCanBusService confirmations, CanOpenDeviceDescription? description = null,
+        CanOpenNodeOptions? options = null)
+    {
+        confirmations = new ClockedCanBusService(bus, clock, sendGate: clock);
+        try
+        {
+            return new CanOpenNode(confirmations, nodeId, options ?? new CanOpenNodeOptions(), ownsService: true,
+                timeSource: clock, description: description);
+        }
+        catch
+        {
+            confirmations.Dispose();
+            throw;
+        }
+    }
 
     /// <summary>Short times, still ordered so a better priority level always waits less than a
     /// worse one: the device slot is narrowed before the priority slot, or the write is rejected.</summary>
@@ -80,8 +92,8 @@ internal static class FlyingMasterRig
         var nodeBus = Open(session, 0);
         var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        var node = OpenClockedNode(nodeBus, LeftId, clock);
-        return new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft),
+        var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        return new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations),
             new FrameLog(nodeBus, peer), peer, nodeBus);
     }
 
@@ -111,9 +123,9 @@ internal static class FlyingMasterRig
         public CanOpenNode OpenPeerNode(byte nodeId, CanOpenDeviceDescription? description = null,
             CanOpenNodeOptions? options = null)
         {
-            var peer = OpenClockedNode(Peer, nodeId, Clock, description, options);
+            var peer = OpenClockedNode(Peer, nodeId, Clock, out var peerConfirmations, description, options);
             // Separate witness IDs prevent one peer's round trip spending another's signal.
-            Witness.Peers.Add(new ActorWitness(peer, _nodeBus, (byte)(0x7C - Witness.Peers.Count)));
+            Witness.Peers.Add(new ActorWitness(peer, _nodeBus, (byte)(0x7C - Witness.Peers.Count), peerConfirmations));
             return peer;
         }
 
@@ -134,9 +146,26 @@ internal static class FlyingMasterRig
         done().Should().BeTrue(why);
     }
 
-    internal static async Task AdvanceAsync(ManualTimeSource clock, ActorWitness left, ActorWitness? right, TimeSpan by)
+    internal static async Task AdvanceAsync(ManualTimeSource clock, ActorWitness left, ActorWitness? right, TimeSpan by,
+        Func<Task>? afterSettlingForTests = null)
     {
-        clock.Advance(by);
+        while (true)
+        {
+            await QuiesceAsync(left, right);
+            if (afterSettlingForTests is { } afterSettling)
+            {
+                afterSettlingForTests = null;
+                await afterSettling();
+            }
+            var roots = right is null ? new[] { left } : new[] { left, right };
+            var witnesses = roots.Concat(roots.SelectMany(w => w.Peers)).ToArray();
+            lock (clock)
+            {
+                if (witnesses.Any(w => w.PendingConfirmations != 0)) continue;
+                clock.Advance(by);
+                break;
+            }
+        }
         await QuiesceAsync(left, right);
     }
 
@@ -232,6 +261,7 @@ internal static class FlyingMasterRig
         private readonly ICanBus _peerBus;
         private readonly byte _witnessPeer;
         private readonly CanOpenNode _node;
+        private readonly ClockedCanBusService _confirmations;
         private readonly SemaphoreSlim _seen = new(0, int.MaxValue);
         private readonly HashSet<byte> _heldVerificationPeers = new();
         private int _markersSent;
@@ -241,6 +271,8 @@ internal static class FlyingMasterRig
         public Action? ContinuationObserved { get; set; }
         public Func<Task>? AfterRound { get; set; }
         public uint MarkerCobId => CanOpenCobId.Heartbeat(_witnessPeer);
+        public int PendingConfirmations => _confirmations.PendingConfirmations;
+        public Action? ConfirmationWaitObserved { get; set; }
         public int MarkersSent => Volatile.Read(ref _markersSent);
 
         public IDisposable HoldPeerSdoChannel(byte peer, SemaphoreSlim channel)
@@ -279,9 +311,10 @@ internal static class FlyingMasterRig
             public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
         }
 
-        public ActorWitness(CanOpenNode node, ICanBus peerBus, byte witnessPeer)
+        public ActorWitness(CanOpenNode node, ICanBus peerBus, byte witnessPeer, ClockedCanBusService confirmations)
         {
             _node = node;
+            _confirmations = confirmations;
             _peerBus = peerBus;
             _witnessPeer = witnessPeer;
             node.HeartbeatReceived += (_, e) =>
@@ -294,17 +327,20 @@ internal static class FlyingMasterRig
         {
             await PokeAsync();
             await PokeAsync();
+            await _confirmations.Timers.PostAsync(() => { });
+            await _confirmations.Timers.PostAsync(() => { });
         }
 
-        /// <summary>Until no send of the node has passed its transmit gate without reaching the bus.
-        /// A send a test double holds has reached it. The budget bounds a thread-pool hand-off.</summary>
+        /// <summary>Until the node's driver handoffs and actual confirmations finish.
+        /// A test double holding before RawCan has no confirmation deadline yet.</summary>
         public async Task SendsHandedOverAsync()
         {
             var deadline = DateTime.UtcNow + ShortTimeout;
-            while (_node.HasTransmitsAwaitingDriverForTests)
+            while (_node.HasTransmitsAwaitingDriverForTests || PendingConfirmations != 0)
             {
+                if (PendingConfirmations != 0) ConfirmationWaitObserved?.Invoke();
                 if (DateTime.UtcNow > deadline)
-                    throw new TimeoutException($"A send of the node did not reach the bus within {ShortTimeout}.");
+                    throw new TimeoutException($"A send of the node did not confirm within {ShortTimeout}.");
                 await Task.Delay(1);
             }
         }

@@ -529,7 +529,7 @@ public partial class CanOpenFlyingMasterTests
         var session = NewSession();
         using var bus = Open(session, 0);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations);
         var od = node.ObjectDictionary;
 
         Action count = () => od.WriteUnsigned(0x1F81, 0x00, 1);
@@ -575,8 +575,8 @@ public partial class CanOpenFlyingMasterTests
         using var bus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock, description);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
         await witness.SettleAsync();
 
         var od = node.ObjectDictionary;
@@ -599,8 +599,8 @@ public partial class CanOpenFlyingMasterTests
         """, ""));
         using var bus2 = Open(session + "b", 0);
         using var peer2 = Open(session + "b", 1);
-        using var node2 = OpenClockedNode(bus2, LeftId, clock, omitted);
-        var witness2 = new ActorWitness(node2, peer2, WitnessForLeft);
+        using var node2 = OpenClockedNode(bus2, LeftId, clock, out var node2Confirmations, omitted);
+        var witness2 = new ActorWitness(node2, peer2, WitnessForLeft, node2Confirmations);
         await witness2.SettleAsync();
         node2.ObjectDictionary.ReadUnsigned(Timing, 0x05).Should().Be(10u,
             "1F90h:05 is absent, so the default device slot stays");
@@ -614,8 +614,8 @@ public partial class CanOpenFlyingMasterTests
         using var bus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock, description);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
         await witness.SettleAsync();
         var od = node.ObjectDictionary;
 
@@ -757,9 +757,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        var gate = new ColdResetGate(new CanBusService(nodeBus));
+        var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock));
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
 
         Tighten(node);
         node.StartFlyingMaster(0, Heartbeat);
@@ -788,9 +788,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus));
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock));
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         var resets = 0;
         node.ApplicationReset += (_, _) => resets++;
 
@@ -858,12 +858,12 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus));
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock));
         arrange(gate);
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
         Exception? background = null;
         node.BackgroundExceptionOccurred += (_, ex) => background ??= ex;
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
 
         Tighten(node);
@@ -1162,9 +1162,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
 
         Tighten(node);
         node.StartFlyingMaster(0, Heartbeat);
@@ -1191,9 +1191,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
 
         Tighten(node);
@@ -1228,9 +1228,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus));
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock));
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         var resets = 0;
         node.ApplicationReset += (_, _) => resets++;
 
@@ -1259,9 +1259,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         var resets = 0;
         node.ApplicationReset += (_, _) => resets++;
 
@@ -1292,9 +1292,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
 
         Tighten(node);
@@ -1327,9 +1327,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
 
         Tighten(node);
         node.StartFlyingMaster(0, Heartbeat);
@@ -1372,8 +1372,8 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
         using var log = new FrameLog(peer);
 
         node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -1426,9 +1426,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1, Reject = true };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1, Reject = true };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
 
         Tighten(node);
         node.StartFlyingMaster(0, Heartbeat);
@@ -1453,9 +1453,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
 
         node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -1489,9 +1489,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
         var timedOut = new System.Collections.Concurrent.ConcurrentQueue<byte>();
         node.FlyingMasterChanged += (_, e) =>
@@ -1529,9 +1529,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
         var timedOut = new System.Collections.Concurrent.ConcurrentQueue<byte>();
         node.FlyingMasterChanged += (_, e) =>
@@ -1583,9 +1583,9 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1, Reject = true };
+        using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1, Reject = true };
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
 
         node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
@@ -1708,11 +1708,12 @@ public partial class CanOpenFlyingMasterTests
     /// or cancels that one send.</summary>
     private sealed class ColdResetGate : ICanBusService
     {
-        private readonly CanBusService _inner;
+        private readonly ClockedCanBusService _inner;
         private readonly TaskCompletionSource<bool> _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public ColdResetGate(CanBusService inner) => _inner = inner;
+        public ColdResetGate(ClockedCanBusService inner) => _inner = inner;
+        public ClockedCanBusService Confirmations => _inner;
 
         public bool Cancel { get; set; }
         public bool Reject { get; set; }
