@@ -527,6 +527,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task TwoPeers_ConcurrentCm_DifferentPgns_EachReassembledByPeerSa()
     {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var session = NewSession();
         using var receiverBus = Open(session, 0);
         using var peerABus = Open(session, 1);
@@ -541,28 +543,50 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var payloadA = RandomPayload(14, seed: 1);
         var payloadB = RandomPayload(14, seed: 2);
 
-        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: RoundtripOptions());
-
-        // Interleave DTs from the two peers to force the (SA, kind) routing to demux correctly.
-        async Task DriveAsync(ICanBus bus, byte peerSa, uint pgn, byte[] pdu)
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(receiverBus));
+        using var receiver = new J1939TpChannel(service, sourceAddress: receiverSa,
+            new J1939TpOptions(), ownsService: false, actor);
+        var grantA = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var grantB = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void ObserveGrant(object? _, CanReceiveDataView e)
         {
-            var rts = J1939TpFrames.BuildRts(pdu.Length, J1939TpFrames.TotalPackets(pdu.Length), 0xFF, pgn);
-            var cmId = J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa);
-            var dtId = J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa);
-            bus.Transmit(CanFrame.Classic((int)cmId, rts, isExtendedFrame: true));
-            // Small gap so both RTSs land before either DT stream begins.
-            await Task.Delay(20).ConfigureAwait(false);
-            for (byte sn = 1; sn <= J1939TpFrames.TotalPackets(pdu.Length); sn++)
-            {
-                var dt = J1939TpFrames.BuildDt(sn, pdu, (sn - 1) * J1939TpFrames.DtDataBytes);
-                bus.Transmit(CanFrame.Classic((int)dtId, dt, isExtendedFrame: true));
-                await Task.Delay(5).ConfigureAwait(false);
-            }
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            var data = e.CanFrame.Data.Span;
+            if (fields.SourceAddress != receiverSa || !J1939Pgn.IsTransportCm(fields.Pgn)
+                || data.Length < 8 || data[0] != J1939TpFrames.ControlCts) return;
+            uint pgn = J1939TpFrames.ReadDataPgn(data);
+            if (fields.DestinationAddress == peerASa && pgn == pgnA) grantA.TrySetResult(true);
+            if (fields.DestinationAddress == peerBSa && pgn == pgnB) grantB.TrySetResult(true);
+        }
+        peerABus.FrameObserved += ObserveGrant;
+        peerBBus.FrameObserved += ObserveGrant;
+        void Start(ICanBus bus, byte peerSa, uint pgn, byte[] payload)
+            => bus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa),
+                J1939TpFrames.BuildRts(payload.Length, J1939TpFrames.TotalPackets(payload.Length), 0xFF, pgn),
+                isExtendedFrame: true));
+        async Task DeliverAsync(ICanBus bus, byte peerSa, byte sn, byte[] payload)
+        {
+            var consumed = service.WaitUntilConsumedAsync(e => e.Frame.IsExtendedFrame
+                && J1939Id.Decompose((uint)e.Frame.ID).SourceAddress == peerSa
+                && J1939Pgn.IsTransportDt(J1939Id.Decompose((uint)e.Frame.ID).Pgn)
+                && e.Frame.Data.Span[0] == sn);
+            bus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa),
+                J1939TpFrames.BuildDt(sn, payload, (sn - 1) * J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+            await consumed.WaitAsync(ShortTimeout);
+            await clock.SettleAsync();
         }
 
-        var driveA = DriveAsync(peerABus, peerASa, pgnA, payloadA);
-        var driveB = DriveAsync(peerBBus, peerBSa, pgnB, payloadB);
-        await Task.WhenAll(driveA, driveB).WithTimeout(ShortTimeout);
+        Start(peerABus, peerASa, pgnA, payloadA);
+        Start(peerBBus, peerBSa, pgnB, payloadB);
+        await Task.WhenAll(grantA.Task, grantB.Task).WaitAsync(ShortTimeout);
+        // Both peers own RX sessions before either data stream starts. Each DT has reached
+        // the actor before the next peer is advanced, so host gaps cannot fake interleaving.
+        for (byte sn = 1; sn <= 2; sn++)
+        {
+            await DeliverAsync(peerABus, peerASa, sn, payloadA);
+            await DeliverAsync(peerBBus, peerBSa, sn, payloadB);
+        }
 
         var received = await CollectAsync(receiver, count: 2, ShortTimeout);
         received.Should().HaveCount(2);
@@ -572,6 +596,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         fromA.Payload.Should().Equal(payloadA);
         fromB.Pgn.Should().Be(pgnB);
         fromB.Payload.Should().Equal(payloadB);
+        clock.Elapsed.Should().Be(TimeSpan.Zero);
     }
 
     // Bugbot 3596183535: BAM announce TX rejection must fail SendBamAsync (not only raise
@@ -675,6 +700,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(true)]
     public async Task SendCm_CancelInFlight_SendsConnectionAbort(bool sendRole)
     {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var peerBus = Open(session, 1);
@@ -683,8 +710,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x72;
         const uint pgn = 0xFE71u;
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa,
-            options: new J1939TpOptions { SendConnectionAbortRole = sendRole });
+        var options = new J1939TpOptions { SendConnectionAbortRole = sendRole };
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            options, ownsService: true, actor);
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -709,6 +737,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // registered yet, so no Connection Abort is due and the test fails for the wrong reason),
         // and spending 50 ms per run when the RTS is out in microseconds.
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
         cts.Cancel();
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
@@ -719,6 +748,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // reserved 0xFF otherwise (#350).
         abort.Should().Equal(new byte[] { 0xFF, (byte)J1939TpAbortReason.NoResourcesAvailable,
             sendRole ? (byte)0xFC : (byte)0xFF, 0xFF, 0xFF, 0x71, 0xFE, 0x00 });
+        clock.Elapsed.Should().Be(TimeSpan.Zero, "host scheduling does not consume a CM deadline");
     }
 
     // #356 T-7: every frame goes to the driver from its own pool work item, so the abort of a CM
@@ -1236,6 +1266,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Cm_Sender_PrematureEom_FailsSend()
     {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var peerBus = Open(session, 1);
@@ -1245,7 +1277,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xFE91u;
         var payload = RandomPayload(14, seed: 91);
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+        var options = new J1939TpOptions();
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            options, ownsService: true, actor);
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1263,6 +1297,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var sendTask = sender.SendCmAsync(pgn, destinationAddress: peerSa, payload);
 
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
 
         // Inject EOM before any CTS — sender is still in WaitCts.
         var eom = J1939TpFrames.BuildEomAck(payload.Length, J1939TpFrames.TotalPackets(payload.Length), pgn);
@@ -1276,6 +1311,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abortFrame[1].Should().Be(7, "an EndOfMsgAck out of turn is a sequence the software cannot recover from (#33)");
+        clock.Elapsed.Should().Be(TimeSpan.Zero, "host scheduling does not consume a CM deadline");
     }
 
     // Bugbot 3596489078: EOM totals that disagree with the session must fail SendCmAsync
@@ -2057,6 +2093,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Cm_Receiver_CapsCtsGrant_AtPeerRtsMaximum()
     {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var session = NewSession();
         using var receiverBus = Open(session, 0);
         using var peerBus = Open(session, 1);
@@ -2065,7 +2103,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x97;
         const uint pgn = 0xFE96u;
 
-        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa); // cap 16 by default
+        var options = new J1939TpOptions();
+        using var receiver = new J1939TpChannel(new CanBusService(receiverBus), sourceAddress: receiverSa,
+            options, ownsService: true, actor);
 
         var grants = new List<byte>();
         var firstGrantSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2095,6 +2135,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // Wait for the first (already capped) grant before feeding the first block's DTs —
         // deterministic, no fixed delay that could race the receiver's RTS processing.
         await firstGrantSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        lock (grants) grants[0].Should().Be(2, "the initial CTS honors the peer's advertised maximum");
+        await clock.WaitUntilTimerArmedAsync(actor, options.T2, ShortTimeout);
         peerBus.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa),
             J1939TpFrames.BuildDt(1, pdu, 0), isExtendedFrame: true));
@@ -2109,6 +2151,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             grants.Should().OnlyContain(g => g == 2,
                 "every CTS grant must be capped at the originator's RTS-advertised maximum of 2");
         }
+        clock.Elapsed.Should().Be(TimeSpan.Zero, "host scheduling does not consume a CM deadline");
     }
 
     // #356 (j1939tp-M3 of the 2026-10-21 review): every CTS the receiver sends starts T2 for the
@@ -2499,6 +2542,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Cm_Sender_CtsForAPacketAlreadySent_AbortsWithRetransmitLimit()
     {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var peerBus = Open(session, 1);
@@ -2508,8 +2553,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xFEA1u;
         var payload = RandomPayload(21, seed: 161); // 3 packets
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa,
-            options: new J1939TpOptions().With(maxRetransmitRequests: 0));
+        var options = new J1939TpOptions().With(maxRetransmitRequests: 0);
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            options, ownsService: true, actor);
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var firstDtSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2531,11 +2577,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var send = sender.SendCmAsync(pgn, destinationAddress: peerSa, payload);
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
 
         var cmId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, senderSa);
         // Grant one packet, take it, then ask for it again.
         peerBus.Transmit(CanFrame.Classic(cmId, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn), isExtendedFrame: true));
         await firstDtSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
         peerBus.Transmit(CanFrame.Classic(cmId, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn), isExtendedFrame: true));
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
@@ -2544,6 +2592,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abort[1].Should().Be(5, "J1939-21 table 7: maximum retransmit request limit reached (#33)");
+        clock.Elapsed.Should().Be(TimeSpan.Zero, "host scheduling does not consume a CM deadline");
     }
 
     // A packet already received, repeated while a later one is expected, is a duplicate
@@ -2653,6 +2702,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Cm_Sender_CtsForPacketZero_AbortsAsBadSequenceNumber()
     {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var peerBus = Open(session, 1);
@@ -2662,7 +2713,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xFEA5u;
         var payload = RandomPayload(14, seed: 165); // 2 packets
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+        var options = new J1939TpOptions();
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            options, ownsService: true, actor);
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2679,6 +2732,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var send = sender.SendCmAsync(pgn, destinationAddress: peerSa, payload);
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
 
         // The codec refuses to build this CTS; a nonconforming peer sends it anyway.
         var cts = J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn);
@@ -2692,6 +2746,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abort[1].Should().Be(7, "J1939-21 table 7: bad sequence number (#33)");
+        clock.Elapsed.Should().Be(TimeSpan.Zero, "host scheduling does not consume a CM deadline");
     }
 
     // -----------------------------------------------------------------------------------
