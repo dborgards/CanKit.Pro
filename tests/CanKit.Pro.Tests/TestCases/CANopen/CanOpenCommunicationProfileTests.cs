@@ -1104,8 +1104,11 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
     {
         var session = NewSession();
         using var bus = ControllableBus.DeferredEchoCapable(session);
-        var clock = new ManualTimeSource();
-        using var slave = new CanOpenNode(new CanBusService(bus), Slave, new CanOpenNodeOptions(), ownsService: true, clock);
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
+        using var service = new ClockedCanBusService(bus, confirmationActor);
+        using var slave = new CanOpenNode(service, Slave, new CanOpenNodeOptions(), ownsService: false,
+            timeSource: confirmationActor.TimeSource);
         var wire = new List<byte>();
         bus.OnTransmitting = frame =>
         {
@@ -1135,9 +1138,15 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
 
         // The restarted cycle's first tick becomes due while the boot-up is still unconfirmed:
         // it waits behind it in the chain instead of reaching the wire on its own.
-        clock.Advance(interval);
+        Task beforeTick = Task.CompletedTask;
+        await slave.PostToActorAsync(() => beforeTick = slave.HeartbeatSendChain);
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
+        await clock.AdvanceAsync(interval);
         await SettleAsync();
-        await Task.Delay(100);
+        Task pendingTick = Task.CompletedTask;
+        await slave.PostToActorAsync(() => pendingTick = slave.HeartbeatSendChain);
+        pendingTick.Should().NotBeSameAs(beforeTick, "the due producer tick was appended to the heartbeat chain");
+        pendingTick.IsCompleted.Should().BeFalse("the tick is still behind the held boot-up confirmation");
         bus.TransmitCount.Should().Be(transmitsBefore + 1, "a tick due while the boot-up is unconfirmed waits behind it");
 
         bus.DeferredEchoes.ReleaseNext().Should().BeTrue();                                   // boot-up confirmed
@@ -1145,8 +1154,10 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
         await bus.DeferredEchoes.WaitForEnqueuedAsync(enqueuedBefore + 3, ShortTimeout);      // the tick, one interval after the boot-up
         bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await pendingTick.WithTimeoutAsync(ShortTimeout);
         await SettleAsync();
-        await Task.Delay(100);
+        await slave.PostToActorAsync(() => slave.HeartbeatSendChain.Should().BeSameAs(pendingTick,
+            "settling the completed chain queued no additional heartbeat"));
         bus.DeferredEchoes.Enqueued.Should().Be(enqueuedBefore + 3,
             "one tick: the one due during the hook was replaced by the restarted cycle's, not fired in addition to it");
         lock (wire) wire.Should().Equal(new byte[] { 0x00, (byte)NmtState.PreOperational, (byte)NmtState.PreOperational },
