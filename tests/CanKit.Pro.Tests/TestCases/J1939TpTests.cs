@@ -1935,14 +1935,15 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Cts_Hold_Before_The_Block_End_Confirmation_Starts_T4_Not_T3()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        using var service = new FrameConsumptionCountingBusService(new ClockedCanBusService(bus, confirmationActor));
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC7u;
         var payload = RandomPayload(21, seed: 8); // three packets, granted one at a time
         var options = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
             ownsService: false, actor);
@@ -1951,6 +1952,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var send = sender.SendCmAsync(pgn, peerSa, payload);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         bus.RaiseObserved(PeerCm(peerSa, subjectSa,
             J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
@@ -1985,14 +1987,15 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Cts_Hold_In_The_Middle_Of_A_Block_Is_Ignored()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        using var service = new FrameConsumptionCountingBusService(new ClockedCanBusService(bus, confirmationActor));
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC5u;
         var payload = RandomPayload(21, seed: 9); // three packets, two granted in the first block
         var options = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
             ownsService: false, actor);
@@ -2001,6 +2004,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var send = sender.SendCmAsync(pgn, peerSa, payload);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         bus.RaiseObserved(PeerCm(peerSa, subjectSa,
             J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
@@ -2036,14 +2040,15 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Hold_Behind_A_Stashed_Cts_Does_Not_Outlive_The_Block_It_Was_Sent_In()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        using var service = new FrameConsumptionCountingBusService(new ClockedCanBusService(bus, confirmationActor));
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC9u;
         var payload = RandomPayload(21, seed: 11); // three packets, granted one at a time
         var options = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
             ownsService: false, actor);
@@ -2059,6 +2064,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var send = sender.SendCmAsync(pgn, peerSa, payload);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         bus.RaiseObserved(PeerCm(peerSa, subjectSa,
             J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
@@ -4135,9 +4141,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Late_Announce_Confirmation_Of_A_Cancelled_Bam_Does_Not_Start_The_Next_Bam()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         const uint pgn = 0xFECAu;
         var payload = RandomPayload(21, seed: 250); // 3 TP.DT
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         var dtSequence = new List<byte>();
@@ -4146,12 +4153,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             if (J1939Id.Decompose((uint)frame.ID).Pgn != J1939Pgn.TpDt) return;
             lock (dtSequence) dtSequence.Add(frame.Data.Span[0]);
         };
-        using var service = new CanBusService(bus);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
         using var sender = BamSenderOn(actor, service);
 
         using var cts = new CancellationTokenSource();
         var first = sender.SendBamAsync(pgn, payload, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // its announce, confirmation held
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         cts.Cancel();
         Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
@@ -4183,14 +4191,15 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Cts_Hold_While_The_Last_Packet_Is_Outstanding_Leaves_T3_For_The_EndOfMsgAck()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        using var service = new FrameConsumptionCountingBusService(new ClockedCanBusService(bus, confirmationActor));
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC4u;
         var payload = RandomPayload(14, seed: 11); // two packets, one block
         var options = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
             ownsService: false, actor);
@@ -4199,6 +4208,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var send = sender.SendCmAsync(pgn, peerSa, payload);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         bus.RaiseObserved(PeerCm(peerSa, subjectSa,
             J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
@@ -4258,9 +4268,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Late_Dt_Confirmation_Of_A_Cancelled_Bam_Does_Not_Advance_The_Next_Bam()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         const uint pgn = 0xFEC9u;
         var payload = RandomPayload(21, seed: 252); // 3 TP.DT
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         var dtSequence = new List<byte>();
@@ -4269,12 +4280,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             if (J1939Id.Decompose((uint)frame.ID).Pgn != J1939Pgn.TpDt) return;
             lock (dtSequence) dtSequence.Add(frame.Data.Span[0]);
         };
-        using var service = new CanBusService(bus);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
         using var sender = BamSenderOn(actor, service);
 
         using var cts = new CancellationTokenSource();
         var first = sender.SendBamAsync(pgn, payload, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // announce
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
         await clock.AdvanceAsync(InFlightSpacing);
@@ -4309,6 +4321,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Late_Announce_Confirmation_Of_A_Cancelled_Bam_With_No_Successor_Sends_Nothing()
     {
         using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         var actor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         var dtCount = 0;
@@ -4316,12 +4329,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         {
             if (J1939Id.Decompose((uint)frame.ID).Pgn == J1939Pgn.TpDt) Interlocked.Increment(ref dtCount);
         };
-        using var service = new CanBusService(bus);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
         using var sender = BamSenderOn(actor, service);
 
         using var cts = new CancellationTokenSource();
         var send = sender.SendBamAsync(0xFECAu, RandomPayload(21, seed: 253), cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // its announce, confirmation held
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         cts.Cancel();
         Func<Task> cancelled = async () => await send.WithTimeout(ShortTimeout);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
@@ -4413,10 +4427,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Stale_Bam_Dt_Continuation_Leaves_The_Successor_Bam_Of_Its_Key_Alone()
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         const uint pgn = 0xFEC9u;
         var stalePayload = RandomPayload(21, seed: 367); // three packets each
         var payload = RandomPayload(21, seed: 368);
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         var dts = new List<byte[]>();
@@ -4424,12 +4439,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         {
             if (J1939Id.Decompose((uint)frame.ID).Pgn == J1939Pgn.TpDt) lock (dts) dts.Add(frame.Data.ToArray());
         };
-        using var service = new CanBusService(bus);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
         using var sender = BamSenderOn(actor, service);
 
         using var cts = new CancellationTokenSource();
         var first = sender.SendBamAsync(pgn, stalePayload, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the announce
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout); // DT 1 is next
         var stale = (await actor.PostAsync(() => sender.CaptureTxContinuations(J1939Pgn.GlobalAddress, pgn))).NextBamDt;
@@ -4458,12 +4474,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("T4Expired")]
     public async Task A_Stale_Cm_Continuation_Leaves_The_Successor_Session_Of_Its_Key_Alone(string continuation)
     {
+        using var clock = new VirtualClock();
+        var confirmationActor = clock.NewActor();
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC9u;
         var stalePayload = RandomPayload(21, seed: 369); // three packets each
         var payload = RandomPayload(21, seed: 370);
         var options = new J1939TpOptions().With(t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
-        using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         var dts = new List<byte[]>();
@@ -4474,7 +4491,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             if (framePgn == J1939Pgn.TpDt) lock (dts) dts.Add(frame.Data.ToArray());
             else if (framePgn == J1939Pgn.TpCm && frame.Data.Span[0] == J1939TpFrames.ControlAbort) Interlocked.Increment(ref aborts);
         };
-        using var service = new CanBusService(bus);
+        using var service = new ClockedCanBusService(bus, confirmationActor);
         using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options, ownsService: false, actor);
         static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
             => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
@@ -4484,6 +4501,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var cancel = new CancellationTokenSource();
         var first = sender.SendCmAsync(pgn, peerSa, stalePayload, cancel.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        await clock.WaitUntilTimerArmedAsync(confirmationActor, TimeSpan.FromSeconds(1), ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         var staleDts = new List<byte[]>();
         if (continuation == "NextCmDt")
