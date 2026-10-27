@@ -30,42 +30,37 @@ public class ProtocolActorShutdownPolicyTests
         var errors = new List<Exception>();
         actor.BackgroundExceptionOccurred += (_, ex) => errors.Add(ex);
         Task? queued = null;
-        IDisposable? cancelled = null;
-        try
+        using var cancelled = await actor.PostAsync(() =>
         {
-            await actor.PostAsync(() =>
+            queued = actor.PostAsync(() => seen.Add("accepted"));
+            actor.Schedule(TimeSpan.Zero, () =>
             {
-                queued = actor.PostAsync(() => seen.Add("accepted"));
-                actor.Schedule(TimeSpan.Zero, () =>
-                {
-                    seen.Add("due");
-                    actor.Schedule(TimeSpan.Zero, () => seen.Add("rearmed"));
-                });
-                actor.Schedule(TimeSpan.FromDays(1), () => seen.Add("future"));
-                cancelled = actor.Schedule(TimeSpan.Zero, () => seen.Add("cancelled"));
-                cancelled.Dispose();
-                actor.Dispose();
-                ((Action)(() => actor.Post(() => { }))).Should().Throw<ObjectDisposedException>();
-                ((Action)(() => actor.Schedule(TimeSpan.Zero, () => { }))).Should().Throw<ObjectDisposedException>();
-            }).WaitAsync(TimeSpan.FromSeconds(10));
-            actor.Dispose(); // Joins the loop, witnessing every callback and the final drain.
-            await queued!.WaitAsync(TimeSpan.FromSeconds(10));
-            if (policy == ActorShutdownPolicy.DiscardPendingTimers)
-            {
-                seen.Should().Equal("accepted");
-                errors.Should().BeEmpty();
-                actor.PendingTimerCount.Should().Be(0, "the joined loop has retired and released pending timers");
-            }
-            else
-            {
-                seen.Should().Equal("accepted", "due");
-                errors.Should().ContainSingle().Which.Should().BeOfType<ObjectDisposedException>();
-            }
-        }
-        finally
+                seen.Add("due");
+                actor.Schedule(TimeSpan.Zero, () => seen.Add("rearmed"));
+            });
+            actor.Schedule(TimeSpan.FromDays(1), () => seen.Add("future"));
+            var handle = actor.Schedule(TimeSpan.Zero, () => seen.Add("cancelled"));
+            handle.Dispose();
+            actor.Dispose();
+            ((Action)(() => actor.Post(() => { }))).Should().Throw<ObjectDisposedException>();
+            ((Action)(() => actor.Schedule(TimeSpan.Zero, () => { }))).Should().Throw<ObjectDisposedException>();
+            return handle;
+        }).WaitAsync(TimeSpan.FromSeconds(10));
+        actor.Dispose(); // Joins the loop, witnessing every callback and the final drain.
+        await queued!.WaitAsync(TimeSpan.FromSeconds(10));
+        if (policy == ActorShutdownPolicy.DiscardPendingTimers)
         {
-            cancelled?.Dispose(); // Retired timer handles remain safe to dispose again.
+            seen.Should().Equal("accepted");
+            errors.Should().BeEmpty();
+            actor.PendingTimerCount.Should().Be(0, "the joined loop has retired and released pending timers");
         }
+        else
+        {
+            seen.Should().Equal("accepted", "due");
+            errors.Should().ContainSingle().Which.Should().BeOfType<ObjectDisposedException>();
+        }
+        // The using declaration disposes the retired handle a second time, including on assertion failure.
+
     }
 
     [Theory]
