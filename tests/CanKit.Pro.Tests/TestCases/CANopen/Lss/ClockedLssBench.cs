@@ -18,8 +18,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Lss;
 /// <summary>
 /// The LSS master and real <see cref="CanOpenNode"/> slaves on the virtual bus, with every timer on
 /// one manual clock that only the test moves (#362). Response, identification and Fastscan windows,
-/// the slave's two switch delays, heartbeats and SDO timeouts are all measured on it, and the bus
-/// stamps frames on it too, so a slow host can delay a reply but never make it late.
+/// the slave's two switch delays, heartbeats, SDO and RawCan confirmation timeouts all use it.
+/// The bus stamps frames on it too, so a slow host can delay a reply but never make it late.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -64,6 +64,7 @@ internal sealed class ClockedLssBench : IDisposable
     private readonly List<Request> _requests = new();
     private readonly List<IDisposable> _disposables = new();
     private readonly List<TrackedNode> _nodes = new();
+    private readonly List<(ClockedCanBusService Service, TrackedNode? Node)> _services = new();
     private Task? _pump;
     private int _masterOps;
     private int _nextListener;
@@ -79,7 +80,7 @@ internal sealed class ClockedLssBench : IDisposable
         _masterTimers = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, _clock, null);
         options.Validate();
         var bus = Track(VirtualAdapterFixture.Open(Session, 0));
-        var service = new GatedService(new CanBusService(bus, _clock.GetTimestamp), this, tracked: null);
+        var service = new GatedService(NewService(bus, null), this, tracked: null);
         var master = Track(new LssMaster(service, options, ownsService: true, _masterTimers));
         Master = new ClockedMaster(this, master, drive: true);
         Undriven = new ClockedMaster(this, master, drive: false);
@@ -120,14 +121,26 @@ internal sealed class ClockedLssBench : IDisposable
         Func<ICanBusService, ICanBusService>? wrap = null, CanOpenDeviceDescription? description = null)
     {
         var bus = Track(VirtualAdapterFixture.Open(Session, channel));
-        ICanBusService inner = new CanBusService(bus, _clock.GetTimestamp);
-        if (wrap is not null) inner = wrap(inner);
         var tracked = new TrackedNode();
+        ICanBusService inner = NewService(bus, tracked);
+        if (wrap is not null) inner = wrap(inner);
         var service = new GatedService(inner, this, tracked);
         var node = new CanOpenNode(service, nodeId, options, ownsService: true, _clock, description);
         tracked.Node = node;
         lock (_nodes) _nodes.Add(tracked);
         return Track(node);
+    }
+
+    private ClockedCanBusService NewService(ICanBus bus, TrackedNode? node)
+    {
+        var service = new ClockedCanBusService(bus, _clock);
+        lock (_services) _services.Add((service, node));
+        return service;
+    }
+
+    private (ClockedCanBusService Service, TrackedNode? Node)[] Services()
+    {
+        lock (_services) return _services.Where(s => !s.Service.IsDisposed).ToArray();
     }
 
     /// <summary>
@@ -354,6 +367,10 @@ internal sealed class ClockedLssBench : IDisposable
                     // A frame handed to a node since the bench was found settled may still be on
                     // its way to the actor; moving the clock now would let it act late.
                     if (Version() != version) continue;
+                    // A new send can start after SettleCoreAsync. Its registration and this
+                    // check share the send gate; do not overtake a newly outstanding echo.
+                    if (Services().Any(s => s.Service.PendingConfirmations != 0
+                            && !(s.Node is { } owner && (owner.Gone || owner.Parked())))) continue;
                     _clock.Advance(step);
                 }
                 if (step > TimeSpan.Zero) MarkProgress();
@@ -408,6 +425,12 @@ internal sealed class ClockedLssBench : IDisposable
                 if (!await WaitForAsync(() => node.Gone || node.Node!.IsLssSettledForTests || node.Parked()).ConfigureAwait(false))
                     return null;
             }
+            // Driver handoff is not confirmation: freeze time until RawCan has consumed the
+            // matching echo (or accepted the non-echo send). Only explicit parked nodes opt out.
+            foreach (var service in Services())
+                if (!await WaitForAsync(() => service.Service.IsDisposed || service.Service.PendingConfirmations == 0
+                        || service.Node is { } owner && (owner.Gone || owner.Parked())).ConfigureAwait(false))
+                    return null;
             long after = Version();
             if (after == before) return after;
             MarkProgress();
@@ -443,6 +466,12 @@ internal sealed class ClockedLssBench : IDisposable
             if (next.Aborted) return null;
             if (next.Delay is { } delay && (earliest is null || delay < earliest)) earliest = delay;
         }
+        foreach (var service in Services())
+        {
+            var next = await AskAsync(service.Service.Timers).ConfigureAwait(false);
+            if (next.Aborted) return null;
+            if (next.Delay is { } delay && (earliest is null || delay < earliest)) earliest = delay;
+        }
         return (earliest, master.Delay is not null);
     }
 
@@ -469,6 +498,8 @@ internal sealed class ClockedLssBench : IDisposable
         for (int round = 0; round < 2; round++)
         {
             if (!await PokeOneAsync(_masterTimers).ConfigureAwait(false)) return;
+            foreach (var service in Services())
+                if (!await PokeOneAsync(service.Service.Timers).ConfigureAwait(false)) return;
             foreach (var node in Nodes())
                 if (!node.Gone && !await PokeOneAsync(node.Node!.ActorForTests).ConfigureAwait(false)) return;
         }
