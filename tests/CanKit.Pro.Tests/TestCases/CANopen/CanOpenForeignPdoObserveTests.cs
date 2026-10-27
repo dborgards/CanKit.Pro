@@ -778,14 +778,14 @@ PDOMapping=0
         var file = PeerFile();
         tool.BindPeerDeviceDescription(Peer, file);
         using var entered = new SemaphoreSlim(0, 1);
-        using var release = new SemaphoreSlim(0, 1);
+        using var release = new ManualResetEventSlim();
         var held = 0;
         using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
         {
             if (index == 0x1800 && sub == 1 && System.Threading.Interlocked.Exchange(ref held, 1) == 0)
             {
                 entered.Release();
-                release.Wait(ShortTimeout);
+                release.Wait();
             }
             if (index is >= 0x1400 and <= 0x1403 or >= 0x1800 and <= 0x1803)
                 return index == 0x1800 && sub == 1 ? U32(Tpdo1) : null;
@@ -795,26 +795,33 @@ PDOMapping=0
 
         var firstSink = new ListSink();
         var secondSink = new ListSink();
-        var first = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, firstSink);
-        entered.Wait(ShortTimeout).Should().BeTrue();
-        // The call runs synchronously up to its first wait, which is the per-peer queue while the
-        // first observation holds it; without that queue it would take the peer's busy SDO
-        // channel right here, be refused, and complete from the file. So when it returns, the
-        // overlap under test has happened -- no sleep is needed to let it queue.
-        var second = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0xA5 }, file, secondSink);
-        second.IsCompleted.Should().BeFalse("the second observation waits for the first");
-        release.Release();
+        try
+        {
+            var first = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, firstSink);
+            entered.Wait(ShortTimeout).Should().BeTrue();
+            // The call runs synchronously up to its first wait, which is the per-peer queue while the
+            // first observation holds it; without that queue it would take the peer's busy SDO
+            // channel right here, be refused, and complete from the file. So when it returns, the
+            // overlap under test has happened -- no sleep is needed to let it queue.
+            var second = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0xA5 }, file, secondSink);
+            second.IsCompleted.Should().BeFalse("the second observation waits for the first");
+            release.Set();
 
-        var firstResult = await first.WithTimeoutAsync(ShortTimeout);
-        var secondResult = await second.WithTimeoutAsync(ShortTimeout);
-        firstResult.Observations.Should().ContainSingle();
-        firstResult.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
-        firstSink.Signals.Should().ContainSingle();
-        firstSink.Signals[0].Value.Should().Equal(0x5A);
-        secondResult.Observations.Should().ContainSingle();
-        secondResult.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
-        secondSink.Signals.Should().ContainSingle();
-        secondSink.Signals[0].Value.Should().Equal(0xA5);
+            var firstResult = await first.WithTimeoutAsync(ShortTimeout);
+            var secondResult = await second.WithTimeoutAsync(ShortTimeout);
+            firstResult.Observations.Should().ContainSingle();
+            firstResult.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+            firstSink.Signals.Should().ContainSingle();
+            firstSink.Signals[0].Value.Should().Equal(0x5A);
+            secondResult.Observations.Should().ContainSingle();
+            secondResult.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+            secondSink.Signals.Should().ContainSingle();
+            secondSink.Signals[0].Value.Should().Equal(0xA5);
+        }
+        finally
+        {
+            release.Set();
+        }
     }
 
     [Fact]
