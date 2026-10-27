@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -8,6 +9,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Lss;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
@@ -29,7 +31,7 @@ public partial class CanOpenPdoEngineTests
         internal readonly int BaselineErrors;
         internal readonly int BaselineFaults;
 
-        internal ControllerEmcyRig(BusState initial = BusState.ErrActive, bool enabled = true)
+        internal ControllerEmcyRig(BusState initial = BusState.ErrActive, bool enabled = true, bool unconfiguredLss = false)
         {
             var session = NewSession();
             Bus = ControllableBus.Plain(session);
@@ -41,10 +43,11 @@ public partial class CanOpenPdoEngineTests
             BaselineErrors = Bus.ErrorFrameSubscriberCount;
             BaselineFaults = Bus.FaultSubscriberCount;
             NodeService = new ControllerBusService(Service);
-            Node = new CanOpenNode(NodeService, Device, new CanOpenNodeOptions
+            Node = new CanOpenNode(NodeService, unconfiguredLss ? CanOpenCobId.UnconfiguredNodeId : Device, new CanOpenNodeOptions
             {
                 EmitControllerErrorEmcy = enabled,
                 EmitGuardingErrorEmcy = true,
+                Lss = unconfiguredLss ? new LssSlaveOptions() : null,
             }, ownsService: false, Clock);
             Settle(Node);
         }
@@ -301,6 +304,70 @@ public partial class CanOpenPdoEngineTests
         await rig.Node.SendEmcyAsync(0x1000, 0);
         await ExpectEmcyAsync(rig.Wire, 2, 0x1000, 0);
         rig.Wire.Count(EmcyId).Should().Be(2);
+    }
+
+    [Theory]
+    [InlineData("CompleteColdReset")]
+    [InlineData("CompleteForcedReset")]
+    public async Task Controller_Emcy_Unexpected_Read_Does_Not_Interrupt_Self_Reset_Echo_Bookkeeping(string complete)
+    {
+        using var rig = new ControllerEmcyRig();
+        var node = (CanOpenNode)rig.Node;
+        int resets = 0;
+        node.ApplicationReset += (_, _) => Interlocked.Increment(ref resets);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+        rig.NodeService.NextBusReadFailure = new InvalidOperationException("unexpected reset baseline");
+        await node.PostToActorAsync(() =>
+        {
+            typeof(CanOpenNode).GetField("_coldResetPending", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .SetValue(node, true);
+            typeof(CanOpenNode).GetMethod(complete, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(node, null);
+            ((bool)typeof(CanOpenNode).GetField("_ignoreBroadcastResetEcho", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(node)!).Should().BeTrue();
+        });
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeOfType<InvalidOperationException>();
+        await Inject(node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, 0);
+        await node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 0);
+        Volatile.Read(ref resets).Should().Be(1, "the broadcast echo must not apply the self-reset again");
+    }
+
+    [Fact]
+    public async Task Controller_Emcy_Unexpected_Read_Does_Not_Lose_The_Lss_Configure_Reply()
+    {
+        using var rig = new ControllerEmcyRig(unconfiguredLss: true);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+        await Inject(rig.Node, CanOpenCobId.LssMasterMessage, LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0);
+        rig.NodeService.NextBusReadFailure = new InvalidOperationException("unexpected LSS baseline");
+        await Inject(rig.Node, CanOpenCobId.LssMasterMessage, LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0);
+        await rig.Wire.WaitForCountAsync(CanOpenCobId.LssSlaveMessage, 1);
+        rig.Wire.Payloads(CanOpenCobId.LssSlaveMessage)[0].Should().Equal(LssCommand.ConfigureNodeId, 0, 0, 0, 0, 0, 0, 0);
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeOfType<InvalidOperationException>();
+        rig.Node.NodeId.Should().Be(Device);
+        rig.Node.State.Should().Be(NmtState.PreOperational);
+    }
+
+    [Fact]
+    public async Task Controller_Emcy_Queued_Baseline_Does_Not_Read_After_Actor_Disposal()
+    {
+        using var rig = new ControllerEmcyRig();
+        var node = (CanOpenNode)rig.Node;
+        var failure = new InvalidOperationException("must remain unread");
+        rig.NodeService.NextBusReadFailure = failure;
+        Task? tail = null;
+        await node.PostToActorAsync(() =>
+        {
+            typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(node, new object[] { CanOpenCobId.NmtCommand,
+                    new byte[] { (byte)NmtCommand.ResetCommunication, Device }, false });
+            tail = node.PostToActorAsync(() => rig.NodeService.NextBusReadFailure.Should().BeSameAs(failure));
+            node.Dispose();
+        });
+        await tail!.WaitAsync(ShortTimeout);
+        rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
+        rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults);
     }
 
     [Fact]

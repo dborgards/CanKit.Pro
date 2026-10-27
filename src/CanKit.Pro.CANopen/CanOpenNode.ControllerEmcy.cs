@@ -24,6 +24,15 @@ internal sealed partial class CanOpenNode
     private void StartControllerErrorMonitoring()
     {
         if (_controllerEmcyMonitor is null) return;
+        _controllerEmcyStarted = false;
+        // Diagnostic reads are a separate actor job. Even an unexpected adapter exception must
+        // not interrupt the reset caller's echo bookkeeping or an LSS configure-node-id reply.
+        _actor.Post(RefreshControllerErrorBaseline);
+    }
+
+    private void RefreshControllerErrorBaseline()
+    {
+        if (_controllerEmcyMonitor is null) return;
         _controllerBaselineRetry?.Dispose();
         _controllerBaselineRetry = null;
         _controllerEmcyStarted = false;
@@ -41,7 +50,7 @@ internal sealed partial class CanOpenNode
             // A transient status-read failure must neither invent a fresh error nor remove the
             // existing monitor. Retry on the same actor clock; normal teardown cancels this work.
             RaiseBackgroundException(ex);
-            _controllerBaselineRetry = _actor.Schedule(System.TimeSpan.FromMilliseconds(50), StartControllerErrorMonitoring);
+            _controllerBaselineRetry = _actor.Schedule(System.TimeSpan.FromMilliseconds(50), RefreshControllerErrorBaseline);
             return;
         }
         fresh.StateChanged += OnControllerEmcyStateChanged;
