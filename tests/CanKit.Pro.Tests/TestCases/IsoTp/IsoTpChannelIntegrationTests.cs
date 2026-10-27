@@ -2674,28 +2674,25 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
                 var receive = channel.ReceiveAsync();
                 var late = new LateDisposal(disposeAsLateAsPossible, send1);
 
-                try
+                callerCts.Cancel();
+                var queued = await Assert.ThrowsAsync<OperationCanceledException>(() => send2.WaitAsync(ShortTimeout));
+                queued.CancellationToken.Should().Be(callerCts.Token);
+
+                // Observe Dispose as part of the test sequence. The using block and outer finally
+                // own failure cleanup, releasing the actor before the channel is torn down.
+                var disposal = Task.Run(async () =>
                 {
-                    callerCts.Cancel();
-                    var queued = await Assert.ThrowsAsync<OperationCanceledException>(() => send2.WaitAsync(ShortTimeout));
-                    queued.CancellationToken.Should().Be(callerCts.Token);
-                }
-                finally
-                {
-                    var disposal = Task.Run(async () =>
-                    {
-                        await late.MayStartAsync().ConfigureAwait(false);
-                        channel.Dispose();
-                    });
-                    // Released only once the disposal is seen to have begun (#400): released earlier,
-                    // send1 can begin and complete before Dispose reaches it, and then it owes no
-                    // ObjectDisposedException.
-                    await late.WaitForAsync(receive);
-                    late.ActorReleased();
-                    release.Set();
-                    await busy;
-                    await disposal.WaitAsync(ShortTimeout);
-                }
+                    await late.MayStartAsync().ConfigureAwait(false);
+                    channel.Dispose();
+                });
+                // Released only once the disposal is seen to have begun (#400): released earlier,
+                // send1 can begin and complete before Dispose reaches it, and then it owes no
+                // ObjectDisposedException.
+                await late.WaitForAsync(receive);
+                late.ActorReleased();
+                release.Set();
+                await busy;
+                await disposal.WaitAsync(ShortTimeout);
 
                 await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
             }
