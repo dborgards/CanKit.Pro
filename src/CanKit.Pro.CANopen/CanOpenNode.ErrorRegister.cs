@@ -190,7 +190,7 @@ internal sealed partial class CanOpenNode
     {
         _communicationErrors.Clear();
         _heartbeatEmcyTimeouts.Clear();
-        _controllerEmcyStarted = false;
+        InvalidateControllerErrorBaseline();
         _heldNodeEmcy = false;
         if (_errorRegisterQueued) QueueErrorRegisterWrite(nodeBits: 0);
     }

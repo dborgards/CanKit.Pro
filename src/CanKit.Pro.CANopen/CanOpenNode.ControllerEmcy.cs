@@ -13,6 +13,7 @@ internal sealed partial class CanOpenNode
     private bool _controllerErrorPassive;
     private bool _controllerEmcyStarted;
     private IDisposable? _controllerBaselineRetry;
+    private long _controllerBaselineGeneration;
 
     private void InitializeControllerErrorMonitor()
     {
@@ -21,18 +22,28 @@ internal sealed partial class CanOpenNode
         _controllerEmcyMonitor.StateChanged += OnControllerEmcyStateChanged;
     }
 
+    private void InvalidateControllerErrorBaseline()
+    {
+        _controllerEmcyStarted = false;
+        _controllerBaselineGeneration++;
+        _controllerBaselineRetry?.Dispose();
+        _controllerBaselineRetry = null;
+    }
+
     private void StartControllerErrorMonitoring()
     {
         if (_controllerEmcyMonitor is null) return;
-        _controllerEmcyStarted = false;
+        InvalidateControllerErrorBaseline();
+        long generation = _controllerBaselineGeneration;
         // Diagnostic reads are a separate actor job. Even an unexpected adapter exception must
         // not interrupt the reset caller's echo bookkeeping or an LSS configure-node-id reply.
-        _actor.Post(RefreshControllerErrorBaseline);
+        _actor.Post(() => RefreshControllerErrorBaseline(generation));
     }
 
-    private void RefreshControllerErrorBaseline()
+    private void RefreshControllerErrorBaseline(long generation)
     {
         if (_controllerEmcyMonitor is null) return;
+        if (generation != _controllerBaselineGeneration) return;
         _controllerBaselineRetry?.Dispose();
         _controllerBaselineRetry = null;
         _controllerEmcyStarted = false;
@@ -50,7 +61,7 @@ internal sealed partial class CanOpenNode
             // A transient status-read failure must neither invent a fresh error nor remove the
             // existing monitor. Retry on the same actor clock; normal teardown cancels this work.
             RaiseBackgroundException(ex);
-            _controllerBaselineRetry = _actor.Schedule(System.TimeSpan.FromMilliseconds(50), RefreshControllerErrorBaseline);
+            _controllerBaselineRetry = _actor.Schedule(System.TimeSpan.FromMilliseconds(50), () => RefreshControllerErrorBaseline(generation));
             return;
         }
         fresh.StateChanged += OnControllerEmcyStateChanged;

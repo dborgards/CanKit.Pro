@@ -72,11 +72,13 @@ public partial class CanOpenPdoEngineTests
     {
         private readonly ICanBusService _inner;
         internal Exception? NextBusReadFailure;
+        internal int BusReads;
         internal ControllerBusService(ICanBusService inner) => _inner = inner;
         public ICanBus Bus
         {
             get
             {
+                Interlocked.Increment(ref BusReads);
                 if (NextBusReadFailure is not { } failure) return _inner.Bus;
                 NextBusReadFailure = null;
                 throw failure;
@@ -368,6 +370,79 @@ public partial class CanOpenPdoEngineTests
         await tail!.WaitAsync(ShortTimeout);
         rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
         rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults);
+    }
+
+    [Fact]
+    public async Task Controller_Emcy_Lss_Reset_Invalidates_An_Already_Queued_Baseline()
+    {
+        using var rig = new ControllerEmcyRig(initial: BusState.ErrPassive, unconfiguredLss: true);
+        var node = (CanOpenNode)rig.Node;
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0);
+        await node.PostToActorAsync(() =>
+        {
+            var incoming = typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            incoming.Invoke(node, new object[] { CanOpenCobId.LssMasterMessage,
+                new byte[] { LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0 }, false });
+            incoming.Invoke(node, new object[] { CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetNode, Device }, false });
+        });
+        Settle(node);
+        node.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        node.State.Should().Be(NmtState.Initializing);
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0);
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8120, Communication);
+        await node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1000, Communication);
+        rig.Wire.Count(EmcyId).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Controller_Emcy_Only_The_Latest_Queued_Reset_May_Read_A_Baseline()
+    {
+        using var rig = new ControllerEmcyRig();
+        var node = (CanOpenNode)rig.Node;
+        int reads = Volatile.Read(ref rig.NodeService.BusReads);
+        await node.PostToActorAsync(() =>
+        {
+            var incoming = typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            incoming.Invoke(node, new object[] { CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, false });
+            incoming.Invoke(node, new object[] { CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, false });
+        });
+        Settle(node);
+        Volatile.Read(ref rig.NodeService.BusReads).Should().Be(reads + 1);
+        await node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 0);
+    }
+
+    [Fact]
+    public async Task Controller_Emcy_Lss_Reset_Invalidates_A_Pending_Baseline_Retry()
+    {
+        using var rig = new ControllerEmcyRig(unconfiguredLss: true);
+        var node = (CanOpenNode)rig.Node;
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0);
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0);
+        Settle(node);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+        rig.Bus.BusState = BusState.ErrPassive;
+        rig.NodeService.NextBusReadFailure = new CanKitException(CanKitErrorCode.NativeCallFailed, "reset retry");
+        await Inject(node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        (await reported.Task.WaitAsync(ShortTimeout)).Message.Should().Be("reset retry");
+        await Inject(node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetNode, Device);
+        Settle(node);
+        int reads = Volatile.Read(ref rig.NodeService.BusReads);
+        Advance(rig.Clock, node, TimeSpan.FromMilliseconds(51));
+        Volatile.Read(ref rig.NodeService.BusReads).Should().Be(reads);
+        node.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0);
+        await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8120, Communication);
+        await node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1000, Communication);
+        rig.Wire.Count(EmcyId).Should().Be(2);
     }
 
     [Fact]

@@ -688,7 +688,9 @@ Bus-off/unknown at this new baseline do not inherit a pre-reset passive cause. A
 read in the CanKit exception family (or ObjectDisposedException) is reported through
 BackgroundExceptionOccurred and retried after 50 ms on the actor clock; unexpected exceptions
 are not retried. The physical read runs as a separate actor job so even an unexpected error
-cannot abort reset echo bookkeeping or an LSS configuration reply. Teardown also cancels this retry. Disposal (including failed
+cannot abort reset echo bookkeeping or an LSS configuration reply. Every reset invalidates
+older queued baseline jobs and retries, including when LSS restores the unconfigured node ID;
+only the latest active boot may consume a new error event. Teardown also cancels this retry. Disposal (including failed
 construction) removes the monitor's handlers and timer. Existing option-copy methods retain
 this setting. Overrun (`8110h`) clear semantics and recovered-from-bus-off (`8140h`) sequencing
 remain separate scope decisions in #423; this option does not emit either code.
