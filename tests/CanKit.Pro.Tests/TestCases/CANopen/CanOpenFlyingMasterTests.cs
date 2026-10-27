@@ -41,7 +41,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         var session = NewSession();
         using var bus = Open(session, 0);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations);
 
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
         node.ActiveFlyingMasterNodeId.Should().BeNull();
@@ -67,7 +67,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         var session = NewSession();
         using var bus = Open(session, 0);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations);
         var od = node.ObjectDictionary;
 
         Action priority = () => node.StartFlyingMaster(3, Heartbeat);
@@ -95,8 +95,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var nodeBus = Open(session, 0);
         using var peerBus = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock);
-        var witness = new ActorWitness(node, peerBus, WitnessForLeft);
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var witness = new ActorWitness(node, peerBus, WitnessForLeft, nodeConfirmations);
         using var log = new FrameLog(peerBus);
         var signals = new ConcurrentQueue<FlyingMasterSignal>();
         node.FlyingMasterChanged += (_, e) => signals.Enqueue(e.Signal);
@@ -133,8 +133,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var nodeBus = Open(session, 0);
         using var peerBus = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock);
-        var witness = new ActorWitness(node, peerBus, WitnessForLeft);
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var witness = new ActorWitness(node, peerBus, WitnessForLeft, nodeConfirmations);
         Exception? background = null;
         var syncs = 0;
         node.FlyingMasterChanged += (_, _) => throw new InvalidOperationException("subscriber failed");
@@ -232,8 +232,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var nodeBus = Open(session, 0);
         using var peerBus = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock);
-        var witness = new ActorWitness(node, peerBus, WitnessForLeft);
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var witness = new ActorWitness(node, peerBus, WitnessForLeft, nodeConfirmations);
 
         Tighten(node);
         node.StartFlyingMaster(1, Heartbeat);
@@ -309,8 +309,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var nodeBus = Open(session, 0);
         using var peerBus = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock);
-        var witness = new ActorWitness(node, peerBus, WitnessForLeft);
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var witness = new ActorWitness(node, peerBus, WitnessForLeft, nodeConfirmations);
         using var log = new FrameLog(peerBus);
 
         peerBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterDetect),
@@ -342,8 +342,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var nodeBus = Open(session, 0);
         using var peerBus = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock);
-        var witness = new ActorWitness(node, peerBus, WitnessForLeft);
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var witness = new ActorWitness(node, peerBus, WitnessForLeft, nodeConfirmations);
         using var log = new FrameLog(peerBus);
         var signals = new ConcurrentQueue<FlyingMasterSignal>();
         node.FlyingMasterChanged += (_, e) => signals.Enqueue(e.Signal);
@@ -376,8 +376,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
             using var bus = Open(session, 0);
             using var peer = Open(session, 1);
             var clock = new ManualTimeSource();
-            using var node = OpenClockedNode(bus, LeftId, clock, description);
-            var witness = new ActorWitness(node, peer, WitnessForLeft);
+            using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations, description);
+            var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
             await witness.SettleAsync();
 
             var report = node.DeviceDescription!;
@@ -551,7 +551,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         var session = NewSession();
         using var bus = Open(session, 0);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock,
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations,
             options: new CanOpenNodeOptions { Profile = CanOpenNodeProfile.Tool });
 
         node.ObjectDictionary.ReadUnsigned(Startup, 0x00)
@@ -566,9 +566,9 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(nodeBus, LeftId, clock,
+        using var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations,
             options: new CanOpenNodeOptions { Profile = CanOpenNodeProfile.Tool });
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
         using var log = new FrameLog(nodeBus, peer);
 
         node.ObjectDictionary.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
@@ -897,7 +897,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         var session = NewSession();
         using var bus = Open(session, 0);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations);
         var od = node.ObjectDictionary;
 
         Action slot = () => od.WriteUnsigned(Timing, 0x04, 100);
@@ -1084,8 +1084,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var bus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock, description);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
         await witness.SettleAsync();
 
         var od = node.ObjectDictionary;
@@ -1112,8 +1112,8 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         using var bus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var node = OpenClockedNode(bus, LeftId, clock, description);
-        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var node = OpenClockedNode(bus, LeftId, clock, out var nodeConfirmations, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations);
         await witness.SettleAsync();
 
         var od = node.ObjectDictionary;
@@ -1144,11 +1144,11 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         var lowerBus = Open(session, 0);
         var higherBus = Open(session, 1);
         var clock = new ManualTimeSource();
-        var lower = OpenClockedNode(lowerBus, lowerId, clock);
-        var higher = OpenClockedNode(higherBus, higherId, clock);
+        var lower = OpenClockedNode(lowerBus, lowerId, clock, out var lowerConfirmations);
+        var higher = OpenClockedNode(higherBus, higherId, clock, out var higherConfirmations);
         return new Pair(clock, lower, higher,
-            new ActorWitness(lower, higherBus, WitnessForLeft),
-            new ActorWitness(higher, lowerBus, WitnessForRight),
+            new ActorWitness(lower, higherBus, WitnessForLeft, lowerConfirmations),
+            new ActorWitness(higher, lowerBus, WitnessForRight, higherConfirmations),
             new FrameLog(lowerBus, higherBus), lowerBus, higherBus);
     }
 

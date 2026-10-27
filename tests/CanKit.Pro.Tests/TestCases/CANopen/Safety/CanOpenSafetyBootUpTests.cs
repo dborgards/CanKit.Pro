@@ -149,16 +149,17 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
             release.Wait();
         });
         Task? advance = null;
+        long before;
+        var step = TimeSpan.FromMilliseconds(10);
         try
         {
             await entered.Task.WaitAsync(ShortTimeout);
-            long before = rig.Clock.GetTimestamp();
-            var step = TimeSpan.FromMilliseconds(10);
+            before = rig.Clock.GetTimestamp();
             advance = AdvanceAsync(rig.Clock, rig.Witness, null, step);
             (await Task.WhenAny(advance, markerObserved.Task).WaitAsync(ShortTimeout)).Should().BeSameAs(markerObserved.Task,
                 "the peer's round-trip marker must reach the bus before settling can complete");
             advance.IsCompleted.Should().BeFalse("the peer actor still holds the marker behind prior work");
-            rig.Clock.GetTimestamp().Should().Be(before + step.Ticks);
+            rig.Clock.GetTimestamp().Should().Be(before, "the peer must settle before the requested step starts");
         }
         finally
         {
@@ -166,6 +167,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
             await blocked.WaitAsync(ShortTimeout);
             if (advance is not null) await advance.WaitAsync(ShortTimeout);
         }
+        rig.Clock.GetTimestamp().Should().Be(before + step.Ticks);
     }
 
     [Fact]
@@ -182,6 +184,8 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         channel.Wait();
         using var permittedWait = rig.Witness.AllowPeerVerificationWait(Slave);
         Task? advance = null;
+        long before;
+        var step = TimeSpan.FromMilliseconds(10);
         try
         {
             rig.Node.StartFlyingMaster(0, Heartbeat);
@@ -196,18 +200,18 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
             {
                 if (Interlocked.Increment(ref observations) == 2) observedTwice.TrySetResult(true);
             };
-            long before = rig.Clock.GetTimestamp();
-            var step = TimeSpan.FromMilliseconds(10);
+            before = rig.Clock.GetTimestamp();
             advance = AdvanceAsync(rig.Clock, rig.Witness, null, step);
             (await Task.WhenAny(advance, observedTwice.Task).WaitAsync(ShortTimeout)).Should().BeSameAs(observedTwice.Task,
                 "settling must keep probing instead of completing while the continuation is gated");
-            rig.Clock.GetTimestamp().Should().Be(before + step.Ticks, "host scheduling cannot consume more protocol time");
+            rig.Clock.GetTimestamp().Should().Be(before, "host scheduling cannot start the next protocol step");
         }
         finally
         {
             channel.Release();
             if (advance is not null) await advance.WaitAsync(ShortTimeout);
         }
+        rig.Clock.GetTimestamp().Should().Be(before + step.Ticks);
     }
 
     [Fact]
@@ -766,9 +770,9 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         var nodeBus = Open(session, 0);
         var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        var gate = new SafetyBootGate(new CanBusService(nodeBus));
+        var gate = new SafetyBootGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock));
         var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
-        return (new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft), new FrameLog(nodeBus, peer), peer, nodeBus), gate);
+        return (new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations), new FrameLog(nodeBus, peer), peer, nodeBus), gate);
     }
 
     /// <summary>Real-time settling without moving the clock: no timer becomes due, so only the
@@ -804,7 +808,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     /// <see cref="PassResets"/> have passed, until <see cref="ReleaseReset"/>.</summary>
     private sealed class SafetyBootGate : ICanBusService
     {
-        private readonly CanBusService _inner;
+        private readonly ClockedCanBusService _inner;
         private readonly object _gate = new();
         private readonly List<TaskCompletionSource<bool>> _heldSdo = new();
         private readonly TaskCompletionSource<bool> _resetEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -813,7 +817,8 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         private int _resetsSeen;
         private volatile bool _holdSdo;
 
-        public SafetyBootGate(CanBusService inner) => _inner = inner;
+        public SafetyBootGate(ClockedCanBusService inner) => _inner = inner;
+        public ClockedCanBusService Confirmations => _inner;
 
         public bool HoldSdo { get => _holdSdo; set => _holdSdo = value; }
         public int PassResets { get; set; } = int.MaxValue;

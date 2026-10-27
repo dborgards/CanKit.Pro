@@ -20,13 +20,20 @@ internal sealed class ClockedCanBusService : ICanBusService
 {
     private readonly CanBusService _inner;
     private readonly AsyncLocal<SendDeadline?> _deadline = new();
+    private readonly object _sendGate;
     private int _pending;
     private int _disposed;
 
-    public ClockedCanBusService(ICanBus bus, ManualTimeSource clock)
+    public ClockedCanBusService(ICanBus bus, ManualTimeSource clock, object? sendGate = null)
     {
+        _sendGate = sendGate ?? new object();
         Timers = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null);
-        _inner = new CanBusService(bus, clock.GetTimestamp);
+        try { _inner = new CanBusService(bus, clock.GetTimestamp); }
+        catch
+        {
+            Timers.Dispose();
+            throw;
+        }
         _inner.ArmConfirmTimeout = (source, timeout) =>
             (_deadline.Value ?? throw new InvalidOperationException("A confirmation must belong to a send."))
             .Arm(Timers, source, timeout);
@@ -50,8 +57,16 @@ internal sealed class ClockedCanBusService : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
-    public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
+    {
+        // Core registers the send inline before its first await. A rig moving time under this
+        // same gate can therefore see every send that started before its clock step.
+        lock (_sendGate) return SendCoreAsync(frame, timeout, cancellationToken);
+    }
+
+    private async Task<TxConfirmation> SendCoreAsync(CanFrame frame, TimeSpan? timeout,
+        CancellationToken cancellationToken)
     {
         var previous = _deadline.Value;
         Interlocked.Increment(ref _pending);
