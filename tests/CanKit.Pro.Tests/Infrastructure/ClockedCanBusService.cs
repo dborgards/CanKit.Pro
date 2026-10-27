@@ -21,17 +21,28 @@ internal sealed class ClockedCanBusService : ICanBusService
     private readonly CanBusService _inner;
     private readonly AsyncLocal<SendDeadline?> _deadline = new();
     private readonly object _sendGate;
+    private readonly bool _ownsTimers;
     private int _pending;
     private int _disposed;
 
     public ClockedCanBusService(ICanBus bus, ManualTimeSource clock, object? sendGate = null)
+        : this(bus, new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null),
+            ownsTimers: true, sendGate)
+    { }
+
+    /// <summary>The caller's clock owns this actor and may keep advancing it after service disposal.</summary>
+    public ClockedCanBusService(ICanBus bus, ProtocolActor timers)
+        : this(bus, timers, ownsTimers: false, sendGate: null) { }
+
+    private ClockedCanBusService(ICanBus bus, ProtocolActor timers, bool ownsTimers, object? sendGate)
     {
         _sendGate = sendGate ?? new object();
-        Timers = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null);
-        try { _inner = new CanBusService(bus, clock.GetTimestamp); }
+        _ownsTimers = ownsTimers;
+        Timers = timers;
+        try { _inner = new CanBusService(bus, timers.TimeSource.GetTimestamp); }
         catch
         {
-            Timers.Dispose();
+            if (_ownsTimers) Timers.Dispose();
             throw;
         }
         _inner.ArmConfirmTimeout = (source, timeout) =>
@@ -90,7 +101,7 @@ internal sealed class ClockedCanBusService : ICanBusService
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         try { _inner.Dispose(); }
-        finally { Timers.Dispose(); }
+        finally { if (_ownsTimers) Timers.Dispose(); }
     }
 
     private sealed class SendDeadline : IDisposable
