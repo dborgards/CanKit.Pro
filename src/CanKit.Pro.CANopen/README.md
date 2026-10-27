@@ -671,8 +671,29 @@ producer mode. Multiple causes share the same register: only the last repaired c
 `0000h`, retaining application bits. An active timeout while `1014h` disables the producer is
 reported once if still active when it is enabled; a recovery while disabled is not replayed.
 NMT reset clears this monitoring error state without an error-reset EMCY. Existing options
-copy methods preserve the opt-in. Node-guarding-consumer timeouts and CAN controller states
-still raise events only; the remaining optional `8110h`/`8120h`/`8140h` feature work stays in #423.
+copy methods preserve the opt-in. Node-guarding-consumer timeouts remain event-only.
+
+`CanOpenNodeOptions.EmitControllerErrorEmcy = true` separately opts into `8120h` for an
+observed error-passive CAN controller. The default is `false` and adds no controller monitor.
+When enabled, the existing `BusStateMonitor` observes the bus on the node actor with 50 ms
+polling and error/fault hints. An initially passive controller is reported on entry to
+Pre-Operational. One observed passive lapse is one communication-error cause, shared with
+PDO, SRDO and guarding causes. Error-active, error-warning and no-error readings repair it;
+bus-off or unknown readings do not establish recovery and leave an already observed cause
+active. An initially bus-off controller does not imply an observed passive error. Producer
+disable/re-enable reports only still-active causes once. NMT reset clears the reported error
+history and takes a fresh physical sample and monitor baseline on re-entry to Pre-Operational,
+so a still passive controller is reported again without replaying a silently repaired lapse.
+Bus-off/unknown at this new baseline do not inherit a pre-reset passive cause. A failed status
+read in the CanKit exception family (or ObjectDisposedException) is reported through
+BackgroundExceptionOccurred and retried after 50 ms on the actor clock; unexpected exceptions
+are not retried. The physical read runs as a separate actor job so even an unexpected error
+cannot abort reset echo bookkeeping or an LSS configuration reply. Every reset invalidates
+older queued baseline jobs and retries, including when LSS restores the unconfigured node ID;
+only the latest active boot may consume a new error event. Teardown also cancels this retry. Disposal (including failed
+construction) removes the monitor's handlers and timer. Existing option-copy methods retain
+this setting. Overrun (`8110h`) clear semantics and recovered-from-bus-off (`8140h`) sequencing
+remain separate scope decisions in #423; this option does not emit either code.
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the

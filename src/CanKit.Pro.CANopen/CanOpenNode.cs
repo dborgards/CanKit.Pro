@@ -256,9 +256,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // A device description shapes the dictionary on top of that, before the node is on
             // the bus (CanOpenNode.DeviceDescription.cs).
             if (description is not null) ApplyDeviceDescription(description);
+            InitializeControllerErrorMonitor();
         }
         catch
         {
+            DisposeControllerErrorMonitor();
             _actor.Dispose();
             throw;
         }
@@ -323,6 +325,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         catch
         {
             CompleteEventQueue();
+            DisposeControllerErrorMonitor();
             _actor.Dispose();
             throw;
         }
@@ -344,6 +347,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             if (LayerSettingsBlockBoot()) return;
             _state = NmtState.PreOperational;
             _ = EmitHeartbeat(0x00);
+            StartControllerErrorMonitoring();
         });
 
         _readerTask = Task.Run(RunReaderAsync);
@@ -953,6 +957,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <summary>Stops the producers and consumers and fails every open transfer. Actor-only.</summary>
     private void CleanUpOnActor()
     {
+        DisposeControllerErrorMonitor();
         _heartbeatProducer.Dispose();
         _heartbeatConsumer.Dispose();
         CancelLssActivation();
