@@ -311,21 +311,31 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var bus = Open(session, 0);
 
-        // Only the sender is present; nobody will reply with CTS. Shorten T3 so the test runs
-        // in ~200 ms instead of the standard-recommended 1250 ms.
-        var opts = new J1939TpOptions().With(
-            t2: TimeSpan.FromMilliseconds(150),
-            t3: TimeSpan.FromMilliseconds(150));
-
-        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x30, options: opts);
+        var opts = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(new CanBusService(bus), sourceAddress: 0x30,
+            opts, ownsService: true, actor);
 
         var send = sender.SendCmAsync(0xFE30, destinationAddress: 0x99,
             RandomPayload(50, seed: 5));
+
+        await ExpireCmTimerAsync(clock, actor, opts.T3);
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
         ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
         ex.Pgn.Should().Be(0xFE30u);
+        ex.Message.Should().Contain("T3").And.Contain("waiting for CTS");
+    }
+
+    private static async Task ExpireCmTimerAsync(VirtualClock clock, ProtocolActor actor, TimeSpan timeout)
+    {
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, ShortTimeout);
+        var lastTick = TimeSpan.FromTicks(1);
+        await clock.AdvanceAsync(timeout - lastTick);
+        (await actor.NextTimerDelayAsync()).Should().Be(lastTick, "the CM deadline must still be pending just before its boundary");
+        await clock.AdvanceAsync(lastTick);
     }
 
     // FR-TP-030 lower-bound check: a 9-byte payload (the smallest legal J1939-TP payload;
@@ -946,11 +956,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x83;
         const uint pgn = 0xFE82u;
 
-        var opts = new J1939TpOptions().With(
-            t2: TimeSpan.FromMilliseconds(80),
-            t1: TimeSpan.FromSeconds(5)); // T1 must not fire first
-
-        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        var opts = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var receiver = new J1939TpChannel(new CanBusService(receiverBus), sourceAddress: receiverSa,
+            opts, ownsService: true, actor);
 
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var bgAbort = new TaskCompletionSource<J1939TpAbortException>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -974,7 +984,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var rts = J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn);
         var rtsId = J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa);
         peerBus.Transmit(CanFrame.Classic((int)rtsId, rts, isExtendedFrame: true));
-        // Do not send any TP.DT — T2 must expire and abort.
+        // The confirmed CTS arms T2; do not deliver any DT.
+        await ExpireCmTimerAsync(clock, actor, opts.T2);
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abortFrame[1].Should().Be((byte)J1939TpAbortReason.Timeout);
@@ -1089,11 +1100,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x89;
         const uint pgn = 0xFE88u;
 
-        var opts = new J1939TpOptions().With(
-            t2: TimeSpan.FromMilliseconds(80),
-            t1: TimeSpan.FromSeconds(5));
-
-        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        var opts = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var receiver = new J1939TpChannel(new CanBusService(receiverBus), sourceAddress: receiverSa,
+            opts, ownsService: true, actor);
 
         var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1117,6 +1128,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         J1939TpFrames.ReadDataPgn(cts).Should().Be(pgn);
 
         // T2 must be armed: with no DT, the receiver aborts for timeout (not a timerless orphan).
+        await ExpireCmTimerAsync(clock, actor, opts.T2);
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abortFrame[1].Should().Be((byte)J1939TpAbortReason.Timeout);
     }
@@ -1565,10 +1577,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x93;
         const uint pgn = 0xFE92u;
 
-        var opts = new J1939TpOptions().With(
-            t1: TimeSpan.FromMilliseconds(120),
-            t2: TimeSpan.FromSeconds(5)); // keep T2 out of the way so T1 is the timer under test
-        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        var opts = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var receiver = new J1939TpChannel(new CanBusService(receiverBus), sourceAddress: receiverSa,
+            opts, ownsService: true, actor);
 
         var ctsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1593,11 +1606,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         // Deliver only the first DT of the granted block after the receiver's CTS arrived.
         await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, opts.T2, ShortTimeout);
         peerBus.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa),
             J1939TpFrames.BuildDt(1, pdu, 0),
             isExtendedFrame: true));
-        // Block not complete and no further DT — T1 must fire.
+        // The first accepted DT replaces T2 with T1; no further DT follows.
+        await ExpireCmTimerAsync(clock, actor, opts.T1);
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abortFrame[1].Should().Be((byte)J1939TpAbortReason.Timeout);
@@ -1749,11 +1764,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x06;
         const uint pgn = 0xFF05u;
 
-        var opts = new J1939TpOptions().With(
-            t2: TimeSpan.FromSeconds(5),
-            t3: TimeSpan.FromSeconds(5),
-            t4: TimeSpan.FromMilliseconds(150));
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
+        var opts = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            opts, ownsService: true, actor);
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -1770,6 +1785,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var send = sender.SendCmAsync(pgn, destinationAddress: peerSa, RandomPayload(21, seed: 15));
 
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, opts.T3, ShortTimeout);
         // CTS with numPackets=0 = "hold connection open" (J1939-21 §5.10.3.1), nextSn=1.
         var hold = new byte[8];
         hold[0] = J1939TpFrames.ControlCts;
@@ -1783,6 +1799,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         peerBus.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, senderSa), hold,
             isExtendedFrame: true));
+
+        await ExpireCmTimerAsync(clock, actor, opts.T4);
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
