@@ -328,10 +328,19 @@ internal sealed partial class CanOpenNode
         _lifeGuardingDeadline?.Dispose();
         _lifeGuardingDeadline = null;
         _lifeGuardingOccurred = false;
+        if (_options.EmitGuardingErrorEmcy)
+            EndCommunicationError(CommunicationError.LifeGuardingTimeout);
     }
 
     private void RaiseLifeGuardingEvent(LifeGuardingState state)
     {
+        if (_options.EmitGuardingErrorEmcy)
+        {
+            if (state == LifeGuardingState.Occurred)
+                RaiseCommunicationError(CommunicationError.LifeGuardingTimeout, 0, 0x8130);
+            else
+                EndCommunicationError(CommunicationError.LifeGuardingTimeout);
+        }
         var args = new LifeGuardingEventArgs(state, _guardTime, _lifeTimeFactor);
         EnqueueEvent(() =>
         {

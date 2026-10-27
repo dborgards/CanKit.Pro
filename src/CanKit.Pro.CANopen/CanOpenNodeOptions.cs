@@ -16,6 +16,17 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 public sealed class CanOpenNodeOptions
 {
+    /// <summary>
+    /// Emit optional <c>8130h</c> EMCYs for heartbeat-consumer timeouts and this node's life-
+    /// guarding timeout. Defaults to <see langword="false"/>; timeout events remain available
+    /// regardless. Enabled errors contribute bits 4 and 0 to <c>1001h</c> until reception,
+    /// removal/reconfiguration of the watch, a guarding poll or disabling life guarding ends
+    /// their cause. The last repaired communication error emits <c>0000h</c>.
+    /// </summary>
+    /// <remarks>Does not enable controller-state or node-guarding-consumer EMCYs. Existing
+    /// <c>With</c> copy methods preserve this setting.</remarks>
+    public bool EmitGuardingErrorEmcy { get; init; }
+
     /// <summary>Client-side SDO transfer timeout, applied to every request (initiate as well as
     /// each segment ack). In a block download it also restarts at every confirmed segment of a
     /// sub-block, so it measures the server's silence and not the time a sub-block takes to send.
@@ -318,6 +329,7 @@ public sealed class CanOpenNodeOptions
     {
         var options = new CanOpenNodeOptions
         {
+            EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

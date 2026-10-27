@@ -639,7 +639,7 @@ may be written in any order, so a slot not yet overwritten does not count agains
 ## Error control
 
 **Error register (`1001h`) and error reset.** Every EMCY the node raises itself is a
-communication error (CiA 301 Table 26, `82xxh`) and follows one rule (§7.2.7.1 and Figure 37;
+communication error (CiA 301 Table 26, `81xxh`/`82xxh`) and follows one rule (§7.2.7.1 and Figure 37;
 §7.5.2.2, Table 54): `8210h` for an RPDO, MPDO or SRDO shorter than its mapping, `8230h` for an
 MPDO destination that is not available, `8240h` for a SYNC of the wrong length and `8250h` for an
 RPDO deadline. Each is sent once per error event. While any of them is active the register
@@ -660,8 +660,19 @@ errors without an EMCY (transitions 5 and 0) and leave the application's bits in
 the EMCY switched off (bit 31 of `1014h`) no error is raised, and an error that ends meanwhile
 still clears the bits. A run of short RPDO frames or SRDO pairs is not consumed while disabled:
 if it persists after enabling, the next short frame/pair reports `8210h` once. Toggling the
-producer after that report does not start a new error event (#434). Heartbeat, node-guarding and life-guarding timeouts and the CAN
-controller state raise no EMCY (`8110h`–`8140h`); they are events only.
+producer after that report does not start a new error event (#434).
+
+`CanOpenNodeOptions.EmitGuardingErrorEmcy = true` opts into `8130h` for heartbeat-consumer
+and local life-guarding timeouts (#423); the default is `false`, so existing timeout events
+keep their behavior without new EMCYs. A silent heartbeat producer is one error event until
+reception or removal/change of its watch; repeated timeouts do not duplicate it. Life guarding
+recovers with the next poll, disabling guard time/life-time factor, or switching to heartbeat
+producer mode. Multiple causes share the same register: only the last repaired cause sends
+`0000h`, retaining application bits. An active timeout while `1014h` disables the producer is
+reported once if still active when it is enabled; a recovery while disabled is not replayed.
+NMT reset clears this monitoring error state without an error-reset EMCY. Existing options
+copy methods preserve the opt-in. Node-guarding-consumer timeouts and CAN controller states
+still raise events only; the remaining optional `8110h`/`8120h`/`8140h` feature work stays in #423.
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the

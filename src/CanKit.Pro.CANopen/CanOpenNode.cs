@@ -1567,7 +1567,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     {
                         byte guardedState = (byte)(data[0] & 0x7F);
                         NoteSlaveNmtState(producer, guardedState);
-                        _heartbeatConsumer.NoteReceived(producer);
+                        NoteHeartbeatForMonitoring(producer);
                     }
                     return;
                 }
@@ -1778,7 +1778,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         if ((data[0] & 0x80) == 0 && TryDecodeHeartbeatState(stateByte, out var state))
             RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
         NoteSlaveNmtState(producer, stateByte);
-        _heartbeatConsumer.NoteReceived(producer);
+        NoteHeartbeatForMonitoring(producer);
     }
 
     // =========================================================================================
@@ -3043,6 +3043,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void RaiseHeartbeatTimeout(byte producer, TimeSpan timeout)
     {
+        if (_options.EmitGuardingErrorEmcy)
+        {
+            _heartbeatEmcyTimeouts[producer] = timeout;
+            RaiseCommunicationError(CommunicationError.HeartbeatTimeout, producer, 0x8130);
+        }
         var args = new HeartbeatTimeoutEventArgs(producer, timeout);
         EnqueueEvent(() =>
         {
