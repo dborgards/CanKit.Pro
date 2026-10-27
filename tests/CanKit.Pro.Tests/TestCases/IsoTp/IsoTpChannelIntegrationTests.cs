@@ -2657,44 +2657,55 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var bus = OpenClassic(session, 0);
         using var service = new CanBusService(bus);
         using var actor = new ProtocolActor();
-        var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
-            ownsService: false, actor);
-        using var release = new ManualResetEventSlim();
-        using var callerCts = new CancellationTokenSource();
-        var busy = actor.PostAsync(() => release.Wait(TimeSpan.FromSeconds(30)));
-
-        var send1 = channel.SendAsync(new byte[] { 0x01 });
-        var send2 = channel.SendAsync(new byte[] { 0x02 }, callerCts.Token);
-        send2.IsCompleted.Should().BeFalse();
-        // Ends once Dispose is under way, and so after its first line, which marks the channel
-        // disposed: from then on the actor fails send1 instead of beginning it.
-        var receive = channel.ReceiveAsync();
-        var late = new LateDisposal(disposeAsLateAsPossible, send1);
-
-        try
+        using (var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor))
         {
-            callerCts.Cancel();
-            var queued = await Assert.ThrowsAsync<OperationCanceledException>(() => send2.WaitAsync(ShortTimeout));
-            queued.CancellationToken.Should().Be(callerCts.Token);
-        }
-        finally
-        {
-            var disposal = Task.Run(async () =>
+            using var release = new ManualResetEventSlim();
+            using var callerCts = new CancellationTokenSource();
+            var busy = actor.PostAsync(() => release.Wait());
+
+            try
             {
-                await late.MayStartAsync().ConfigureAwait(false);
-                channel.Dispose();
-            });
-            // Released only once the disposal is seen to have begun (#400): released earlier,
-            // send1 can begin and complete before Dispose reaches it, and then it owes no
-            // ObjectDisposedException.
-            await late.WaitForAsync(receive);
-            late.ActorReleased();
-            release.Set();
-            await busy;
-            await disposal.WaitAsync(ShortTimeout);
-        }
+                var send1 = channel.SendAsync(new byte[] { 0x01 });
+                var send2 = channel.SendAsync(new byte[] { 0x02 }, callerCts.Token);
+                send2.IsCompleted.Should().BeFalse();
+                // Ends once Dispose is under way, and so after its first line, which marks the channel
+                // disposed: from then on the actor fails send1 instead of beginning it.
+                var receive = channel.ReceiveAsync();
+                var late = new LateDisposal(disposeAsLateAsPossible, send1);
 
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
+                try
+                {
+                    callerCts.Cancel();
+                    var queued = await Assert.ThrowsAsync<OperationCanceledException>(() => send2.WaitAsync(ShortTimeout));
+                    queued.CancellationToken.Should().Be(callerCts.Token);
+                }
+                finally
+                {
+                    var disposal = Task.Run(async () =>
+                    {
+                        await late.MayStartAsync().ConfigureAwait(false);
+                        channel.Dispose();
+                    });
+                    // Released only once the disposal is seen to have begun (#400): released earlier,
+                    // send1 can begin and complete before Dispose reaches it, and then it owes no
+                    // ObjectDisposedException.
+                    await late.WaitForAsync(receive);
+                    late.ActorReleased();
+                    release.Set();
+                    await busy;
+                    await disposal.WaitAsync(ShortTimeout);
+                }
+
+                await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
+            }
+            finally
+            {
+                // Also releases the actor when setup or an assertion fails before the disposal probe.
+                release.Set();
+                await busy.WaitAsync(ShortTimeout);
+            }
+        }
     }
 
     /// <summary>Starts a disposal as late as the test lets it: not before the test waits on it,
