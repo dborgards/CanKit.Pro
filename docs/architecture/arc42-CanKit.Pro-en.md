@@ -1141,7 +1141,11 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   (FR-RAW-023) — `PostAsync`/`PostAsync<T>` failures instead go through the returned task, since
   the caller observes it via `await` anyway. `Dispose` rejects new work immediately
   (`ObjectDisposedException`) but still runs already queued work to completion instead of leaving
-  a `PostAsync` task waiting at dispose time hanging indefinitely. The ISO-TP prototype
+  a `PostAsync` task waiting at dispose time hanging indefinitely. Its original constructor keeps
+  draining due timers; the additive `ActorShutdownPolicy.DiscardPendingTimers` constructor option
+  instead discards pending timers, including due ones, while completing accepted mailbox work.
+  Timer selection is ordered against disposal; an already selected callback may still finish.
+  The ISO-TP prototype
   (functionally defective, Review §1.1, including a 100 % CPU busy loop and unsynchronised `List`
   states) no longer exists; its successor `IsoTpChannel` and the J1939, J1939-TP and CANopen
   packages run on `ProtocolActor`. Secured via unit/concurrency test

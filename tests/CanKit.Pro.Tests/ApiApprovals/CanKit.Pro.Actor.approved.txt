@@ -6,6 +6,11 @@ namespace CanKit.Pro.Actor
         ThreadPool = 1,
         SynchronizationContext = 2,
     }
+    public enum ActorShutdownPolicy
+    {
+        DrainDueTimers = 0,
+        DiscardPendingTimers = 1,
+    }
     public interface IProtocolActor : System.IDisposable
     {
         event System.EventHandler<System.Exception> BackgroundExceptionOccurred;
@@ -17,6 +22,7 @@ namespace CanKit.Pro.Actor
     public sealed class ProtocolActor : CanKit.Pro.Actor.IProtocolActor, System.IDisposable
     {
         public ProtocolActor(CanKit.Pro.Actor.ActorExecutionMode mode = 0, System.Threading.SynchronizationContext? synchronizationContext = null) { }
+        public ProtocolActor(CanKit.Pro.Actor.ActorExecutionMode mode, System.Threading.SynchronizationContext? synchronizationContext, CanKit.Pro.Actor.ActorShutdownPolicy shutdownPolicy) { }
         public bool IsOnCurrentActor { get; }
         public event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         public void Dispose() { }
