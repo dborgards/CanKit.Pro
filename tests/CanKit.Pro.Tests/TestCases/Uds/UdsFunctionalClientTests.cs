@@ -55,14 +55,17 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     {
         public VirtualClock Clock { get; } = new();
         public ProtocolActor Actor { get; }
+        public ProtocolActor ConfirmationActor { get; }
 
         public WindowClock()
         {
             Actor = Clock.NewActor();
+            ConfirmationActor = Clock.NewActor();
             Clock.Advance(TimeSpan.FromMilliseconds(1));
         }
 
         public long Now => Actor.TimeSource.GetTimestamp();
+        public ClockedCanBusService OpenService(ICanBus bus) => new(bus, ConfirmationActor);
 
         public void Dispose() => Clock.Dispose();
     }
@@ -70,7 +73,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     private static UdsFunctionalClient OpenOnClock(ICanBus bus, WindowClock clock,
         TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null,
         IsoTpFunctionalOptions? options = null)
-        => OpenOnClock(new CanBusService(bus, clock.Actor.TimeSource.GetTimestamp), clock,
+        => OpenOnClock(clock.OpenService(bus), clock,
             responseWindow, responsePendingWindow, options);
 
     private static UdsFunctionalClient OpenOnClock(ICanBusService service, WindowClock clock,
@@ -81,6 +84,25 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             options ?? FastOptions(), ownsService: true, clock.Actor);
         return UdsFunctionalClient.Create(iso, clock.Actor, ownsClient: true,
             responseWindow: responseWindow, responsePendingWindow: responsePendingWindow);
+    }
+
+    [Fact]
+    public async Task A_Missing_Functional_Echo_Expires_NAs_On_The_Window_Clock()
+    {
+        using var clock = new WindowClock();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var options = FastOptions();
+        var p2 = TimeSpan.FromSeconds(1);
+        using var functional = OpenOnClock(bus, clock, responseWindow: p2, options: options);
+        var call = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await clock.Clock.WaitUntilTimerArmedAsync(clock.ConfirmationActor, options.NAs, ShortTimeout);
+        await WaitForProvisionalWindow(clock, p2);
+        await clock.Clock.AdvanceAsync(options.NAs - TimeSpan.FromTicks(1));
+        call.IsCompleted.Should().BeFalse("N_As still has one virtual tick left");
+        await clock.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
+        var failure = await Assert.ThrowsAsync<IsoTpTimeoutException>(() => call.WaitAsync(ShortTimeout));
+        failure.Timer.Should().Be(IsoTpTimer.NAs);
     }
 
     private static async Task WaitUntilArmed(WindowClock clock, TimeSpan expected, TimeSpan? lateBy = null)
@@ -937,7 +959,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var busEcus = OpenClassic(session, 1);
         var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x78 });
 
-        var iso = new IsoTpFunctionalClient(new CanBusService(busTester, clock.Actor.TimeSource.GetTimestamp),
+        var iso = new IsoTpFunctionalClient(clock.OpenService(busTester),
             FunctionalTxId, Ecu1, 0x7EF, FastOptions(), ownsService: true, clock.Actor);
         using var functional = UdsFunctionalClient.Create(iso, clock.Actor, ownsClient: true,
             responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500),
@@ -1010,7 +1032,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var p2 = TimeSpan.FromMilliseconds(windowMs);
         using var clock = new WindowClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var inner = new CanBusService(bus, clock.Actor.TimeSource.GetTimestamp);
+        using var inner = clock.OpenService(bus);
         var service = new SendEnteredService(inner);
         using var functional = OpenOnClock(service, clock,
             responseWindow: p2, responsePendingWindow: TimeSpan.FromMilliseconds(3000));

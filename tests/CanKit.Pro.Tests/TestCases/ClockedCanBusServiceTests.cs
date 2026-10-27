@@ -93,6 +93,51 @@ public class ClockedCanBusServiceTests : IClassFixture<VirtualAdapterFixture>
         bench.Now.Should().Be(started, "an already removed confirmation deadline cannot choose a clock step");
     }
 
+    [Fact]
+    public async Task Disposing_A_Service_Preserves_Its_Clock_Owned_Actor()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(VirtualAdapterFixture.NewSession("borrowed-confirm"));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        Task<TxConfirmation> send;
+        using (var service = new ClockedCanBusService(bus, actor))
+        {
+            send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }));
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(1, HangGuard);
+            await ArmedAsync(service, TimeSpan.FromSeconds(1));
+        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(HangGuard));
+        (await actor.NextTimerDelayAsync()).Should().BeNull("service disposal removes its own pending deadline");
+        bool fired = false;
+        using var timer = actor.Schedule(TimeSpan.FromMilliseconds(10), () => fired = true);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(10));
+        fired.Should().BeTrue("the external clock still owns and drives its actor");
+    }
+
+    [Fact]
+    public async Task Confirmation_Deadlines_Do_Not_Shadow_The_Protocol_Actors_Timer()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(VirtualAdapterFixture.NewSession("separate-confirm"));
+        using var clock = new VirtualClock();
+        var protocol = clock.NewActor();
+        using var service = new ClockedCanBusService(bus, clock.NewActor());
+        bool protocolFired = false;
+        using var timer = protocol.Schedule(TimeSpan.FromSeconds(1), () => protocolFired = true);
+        var budget = TimeSpan.FromMilliseconds(500);
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), budget);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, HangGuard);
+        await ArmedAsync(service, budget);
+        (await protocol.NextTimerDelayAsync()).Should().Be(TimeSpan.FromSeconds(1));
+        await clock.AdvanceAsync(budget - TimeSpan.FromTicks(1));
+        send.IsCompleted.Should().BeFalse();
+        await clock.AdvanceAsync(TimeSpan.FromTicks(1));
+        (await send.WaitAsync(HangGuard)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        protocolFired.Should().BeFalse();
+        (await protocol.NextTimerDelayAsync()).Should().Be(budget);
+        await clock.AdvanceAsync(budget);
+        protocolFired.Should().BeTrue();
+    }
+
     private static async Task ArmedAsync(ClockedCanBusService service, TimeSpan delay)
     {
         var until = DateTime.UtcNow + HangGuard;
