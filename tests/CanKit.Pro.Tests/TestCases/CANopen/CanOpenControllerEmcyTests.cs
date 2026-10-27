@@ -6,6 +6,7 @@ using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.RawCan;
@@ -67,15 +68,15 @@ public partial class CanOpenPdoEngineTests
     private sealed class ControllerBusService : ICanBusService
     {
         private readonly ICanBusService _inner;
-        internal bool FailNextBusRead;
+        internal Exception? NextBusReadFailure;
         internal ControllerBusService(ICanBusService inner) => _inner = inner;
         public ICanBus Bus
         {
             get
             {
-                if (!FailNextBusRead) return _inner.Bus;
-                FailNextBusRead = false;
-                throw new InvalidOperationException("transient controller status read");
+                if (NextBusReadFailure is not { } failure) return _inner.Bus;
+                NextBusReadFailure = null;
+                throw failure;
             }
         }
         public int SubscriptionCount => _inner.SubscriptionCount;
@@ -252,16 +253,20 @@ public partial class CanOpenPdoEngineTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Controller_Emcy_Reset_Retries_A_Failed_Baseline_And_Cleans_Up_The_Retry(bool disposeBeforeRetry)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Controller_Emcy_Reset_Retries_A_Failed_Baseline_And_Cleans_Up_The_Retry(bool disposeBeforeRetry, bool disposedRead)
     {
         using var rig = new ControllerEmcyRig();
         rig.Observe(BusState.ErrPassive);
         await ExpectEmcyAsync(rig.Wire, 1, 0x8120, Communication);
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         rig.Node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
-        rig.NodeService.FailNextBusRead = true;
+        rig.NodeService.NextBusReadFailure = disposedRead
+            ? new ObjectDisposedException(null, "transient controller status read")
+            : new CanKitException(CanKitErrorCode.NativeCallFailed, "transient controller status read");
         await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
         (await reported.Task.WaitAsync(ShortTimeout)).Message.Should().Be("transient controller status read");
         if (disposeBeforeRetry)
@@ -278,6 +283,24 @@ public partial class CanOpenPdoEngineTests
         rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors + 1);
         rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults + 1);
         rig.Wire.Count(EmcyId).Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Controller_Emcy_Does_Not_Retry_An_Unexpected_Baseline_Error()
+    {
+        using var rig = new ControllerEmcyRig();
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8120, Communication);
+        rig.NodeService.NextBusReadFailure = new InvalidOperationException("unexpected baseline failure");
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        // The frame-dispatch boundary reports the unexpected exception, without a status retry.
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeOfType<InvalidOperationException>();
+        Advance(rig.Clock, rig.Node, TimeSpan.FromMilliseconds(51));
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1000, 0);
+        rig.Wire.Count(EmcyId).Should().Be(2);
     }
 
     [Fact]

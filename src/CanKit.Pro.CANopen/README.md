@@ -685,8 +685,9 @@ disable/re-enable reports only still-active causes once. NMT reset clears the re
 history and takes a fresh physical sample and monitor baseline on re-entry to Pre-Operational,
 so a still passive controller is reported again without replaying a silently repaired lapse.
 Bus-off/unknown at this new baseline do not inherit a pre-reset passive cause. A failed status
-read is reported through BackgroundExceptionOccurred and retried after 50 ms on the actor
-clock; teardown also cancels this retry. Disposal (including failed
+read in the CanKit exception family (or ObjectDisposedException) is reported through
+BackgroundExceptionOccurred and retried after 50 ms on the actor clock; unexpected exceptions
+are not retried. Teardown also cancels this retry. Disposal (including failed
 construction) removes the monitor's handlers and timer. Existing option-copy methods retain
 this setting. Overrun (`8110h`) clear semantics and recovered-from-bus-off (`8140h`) sequencing
 remain separate scope decisions in #423; this option does not emit either code.

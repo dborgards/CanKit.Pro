@@ -1,5 +1,6 @@
 using System;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.Reliability;
 
 namespace CanKit.Pro.CANopen;
@@ -35,7 +36,7 @@ internal sealed partial class CanOpenNode
         {
             fresh = new BusStateMonitor(_service.Bus, _actor);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is CanKitException or ObjectDisposedException)
         {
             // A transient status-read failure must neither invent a fresh error nor remove the
             // existing monitor. Retry on the same actor clock; normal teardown cancels this work.
