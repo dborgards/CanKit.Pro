@@ -75,7 +75,22 @@ using var timeout = actor.Schedule(TimeSpan.FromMilliseconds(150), () => channel
 Disposing an actor stops it from accepting new work (`Post`/`Schedule` throw
 `ObjectDisposedException`) but runs whatever was already queued to completion first, so a caller
 awaiting `PostAsync` right as `Dispose` happens still gets a real result instead of hanging.
-Not-yet-due `Schedule` callbacks are discarded, not fired. `Dispose` waits up to five seconds for
+The original constructor keeps `ActorShutdownPolicy.DrainDueTimers`: due callbacks still run;
+not-yet-due `Schedule` callbacks are discarded. To finish accepted mailbox work while discarding
+all pending timers, including due ones, explicitly select the additive policy:
+
+```csharp
+using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null,
+    ActorShutdownPolicy.DiscardPendingTimers);
+```
+
+Timer selection and disposal are ordered under the same gate. A callback already selected before
+disposal may still complete, including a callback waiting to marshal through a synchronization
+context. The gate is released before invoking or marshaling user code. This policy does not cancel
+accepted mailbox requests or complete tasks that depend on discarded timers: callers must still
+link their own lifetime cancellation. Neither policy permits rearming after disposal.
+
+`Dispose` waits up to five seconds for
 the loop to actually finish; if a callback is still running when that elapses it returns anyway
 (so `Dispose` never becomes the thing that hangs) and reports a `TimeoutException` through
 `BackgroundExceptionOccurred` — a silent give-up would leave the caller unable to tell a clean

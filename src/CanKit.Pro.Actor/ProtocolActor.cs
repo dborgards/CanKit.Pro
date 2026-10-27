@@ -158,6 +158,7 @@ namespace CanKit.Pro.Actor
         });
 
         private readonly TimeSpan _shutdownTimeout;
+        private readonly ActorShutdownPolicy _shutdownPolicy;
 
         private int _disposedFlag;
 
@@ -280,9 +281,23 @@ namespace CanKit.Pro.Actor
         {
         }
 
+        /// <summary>
+        /// Creates an actor with an explicitly selected shutdown policy. The original two-parameter
+        /// constructor continues to use <see cref="ActorShutdownPolicy.DrainDueTimers"/>.
+        /// </summary>
+        /// <param name="mode">Execution context for the loop (FR-RAW-024).</param>
+        /// <param name="synchronizationContext">Required for SynchronizationContext mode; null otherwise.</param>
+        /// <param name="shutdownPolicy">Whether pending due timers are executed or discarded at shutdown.</param>
+        /// <exception cref="ArgumentOutOfRangeException">The shutdown policy is not defined.</exception>
+        public ProtocolActor(ActorExecutionMode mode, SynchronizationContext? synchronizationContext,
+            ActorShutdownPolicy shutdownPolicy)
+            : this(mode, synchronizationContext, timeSource: null, shutdownTimeout: null, shutdownPolicy: shutdownPolicy)
+        {
+        }
+
         // Test seam. Kept internal (and as a separate overload rather than extra optional
         // parameters on the public constructor, which would change that constructor's compiled
-        // signature) so the published surface stays exactly as it was: substituting the tick source
+        // signature) so the original constructor signature stays as it was: substituting the tick source
         // is what makes timer behaviour testable without sleeping, and shortening the shutdown
         // timeout is what makes the "Dispose gave up" path testable without a five-second wait.
         internal ProtocolActor(
@@ -291,8 +306,12 @@ namespace CanKit.Pro.Actor
             ITimeSource? timeSource,
             TimeSpan? shutdownTimeout,
             Action<ProtocolActor>? beforeLoopStart = null,
-            Action<ProtocolActor>? beforeStopRequested = null)
+            Action<ProtocolActor>? beforeStopRequested = null,
+            ActorShutdownPolicy shutdownPolicy = ActorShutdownPolicy.DrainDueTimers)
         {
+            if (shutdownPolicy != ActorShutdownPolicy.DrainDueTimers && shutdownPolicy != ActorShutdownPolicy.DiscardPendingTimers)
+                throw new ArgumentOutOfRangeException(nameof(shutdownPolicy));
+            _shutdownPolicy = shutdownPolicy;
             _beforeStopRequested = beforeStopRequested;
             if (mode == ActorExecutionMode.SynchronizationContext)
             {
@@ -779,7 +798,8 @@ namespace CanKit.Pro.Actor
         // from that point on), but run everything already queued at the moment of Dispose to
         // completion -- so a caller awaiting PostAsync exactly when Dispose happens still gets a
         // real result/exception instead of a task that hangs forever. Never waits for or fires
-        // not-yet-due timers; those are simply discarded.
+        // not-yet-due timers; those are simply discarded. The opt-in DiscardPendingTimers policy
+        // also discards due timers instead of calling FireDueTimers after draining the mailbox.
         private void FinalDrain()
         {
             // Unlike the live loop, this drains to genuine emptiness: the batching in DrainMailbox
@@ -793,7 +813,15 @@ namespace CanKit.Pro.Actor
                 DrainPendingTimerInserts();
             }
 
-            FireDueTimers();
+            if (_shutdownPolicy == ActorShutdownPolicy.DiscardPendingTimers)
+            {
+                foreach (var entry in _timers) Retire(entry);
+                _timers.Clear();
+            }
+            else
+            {
+                FireDueTimers();
+            }
         }
 
         private int NextWaitTimeoutMilliseconds()
@@ -900,13 +928,23 @@ namespace CanKit.Pro.Actor
                 if (_mailbox.TryPeek(out var older) && older.PostedAt < entry.DueTimestamp)
                     break;
 
-                _timers.RemoveAt(0);
+                // Selecting a callback and accepting disposal have one ordering point. Do not
+                // hold this gate while invoking user code or marshaling to a context: callbacks
+                // may dispose this actor or wait for a thread that calls Post/Schedule.
+                bool cancelled;
+                lock (_disposeGate)
+                {
+                    if (_shutdownPolicy == ActorShutdownPolicy.DiscardPendingTimers && Volatile.Read(ref _disposedFlag) != 0)
+                        break;
+                    _timers.RemoveAt(0);
+                    cancelled = entry.Retire();
+                }
 
                 // Retire() reports whether this entry had been cancelled, and does so atomically
                 // with taking it out of circulation -- so a Dispose racing us either wins (we skip
                 // the callback) or loses and finds nothing left to cancel, matching Schedule's
                 // documented "a callback already in flight may still complete".
-                if (!entry.Retire())
+                if (!cancelled)
                     RunSafely(entry.Callback);
                 else
                     Interlocked.Decrement(ref _cancelledTimerCount);
@@ -1067,7 +1105,7 @@ namespace CanKit.Pro.Actor
 
         // Loop-thread-only view of the pending timer list, for tests that need to prove cancelled
         // entries are actually reclaimed rather than merely never fired. Reading _timers.Count is
-        // only safe from the loop, hence the accessor rather than exposing the list.
+        // only safe from the loop (or after joining it), hence the accessor rather than exposing the list.
         internal int PendingTimerCount => _timers.Count;
 
         // OnDispatchFailure is null for plain Post() items (BackgroundExceptionOccurred is their
