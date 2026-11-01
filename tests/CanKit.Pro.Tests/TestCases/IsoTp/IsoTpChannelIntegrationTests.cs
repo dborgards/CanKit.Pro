@@ -497,6 +497,68 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
+    // #353: characterize the documented drop of reserved FS during an active transfer.
+    // This pins the current contract, not a reading of ISO 15765-2; the normative question
+    // remains open. Moving virtual time before the reserved FC distinguishes a drop from a
+    // Wait that would silently re-arm N_Bs and extend the transfer.
+    // --------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(3)]
+    [InlineData(15)]
+    public async Task A_Reserved_FlowStatus_After_A_Block_Leaves_The_Original_NBs_Deadline(int flowStatus)
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        var epAB = IsoTpEndpoint.Normal(0x420, 0x421);
+        var epBA = IsoTpEndpoint.Normal(0x421, 0x420);
+        var nBs = TimeSpan.FromMilliseconds(500);
+        using var clock = new VirtualClock();
+        using var service = new CanBusService(busA);
+        var senderActor = clock.NewActor();
+        using var sender = new IsoTpChannel(service, epAB, FastOptions(nBs: nBs),
+            ownsService: false, senderActor);
+        using var cfArrived = new SemaphoreSlim(0);
+        using var fcArrived = new SemaphoreSlim(0);
+        busB.FrameObserved += (_, e) =>
+        {
+            var data = e.CanFrame.Data.ToArray();
+            if (e.CanFrame.ID == 0x420 && data.Length > 0 && (data[0] >> 4) == 0x2)
+                cfArrived.Release();
+        };
+        busA.FrameObserved += (_, e) =>
+        {
+            var data = e.CanFrame.Data.ToArray();
+            if (e.CanFrame.ID == 0x421 && data.Length > 0 && (data[0] >> 4) == 0x3)
+                fcArrived.Release();
+        };
+
+        var sendTask = sender.SendAsync(Enumerable.Range(0, 27).Select(i => (byte)i).ToArray());
+        await clock.WaitUntilTimerArmedAsync(senderActor, nBs, ShortTimeout);
+        var fc = IsoTpFrameCodec.BuildFlowControl(epBA, FlowStatus.ClearToSend,
+            blockSize: 1, stMinRaw: 0, isCanFd: false, padding: true);
+        busB.Transmit(CanFrame.Classic(0x421, fc));
+        (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue();
+        (await cfArrived.WaitAsync(ShortTimeout)).Should().BeTrue();
+        await clock.WaitUntilTimerArmedAsync(senderActor, nBs, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+
+        fc[0] = (byte)(0x30 | flowStatus);
+        busB.Transmit(CanFrame.Classic(0x421, fc));
+        (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue();
+        await sender.SettleAsync().WaitAsync(ShortTimeout);
+        sendTask.IsCompleted.Should().BeFalse("a reserved FS neither completes nor aborts the active send");
+        (await senderActor.NextTimerDelayAsync()).Should().Be(TimeSpan.FromMilliseconds(300),
+            "a dropped reserved FS must not re-arm N_Bs as Wait would");
+
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(299));
+        sendTask.IsCompleted.Should().BeFalse("the original deadline has not elapsed");
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(2));
+        Func<Task> act = () => sendTask.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<IsoTpTimeoutException>()).Which.Timer.Should().Be(IsoTpTimer.NBs);
+    }
+
+    // --------------------------------------------------------------------------------
     // FR-TP-012 — Overflow FC aborts the send with a reported failure.
     // --------------------------------------------------------------------------------
     [Fact]
