@@ -30,6 +30,15 @@ const check = (what, id) => {
 
 for (const entry of config.plugins ?? []) {
   const [name, options] = Array.isArray(entry) ? entry : [entry, {}];
+
+  // package.json replaces @semantic-release/npm with a placeholder that throws when loaded, so
+  // the npm CLI it bundles stays out of the tree (#460). It resolves fine, so say it here.
+  if (name === '@semantic-release/npm') {
+    problems.push(`plugin ${name} is disabled in this repository (see eng/semantic-release-npm-disabled)`);
+    console.log(`DISABLED plugin ${name}`);
+    continue;
+  }
+
   check('plugin', name);
 
   const preset = options?.preset;
