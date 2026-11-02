@@ -20,7 +20,9 @@ The cancellation tests inject throwing callbacks and assert both the original fa
 
 Follow-up verification on 2026-10-27 at `cc363d6d`: #742 is now fixed by #480, leaving 18 of the original recommendations below visible. No new alerts were reported.
 
-These sites retain their existing behavior and remain visible to CodeQL. No global query exclusion, inline suppression or alert dismissal is used to make the dashboard green.
+These sites retain their existing behavior. No global query exclusion or inline suppression is used.
+
+Status 2026-11-02: all 18 alerts below were dismissed in code scanning as "won't fix", each with the reason from this table. The code is unchanged.
 
 | Alerts | Site | Reason to retain the current construct |
 | --- | --- | --- |
