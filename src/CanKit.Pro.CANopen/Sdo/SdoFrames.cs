@@ -91,7 +91,8 @@ internal static class SdoFrames
     /// <summary>Builds the client → server "Initiate Domain Download" request (SDO write). Uses
     /// expedited encoding when <paramref name="data"/> is 1..4 bytes, segmented (with a size
     /// indicator) otherwise. Segmented downloads always set the "size indicated" bit so the
-    /// server knows the total payload length up front.</summary>
+    /// server knows the total payload length up front. An empty payload is segmented with size
+    /// 0: expedited n = 4 - length cannot tell 0 bytes from 4 (#500).</summary>
     internal static byte[] BuildDownloadInit(ushort index, byte subindex, ReadOnlySpan<byte> data)
     {
         var buf = new byte[8];
@@ -99,7 +100,7 @@ internal static class SdoFrames
         buf[2] = (byte)((index >> 8) & 0xFF);
         buf[3] = subindex;
 
-        if (data.Length <= 4)
+        if (data.Length is >= 1 and <= 4)
         {
             // Expedited: bits e=1, s=1, n = 4 - data.Length (bits 2..3).
             buf[0] = (byte)(CcsDownloadInitExpeditedBase | (((4 - data.Length) & 0x03) << 2) | 0x03);

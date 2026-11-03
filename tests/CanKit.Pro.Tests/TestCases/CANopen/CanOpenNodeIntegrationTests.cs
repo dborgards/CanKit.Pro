@@ -14,6 +14,7 @@ using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -512,26 +513,30 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         raw.Should().Equal(0xAA);
     }
 
-    // Regression for Copilot 3600429203: a length-0 download cannot be represented in the
-    // expedited SDO encoding (the 2-bit "n" field cannot distinguish empty from a 4-byte
-    // payload). We chose "reject empty downloads at the public API" as the consistent policy;
-    // this test locks that choice in and gives users a clear exception instead of silent
-    // misencoding.
+    // #500: an empty value — clearing a VISIBLE_STRING — is a legal write. The expedited
+    // encoding cannot carry it (n = 4 - length cannot tell 0 bytes from 4), the segmented one
+    // can, and SdoDownloadAsync used to refuse it with ArgumentException instead of sending it so.
+    // Both nodes run on a clock nothing moves, so a stalled runner cannot turn the 1 s SDO
+    // timeout into the failure (#92).
     [Fact]
-    public async Task Sdo_EmptyDownload_ThrowsArgumentException()
+    public async Task Sdo_EmptyDownload_Clears_A_VisibleString_On_The_Server()
     {
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var master = new CanOpenNode(new CanBusService(busA), 0x01, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         PeerSdoLaboratory.Bind(master, 0x11);
-        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        using var slave = new CanOpenNode(new CanBusService(busB), 0x11, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         PeerSdoLaboratory.Bind(slave, 0x11);
-        slave.ObjectDictionary.AddDomain(0x2600, 0x00, new byte[8]);
+        slave.ObjectDictionary.AddRaw(0x2600, 0x00, OdDataType.VisibleString, Encoding.ASCII.GetBytes("abcd"));
 
-        await Assert.ThrowsAsync<ArgumentException>(() =>
-            master.SdoDownloadAsync(0x11, 0x2600, 0x00, ReadOnlyMemory<byte>.Empty));
+        await master.SdoDownloadAsync(0x11, 0x2600, 0x00, ReadOnlyMemory<byte>.Empty)
+            .WithTimeoutAsync(ShortTimeout);
+
+        slave.ObjectDictionary.ReadRaw(0x2600, 0x00).Should().BeEmpty();
     }
 
     // Regression for Copilot 3600429187: an empty OD value must NOT be served via the
