@@ -735,22 +735,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(serverNodeId);
         ValidateTransferMode(mode, nameof(mode));
-        if (data.Length == 0)
-        {
-            // The expedited encoding steals bit-pair "n" from the CS byte to advertise how many
-            // of the four payload bytes are valid (n = 4 - length, 2 bits). Length 0 collapses
-            // onto the same wire encoding as length 4 (n = 0), so a length-0 expedited download
-            // is indistinguishable from a length-4 one on the receiver. Rather than silently
-            // sending a bogus 4-byte frame that either a) writes four zero bytes on the peer or
-            // b) trips a length-mismatch abort, we reject empty downloads here with a clear
-            // exception. Callers wanting to touch an OD entry without changing its value should
-            // use a segmented transport (e.g. by embedding at least one meaningful byte).
-            throw new ArgumentException(
-                "SDO download payload must contain at least one byte; the CiA 301 expedited " +
-                "encoding cannot represent a zero-length download and empty payloads are " +
-                "rejected rather than being silently misencoded as four zero bytes.",
-                nameof(data));
-        }
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var payload = data.ToArray();
         return InPeerSdoChannelAsync(serverNodeId, PeerSdoChannel(serverNodeId),
@@ -760,8 +744,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <summary>The download itself, without taking the peer's SDO channel: for a caller that
     /// holds it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public
     /// call). Still passes the peer gate — against the live binding, or for a safety transaction
-    /// against the description it started with (<paramref name="transaction"/>).
-    /// <paramref name="payload"/> is not empty.</summary>
+    /// against the description it started with (<paramref name="transaction"/>).</summary>
     private Task<byte[]> SdoDownloadCoreAsync(byte serverNodeId, ushort index, byte subindex,
         byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null, PeerDescriptionBinding? transaction = null)
     {
@@ -775,8 +758,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         //   * Block was explicitly requested → always block.
         //   * Auto and payload ≥ SdoBlockThresholdBytes → block.
         //   * Auto and payload < threshold → classic client, which picks expedited for 1..4
-        //     bytes and segmented above that in BuildDownloadInit. That split is dictated by
-        //     CiA 301 §7.2.4.3.3/§7.2.4.3.6 and is deliberately not caller-selectable.
+        //     bytes and segmented for an empty payload and above 4 in BuildDownloadInit. That
+        //     split is dictated by CiA 301 §7.2.4.3.3/§7.2.4.3.6 and is deliberately not
+        //     caller-selectable.
         bool useBlock = mode == SdoTransferMode.Block
                         || (mode == SdoTransferMode.Auto && payload.Length >= _options.SdoBlockThresholdBytes);
         if (useBlock)
@@ -2496,10 +2480,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             if (session.IsDownload)
             {
                 if (cs != SdoFrames.ScsDownloadInitAck) return;
-                // For expedited download this completes the transfer. For segmented, start
-                // sending segments (or complete if the payload is empty, though we always used
-                // expedited for zero-length data).
-                if (session.Payload!.Length <= 4)
+                // For expedited download (1..4 bytes, see BuildDownloadInit) this completes the
+                // transfer. For segmented, start sending segments — an empty payload too, whose
+                // one last segment carries no data (#500).
+                if (session.Payload!.Length is >= 1 and <= 4)
                 {
                     session.Deadline?.Dispose();
                     _sdoClients.Remove(serverNodeId);

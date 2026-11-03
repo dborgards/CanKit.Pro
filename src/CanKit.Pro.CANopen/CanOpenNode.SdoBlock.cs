@@ -564,6 +564,16 @@ internal sealed partial class CanOpenNode
         if (session.ResumeSeqno == 1)
             session.SubBlockStartOffset = session.Offset;
         var seqno = session.ResumeSeqno;
+        if (session.Payload!.Length == 0)
+        {
+            // An empty value still needs its one segment, as the server's block upload sends
+            // (#341): c = 1, no data, n = 7 in the end frame. Without it the server waits for
+            // seqno 1 and both sides end in their timeouts (#500).
+            frames.Add((cobId, SdoBlockFrames.BuildSegment(seqno, isLastSegment: true, ReadOnlySpan<byte>.Empty)));
+            session.SubBlockLastSeqno = seqno;
+            seqno++;
+            session.LastSegmentUnusedBytes = 7;
+        }
         while (seqno <= session.NegotiatedBlockSize)
         {
             int remaining = session.Payload!.Length - session.Offset;

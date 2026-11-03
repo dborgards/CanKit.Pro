@@ -91,6 +91,16 @@ public class CanOpenCodecTests
         advertised.Should().Be((uint)length);
     }
 
+    // #500: n = 4 - length cannot tell 0 bytes from 4, so an empty value is not expedited. It
+    // goes segmented with an indicated size of 0 (CiA 301 §7.2.4.3.3), which says it exactly.
+    [Fact]
+    public void SdoDownloadInit_Empty_UsesSegmentedEncodingWithSizeZero()
+    {
+        var frame = SdoFrames.BuildDownloadInit(0x2100, 0x00, ReadOnlySpan<byte>.Empty);
+
+        frame.Should().Equal(SdoFrames.CcsDownloadInitSegmented, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00);
+    }
+
     // -----------------------------------------------------------------------------------------
     // SdoFrames — command bytes, multiplexer, expedited length, segmented size bit, segments.
     // -----------------------------------------------------------------------------------------

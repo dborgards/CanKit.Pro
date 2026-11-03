@@ -251,6 +251,32 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().StartWith("Peer server 0x11 aborted");
     }
 
+    // FR-CO-003 (#500): an empty value goes segmented — initiate 21h with size 0, then one last
+    // segment with all seven bytes unused (c = 1, n = 7: 0Fh) — and the transfer ends with that
+    // segment's ack, not with the initiate's. Both halves are on the wire: an expedited initiate
+    // would read as four bytes, and a client that took the initiate ack as the end of an
+    // expedited transfer would never send the segment the server is waiting for.
+    [Fact]
+    public async Task Sdo_Client_Downloads_An_Empty_Value_As_One_Empty_Last_Segment()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = OpenOnStoppedClock(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
+            ReadOnlyMemory<byte>.Empty);
+        tap.Next(ShortTimeout).Should().Equal(SizedDownloadInit(0x2001, 0x00, 0));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 });
+        tap.Next(ShortTimeout).Should().Equal(0x0F, 0, 0, 0, 0, 0, 0, 0);
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { SdoFrames.ScsDownloadSegmentBase, 0, 0, 0, 0, 0, 0, 0 });
+        await download.WithTimeoutAsync(ShortTimeout);
+    }
+
     // FR-CO-003 (#18): the other half of attribution is the phase. A segmented download client
     // that has accepted its initiate response exchanges segment acks, which carry no multiplexer;
     // an initiate response arriving now — a duplicate, or a late one — belongs to no phase the
