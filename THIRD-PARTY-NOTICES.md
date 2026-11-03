@@ -52,7 +52,7 @@ local dotnet tools, or part of the website and release tooling.
 | Package | License |
 | --- | --- |
 | [GitVersion](https://github.com/GitTools/GitVersion) (`gitversion.tool`, a local dotnet tool) | MIT |
-| [xunit](https://github.com/xunit/xunit), xunit.runner.visualstudio | Apache-2.0 |
+| [xunit.v3.mtp-off](https://github.com/xunit/xunit), xunit.runner.visualstudio | Apache-2.0 |
 | [Microsoft.NET.Test.Sdk](https://github.com/microsoft/vstest) | MIT |
 | [AwesomeAssertions](https://github.com/AwesomeAssertions/AwesomeAssertions) | Apache-2.0 |
 | [coverlet.collector](https://github.com/coverlet-coverage/coverlet) | MIT |

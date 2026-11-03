@@ -2833,12 +2833,18 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var weak = await SendAndForgetAsync(sender, receiver, shutdown.Token);
 
-        for (int i = 0; i < 5 && weak.IsAlive; i++)
+        // xUnit.net v3 resumes this method inline, from inside SendAndForgetAsync's completion, so
+        // on the first pass that frame is still on this stack and still holds the Task. Yielding
+        // leaves it behind; a registration that was not disposed holds the Task for the whole bound.
+        var bound = DateTime.UtcNow + ShortTimeout;
+        do
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
-        }
+            if (!weak.IsAlive) break;
+            await Task.Yield();
+        } while (DateTime.UtcNow < bound);
 
         weak.IsAlive.Should().BeFalse("the token's registration for the send was disposed with it");
     }
