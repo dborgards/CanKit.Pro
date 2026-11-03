@@ -14,6 +14,7 @@ using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -515,6 +516,8 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // #500: an empty value — clearing a VISIBLE_STRING — is a legal write. The expedited
     // encoding cannot carry it (n = 4 - length cannot tell 0 bytes from 4), the segmented one
     // can, and SdoDownloadAsync used to refuse it with ArgumentException instead of sending it so.
+    // Both nodes run on a clock nothing moves, so a stalled runner cannot turn the 1 s SDO
+    // timeout into the failure (#92).
     [Fact]
     public async Task Sdo_EmptyDownload_Clears_A_VisibleString_On_The_Server()
     {
@@ -522,9 +525,11 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var master = new CanOpenNode(new CanBusService(busA), 0x01, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         PeerSdoLaboratory.Bind(master, 0x11);
-        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        using var slave = new CanOpenNode(new CanBusService(busB), 0x11, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         PeerSdoLaboratory.Bind(slave, 0x11);
         slave.ObjectDictionary.AddRaw(0x2600, 0x00, OdDataType.VisibleString, Encoding.ASCII.GetBytes("abcd"));
 

@@ -10,6 +10,7 @@ using CanKit.Core;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -85,6 +86,8 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
     // #500: an empty value by block download still needs its one segment — c = 1, all seven
     // bytes unused, n = 7 in the end frame — as the server's block upload does since #341.
     // Without it the client sends no segment, the server waits for seqno 1, and both time out.
+    // Both nodes run on a clock nothing moves, so a stalled runner cannot turn the 1 s SDO
+    // timeout into the failure (#92); without the segment the transfer hangs into ShortTimeout.
     [Fact]
     public async Task Sdo_BlockDownload_Of_An_Empty_Value_Clears_A_VisibleString()
     {
@@ -92,9 +95,11 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var master = new CanOpenNode(new CanBusService(busA), 0x01, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         PeerSdoLaboratory.Bind(master, 0x11);
-        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        using var slave = new CanOpenNode(new CanBusService(busB), 0x11, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddRaw(0x2A02, 0x00, OdDataType.VisibleString, new byte[] { 0x61, 0x62, 0x63 });
