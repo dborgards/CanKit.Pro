@@ -11,4 +11,4 @@ mkdocs-material==9.8.0
 # MkDocs dependency under the "properdocs" name and would install a second copy of MkDocs next to
 # the pinned one (#231 moved the pin to 0.6.3 regardless, and `pip install -r` then also installed
 # properdocs; .github/dependabot.yml now ignores that version).
-mkdocs-literate-nav==0.6.2
+mkdocs-literate-nav==0.6.3
