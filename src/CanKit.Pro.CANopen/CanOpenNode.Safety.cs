@@ -448,9 +448,14 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         // EN 50325-5:2010 §6.4.1.6: a configuration that is not valid is held as 00h, whichever of
         // the values Table 13 calls "not valid" was written (#289).
-        // A reset runs this on a node without SRDOs too, whose 13FEh, if any, is the application's.
-        if (_srdoCount > 0 && _od.TryReadUnsigned(Co.SrdoConfigurationValid, 0x00, out var held) && held != 0 && held != SrdoRecords.ConfigurationValidValue)
-            _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
+        // A reset runs this on a node without SRDOs too, whose 13FEh, if any, is the application's;
+        // with SRDOs the object always exists.
+        if (_srdoCount > 0)
+        {
+            uint held = _od.ReadUnsigned(Co.SrdoConfigurationValid, 0x00);
+            if (held != 0 && held != SrdoRecords.ConfigurationValidValue)
+                _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
+        }
         _safetyImage = RevalidateSafetyConfiguration() && IsConfigurationValidFlagSet() ? CaptureSafetyImage() : null;
     }
 
