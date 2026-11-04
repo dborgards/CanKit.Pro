@@ -10,6 +10,9 @@ internal interface ISrdoEngineHost
     /// while disabled, matching the node's RPDO reporting rule (#434). Actor loop only.</summary>
     bool EmcyEnabled { get; }
 
+    /// <summary>Whether the node's NMT state lets a received GFC through. Actor loop only.</summary>
+    bool GfcReceptionEnabled { get; }
+
     /// <summary>A single frame, sent at once: the global failsafe command.</summary>
     void Send(uint cobId, byte[] payload);
 

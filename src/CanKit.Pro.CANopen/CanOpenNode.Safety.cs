@@ -776,6 +776,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     bool ISrdoEngineHost.EmcyEnabled => _emcyValid;
 
+    // EN 50325-5:2010 §6.4.2.1 and §7.2.1 tie the reception to no NMT state, and §8.2.2 limits only
+    // SRDOs to Operational, so Pre-operational reports it too. Stopped leaves only node control and
+    // error control (CiA 301 Table 37); an unconfigured LSS slave stays in Initialisation (#507).
+    bool ISrdoEngineHost.GfcReceptionEnabled => _state is NmtState.PreOperational or NmtState.Operational;
+
     void ISrdoEngineHost.EmitEmcy(int srdoNumber, ushort errorCode)
         => RaiseCommunicationError(CommunicationError.SrdoLength, srdoNumber, errorCode);
 

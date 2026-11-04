@@ -86,7 +86,7 @@ maintainer decision does.
 | FR-CO-038 | At the transition to Operational, per SRDO: `13FEh` = `A5h` and a matching checksum, else `ConfigurationInvalid` and nothing sent ([Configuring and committing](#configuring-and-committing)) |
 | FR-CO-039 | Producer: cycle = refresh time, first cycle after 0.5 ms × node-id, plain and inverted frame as one unit, `TriggerSrdoAsync` and change of state send at once and restart the cycle ([Producer](#producer)) |
 | FR-CO-040 | Consumer: order, inversion, SRVT, SCT, length (EMCY `8210h` once per run), writing the mapped objects, `SrdoReceived` / `SrdoStateChanged`, re-validation by the next valid pair ([Consumer](#consumer)) |
-| FR-CO-041 | Global failsafe command: sent and reported only in Operational, DLC 0; `1300h` records it ([GFC](#gfc)) |
+| FR-CO-041 | Global failsafe command: sent only in Operational, reported in Pre-operational and Operational, DLC 0; `1300h` records it ([GFC](#gfc)) |
 | FR-CO-042 | `ICanOpenSafety` through `node.Safety()`, without widening `ICanOpenNode`; configuration, delete, commit, state, options ([Opening a safety node](#opening-a-safety-node)) |
 | FR-CO-043 | EDS/DCF: the safety objects loaded like the PDO records, with findings; the file's highest SRDO record raises `SrdoCount` ([Opening a safety node](#opening-a-safety-node)) |
 | FR-CO-044 | `ConfigurePeerSafetyAsync` after §9.2 (write, read back, compare, `A5h` only without a difference) and `VerifyPeerSafetyConfigurationAsync` after §8.3.1 step D, both through the peer-SDO gate ([Configuring a peer](#configuring-a-peer)) |
@@ -1102,11 +1102,16 @@ driver call — including one already waiting there behind another send (#294); 
 has been handed goes out. A send cancelled by the period ends
 quietly; one the caller cancelled — before the call ran or while the send waited — ends with
 `OperationCanceledException`, and so does a send under which the bus service is disposed, which
-is also reported on `BackgroundExceptionOccurred` as a transport failure. A GFC is reported by
-`GlobalFailsafeCommandReceived` while Operational (#507), and only as a classic CAN frame with
-DLC 0 (EN 50325-5:2010 Figure 10) — a CAN FD frame on `001h` is no GFC and is ignored. On a bus that
-echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event is critical, and
-identical ones still waiting are folded into one.
+is also reported on `BackgroundExceptionOccurred` as a transport failure.
+
+A received GFC is reported by `GlobalFailsafeCommandReceived` and recorded in `1300h` while
+Pre-operational or Operational. EN 50325-5:2010 §6.4.2.1 and §7.2.1 tie its reception to no NMT
+state, and §8.2.2 limits only SRDOs to Operational. In Pre-operational the report is diagnostic: the
+SRLD is in its safe state there already. A node in Stopped ignores it, since that state leaves only
+node control and error control (CiA 301 Table 37), and so does an unconfigured LSS slave. Only a
+classic CAN frame with DLC 0 is a GFC (EN 50325-5:2010 Figure 10); a CAN FD frame on `001h` is
+ignored. On a bus that echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event
+is critical, and identical ones still waiting are folded into one.
 
 ### Configuring a peer
 

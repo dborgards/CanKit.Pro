@@ -9,6 +9,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Lss;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Safety;
@@ -1623,6 +1624,61 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         echo.InjectPeerFrame(CanFrame.Classic((int)CanOpenCobId.Heartbeat(0x12), new[] { (byte)NmtState.Operational }));
         await WaitUntilAsync(() => Volatile.Read(ref witnesses) >= 1, "witness delivered");
         Volatile.Read(ref gfcs).Should().Be(1, "the own GFC is reported, and only once");
+    }
+
+    /// <summary>The NMT states as the node has them (#507): reported and recorded in Pre-operational,
+    /// ignored in Stopped. An NMT command sent after each GFC is the witness: it is handled, and its
+    /// event delivered, behind the frame.</summary>
+    [Fact]
+    public async Task A_Gfc_Is_Reported_In_PreOperational_And_Ignored_In_Stopped()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        int gfcs = 0, commands = 0;
+        node.Safety().GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
+        node.NmtCommandReceived += (_, _) => Interlocked.Increment(ref commands);
+        node.State.Should().Be(NmtState.PreOperational);
+        node.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u);
+
+        wire.Transmit(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>());
+        await WaitUntilAsync(() => Volatile.Read(ref gfcs) == 1, "reported in Pre-operational");
+        node.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(1u, "and recorded there");
+
+        node.ObjectDictionary.WriteUnsigned(0x1300, 0, 0);
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped && Volatile.Read(ref commands) == 1, "stop");
+        wire.Transmit(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>());
+        wire.SendNmt(NmtCommand.EnterPreOperational, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.PreOperational && Volatile.Read(ref commands) == 2, "witness");
+        Volatile.Read(ref gfcs).Should().Be(1, "Stopped leaves only node control and error control");
+        node.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u, "and nothing is recorded");
+
+        wire.Transmit(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>());
+        await WaitUntilAsync(() => Volatile.Read(ref gfcs) == 2, "Pre-operational again");
+    }
+
+    /// <summary>An unconfigured LSS slave is still in Initialisation: it has not booted up (#507).
+    /// A peer's heartbeat behind the frame is the witness, delivered on the same event queue.</summary>
+    [Fact]
+    public async Task An_Unconfigured_Lss_Slave_Ignores_A_Gfc()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var options = new CanOpenNodeOptions { SrdoCount = 1, Lss = new LssSlaveOptions { Enabled = true } };
+        using var node = CanOpen.OpenNode(bus, CanOpenCobId.UnconfiguredNodeId, options);
+        int gfcs = 0, witnesses = 0;
+        node.Safety().GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
+        node.HeartbeatReceived += (_, _) => Interlocked.Increment(ref witnesses);
+
+        wire.Transmit(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>());
+        wire.Transmit(CanOpenCobId.Heartbeat(0x12), new[] { (byte)NmtState.Operational });
+        await WaitUntilAsync(() => Volatile.Read(ref witnesses) >= 1, "witness");
+        node.State.Should().Be(NmtState.Initializing);
+        Volatile.Read(ref gfcs).Should().Be(0);
+        node.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u);
     }
 
     [Fact]

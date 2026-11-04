@@ -224,6 +224,6 @@ public interface ICanOpenSafety
     /// <summary>An SRDO became valid or invalid (transitions only; never dropped).</summary>
     event EventHandler<SrdoStateChangedEventArgs>? SrdoStateChanged;
 
-    /// <summary>A GFC arrived while Operational, whatever <c>1300h</c> held; the node set it to 1 (including the node's own, on a bus that echoes).</summary>
+    /// <summary>A GFC arrived while Pre-operational or Operational, whatever <c>1300h</c> held; the node set it to 1 (including the node's own, on a bus that echoes).</summary>
     event EventHandler<GlobalFailsafeCommandReceivedEventArgs>? GlobalFailsafeCommandReceived;
 }
