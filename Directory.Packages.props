@@ -39,7 +39,12 @@
 
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
-    <PackageVersion Include="xunit" Version="2.9.3" />
+    <!--
+      xunit.v3.mtp-off, not xunit.v3: from 4.0 the plain package turns on Microsoft Testing Platform
+      v2, which refuses the VSTest target on the .NET 10 SDK. CI's trx logger, coverlet.collector and
+      the test filter syntax in CONTRIBUTING.md are all VSTest, so the suite stays on it.
+    -->
+    <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
     <!--
       AwesomeAssertions, not FluentAssertions: from 8.0.0 onwards FluentAssertions ships under the
