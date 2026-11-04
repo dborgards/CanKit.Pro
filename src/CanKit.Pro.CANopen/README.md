@@ -105,6 +105,7 @@ maintainer decision does.
 | FR-CO-058 | The device side of CiA 319: at the write of `A5h` the checksums of the existing SRDOs are compared and a mismatch sets `13FEh` back to `00h` at once (§5.3 step 4); the same after a reset, before the boot-up (§5.4) ([Configuring and committing](#configuring-and-committing)) |
 | FR-CO-059 | `SrdoConfigurationCheckInterval`: the same check repeated periodically (§5.3, opt-in); a mismatch in Operational makes every SRDO `ConfigurationInvalid` ([Configuring and committing](#configuring-and-committing)) |
 | FR-CO-057 | SAM/DAM MPDO, scanner/dispatcher blocks and inhibit queue |
+| FR-CO-062 | Pre-defined error field `1003h`, opt-in by `ErrorHistoryCapacity` or a description that declares it ([Error control](#error-control)) |
 
 ## Not built, and why
 
@@ -186,10 +187,9 @@ Deliberate omissions, each checked against the norm text:
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
-with such an entry instead of ignoring it. The same holds for the pre-defined error field
-(`1003h`), the EMCY inhibit time (`1015h`) and the error behaviour object (`1029h`): the node
-neither maintains nor reads them, and a description that declares one gets it created as data
-and reported `NotImplemented`.
+with such an entry instead of ignoring it. The same holds for the EMCY inhibit time (`1015h`) and
+the error behaviour object (`1029h`): the node neither maintains nor reads them, and a description
+that declares one gets it created as data and reported `NotImplemented`.
 
 ## The object dictionary is the configuration
 
@@ -237,6 +237,7 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0609 0030h` | Reserved transmission type; bit 29 set on SYNC/EMCY; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time or SYNC start changed while the PDO is valid; reserved mapping count `41h`–`FDh`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
 | `0800 0020h` | Wrong signature written to `1010h:01` / `1011h:01` |
 | `0800 0022h` | SDO server session open when the node entered Stopped or was reset; `1F82h` written while this node is not the active NMT master |
+| `0800 0024h` | Upload of an entry of `1003h` above its count |
 
 **Expedited download without a size.** CiA 301 §7.2.4.3.3 permits `e = 1, s = 0` (command byte
 `22h`): "d contains unspecified number of bytes to be downloaded". The server then takes the
@@ -639,6 +640,30 @@ the entries N names. While the mapping is disabled the slots keep what they held
 may be written in any order, so a slot not yet overwritten does not count against a new one.
 
 ## Error control
+
+**Error history (`1003h`).** Optional (CiA 301 §7.5.2.4), so off by default:
+`CanOpenNodeOptions.ErrorHistoryCapacity` gives its number of entries (0..254), and a device
+description that declares the object raises that to its highest entry. Without either, `1003h` is
+the application's to declare.
+
+Every EMCY this node transmits is entered in the step that transmits it (Figure 37, transitions 1
+and 3): the application's and the node's own. An EMCY that does not reach the bus is not — switched
+off by bit 31 of `1014h`, cancelled, or replaced while held in Stopped — and neither is `0000h`,
+which reports that an error ended, or a received EMCY. The newest is at sub-index `01h`, older ones
+move up and a full history drops the oldest. An entry is the error code in the low 16 bits and, as
+the manufacturer-specific additional information, the first two manufacturer-specific bytes of the
+EMCY, little-endian, in the high 16; the node's own EMCYs carry 0 there.
+
+Sub-index `00h` is the count: writing 0 empties the history, any other value is refused with
+`0609 0030h`. The entries are `ro`. An upload of an entry above the count gets `0800 0024h`: the
+text asks that of sub-index `01h` with no error present, and this applies it to every vacant one. A
+file may declare the count `ro`, which is honoured on the bus; a count the file presets starts at 0
+all the same and entries it declares `rw` stay `ro`, each with a `Corrected` finding.
+
+The history is status, like `1001h`: `1010h` does not store it and `1011h` does not restore it. An
+NMT reset leaves it standing, which departs from §7.3.2.2.1 (the communication profile area returns
+to its power-on values, here a count of 0), so that a master that resets a node to recover it can
+still read why it had to, as the maintainer decided on #434. Power-off ends it.
 
 **Error register (`1001h`) and error reset.** Every EMCY the node raises itself is a
 communication error (CiA 301 Table 26, `81xxh`/`82xxh`) and follows one rule (§7.2.7.1 and Figure 37;

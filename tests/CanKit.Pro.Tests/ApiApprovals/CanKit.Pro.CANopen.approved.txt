@@ -97,6 +97,7 @@ namespace CanKit.Pro.CANopen
         public bool EmitGuardingErrorEmcy { get; init; }
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
+        public int ErrorHistoryCapacity { get; init; }
         public int EventQueueCapacity { get; init; }
         public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }
         public int MaxSdoTransferBytes { get; init; }
@@ -131,6 +132,7 @@ namespace CanKit.Pro.CANopen
                     int? srdoCount = default,
                     bool? enableChangeOfStateSrdo = default,
                     int? pdoCount = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions WithErrorHistoryCapacity(int capacity) { }
         public CanKit.Pro.CANopen.CanOpenNodeOptions WithLss(CanKit.Pro.CANopen.Lss.LssSlaveOptions? lss) { }
         public CanKit.Pro.CANopen.CanOpenNodeOptions WithSrdoConfigurationCheckInterval(System.TimeSpan? interval) { }
     }
@@ -1196,6 +1198,7 @@ namespace CanKit.Pro.CANopen.Sdo
         SubIndexDoesNotExist = 101253137u,
         ValueRangeExceeded = 101253168u,
         General = 134217728u,
+        NoDataAvailable = 134217764u,
         DataCannotBeTransferred = 134217760u,
         DataCannotBeTransferredDeviceState = 134217762u,
     }

@@ -235,6 +235,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // The SRDO engine (CiA DSP 304) needs its count before the communication profile is
         // populated: a record write there already reaches the engine through the CoS filter.
         _srdoCount = Math.Max(_options.SrdoCount, DescribedSrdoCount(description));
+        _errorHistoryCapacity = Math.Max(_options.ErrorHistoryCapacity, DescribedErrorHistoryCapacity(description));
         _srdoInFlight = new bool[_srdoCount + 1];
         _srdoPending = new SrdoPair?[_srdoCount + 1];
         _srdo = new Safety.SrdoEngine(_actor, _actor.TimeSource, _deadlines, _od, _nodeId, _srdoCount, this);
@@ -599,7 +600,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
                 return Task.CompletedTask;
             }
-            frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
+            NoteTransmittedEmcy(frame, applicationErrorRegister, nodeBits);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
         return AppendToEmcyChain(transmit);
@@ -1922,11 +1923,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // backing array without any coordination with the actor loop, and the unlocked
         // copy path used to read _value.Length and then re-dereference _value byte-by-byte,
         // which can tear when the write lands between those two reads.
-        if (!_od.TryReadRaw(index, subindex, out var value))
+        if (SnapshotForUpload(index, subindex, out var value) is { } refused)
         {
-            // Race: entry was removed between the TryGet above and this locked snapshot.
-            // Treat that as ObjectDoesNotExist rather than crashing with a KeyNotFound.
-            SendSdoServerAbort(index, subindex, SdoAbortCode.ObjectDoesNotExist);
+            // Race: entry was removed between the TryGet above and this locked snapshot, which is
+            // ObjectDoesNotExist rather than a KeyNotFound; or an entry of 1003h above its count.
+            SendSdoServerAbort(index, subindex, refused);
             return;
         }
         // Expedited only makes sense for 1..4 bytes: the 2-bit "n" field in the CS byte cannot

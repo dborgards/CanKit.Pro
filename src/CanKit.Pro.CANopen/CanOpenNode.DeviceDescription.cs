@@ -436,6 +436,8 @@ internal sealed partial class CanOpenNode
         if (index is >= Co.TpdoMap and < Co.TpdoMap + 0x200)
             return ApplyPdoMappingRecord(index, entries, findings, failedMappings);
 
+        if (IsManagedErrorHistory(index)) return ApplyErrorHistory(entries, findings);
+
         // CiA DSP 304: only when the node has SRDOs; otherwise the objects are data like any other.
         if (IsManagedSafetyObject(index))
         {

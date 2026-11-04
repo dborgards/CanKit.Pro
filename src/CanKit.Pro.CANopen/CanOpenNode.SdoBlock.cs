@@ -1009,10 +1009,9 @@ internal sealed partial class CanOpenNode
             return;
         }
 
-        if (!_od.TryReadRaw(index, subindex, out var value))
+        if (SnapshotForUpload(index, subindex, out var value) is { } refused)
         {
-            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
-                SdoFrames.BuildAbort(index, subindex, (uint)SdoAbortCode.ObjectDoesNotExist));
+            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), SdoFrames.BuildAbort(index, subindex, (uint)refused));
             return;
         }
 
