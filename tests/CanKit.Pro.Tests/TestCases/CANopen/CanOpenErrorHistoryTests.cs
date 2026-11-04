@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -286,6 +287,18 @@ public partial class CanOpenPdoEngineTests
 
         await wire.WaitForCountAsync(SdoResponse, 1);
         wire.Payloads(SdoResponse)[0].Should().Equal(HistoryAbort(0x01, SdoAbortCode.NoDataAvailable));
+    }
+
+    // The race the server's own comment names: an object gone between its lookup and the snapshot.
+    // No frame can stage that, so this asks the snapshot directly.
+    [Fact]
+    public void A_Snapshot_Of_An_Object_That_Is_Gone_Says_So()
+    {
+        var session = NewSession();
+        using var node = OpenClocked(Open(session, 0), Device, new ManualTimeSource());
+        var snapshot = typeof(CanOpenNode).GetMethod("SnapshotForUpload", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        snapshot.Invoke(node, new object?[] { (ushort)0x2FFF, (byte)0, null }).Should().Be(SdoAbortCode.ObjectDoesNotExist);
+        snapshot.Invoke(node, new object?[] { (ushort)0x1001, (byte)0, null }).Should().BeNull();
     }
 
     [Fact]

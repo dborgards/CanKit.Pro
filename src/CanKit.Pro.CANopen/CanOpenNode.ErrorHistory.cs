@@ -58,6 +58,15 @@ internal sealed partial class CanOpenNode
         for (int n = 1; n <= _errorHistoryCapacity; n++) _od.WriteRawUnchecked(Co.ErrorHistory, (byte)n, empty);
     }
 
+    /// <summary>The EMCY in <paramref name="frame"/> is being transmitted: <c>1001h</c> gets the
+    /// register the frame carries and <c>1003h</c> its error, as one write. Actor loop only.</summary>
+    private void NoteTransmittedEmcy(byte[] frame, byte? applicationErrorRegister, byte nodeBits)
+        => _od.Transaction(() =>
+        {
+            frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
+            EnterInErrorHistory(frame);
+        });
+
     /// <summary>The EMCY in <paramref name="frame"/> is being transmitted: its error goes in at
     /// sub-index 01h, the older ones move up and the oldest of a full history falls off. Under the
     /// dictionary's write gate, on the actor.</summary>

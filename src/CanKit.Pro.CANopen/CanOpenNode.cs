@@ -600,11 +600,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
                 return Task.CompletedTask;
             }
-            _od.Transaction(() =>
-            {
-                frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
-                EnterInErrorHistory(frame);
-            });
+            NoteTransmittedEmcy(frame, applicationErrorRegister, nodeBits);
             return SendControlFrame(cobId, frame, cancellationToken);
         };
         return AppendToEmcyChain(transmit);
