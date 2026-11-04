@@ -1066,6 +1066,26 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         if (from != CanOpenCobId.UnconfiguredNodeId) await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, from);
         await bench.WaitUntilAsync(() => slave.NodeId == to && slave.State == NmtState.PreOperational);
         od.ReadUnsigned(0x1301, 0x01).Should().Be(direction);
+        od.ReadUnsigned(0x1301, 0x02).Should().Be(direction == 2 ? 50u : 25u, "Table 5: the default follows the direction");
+    }
+
+    /// <summary>A cycle time the application chose is not the old direction's default and stays,
+    /// while the direction moves.</summary>
+    [Fact]
+    public async Task A_Cycle_Time_The_Application_Chose_Survives_An_Lss_Node_Id_Change()
+    {
+        using var bench = NewBench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions(), srdoCount: 1);
+        var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x1301, 0x02, 30);
+        slave.StoreParameters();
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench, slave);
+        (await bench.Master.ConfigureNodeIdAsync(40)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await bench.WaitUntilAsync(() => slave.NodeId == 40 && slave.State == NmtState.PreOperational);
+        od.ReadUnsigned(0x1301, 0x01).Should().Be(2u);
+        od.ReadUnsigned(0x1301, 0x02).Should().Be(30u);
     }
 
     /// <summary>A direction the application chose is not the old node-id's default and stays.</summary>

@@ -20,6 +20,10 @@ internal static class SrdoRecords
     public const int MappingSubindices = 2 * SrdoMapping.MaxEntries;
     /// <summary>Sub-index 4 of every record: "defined as type 254" (§8.4.2.2).</summary>
     public const byte TransmissionType = 254;
+    /// <summary>Sub-index 2 of a transmit record at power-on, 25 ms (EN 50325-5:2010 Table 5).</summary>
+    public const ushort DefaultRefreshTimeMs = 25;
+    /// <summary>Sub-index 2 of a receive record at power-on, 50 ms (EN 50325-5:2010 Table 5).</summary>
+    public const ushort DefaultSafeguardCycleTimeMs = 50;
     /// <summary>Sub-index 3 of every record at power-on, 20 ms (§8.4.2.2) — and the value a
     /// configuration entity checksums for a tx SRDO whose SRVT the SRD does not implement
     /// (CiA 319 v2.0.0 §6.2).</summary>
