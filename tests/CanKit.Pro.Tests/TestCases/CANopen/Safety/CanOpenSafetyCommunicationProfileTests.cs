@@ -204,6 +204,27 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.ReadUnsigned(0x1301, 1).Should().Be(7u, "an application object, not validated as an SRDO record");
     }
 
+    /// <summary>Without SRDOs 13FEh is the application's, of whatever type it declares: a reset
+    /// neither takes it for the configuration-valid flag nor fails on its width (Codex on #508).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Without_Srdos_A_Reset_Leaves_An_Application_13FEh_Alone(bool wide)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var master = Open(session, 2);
+        using var node = CanOpen.OpenNode(bus, Device);
+        var od = node.ObjectDictionary;
+        if (wide) od.AddU32(0x13FE, 0x00, 0x42);
+        else od.AddU8(0x13FE, 0x00, 0x42);
+        SendNmt(master, NmtCommand.Start, Device);
+        await WaitForStateAsync(node, NmtState.Operational);
+        SendNmt(master, NmtCommand.ResetCommunication, Device);
+        await WaitForStateAsync(node, NmtState.PreOperational);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0x42u);
+    }
+
     [Fact]
     public void With_Two_Srdos_Only_Their_Records_Are_Reserved()
     {
