@@ -64,16 +64,17 @@ public partial class CanOpenPdoEngineTests
     }
 
     private static CanOpenDeviceDescription EdsWithHistory(string subZeroAccess, string subZeroValue, params string[] entryAccess)
+        => CanOpenDeviceDescription.ParseEds(EdsTextWithHistory(subZeroAccess, subZeroValue, entryAccess));
+
+    private static string EdsTextWithHistory(string subZeroAccess, string subZeroValue, params string[] entryAccess)
     {
-        var text = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "device.eds"))
-            .Replace("\r\n", "\n");
+        var text = File.ReadAllText(CanOpenDeviceDescriptionTests.Fixture("device.eds")).Replace("\r\n", "\n");
         text.Should().Contain("SupportedObjects=12\n");
         var sections = $"[1003]\nParameterName=Pre-defined error field\nObjectType=0x8\nSubNumber={entryAccess.Length + 1}\n\n"
             + $"[1003sub0]\nParameterName=Number of errors\nObjectType=0x7\nDataType=0x0005\nAccessType={subZeroAccess}\nDefaultValue={subZeroValue}\nPDOMapping=0\n\n"
             + string.Concat(entryAccess.Select((access, i) =>
                 $"[1003sub{i + 1}]\nParameterName=Standard error field\nObjectType=0x7\nDataType=0x0007\nAccessType={access}\nDefaultValue=0\nPDOMapping=0\n\n"));
-        text = text.Replace("SupportedObjects=12\n", "SupportedObjects=13\n13=0x1003\n").Replace("[OptionalObjects]\n", sections + "[OptionalObjects]\n");
-        return CanOpenDeviceDescription.ParseEds(text);
+        return text.Replace("SupportedObjects=12\n", "SupportedObjects=13\n13=0x1003\n").Replace("[OptionalObjects]\n", sections + "[OptionalObjects]\n");
     }
 
     private static ICanOpenNode OpenDescribed(string session, CanOpenDeviceDescription description, out Wire wire, int capacity = 0)
@@ -259,6 +260,34 @@ public partial class CanOpenPdoEngineTests
         (await SdoExchangeAsync(wire, command, 0x01, 127))[0].Should().NotBe((byte)0x80, "sub-index 01h holds an error now");
     }
 
+    // Count and entry are one read (Codex on #510). The test holds the write gate, as an application
+    // emptying the history on its own thread does. An upload that reads without the gate answers with
+    // the error while the gate is held. How long the wait is only decides how surely that is seen:
+    // the node cannot answer while the gate is held, so a slow host weakens this test, not breaks it.
+    [Theory]
+    [InlineData(HistoryUploadInit)]
+    [InlineData(HistoryBlockUploadInit)]
+    public async Task An_Upload_Does_Not_Read_Between_The_Writes_Of_An_Emptying(byte command)
+    {
+        var session = NewSession();
+        using var node = OpenWithHistory(session, 2, out var wire);
+        using var _w = wire;
+        await StartAsync(wire, node);
+        await node.SendEmcyAsync(0xFF01, 0);
+        var od = node.ObjectDictionary;
+
+        od.Transaction(() =>
+        {
+            wire.Transmit(SdoRequest, new byte[] { command, 0x03, 0x10, 0x01, 127, 0, 0, 0 });
+            Thread.Sleep(200);
+            wire.Payloads(SdoResponse).Should().BeEmpty("the upload waits for the write gate");
+            od.WriteUnsigned(0x1003, 0, 0);
+        });
+
+        await wire.WaitForCountAsync(SdoResponse, 1);
+        wire.Payloads(SdoResponse)[0].Should().Equal(HistoryAbort(0x01, SdoAbortCode.NoDataAvailable));
+    }
+
     [Fact]
     public async Task An_Entry_Within_The_Count_And_The_Count_Are_Uploaded()
     {
@@ -414,6 +443,20 @@ public partial class CanOpenPdoEngineTests
         var findings = node.DeviceDescription!.Findings.Where(f => f.Index == 0x1003).ToList();
         findings.Should().Contain(f => f.Subindex == 0 && f.Outcome == DeviceDescriptionOutcome.Corrected);
         findings.Should().Contain(f => f.Subindex == 1 && f.Outcome == DeviceDescriptionOutcome.Corrected);
+    }
+
+    [Fact]
+    public void An_Entry_Above_Sub_Index_FEh_Is_Left_Out_And_Reported()
+    {
+        var text = EdsTextWithHistory("rw", "0", "ro").Replace("[OptionalObjects]\n",
+            "[1003subFF]\nParameterName=Beyond the object\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0\nPDOMapping=0\n\n[OptionalObjects]\n");
+        var session = NewSession();
+        using var node = OpenDescribed(session, CanOpenDeviceDescription.ParseEds(text), out var wire);
+        using var _w = wire;
+        node.ObjectDictionary.TryGet(0x1003, 1, out _).Should().BeTrue();
+        node.ObjectDictionary.TryGet(0x1003, 2, out _).Should().BeFalse("FFh does not raise the capacity");
+        node.ObjectDictionary.TryGet(0x1003, 0xFF, out _).Should().BeFalse();
+        node.DeviceDescription!.Findings.Should().Contain(f => f.Index == 0x1003 && f.Subindex == 0xFF && f.Outcome == DeviceDescriptionOutcome.Omitted);
     }
 
     [Fact]

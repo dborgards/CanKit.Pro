@@ -37,7 +37,7 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
 
     private static ICanBus Open(string session, int channel) => VirtualAdapterFixture.Open(session, channel);
 
-    private static string Fixture(string name)
+    internal static string Fixture(string name)
         => Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", name);
 
     private static CanOpenDeviceDescription DeviceEds() => CanOpenDeviceDescription.Load(Fixture("device.eds"));

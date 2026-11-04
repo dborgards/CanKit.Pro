@@ -70,10 +70,23 @@ internal sealed partial class CanOpenNode
         _od.WriteRawUnchecked(Co.ErrorHistory, 0x00, new[] { (byte)(kept + 1) });
     }
 
-    /// <summary>§7.5.2.4 NOTE: with no error present an upload of sub-index 01h aborts. Read here for
-    /// every entry above the count.</summary>
-    private bool IsVacantErrorHistoryEntry(ushort index, byte subindex)
-        => IsManagedErrorHistory(index) && subindex > _od.ReadUnsigned(Co.ErrorHistory, 0x00);
+    /// <summary>What an SDO upload serves: <paramref name="value"/>, or the abort code instead.
+    /// §7.5.2.4 NOTE: with no error present an upload of sub-index 01h aborts, read here for every
+    /// entry above the count. Count and entry are read together under the write gate: an application
+    /// emptying the history from its own thread could otherwise land between them, and the upload
+    /// would serve a zero that was never an error (Codex on #510).</summary>
+    private SdoAbortCode? SnapshotForUpload(ushort index, byte subindex, out byte[] value)
+    {
+        if (!IsManagedErrorHistory(index))
+            return _od.TryReadRaw(index, subindex, out value!) ? null : SdoAbortCode.ObjectDoesNotExist;
+        byte[]? entry = null;
+        _od.Transaction(() =>
+        {
+            if (subindex <= _od.ReadUnsigned(Co.ErrorHistory, 0x00)) entry = _od.ReadRaw(Co.ErrorHistory, subindex);
+        });
+        value = entry ?? Array.Empty<byte>();
+        return entry is null ? SdoAbortCode.NoDataAvailable : null;
+    }
 
     /// <summary>The count starts at 00h whatever the file says, the entries stay ro: the node writes
     /// them. The access of the count is the file's, so that a device can refuse to be cleared.</summary>
@@ -91,7 +104,7 @@ internal sealed partial class CanOpenNode
                         "the history starts empty: the node counts what it enters", entry.Value));
                 loaded++;
             }
-            else if (_od.TryGet(Co.ErrorHistory, entry.Subindex, out _))
+            else if (entry.Subindex <= _errorHistoryCapacity)
             {
                 if ((MapAccess(entry.Access) & OdAccess.WriteOnly) != 0)
                     findings.Add(new DeviceDescriptionFinding(Co.ErrorHistory, entry.Subindex, DeviceDescriptionOutcome.Corrected,
