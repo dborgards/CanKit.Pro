@@ -5,12 +5,12 @@ namespace CanKit.Pro.CANopen.Safety;
 
 /// <summary>
 /// The safety configuration checksum of object 13FFh (CiA DSP 304 V1.0 §8.4.2.2; EN 50325-5:2010
-/// §6.4.1.5, Table 9). Both texts give the generator polynomial x^16 + x^12 + x^5 + 1, the order
-/// of the fields and the seed 0000h (EN 50325-5); neither names the byte order of a multi-byte
-/// field — Table 9 only lists each field's bits from the most significant down (b15 … b0). This
-/// implementation uses CRC-16/XMODEM (initial value 0000h, no reflection, no final XOR — the
-/// algorithm CiA 301 §7.2.4.3.16 prescribes for the SDO block transfer) and feeds multi-byte
-/// fields little-endian, the CANopen byte image, as CANopenNode's CO_SRDOcalcCrc does (#289).
+/// §6.4.1.5, Table 9). Both texts give the generator polynomial x^16 + x^12 + x^5 + 1 and the order
+/// of the fields; EN 50325-5 adds the seed 0000h, and its formula (2) lists a multi-byte field low
+/// byte first (b7..0, then b15..8), each byte from its bit 7 down. This implementation uses
+/// CRC-16/XMODEM (initial value 0000h, no reflection, no final XOR — the algorithm CiA 301
+/// §7.2.4.3.16 prescribes for the SDO block transfer) and feeds multi-byte fields little-endian,
+/// the CANopen byte image, as CANopenNode's CO_SRDOcalcCrc does (#289).
 /// </summary>
 public static class SrdoCrc
 {

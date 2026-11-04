@@ -230,6 +230,60 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "SRDO 1 matches again and SRDO 2 does not exist");
     }
 
+    // EN 50325-5:2010 §8.1, §8.2.2 and Tables 5, 8, 11, 13, 15 (#289): a configuration tool reaches
+    // the safety objects by SDO download on a node opened without any option, read-only are the
+    // constants, and Operational refuses all of it but 1300h.
+    [Fact]
+    public async Task A_Tool_Downloads_To_The_Safety_Objects_Of_A_Node_Without_Options()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        var od = device.ObjectDictionary;
+        uint request = CanOpenCobId.SdoRx(Producer), response = CanOpenCobId.SdoTx(Producer);
+        int answers = 0;
+        async Task<byte[]> Download(byte command, ushort index, byte subindex, params byte[] value)
+        {
+            var frame = new byte[8];
+            frame[0] = command;
+            frame[1] = (byte)index;
+            frame[2] = (byte)(index >> 8);
+            frame[3] = subindex;
+            value.CopyTo(frame, 4);
+            wire.Transmit(request, frame);
+            await wire.WaitForCountAsync(response, ++answers);
+            return wire.Payloads(response)[answers - 1];
+        }
+        const byte OneByte = 0x2F, TwoBytes = 0x2B, Accepted = 0x60;
+        byte[] AbortOf(ushort index, byte subindex, uint code) => new[]
+        {
+            (byte)0x80, (byte)index, (byte)(index >> 8), subindex, (byte)code, (byte)(code >> 8), (byte)(code >> 16), (byte)(code >> 24),
+        };
+
+        (await Download(OneByte, 0x1301, 0x01, 0))[0].Should().Be(Accepted, "the SRDO is deleted before its mapping changes");
+        (await Download(TwoBytes, 0x1301, 0x02, 30, 0))[0].Should().Be(Accepted);
+        (await Download(OneByte, 0x1381, 0x00, 0))[0].Should().Be(Accepted);
+        (await Download(TwoBytes, 0x13FF, 0x01, 0x34, 0x12))[0].Should().Be(Accepted);
+        (await Download(OneByte, 0x13FE, 0x00, 0xA5))[0].Should().Be(Accepted);
+        od.ReadUnsigned(0x1301, 2).Should().Be(30u);
+        od.ReadUnsigned(0x13FF, 1).Should().Be(0x1234u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+
+        (await Download(OneByte, 0x1301, 0x00, 6)).Should().Equal(AbortOf(0x1301, 0x00, (uint)SdoAbortCode.AttemptWriteReadOnly));
+        (await Download(OneByte, 0x1301, 0x04, 254)).Should().Equal(AbortOf(0x1301, 0x04, (uint)SdoAbortCode.AttemptWriteReadOnly));
+        (await Download(OneByte, 0x13FF, 0x00, 1)).Should().Equal(AbortOf(0x13FF, 0x00, (uint)SdoAbortCode.AttemptWriteReadOnly));
+
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => device.State == NmtState.Operational, "the node did not reach Operational");
+        (await Download(TwoBytes, 0x1301, 0x02, 40, 0)).Should().Equal(AbortOf(0x1301, 0x02, (uint)SdoAbortCode.DataCannotBeTransferredDeviceState));
+        (await Download(OneByte, 0x13FE, 0x00, 0)).Should().Equal(AbortOf(0x13FE, 0x00, (uint)SdoAbortCode.DataCannotBeTransferredDeviceState));
+        (await Download(OneByte, 0x1300, 0x00, 1))[0].Should().Be(Accepted, "§8.2.2 excepts the GFC parameter");
+        od.ReadUnsigned(0x1301, 2).Should().Be(30u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        od.ReadUnsigned(0x1300, 0).Should().Be(1u);
+    }
+
     // CiA 319 §5.3, after step 5 (FR-CO-036): the first SDO download indication to a safety
     // parameter clears 13FEh "even if the value included in the download indication is identical
     // to the value currently in the object entry"; one to an object that "is read-only", or that

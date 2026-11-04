@@ -80,7 +80,7 @@ maintainer decision does.
 | FR-CO-032 | Boot-up of the slaves in `1F81h` by the active master, `1F80h`, `1F82h`, `1F89h` ([Boot-up](#boot-up)) |
 | FR-CO-033 | Listen-only discovery: heartbeat or boot-up within a caller-chosen window, nothing transmitted ([Discovery](#discovery)) |
 | FR-CO-034 | Scan on request: one SDO upload of `1000h:00` per node-id not already found ([Discovery](#discovery)) |
-| FR-CO-035 | Safety objects `1300h`, `1301h`–`1340h`, `1381h`–`13C0h`, `13FEh`, `13FFh` as managed objects at the DSP 304 §8.4.2.2 defaults, only with `SrdoCount` > 0 or SRDO records in a description; reset, store and load like the communication objects ([The objects](#the-objects)) |
+| FR-CO-035 | Safety objects `1300h`, `1301h`–`1340h`, `1381h`–`13C0h`, `13FEh`, `13FFh` as managed objects at the DSP 304 §8.4.2.2 and EN 50325-5:2010 Table 5 defaults, bus-writable outside Operational, only with `SrdoCount` > 0 or SRDO records in a description; reset, store and load like the communication objects ([The objects](#the-objects)) |
 | FR-CO-036 | Every write to them validated: value ranges, `0800 0022h` in Operational, delete before change, plain/inverted pairs, at most 8 bytes, COB-ID collisions; `13FEh` back to 0 on every parameter write ([The objects](#the-objects)) |
 | FR-CO-037 | The `13FFh` checksum of §8.4.2.2 as CRC-16/XMODEM over the fields, multi-byte fields little-endian; `SrdoCrc` is public ([Configuring and committing](#configuring-and-committing)) |
 | FR-CO-038 | At the transition to Operational, per SRDO: `13FEh` = `A5h` and a matching checksum, else `ConfigurationInvalid` and nothing sent ([Configuring and committing](#configuring-and-committing)) |
@@ -137,13 +137,15 @@ Deliberate omissions, each checked against the norm text:
   inverted frame from the plain one and compares bit by bit on reception; building the pair
   "by two different ways" and entering the safe state are the device's.
 * **SRDO details V1.0 leaves open** — the checksum's initial value (EN 50325-5:2010 §6.4.1.5 gives
-  0000h), its byte order (neither text names it; CRC-16/XMODEM with multi-byte fields
-  little-endian, as CANopenNode feeds them — the maintainer's decision on #289) and the
-  `ro`/`rw` conflict of `13FFh` (EN 50325-5:2010 Table 11: `rw` in Pre-operational, `ro` in
-  Operational — the records' rule, which this implementation applies: always writable locally,
-  on the bus with `WritableCommunicationParameters` or a file that declares it `rw`; a file that
-  declares `13FFh:n` `ro` or `const` is honoured, #289).
+  0000h), its byte order (EN 50325-5:2010 formula (2), low byte first: CRC-16/XMODEM with
+  multi-byte fields little-endian, as CANopenNode feeds them) and the `ro`/`rw` conflict of `13FFh`
+  (EN 50325-5:2010 Table 11: `rw` in Pre-operational, `ro` in Operational — the records' rule, which
+  this implementation applies; a file that declares `13FFh:n` `ro` or `const` is honoured, #289).
 * **Bit-granular SRDO mapping and more than 8 objects per SRDO** — the safety mapping retains its own narrower limits; the PDO extensions do not widen them.
+* **A separate object for an SRDO's inverted data** — the even mapping slot must repeat the odd one
+  and the inverted frame is built from the plain one. EN 50325-5:2010 Table 8 does not require the
+  repetition. A device may refuse the other form, but as tool and monitor this implementation also
+  refuses a device that uses it (#506).
 * **The safety application layer of CiA 319 clauses 7 and 8** — the *Safety application
   configuration valid* and *… signature* objects a CiA profile or a manufacturer-specific profile
   places in its own area, and the data set they sign. Which objects, in which order, is the
@@ -808,10 +810,10 @@ sends one frame per server response, and an upload's segments come from the serv
 The binding is **CiA DSP 304 version 1.0** (1 January 2001), the safety-relevant communication
 on top of CiA 301: SRDOs, the global failsafe command (GFC) and the objects `1300h`–`13FFh`.
 Version 1.1 moved into EN 50325-5:2010; where this implementation follows that text instead of
-V1.0 it says so (the defaults of `1301h:01` and the role of `1300h`, #289). Where the text
-compared with it gives no figure — the first cyclic transmission delayed 0.5 ms × node-id, the
-DLC rule of the GFC, V1.0's formulas (1) and (2) — V1.0 stands, as the maintainer decided on
-#289. Sections cited here
+V1.0 it says so. The objects are compared with it row by row in
+[`docs/reviews/2026-11-04-en50325-5-conformance.md`](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-04-en50325-5-conformance.md)
+(#289). Where that text is silent — the first cyclic transmission delayed 0.5 ms × node-id — V1.0
+stands, as the maintainer decided on #289. Sections cited here
 are those of DSP 304 V1.0. Everything lives in the
 namespace `CanKit.Pro.CANopen.Safety` and is reached through `node.Safety()`, an extension on
 `ICanOpenNode` (the interface is not widened); on a node this library did not create it throws
@@ -845,8 +847,7 @@ several (not mappable, not accessible, another width, no fixed width); an invert
 not repeat its plain slot and a mapping beyond 8 bytes keep the generic text with their own abort
 code. A record below the highest one that the file omits exists all the same —
 `13FFh:00` is the number of SRDOs (§8.4.2.2), so records 1..n exist and a master reaches every
-one — at its defaults, deleted, with the node's default access (read-only on the bus without
-`WritableCommunicationParameters`), and is reported as `SuppliedDefault`. A mapping
+one — at its defaults, deleted, with the node's default access, and is reported as `SuppliedDefault`. A mapping
 record without its communication record is applied with that SRDO deleted, and a mapping the
 node refuses leaves that SRDO deleted. `13FEh` is applied last, so a file whose checksums match its records loads as a
 valid configuration; a file whose checksum does not match loads without a finding, and the node
@@ -874,29 +875,25 @@ from the bus never triggers one.
 
 ### The objects
 
-DSP 304 §8.4.2.2 Table 6, created at these defaults:
+DSP 304 §8.4.2.2 Table 6, created at these defaults, which
+[the comparison](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-04-en50325-5-conformance.md) holds against
+EN 50325-5:2010:
 
 | Object | Sub-index | Default | Each write is held to |
 | --- | --- | --- | --- |
 | `1300h` GFC parameter | `00h` | 0 | 0 or 1 (`0609 0030h`). Writable in Operational: it is not covered by the checksum. The node sets it to 1 when it requests or receives a GFC (EN 50325-5:2010 §6.4.2.1); it is not a switch in front of either. |
 | `1301h`–`1340h` communication record of SRDO n | `00h` | 6 | Constant (`0601 0002h`). |
 | | `01h` direction | SRDO 1 of node-id 1..32: 1, of node-id 33..64: 2 (EN 50325-5:2010 Table 5); else 0 | 0 deleted, 1 transmit, 2 receive; 3..255 `0609 0030h`. Creating needs both COB-IDs set, in range, consecutive and not held by another existing SRDO, and every mapped object accessible in that direction (a producer reads, a consumer writes). |
-| | `02h` refresh time (tx) / SCT (rx), ms | 25 | 1..65535 (`0609 0030h` for 0). |
+| | `02h` refresh time (tx) / SCT (rx), ms | 50 where `01h` defaults to receive, else 25 (EN 50325-5:2010 Table 5) | 1..65535 (`0609 0030h` for 0). |
 | | `03h` SRVT, ms | 20 | 1..255. Part of the checksum for both directions; only a consumer acts on it. |
-| | `04h` transmission type | 254 | Constant; every write `0609 0030h`. |
+| | `04h` transmission type | 254 | Constant: a download `0601 0002h`, a local write `0609 0030h`. |
 | | `05h` COB-ID 1 | FFh + 2 × node-id for SRDO 1 of a node-id 1..64, else 0 | 0 or an odd CAN-ID 101h..17Fh, bits 11..31 clear; not changeable while the SRDO exists; not one of another existing SRDO (`0609 0030h`). |
 | | `06h` COB-ID 2 | 100h + 2 × node-id, likewise | 0 or COB-ID 1 + 1 (102h..180h), same rules. |
 | `1381h`–`13C0h` mapping of SRDO n | `00h` | 0 | 0 or an even count 2..16 (`0609 0030h`); every slot up to it filled (`0602 0000h`), each odd slot passing the slot rules below again (its object may have been re-declared since the slot was written), each even slot equal to the odd one before it — plain, then inverted (`0604 0041h`), at most 8 bytes in total (`0604 0042h`). |
 | | `01h`–`10h` | 0 | Byte-aligned 8..64 bits, an existing mappable object outside `1000h`–`1FFFh` of a fixed width equal to that width — no string or domain, this implementation's rule — no dummy (`0607 0010h`, `0602 0000h`, `0604 0041h`). Mapping writes while the SRDO exists, and slot writes while the count is not 0, `0601 0000h`. |
-| `13FEh` configuration valid | `00h` | 0 | Any value; only `A5h` means valid. |
+| `13FEh` configuration valid | `00h` | 0 | Any value; only `A5h` means valid, and any other is held as 0 (EN 50325-5:2010 §6.4.1.6). |
 | `13FFh` safety configuration checksum | `00h` | `SrdoCount` | Constant (`0601 0002h`). |
 | | `01h`–n | 0 | UNSIGNED16, the checksum of SRDO n. Bus access as for the records (below); a description that declares it `ro` or `const` is honoured — a download is refused with `0601 0002h` and leaves `13FEh` as it was (CiA 319 §5.3). |
-
-The defaults and value ranges of `1301h`–`1340h`, `1381h`–`13C0h` and `13FEh` in this table are
-those of DSP 304 V1.0, except the default direction of `1301h:01`, which follows EN 50325-5:2010
-Table 5. Whether EN 50325-5:2010 changes any other of them is not checked: its text is not part of
-this repository, and only the clauses cited in this section were compared with it (#289). Until
-it is, these values stay as V1.0 gives them.
 
 The records, `13FEh` and `13FFh` refuse every write in Operational with `0800 0022h` (§8.3.2.4,
 note 1); reading stays allowed. The transition into Operational takes the dictionary's write gate,
@@ -906,9 +903,10 @@ record or to `13FFh` sets `13FEh` back to 0 (§8.4.2.2, "automatically 0"), so a
 PDO cannot take a CAN-ID in 101h..180h (CiA 301 Table 40), so SRDO COB-IDs are only checked
 against each other.
 
-The objects are communication-profile objects like the PDO records: read-only on the bus unless
-the node is opened with `WritableCommunicationParameters` or the file declares them `rw`, always
-writable locally. Reset Node and Reset Communication return them to their power-on values, `1010h`
+The objects are communication-profile objects like the PDO records, but read/write on the bus
+outside Operational without `WritableCommunicationParameters`, which governs the PDO records alone:
+EN 50325-5:2010 Tables 5, 8, 11, 13 and 15 give them `rw`, and its §8.1 configures them by SDO
+download. A file may declare them `ro`. Reset Node and Reset Communication return them to their power-on values, `1010h`
 "save" stores them and `1011h` "load" brings them back. Putting a stored configuration back does
 not clear `13FEh`, so a configuration that was valid when it was saved is valid again after the
 reset.
@@ -942,9 +940,8 @@ every SRDO, computed by `SrdoCrc.Compute`, and then `13FEh` = `A5h`. `A5h` has t
 because every checksum write clears it. The checksum (§8.4.2.2) runs over the direction (1 byte),
 the refresh time or SCT (2), the SRVT (1), COB-ID 1 (4), COB-ID 2 (4), the mapping count (1) and,
 per mapping sub-index, that sub-index (1) and its value (4). V1.0 gives the polynomial
-x¹⁶ + x¹² + x⁵ + 1 and nothing else; EN 50325-5:2010 §6.4.1.5 adds the seed 0000h and still leaves
-the byte order of a multi-byte field open (Table 9 lists the bits of a field from the most
-significant down). The initial value and byte order used here are those of CRC-16/XMODEM
+x¹⁶ + x¹² + x⁵ + 1 and nothing else; EN 50325-5:2010 §6.4.1.5 adds the seed 0000h, and its formula
+(2) lists a multi-byte field low byte first. The initial value used here is that of CRC-16/XMODEM
 (`SrdoCrc.Crc16Xmodem`, also used by the SDO block transfer), multi-byte fields little-endian —
 the CANopen byte image, as CANopenNode's `CO_SRDOcalcCrc` feeds them (#289). Releases before this
 one fed them MSB-first: a `13FFh` written then no longer matches. `SrdoCrc.Compute` takes the times as whole milliseconds, rounded half to even
@@ -1081,8 +1078,8 @@ has been handed goes out. A send cancelled by the period ends
 quietly; one the caller cancelled — before the call ran or while the send waited — ends with
 `OperationCanceledException`, and so does a send under which the bus service is disposed, which
 is also reported on `BackgroundExceptionOccurred` as a transport failure. A GFC is reported by
-`GlobalFailsafeCommandReceived` while Operational, and only as a classic CAN frame with
-DLC 0 — a CAN FD frame on `001h` is no GFC and is ignored. On a bus that
+`GlobalFailsafeCommandReceived` while Operational (#507), and only as a classic CAN frame with
+DLC 0 (EN 50325-5:2010 Figure 10) — a CAN FD frame on `001h` is no GFC and is ignored. On a bus that
 echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event is critical, and
 identical ones still waiting are folded into one.
 
@@ -1548,8 +1545,9 @@ validated. `0xFF` is legal only while LSS is on: the node then stays in NMT Init
 boot-up and serves no SDO, until configure node-id gives it a value in 1..127. That value becomes
 active at once and the node boots, and it stays in LSS configuration. A node that already has an
 active node-id keeps it until the next NMT reset communication, which copies the pending node-id
-into the active one and retargets pre-defined COB-IDs, and the direction of SRDO 1 (EN 50325-5:2010
-Table 5), that still name the old one; a direction of a committed SRDO stays. Reset node copies
+into the active one and retargets pre-defined COB-IDs, and the direction of SRDO 1 with its default
+cycle time (EN 50325-5:2010 Table 5), that still name the old one; a direction of a committed SRDO
+stays. Reset node copies
 the persistent node-id back into the pending one first. Neither reset reloads the bit timing.
 An identity change closes the transmit gate and drains old-ID reservations before publishing
 the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs

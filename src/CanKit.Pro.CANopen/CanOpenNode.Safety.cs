@@ -46,9 +46,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         return highest;
     }
 
-    /// <summary>§8.4.2.2 defaults. Bus access follows WritableCommunicationParameters, as the PDO
-    /// records do (Table 6 footnote: "These may be read only"); sub0 and sub4 are const.</summary>
-    private void PopulateSafetyObjects() => PopulateSafetyObjects(_od, _nodeId, _srdoCount, _options.WritableCommunicationParameters);
+    /// <summary>§8.4.2.2 defaults. Read/write on the bus outside Operational, where the validator
+    /// refuses (EN 50325-5:2010 Tables 5, 8, 11, 13, 15; §8.1 configures by SDO download, #289);
+    /// sub0, sub4 and 13FFh:00 are const. WritableCommunicationParameters is the PDO records'
+    /// option, and a device description may declare less.</summary>
+    private void PopulateSafetyObjects() => PopulateSafetyObjects(_od, _nodeId, _srdoCount);
 
     /// <summary>EN 50325-5:2010 Table 5, object 1301h:01 default: node-id 1..32 produces, 33..64
     /// consumes, any other node-id (65..127, or 255 before LSS assigns one) has no SRDO 1 (#289).</summary>
@@ -56,11 +58,16 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         => (uint)(nodeId - 1) > 63 ? SrdoDirection.None // node-ids are 1..127 or 255: this folds "below 1" into "above 64"
             : nodeId <= 32 ? SrdoDirection.Transmit : SrdoDirection.Receive;
 
+    /// <summary>EN 50325-5:2010 Table 5, sub-index 02h default: tx 25, rx 50 (#289). A record
+    /// without a direction has neither; it holds the transmit one, which is what V1.0 gave.</summary>
+    internal static ushort DefaultCycleTimeMs(SrdoDirection direction)
+        => direction == SrdoDirection.Receive ? SrdoRecords.DefaultSafeguardCycleTimeMs : SrdoRecords.DefaultRefreshTimeMs;
+
     /// <summary>Static, as every rule of this file down to the mapping entry, so that
     /// <see cref="LoadDescribedSafetyObjects(CanOpenDeviceDescription, byte)"/> runs the same code over a dictionary of its own.</summary>
-    private static void PopulateSafetyObjects(ObjectDictionary od, byte nodeId, int srdoCount, bool writable)
+    private static void PopulateSafetyObjects(ObjectDictionary od, byte nodeId, int srdoCount)
     {
-        var acc = writable ? OdAccess.ReadWrite : OdAccess.ReadOnly;
+        const OdAccess acc = OdAccess.ReadWrite;
         const OdAccess ro = OdAccess.ReadOnly;
         const bool nm = false;
         od.AddU8(Co.GfcParameter, 0x00, 0, acc, nm);
@@ -69,9 +76,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             var comm = SrdoRecords.CommIndex(n);
             var map = SrdoRecords.MapIndex(n);
             bool predefined = n == 1 && nodeId <= 64;
+            var direction = predefined ? DefaultDirectionOfSrdo1(nodeId) : SrdoDirection.None;
             od.AddU8(comm, 0x00, 6, ro, nm);
-            od.AddU8(comm, 0x01, (byte)(predefined ? DefaultDirectionOfSrdo1(nodeId) : SrdoDirection.None), acc, nm);
-            od.AddU16(comm, 0x02, 25, acc, nm);
+            od.AddU8(comm, 0x01, (byte)direction, acc, nm);
+            od.AddU16(comm, 0x02, DefaultCycleTimeMs(direction), acc, nm);
             od.AddU8(comm, 0x03, SrdoRecords.DefaultValidationTimeMs, acc, nm);
             od.AddU8(comm, 0x04, SrdoRecords.TransmissionType, ro, nm);
             od.AddU32(comm, 0x05, predefined ? CanOpenCobId.SrdoDefaultCobId1(nodeId) : 0u, acc, nm);
@@ -105,7 +113,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         if (index == Co.GfcParameter)
             return value[0] <= 1 ? OdWriteDecision.Accept : OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded); // 0 not valid, 1 valid
         if (index == Co.SrdoConfigurationValid)
-            return OdWriteDecision.Accept; // any value; only A5h means valid
+            return OdWriteDecision.Accept; // any value; only A5h means valid, the rest is held as 00h
         if (index == Co.SrdoChecksum)
             return subindex == 0 ? OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly) : OdWriteDecision.Accept;
         if (SrdoRecords.IsCommunicationRecord(index))
@@ -438,6 +446,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// stands afterwards, the image the periodic check compares against. Under the write gate.</summary>
     private void VerifyConfigurationValidAndTakeImage()
     {
+        // EN 50325-5:2010 §6.4.1.6: a configuration that is not valid is held as 00h, whichever of
+        // the values Table 13 calls "not valid" was written (#289).
+        // A reset runs this on a node without SRDOs too, which has no 13FEh.
+        if (_od.TryReadUnsigned(Co.SrdoConfigurationValid, 0x00, out var held) && held != 0 && held != SrdoRecords.ConfigurationValidValue)
+            _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
         _safetyImage = RevalidateSafetyConfiguration() && IsConfigurationValidFlagSet() ? CaptureSafetyImage() : null;
     }
 

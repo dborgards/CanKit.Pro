@@ -212,7 +212,7 @@ internal sealed partial class CanOpenNode
         CanOpenCobId.ValidateNodeId(nodeId);
         var od = new ObjectDictionary();
         int srdoCount = objects.SrdoCount;
-        PopulateSafetyObjects(od, nodeId, srdoCount, writable: true);
+        PopulateSafetyObjects(od, nodeId, srdoCount);
         od.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
             ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value)
             : OdWriteDecision.Accept;

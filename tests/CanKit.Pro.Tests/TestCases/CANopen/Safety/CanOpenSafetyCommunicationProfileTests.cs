@@ -521,15 +521,69 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         Rejected(() => od.WriteUnsigned(0x1300, 0, 2)).Should().Be(SdoAbortCode.ValueRangeExceeded);
     }
 
-    [Fact]
-    public void Read_Only_On_The_Bus_Without_WritableCommunicationParameters()
+    /// <summary>EN 50325-5:2010 Tables 5, 8, 11, 13, 15: read/write outside Operational, without
+    /// an option (#289). The option stays what its name says for the PDO records; the constant
+    /// sub-indices stay read-only.</summary>
+    [Theory]
+    [InlineData(0x1300, 0, OdAccess.ReadWrite)]
+    [InlineData(0x1301, 1, OdAccess.ReadWrite)]
+    [InlineData(0x1301, 2, OdAccess.ReadWrite)]
+    [InlineData(0x1301, 3, OdAccess.ReadWrite)]
+    [InlineData(0x1301, 5, OdAccess.ReadWrite)]
+    [InlineData(0x1301, 6, OdAccess.ReadWrite)]
+    [InlineData(0x1381, 0, OdAccess.ReadWrite)]
+    [InlineData(0x1381, 1, OdAccess.ReadWrite)]
+    [InlineData(0x13FE, 0, OdAccess.ReadWrite)]
+    [InlineData(0x13FF, 1, OdAccess.ReadWrite)]
+    [InlineData(0x1301, 0, OdAccess.ReadOnly)]
+    [InlineData(0x1301, 4, OdAccess.ReadOnly)]
+    [InlineData(0x13FF, 0, OdAccess.ReadOnly)]
+    [InlineData(0x1400, 1, OdAccess.ReadOnly)]
+    public void Bus_Access_Without_WritableCommunicationParameters(ushort index, byte subindex, OdAccess access)
     {
         var session = VirtualAdapterFixture.NewSession("co-safety-od");
         using var bus = Open(session, 1);
         using var node = CanOpen.OpenNode(bus, Device, new CanOpenNodeOptions { SrdoCount = 1 });
-        node.ObjectDictionary.TryGet(0x1301, 1, out var entry).Should().BeTrue();
-        entry.Access.Should().Be(OdAccess.ReadOnly);
-        node.ObjectDictionary.TryGet(0x13FE, 0, out entry);
-        entry.Access.Should().Be(OdAccess.ReadOnly);
+        node.ObjectDictionary.TryGet(index, subindex, out var entry).Should().BeTrue();
+        entry.Access.Should().Be(access);
+    }
+
+    /// <summary>EN 50325-5:2010 Table 5, 1301h:02: tx 25, rx 50 (#289), so the default of SRDO 1
+    /// follows its default direction. A record without a direction has neither default; it holds
+    /// the transmit one.</summary>
+    [Theory]
+    [InlineData(1, 25u)]
+    [InlineData(32, 25u)]
+    [InlineData(33, 50u)]
+    [InlineData(64, 50u)]
+    [InlineData(65, 25u)]
+    [InlineData(127, 25u)]
+    public void The_Default_Cycle_Time_Of_Srdo_1_Follows_Its_Default_Direction(byte nodeId, uint milliseconds)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus, srdoCount: 2, nodeId: nodeId, keepDefaults: true);
+        node.ObjectDictionary.ReadUnsigned(0x1301, 2).Should().Be(milliseconds);
+        node.ObjectDictionary.ReadUnsigned(0x1302, 2).Should().Be(25u, "1302h is deleted at every node-id");
+    }
+
+    /// <summary>EN 50325-5:2010 §6.4.1.6 and Table 13: every value but A5h means "not valid", and
+    /// the device then holds 00h (#289). The neighbours of A5h are the values a wrong comparison
+    /// lets through.</summary>
+    [Theory]
+    [InlineData(0x01)]
+    [InlineData(0xA4)]
+    [InlineData(0xA6)]
+    [InlineData(0xFF)]
+    public void A_Value_Other_Than_A5h_In_13FEh_Is_Held_As_00h(byte value)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.WriteUnsigned(0x13FE, 0, value);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing exists here whose checksum could fail");
     }
 }

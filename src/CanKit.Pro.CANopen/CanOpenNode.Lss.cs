@@ -1064,12 +1064,18 @@ internal sealed partial class CanOpenNode : ILssSlave
         // id after power-on (255 has no SRDO 1) or moves across 32/33 holds what a node powered
         // up with that id holds. A direction the application changed does not match and stays;
         // so does one of a committed SRDO (13FEh = A5h), which would otherwise change its role
-        // behind a configuration somebody signed.
+        // behind a configuration somebody signed. The default cycle time moves with it (Table 5:
+        // tx 25, rx 50), under the same rule: a value the application chose stays.
         var fromDirection = DefaultDirectionOfSrdo1(from);
         var toDirection = DefaultDirectionOfSrdo1(to);
         // The record is always present when this runs (see above).
         if (!wasValid && fromDirection != toDirection && _od.ReadUnsigned(comm, 0x01) == (byte)fromDirection)
+        {
             _od.WriteRawUnchecked(comm, 0x01, new[] { (byte)toDirection });
+            ushort toCycle = DefaultCycleTimeMs(toDirection);
+            if (_od.ReadUnsigned(comm, 0x02) == DefaultCycleTimeMs(fromDirection))
+                _od.WriteRawUnchecked(comm, 0x02, new[] { (byte)toCycle, (byte)(toCycle >> 8) });
+        }
         bool changed = RetargetCobId(comm, 0x05, from1, to1);
         changed |= RetargetCobId(comm, 0x06, from2, to2);
         if (!wasValid || !changed) return;

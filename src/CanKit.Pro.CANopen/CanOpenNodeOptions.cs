@@ -179,7 +179,7 @@ public sealed class CanOpenNodeOptions
     /// the records describe that configuration truthfully to a master without offering to change
     /// it (CiA 301 permits <c>ro</c> PDO parameter records, objects overview footnote). The
     /// SYNC, EMCY, heartbeat and guarding objects are writable in either case, as CiA 301
-    /// prescribes for them.
+    /// prescribes for them, and so are the safety objects, as EN 50325-5:2010 does.
     /// </summary>
     public bool WritableCommunicationParameters { get; init; }
 
