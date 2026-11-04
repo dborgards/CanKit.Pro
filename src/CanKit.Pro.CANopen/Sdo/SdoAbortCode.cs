@@ -89,6 +89,10 @@ public enum SdoAbortCode : uint
     /// <summary>General error / unspecified.</summary>
     General = 0x08000000u,
 
+    /// <summary>No data available (CiA 301 Table 22). Emitted for an upload of an entry of the
+    /// pre-defined error field <c>1003h</c> above its count (§7.5.2.4, NOTE).</summary>
+    NoDataAvailable = 0x08000024u,
+
     /// <summary>Data cannot be transferred or stored to the application (CiA 301 Table 22).
     /// Emitted for a wrong signature written to <c>1010h</c> / <c>1011h</c> (§7.5.2.13 /
     /// §7.5.2.14, "abort code: 0800 002xh").</summary>

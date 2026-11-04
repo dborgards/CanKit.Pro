@@ -51,7 +51,8 @@ public partial class CanOpenForeignPdoObserveTests
     [InlineData(0x1FA0, false)]
     [InlineData(0x1FFF, false)]
     [InlineData(0x2000, false)]
-    [InlineData(0x1003, true)]
+    [InlineData(0x1003, false)]
+    [InlineData(0x1015, true)]
     [InlineData(0x1F9F, true)]
     public void Description_Only_Reports_Unimplemented_Behaviour_For_Unknown_Profile_Objects(ushort index, bool reported)
     {

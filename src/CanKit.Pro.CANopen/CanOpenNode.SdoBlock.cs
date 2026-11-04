@@ -1008,6 +1008,12 @@ internal sealed partial class CanOpenNode
                 SdoFrames.BuildAbort(index, subindex, (uint)SdoAbortCode.AttemptReadWriteOnly));
             return;
         }
+        if (IsVacantErrorHistoryEntry(index, subindex))
+        {
+            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+                SdoFrames.BuildAbort(index, subindex, (uint)SdoAbortCode.NoDataAvailable));
+            return;
+        }
 
         if (!_od.TryReadRaw(index, subindex, out var value))
         {

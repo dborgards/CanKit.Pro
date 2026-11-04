@@ -49,6 +49,7 @@ internal sealed partial class CanOpenNode
     {
         public const ushort DeviceType = 0x1000;
         public const ushort ErrorRegister = 0x1001;
+        public const ushort ErrorHistory = 0x1003;
         public const ushort SyncCobId = 0x1005;
         public const ushort CyclePeriod = 0x1006;
         public const ushort SyncWindow = 0x1007;
@@ -219,6 +220,7 @@ internal sealed partial class CanOpenNode
         }
 
         if (_srdoCount > 0) PopulateSafetyObjects();
+        if (_errorHistoryCapacity > 0) PopulateErrorHistory();
 
         _od.DeclareGuard = DeclareRefusal;
         _od.WriteValidator = ValidateCommunicationWrite;
@@ -267,12 +269,13 @@ internal sealed partial class CanOpenNode
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
         >= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount => true,
         _ when IsManagedSafetyObject(index) => true,
+        _ when IsManagedErrorHistory(index) => true,
         _ => false,
     };
 
     /// <summary>
     /// The objects an NMT reset restores: the managed communication objects — except status
-    /// (1001h) and the constant records (1010h/1011h capabilities, 1200h) — and every object a
+    /// (1001h, 1003h) and the constant records (1010h/1011h capabilities, 1200h) — and every object a
     /// device description declared, the placeholders 1000h/1018h and the application objects
     /// among them. Without a description the node has no power-on source for those: what the
     /// application put into 1000h, 1018h or its own objects stays across a reset, as FR-CO-019
@@ -281,7 +284,7 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private bool IsRestorableObject(ushort index)
         => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index))
-           && index is not (Co.ErrorRegister or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
+           && index is not (Co.ErrorRegister or Co.ErrorHistory or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
 
     // The objects a device description declared and the loader created or took over; empty
     // without a description. Written once, on the constructing thread, before the node's actor
@@ -297,6 +300,7 @@ internal sealed partial class CanOpenNode
     private OdWriteDecision ValidateCommunicationWrite(ushort index, byte subindex, byte[] value)
     {
         if (IsManagedSafetyObject(index)) return ValidateSafetyWrite(index, subindex, value);
+        if (IsManagedErrorHistory(index)) return ValidateErrorHistoryWrite(subindex, value);
         switch (index)
         {
             case Co.SyncCobId:
@@ -531,6 +535,11 @@ internal sealed partial class CanOpenNode
     private void OnOdEntryWrittenForCommunicationProfile(ushort index, byte subindex)
     {
         NoteErrorRegisterWritten(index, subindex);
+        if (IsManagedErrorHistory(index))
+        {
+            OnErrorHistoryWritten(subindex);
+            return;
+        }
         if (Volatile.Read(ref _disposed) != 0) return;
         if (index is >= 0x1FA0 and <= 0x1FCF)
         {

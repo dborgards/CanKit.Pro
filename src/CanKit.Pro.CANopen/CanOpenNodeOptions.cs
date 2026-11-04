@@ -222,6 +222,18 @@ public sealed class CanOpenNodeOptions
     public TimeSpan? SrdoConfigurationCheckInterval { get; init; }
 
     /// <summary>
+    /// The entries of the pre-defined error field <c>1003h</c> (CiA 301 §7.5.2.4), 0..254. 0, the
+    /// default, leaves the optional object out, and an application may declare it itself. A device
+    /// description that declares the object raises this to its highest entry. The node enters every
+    /// EMCY it transmits except <c>0000h</c>, the newest at sub-index <c>01h</c>, the first two
+    /// manufacturer-specific bytes as the additional information; a full history drops the oldest.
+    /// Writing 0 to sub-index <c>00h</c> empties it. An NMT reset leaves it, <c>1010h</c> does not
+    /// store it, so power-off ends it. Kept by <c>With(...)</c>;
+    /// <see cref="WithErrorHistoryCapacity"/> replaces it.
+    /// </summary>
+    public int ErrorHistoryCapacity { get; init; }
+
+    /// <summary>
     /// Layer setting services (CiA 305). <see langword="null"/> (the default) leaves them off,
     /// unless the device description the node is opened with sets <c>LSS_Supported</c>. An
     /// instance turns them on, and <see cref="LssSlaveOptions.Enabled"/> <see langword="false"/>
@@ -318,6 +330,12 @@ public sealed class CanOpenNodeOptions
         => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
             interval);
 
+    /// <summary>Returns a copy of this options record with <see cref="ErrorHistoryCapacity"/> replaced.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacity"/> is outside 0..254.</exception>
+    public CanOpenNodeOptions WithErrorHistoryCapacity(int capacity)
+        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
+            SrdoConfigurationCheckInterval, capacity);
+
     private CanOpenNodeOptions Copy(
         TimeSpan? sdoTimeout,
         TimeSpan? sdoServerTimeout,
@@ -336,7 +354,8 @@ public sealed class CanOpenNodeOptions
         bool? enableChangeOfStateSrdo,
         LssSlaveOptions? lss,
         int? pdoCount,
-        TimeSpan? srdoConfigurationCheckInterval)
+        TimeSpan? srdoConfigurationCheckInterval,
+        int? errorHistoryCapacity = null)
     {
         var options = new CanOpenNodeOptions
         {
@@ -360,6 +379,7 @@ public sealed class CanOpenNodeOptions
             EnableChangeOfStateSrdo = enableChangeOfStateSrdo ?? EnableChangeOfStateSrdo,
             Lss = lss,
             SrdoConfigurationCheckInterval = srdoConfigurationCheckInterval,
+            ErrorHistoryCapacity = errorHistoryCapacity ?? ErrorHistoryCapacity,
         };
         options.Validate();
         return options;
@@ -397,6 +417,9 @@ public sealed class CanOpenNodeOptions
         if (SrdoCount is < 0 or > 64)
             throw new ArgumentOutOfRangeException(nameof(SrdoCount), SrdoCount,
                 "SrdoCount must be 0..64: CiA DSP 304 limits a network to 64 SRDOs (§3).");
+        if (ErrorHistoryCapacity is < 0 or > 254)
+            throw new ArgumentOutOfRangeException(nameof(ErrorHistoryCapacity), ErrorHistoryCapacity,
+                "ErrorHistoryCapacity must be 0..254: the entries of 1003h end at sub-index FEh (CiA 301 §7.5.2.4).");
         if (SrdoConfigurationCheckInterval is { } check && check <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(SrdoConfigurationCheckInterval), check,
                 "SrdoConfigurationCheckInterval must be positive, or null for no periodic check.");

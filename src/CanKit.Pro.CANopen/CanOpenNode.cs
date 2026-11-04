@@ -235,6 +235,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // The SRDO engine (CiA DSP 304) needs its count before the communication profile is
         // populated: a record write there already reaches the engine through the CoS filter.
         _srdoCount = Math.Max(_options.SrdoCount, DescribedSrdoCount(description));
+        _errorHistoryCapacity = Math.Max(_options.ErrorHistoryCapacity, DescribedErrorHistoryCapacity(description));
         _srdoInFlight = new bool[_srdoCount + 1];
         _srdoPending = new SrdoPair?[_srdoCount + 1];
         _srdo = new Safety.SrdoEngine(_actor, _actor.TimeSource, _deadlines, _od, _nodeId, _srdoCount, this);
@@ -599,7 +600,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
                 return Task.CompletedTask;
             }
-            frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
+            _od.Transaction(() =>
+            {
+                frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
+                EnterInErrorHistory(frame);
+            });
             return SendControlFrame(cobId, frame, cancellationToken);
         };
         return AppendToEmcyChain(transmit);
@@ -1913,6 +1918,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         if ((entry.Access & OdAccess.ReadOnly) == 0)
         {
             SendSdoServerAbort(index, subindex, SdoAbortCode.AttemptReadWriteOnly);
+            return;
+        }
+        if (IsVacantErrorHistoryEntry(index, subindex))
+        {
+            SendSdoServerAbort(index, subindex, SdoAbortCode.NoDataAvailable);
             return;
         }
 
