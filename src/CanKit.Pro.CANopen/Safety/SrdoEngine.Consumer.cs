@@ -8,7 +8,8 @@ internal sealed partial class SrdoEngine
 {
     /// <summary>Routes a frame to the SRDO it belongs to. True when the id is one of this node's
     /// SRDO ids or 001h, whether or not anything happened: a remote frame (§8.1 "RTR is not
-    /// possible"), an echo of our own producer frames (#95), a frame outside Operational.
+    /// possible"), an echo of our own producer frames (#95), an SRDO frame outside Operational, a
+    /// GFC in an NMT state that does not take one.
     /// <paramref name="isFd"/>: the frame arrived as a CAN FD frame, which is neither an SRDO frame
     /// nor a GFC (§8.1, §8.2: classic CAN).</summary>
     public bool TryHandleFrame(uint cobId, byte[] data, bool isRtr, bool isFd = false)
@@ -22,7 +23,7 @@ internal sealed partial class SrdoEngine
             // EN 50325-5:2010 §7.2.1 (OBE-12450): the GFC consumer signals the reception to its
             // SRLD, whatever 1300h holds — §6.4.2.1 (OBE-12439) makes 1300h the record of the
             // indication, not a switch in front of it (#289).
-            if (!isRtr && !isFd && data.Length == 0 && _operational)
+            if (!isRtr && !isFd && data.Length == 0 && _host.GfcReceptionEnabled)
             {
                 MarkGfc();
                 _host.GlobalFailsafeCommandReceived();

@@ -546,7 +546,7 @@ public class SrdoEngineConsumerTests : IDisposable
     }
 
     [Fact]
-    public void Gfc_Is_Received_And_Sent_Only_While_Operational_And_Is_Recorded_In_1300h()
+    public void Gfc_Is_Sent_Only_While_Operational_And_Is_Recorded_In_1300h()
     {
         StartConsumer();
         _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u);
@@ -568,8 +568,24 @@ public class SrdoEngineConsumerTests : IDisposable
         OnActor(() => _engine.LeaveOperational());
         OnActor(() => sent = _engine.TrySendGfc());
         sent.Should().BeFalse();
-        Frame(CanOpenCobId.GlobalFailsafeCommand);
-        _host.Gfcs.Should().Be(1, "outside Operational nothing is signalled");
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "a request refused records nothing");
+    }
+
+    /// <summary>The NMT state decides through the host, not through the engine's Operational: §8.2.2
+    /// limits SRDOs to Operational, not the GFC (#507).</summary>
+    [Fact]
+    public void A_Gfc_Is_Received_Only_Where_The_Host_Takes_One()
+    {
+        StartConsumer();
+        OnActor(() => _engine.LeaveOperational());
+        Frame(CanOpenCobId.GlobalFailsafeCommand).Should().BeTrue();
+        _host.Gfcs.Should().Be(1, "the engine's own Operational does not gate the reception");
+        _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(1u);
+
+        _od.WriteUnsigned(SrdoRecords.GfcParameter, 0, 0);
+        _host.GfcReceptionEnabled = false;
+        Frame(CanOpenCobId.GlobalFailsafeCommand).Should().BeTrue("001h is a safety id even when ignored");
+        _host.Gfcs.Should().Be(1, "nothing is signalled");
         _od.ReadUnsigned(SrdoRecords.GfcParameter, 0).Should().Be(0u, "and nothing is recorded");
     }
 
