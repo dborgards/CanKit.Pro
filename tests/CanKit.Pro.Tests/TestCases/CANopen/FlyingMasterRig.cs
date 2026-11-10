@@ -180,6 +180,8 @@ internal static class FlyingMasterRig
         while (true)
         {
             var before = new List<object[]>();
+            var nmtBefore = witnesses.Select(w => w.NmtWork).ToArray();
+            var nmtOpenBefore = nmtBefore.Select(work => work.Select(t => !((Task)t).IsCompleted).ToArray()).ToArray();
             foreach (var witness in roots)
                 before.Add((await witness.CaptureVerificationWorkAsync()).ActiveTransfers);
             foreach (var witness in witnesses) await witness.SettleAsync();
@@ -195,6 +197,16 @@ internal static class FlyingMasterRig
                 pending |= work.Waiting;
                 if (work.Waiting) roots[i].ContinuationObserved?.Invoke();
                 changed |= !SameTransfers(before[i], work.ActiveTransfers);
+            }
+            // NMT work that started or finished during this round may have posted its outcome
+            // to the actor after the round's last heartbeat: settle once more. A send the driver
+            // holds stays open across rounds and changes nothing.
+            for (int i = 0; i < witnesses.Length; i++)
+            {
+                pending |= witnesses[i].NmtWorkInFlight;
+                var nmtAfter = witnesses[i].NmtWork;
+                changed |= !SameTransfers(nmtBefore[i], nmtAfter)
+                           || nmtAfter.Where((t, k) => nmtOpenBefore[i][k] && ((Task)t).IsCompleted).Any();
             }
             if (!pending && !changed) return;
 
@@ -274,6 +286,21 @@ internal static class FlyingMasterRig
         public int PendingConfirmations => _confirmations.PendingConfirmations;
         public Action? ConfirmationWaitObserved { get; set; }
         public int MarkersSent => Volatile.Read(ref _markersSent);
+
+        /// <summary>An NMT frame, or the outcome of a cold or forced Reset Communication, has
+        /// left the actor and not come back. The send, its confirmation and the continuation that
+        /// applies the reset all run on the thread pool, where neither the witness heartbeats nor
+        /// the driver seams see them: before the frame is reserved, and after it is confirmed, the
+        /// node looks idle while the frame or the reset is still on its way. A send the driver
+        /// holds is the test's to release, so the work queued behind it does not count.</summary>
+        /// <summary>The node's NMT queue tail and reset outcome, compared by reference between
+        /// settle rounds. An outcome completes only after it has been posted to the actor, so a
+        /// round that starts with both completed and unchanged has drained what they posted.</summary>
+        public object[] NmtWork => new object[] { _node.NmtQueueForTests, _node.ResetOutcomeForTests };
+
+        public bool NmtWorkInFlight
+            => (!_node.NmtQueueForTests.IsCompleted || !_node.ResetOutcomeForTests.IsCompleted)
+               && !_node.HasTransmitsHeldByDriverForTests;
 
         public IDisposable HoldPeerSdoChannel(byte peer, SemaphoreSlim channel)
         {
