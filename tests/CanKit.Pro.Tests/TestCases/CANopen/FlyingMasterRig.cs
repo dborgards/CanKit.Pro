@@ -196,6 +196,7 @@ internal static class FlyingMasterRig
                 if (work.Waiting) roots[i].ContinuationObserved?.Invoke();
                 changed |= !SameTransfers(before[i], work.ActiveTransfers);
             }
+            foreach (var witness in witnesses) pending |= witness.NmtWorkInFlight;
             if (!pending && !changed) return;
 
             long now = roots.Sum(w => w.SdoProgress());
@@ -274,6 +275,16 @@ internal static class FlyingMasterRig
         public int PendingConfirmations => _confirmations.PendingConfirmations;
         public Action? ConfirmationWaitObserved { get; set; }
         public int MarkersSent => Volatile.Read(ref _markersSent);
+
+        /// <summary>An NMT frame, or the outcome of a cold or forced Reset Communication, has
+        /// left the actor and not come back. The send, its confirmation and the continuation that
+        /// applies the reset all run on the thread pool, where neither the witness heartbeats nor
+        /// the driver seams see them: before the frame is reserved, and after it is confirmed, the
+        /// node looks idle while the frame or the reset is still on its way. A send the driver
+        /// holds is the test's to release, so the work queued behind it does not count.</summary>
+        public bool NmtWorkInFlight
+            => (!_node.NmtQueueForTests.IsCompleted || !_node.ResetOutcomeForTests.IsCompleted)
+               && !_node.HasTransmitsHeldByDriverForTests;
 
         public IDisposable HoldPeerSdoChannel(byte peer, SemaphoreSlim channel)
         {

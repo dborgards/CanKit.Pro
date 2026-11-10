@@ -55,6 +55,12 @@ internal sealed partial class CanOpenNode
     private Task _nmtOrder = Task.CompletedTask;
 
     /// <summary>
+    /// Test seam: the last queued NMT frame's outcome. Until it completes, an NMT frame is still
+    /// on its way through the thread pool to the bus, or its outcome back to the queue.
+    /// </summary>
+    internal Task NmtQueueForTests => Volatile.Read(ref _nmtOrder);
+
+    /// <summary>
     /// Takes the network list. Runs only while this node is the active master, and again when
     /// <c>1F80h</c>, <c>1F81h</c> or <c>1F89h</c> change in that role. A slave that is not
     /// keep-alive is reset individually. A broadcast Reset is not used: the cold election

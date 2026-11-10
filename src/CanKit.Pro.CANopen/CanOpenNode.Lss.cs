@@ -150,6 +150,13 @@ internal sealed partial class CanOpenNode : ILssSlave
     }
 
     /// <summary>
+    /// Test seam: a send whose driver call has returned is still waiting for its confirmation --
+    /// a test double holds it, or the driver confirms later. A settled test cannot wait for work
+    /// behind such a send, because only the test releases it.
+    /// </summary>
+    internal bool HasTransmitsHeldByDriverForTests => Volatile.Read(ref _txInDriver) != 0;
+
+    /// <summary>
     /// Test seam (#428): runs between the two reads of <see cref="HasTransmitsAwaitingDriverForTests"/>,
     /// so a test can let sends complete and start exactly there.
     /// </summary>
