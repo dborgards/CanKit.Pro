@@ -3256,7 +3256,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
-    // FR-TP-002 (#27, ISO 15765-2 §9.8): a Consecutive Frame whose CAN_DL is not the First
+    // FR-TP-002 (#27, ISO 15765-2:2024 §9.5.2, §9.6.4.1): a Consecutive Frame whose CAN_DL is not the First
     // Frame's RX_DL — unless it is the last one — is ignored, not accepted with fewer bytes.
     // Under the bug the shortened CF's 4 bytes were copied and everything after them shifted;
     // the conforming CF that follows under the same SN completes the PDU intact.

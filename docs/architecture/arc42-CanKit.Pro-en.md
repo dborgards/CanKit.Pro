@@ -775,7 +775,7 @@ stateDiagram-v2
     Idle --> Reassembling : FF (length within limit)<br/>allocate buffer, ExpectedSn=1,<br/>send FC(CTS), N_Cr running
     Reassembling --> Reassembling : CF with expected SN<br/>copy bytes, restart N_Cr,<br/>FC(CTS) per block if needed
     Reassembling --> Idle : SN mismatch or N_Cr expired<br/>→ AbortRx (error to receiver)
-    Reassembling --> Reassembling : new FF (ISO 15765-2 §6.5.5)<br/>old reassembly ended via AbortRx,<br/>new one begins
+    Reassembling --> Reassembling : new FF (ISO 15765-2:2024 §9.8.3, Table 24)<br/>old reassembly ended via AbortRx,<br/>new one begins
     Reassembling --> Idle : all bytes received<br/>→ PDU into the inbox
     Idle --> [*]
 ```
