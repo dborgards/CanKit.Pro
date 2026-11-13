@@ -83,6 +83,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     // the lock is held without guessing how long the acquisition itself takes (#171).
     internal event Action? RequestLockAcquired;
 
+    // Test hook: fires when a waiting keep-alive tick has seen the computeKey window open and
+    // is about to claim it, so a test can close the window in between (#354).
+    internal event Action? KeyWindowOpenSeen;
+
     /// <summary>
     /// Acquires <see cref="_requestLock"/>, raising <see cref="RequestLockContended"/> first if
     /// it is already held. The non-blocking probe
@@ -712,7 +716,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     /// One keep-alive tick: a TesterPresent under the request lock, or -- while SecurityAccess
     /// holds the lock and runs computeKey -- a suppressed one in the window it lends (#354).
     /// </summary>
-    private async Task KeepAliveTickAsync(bool suppress, CancellationToken cancellationToken)
+    internal async Task KeepAliveTickAsync(bool suppress, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
@@ -724,16 +728,17 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             RequestLockContended?.Invoke();
             using var stopWaiting = CancellationTokenSource.CreateLinkedTokenSource(token);
             var lockWait = _requestLock.WaitAsync(stopWaiting.Token);
-            while (!lockWait.IsCompleted)
+            while (true)
             {
                 var opened = KeyWindowOpenedAsync();
                 if (await Task.WhenAny(lockWait, opened).ConfigureAwait(false) == lockWait) break;
+                KeyWindowOpenSeen?.Invoke();
                 if (!TryBeginKeyWindowSend()) continue; // closed again before we got to it
                 try
                 {
+                    // SecurityAccess holds the lock until this send has ended (CloseKeyWindowAsync
+                    // waits for it), so the wait cannot have been granted and simply ends here.
                     stopWaiting.Cancel();
-                    if (await TookLockAnywayAsync(lockWait).ConfigureAwait(false))
-                        _requestLock.Release();
                     // Always suppressed here: a positive response would land in the middle of
                     // the security sequence, and the keep-alive only has to reset S3.
                     await SendWithoutResponseCoreAsync((byte[])SuppressedTesterPresent.Clone(), token).ConfigureAwait(false);
@@ -754,19 +759,6 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         finally
         {
             _requestLock.Release();
-        }
-    }
-
-    private static async Task<bool> TookLockAnywayAsync(Task lockWait)
-    {
-        try
-        {
-            await lockWait.ConfigureAwait(false);
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            return false;
         }
     }
 
