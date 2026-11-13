@@ -133,8 +133,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafetyInspection
                     findings.Add(new PeerSafetyFinding(SrdoRecords.CommIndex(n), 1, PeerSafetyFindingKind.ExpectedUnavailable,
                         "The expected SRDO lies outside the acquired peer/description range."));
             }
+            // Every slot, the even ones too: a peer's inverted data may live in objects of their
+            // own (EN 50325-5:2010 §6.4.1.4, Table 8; #506), checked against the file as the plain ones.
             var mappedObjects = entries.Where(e => SrdoRecords.IsMappingRecord(e.Index) &&
-                    (e.Subindex & 1) != 0 && e.RawValue.Count == 4)
+                    e.Subindex != 0 && e.RawValue.Count == 4)
                 .Select(e => ((ushort)(e.UnsignedValue!.Value >> 16), (byte)(e.UnsignedValue.Value >> 8)));
             var mappingBinding = new PeerDescriptionBinding(description, mappedObjects);
             return PeerSafetyDiagnostics.Build(peerNodeId, started, timer.Elapsed, entries, rechecks, findings,

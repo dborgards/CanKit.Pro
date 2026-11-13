@@ -47,9 +47,10 @@ public static class SrdoCrc
     }
 
     /// <summary>The 13FFh byte sequence of a configuration being written — the record form of
-    /// <paramref name="parameter"/> and <paramref name="mapping"/>: each mapped object twice,
-    /// plain at the odd and inverted at the even sub-index, with the same mapping value — fed to
-    /// the serializer below.</summary>
+    /// <paramref name="parameter"/> and <paramref name="mapping"/>: each pair as the record holds
+    /// it, the plain entry at the odd and its inverted entry at the even sub-index (the same value
+    /// unless the mapping names a separate inverted object; EN 50325-5:2010 §6.4.1.5, Table 9) —
+    /// fed to the serializer below.</summary>
     internal static byte[] CanonicalBytes(in SrdoCommunicationParameter parameter, SrdoMapping mapping)
     {
         if ((byte)parameter.Direction > (byte)SrdoDirection.Receive)
@@ -58,14 +59,16 @@ public static class SrdoCrc
         byte srvt = (byte)Milliseconds(parameter.ValidationTime, byte.MaxValue, "SRVT (sub-index 3, UNSIGNED8)", nameof(parameter));
         var slots = new List<(byte Subindex, uint Value)>(2 * mapping.Entries.Count);
         byte sub = 1;
-        foreach (var entry in mapping.Entries)
+        for (int i = 0; i < mapping.Entries.Count; i++)
         {
-            uint value = ((uint)entry.Index << 16) | ((uint)entry.Subindex << 8) | entry.BitLength;
-            slots.Add((sub++, value));
-            slots.Add((sub++, value));
+            slots.Add((sub++, Word(mapping.Entries[i])));
+            slots.Add((sub++, Word(mapping.InvertedEntries[i])));
         }
         return CanonicalBytes((byte)parameter.Direction, cycle, srvt, parameter.CobId1, parameter.CobId2, (byte)slots.Count, slots);
     }
+
+    private static uint Word(Pdo.PdoMappingEntry entry)
+        => ((uint)entry.Index << 16) | ((uint)entry.Subindex << 8) | entry.BitLength;
 
     /// <summary>§8.4.2.2 "The order for data which are checked by the CRC": a) direction (1),
     /// b) refresh time / SCT (2), c) SRVT (1), d) COB-ID 1 (4), e) COB-ID 2 (4), f) mapping

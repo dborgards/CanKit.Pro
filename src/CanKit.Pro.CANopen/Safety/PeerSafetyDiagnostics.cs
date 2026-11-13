@@ -84,7 +84,7 @@ internal static class PeerSafetyDiagnostics
             // Deleted SRDO checksums are not verified by the existing device/verification path.
             if (direction == 0) comparison = SafetyComparison.NotRequested;
             if (comparison == SafetyComparison.Mismatch)
-                Find(SrdoRecords.Checksum, (byte)n, PeerSafetyFindingKind.SignatureMismatch, "Stored signature differs from the independently recomputed signature (implementation rules; #289 remains open).");
+                Find(SrdoRecords.Checksum, (byte)n, PeerSafetyFindingKind.SignatureMismatch, "Stored signature differs from the signature recomputed over the live record (EN 50325-5:2010 §6.4.1.5, Table 9).");
             // Like the existing verification path, a deleted record is identified by direction
             // alone; its stale timing/COB-ID values are not active communication parameters.
             bool communicationValid = highest == 6 && direction is 0 or 1 or 2 &&
@@ -100,23 +100,29 @@ internal static class PeerSafetyDiagnostics
                 {
                     for (int i = 0; i < slots.Count; i += 2)
                     {
+                        // EN 50325-5:2010 §6.4.1.4, Table 8: the even slot names the object of
+                        // the inverted data, the same or one of its own, as wide (#506).
                         uint word = slots[i].Value;
-                        if (!SrdoRecords.IsInvertedSlotOf(word, slots[i + 1].Value))
+                        uint inverted = slots[i + 1].Value;
+                        if (!SrdoRecords.IsPeerInvertedSlotOf(word, inverted))
                         { mappingValid = false; break; }
-                        mapping.Add(new PdoMappingEntry((ushort)(word >> 16), (byte)(word >> 8), (byte)word));
+                        mapping.Add(new PdoMappingEntry((ushort)(word >> 16), (byte)(word >> 8), (byte)word),
+                            new PdoMappingEntry((ushort)(inverted >> 16), (byte)(inverted >> 8), (byte)inverted));
                     }
                 }
                 catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
                 { mappingValid = false; }
             }
             if (mappingValid && direction is 1 or 2 && mappingRefusal is not null)
-                for (int i = 0; i < mapping.Entries.Count; i++)
+                for (int slot = 0; slot < 2 * mapping.Entries.Count; slot++)
                 {
-                    var entry = mapping.Entries[i];
+                    int i = slot / 2;
+                    var entry = (slot & 1) == 0 ? mapping.Entries[i] : mapping.InvertedEntries[i];
+                    if ((slot & 1) == 1 && entry.Equals(mapping.Entries[i])) continue;
                     if (mappingRefusal(entry, (SrdoDirection)direction.Value) is { } refusal)
                     {
                         mappingValid = false;
-                        Find(map, (byte)(2 * i + 1), PeerSafetyFindingKind.InvalidMapping,
+                        Find(map, (byte)(slot + 1), PeerSafetyFindingKind.InvalidMapping,
                             $"Mapped object {entry.Index:X4}h:{entry.Subindex:X2} {refusal} in the bound description.");
                     }
                 }
@@ -143,6 +149,7 @@ internal static class PeerSafetyDiagnostics
                 }
             result.Add(new PeerSafetySrdoSnapshot(n, parameter,
                 mappingValid && direction != 0 ? mapping.ToArray() : Array.Empty<PdoMappingEntry>(),
+                mappingValid && direction != 0 ? mapping.InvertedEntries.ToArray() : Array.Empty<PdoMappingEntry>(),
                 stored.HasValue ? (ushort)stored.Value : null, computed, comparison,
                 direction is 1 or 2 && communicationValid && mappingValid && comparison == SafetyComparison.Match &&
                 valid == true && complete && consistency == PeerSafetySnapshotConsistency.Unconfirmed));
@@ -150,7 +157,7 @@ internal static class PeerSafetyDiagnostics
         complete &= fieldsComplete;
         // A later collision or missing field invalidates the earlier record too.
         result = result.Select(s => !complete || collisions.Contains(s.Number)
-            ? new PeerSafetySrdoSnapshot(s.Number, s.Parameter, s.Mapping.ToArray(), s.StoredSignature,
+            ? new PeerSafetySrdoSnapshot(s.Number, s.Parameter, s.Mapping.ToArray(), s.InvertedMapping.ToArray(), s.StoredSignature,
                 s.ComputedSignature, s.SignatureComparison, false) : s).ToList();
         var expectedComparison = hasExpected ? SafetyComparison.Match : SafetyComparison.NotRequested;
         foreach (var pair in expected)
@@ -176,7 +183,7 @@ internal static class PeerSafetyDiagnostics
                 "A complete acquisition without observed changes is required to establish a matching expected configuration.");
         }
         findings.Add(new PeerSafetyFinding(0, 0, PeerSafetyFindingKind.NormativeUncertainty,
-            "CRC byte order and version-specific interoperability remain subject to #289. This diagnostic is not a safety approval."));
+            "The signature is computed as EN 50325-5:2010 §6.4.1.5 specifies (CRC-16, seed 0000h, multi-byte fields low byte first); a device built to another edition of CiA 304 may compute it differently. This diagnostic is not a safety approval."));
         return new PeerSafetySnapshot(peer, started, duration, entries, rechecks, result, findings,
             valid, complete, expectedComparison, consistency);
     }

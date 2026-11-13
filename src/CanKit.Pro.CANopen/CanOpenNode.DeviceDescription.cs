@@ -194,7 +194,9 @@ internal sealed partial class CanOpenNode
     /// written by the loader's own steps in the loader's order — the §8.4.2.2 defaults, the
     /// application objects a mapping can name, 1300h, the communication records with the SRDO
     /// deleted, the mapping records, the deferred creates — through the node's own write
-    /// validator (CiA DSP 304 §8.4.2.2), as in Pre-Operational. Findings are not
+    /// validator (CiA DSP 304 §8.4.2.2), as in Pre-Operational — with the mapping rule of a peer,
+    /// which may keep its inverted data in objects of their own (EN 50325-5:2010 §6.4.1.4,
+    /// Table 8; #506), where this device's own dictionary repeats the plain object. Findings are not
     /// kept; the node reports them when it loads the file. What
     /// <see cref="Safety.PeerSafetyConfiguration.FromDeviceDescription"/> reads, so that step D
     /// against a slave's own DCF expects what the slave holds.
@@ -214,7 +216,7 @@ internal sealed partial class CanOpenNode
         int srdoCount = objects.SrdoCount;
         PopulateSafetyObjects(od, nodeId, srdoCount);
         od.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
-            ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value)
+            ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value, peerMapping: true)
             : OdWriteDecision.Accept;
         var findings = new List<DeviceDescriptionFinding>();
         var pendingSrdoCreates = new List<(int Srdo, byte Direction, string Raw)>();

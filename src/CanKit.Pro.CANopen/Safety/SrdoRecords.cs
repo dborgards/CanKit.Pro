@@ -12,8 +12,8 @@ internal static class SrdoRecords
     public const ushort GfcParameter = 0x1300;
     public const ushort CommunicationBase = 0x1300;   // record n at 1300h + n
     public const ushort MappingBase = 0x1380;         // record n at 1380h + n
-    public const ushort ConfigurationValid = 0x13FE;
-    public const ushort Checksum = 0x13FF;
+    public const ushort ConfigurationValid = 0x13FE;   // EN 50325-5:2010 §6.4.1.6
+    public const ushort Checksum = 0x13FF;             // EN 50325-5:2010 §6.4.1.5
     public const byte ConfigurationValidValue = 0xA5;
     public const int MaxSrdoCount = 64;
     /// <summary>8 objects, each plain (odd sub-index) and inverted (even sub-index).</summary>
@@ -50,12 +50,26 @@ internal static class SrdoRecords
     public static bool IsChecksummed(ushort index)
         => index == Checksum || IsCommunicationRecord(index) || IsMappingRecord(index);
 
-    /// <summary>§8.4.2.2, object 1381h–13C0h: the odd sub-indices map the objects "data not
-    /// inverted", each even one the inverted object of the odd one before it — the same entry.
-    /// True when <paramref name="inverted"/> is that entry. The one rule the dictionary's mapping
-    /// validator (and the device-description loader, which writes through it) and the
-    /// description fallback of <c>ObserveForeignSrdoAsync</c> share.</summary>
+    /// <summary>The device rule: this node's even slot names the same object as the odd one
+    /// before it. EN 50325-5:2010 §6.4.1.4 (Table 8) lets the even slot name an object of its
+    /// own; a CanKit device keeps the narrower form, which the norm permits, and its dictionary's
+    /// mapping validator refuses another (0604 0041h). Peers are read with
+    /// <see cref="IsPeerInvertedSlotOf"/>.</summary>
     public static bool IsInvertedSlotOf(uint plain, uint inverted) => inverted != 0 && inverted == plain;
+
+    /// <summary>The tool and monitor rule (#506): a peer's even slot names the object of the
+    /// bitwise inverted data of the odd one before it, the same object or one of its own
+    /// (EN 50325-5:2010 §6.4.1.4, Table 8). It is set, not a dummy, and as wide as the plain
+    /// object — the second frame is the bitwise inverse of the first (§7.1.1), byte for byte.
+    /// What the peer configuration, the observation of a peer's SRDO and the snapshot
+    /// diagnostics apply.</summary>
+    public static bool IsPeerInvertedSlotOf(uint plain, uint inverted)
+    {
+        if (inverted == 0 || (byte)inverted != (byte)plain) return false;
+        ushort index = (ushort)(inverted >> 16);
+        byte sub = (byte)(inverted >> 8);
+        return !(sub == 0 && index is >= 0x0001 and <= 0x0007);
+    }
 
     public static int? SrdoNumberOf(ushort index)
     {
@@ -104,6 +118,31 @@ internal static class SrdoRecords
         return entries.ToArray();
     }
 
+    /// <summary>The pairs of the mapping: each odd slot with the even slot after it. Empty when
+    /// sub0 is 0 or when a slot up to sub0 is empty or malformed, as for
+    /// <see cref="ReadMapping"/>.</summary>
+    public static (PdoMappingEntry Plain, PdoMappingEntry Inverted)[] ReadMappingPairs(ObjectDictionary od, int n)
+    {
+        var plain = ReadMapping(od, n);
+        if (plain.Length == 0) return Array.Empty<(PdoMappingEntry, PdoMappingEntry)>();
+        var map = MapIndex(n);
+        var pairs = new (PdoMappingEntry, PdoMappingEntry)[plain.Length];
+        for (int i = 0; i < plain.Length; i++)
+        {
+            byte even = (byte)(2 * i + 2);
+            if (!od.TryReadUnsigned(map, even, out var raw) || raw == 0) return Array.Empty<(PdoMappingEntry, PdoMappingEntry)>();
+            try
+            {
+                pairs[i] = (plain[i], new PdoMappingEntry((ushort)(raw >> 16), (byte)(raw >> 8), (byte)raw));
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return Array.Empty<(PdoMappingEntry, PdoMappingEntry)>();
+            }
+        }
+        return pairs;
+    }
+
     /// <summary>§9.5 last rule: "The CRC-Entry in the object dictionary shall be equal to the CRC
     /// calculation of the safety device and the configuration-valid flag shall be valid."</summary>
     public static bool IsConfigurationValid(ObjectDictionary od, int n)
@@ -114,10 +153,8 @@ internal static class SrdoRecords
     }
 
     /// <summary>The §8.4.2.2 checksum over record n as the dictionary holds it: every field raw,
-    /// the mapping slots 1..count as stored — the inverted slots included, not synthesised from
-    /// the plain ones as <see cref="SrdoCrc.Compute"/> does for a configuration being written.
-    /// A legitimate record gives the same value, its inverted slots repeat the plain ones (the
-    /// validator sees to that); a record changed behind the dictionary's back, in any slot, does
+    /// the mapping slots 1..count as stored — the inverted slots included. A legitimate record
+    /// gives the value <see cref="SrdoCrc.Compute"/> gives for its configuration; a record changed behind the dictionary's back, in any slot, does
     /// not (Codex on #329). The byte sequence is <see cref="SrdoCrc"/>'s one serializer, so the
     /// two sides cannot drift apart in layout or byte order.</summary>
     public static ushort RecordChecksum(ObjectDictionary od, int n)

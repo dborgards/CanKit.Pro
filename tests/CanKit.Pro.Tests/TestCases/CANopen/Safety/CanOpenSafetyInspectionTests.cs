@@ -69,7 +69,7 @@ public class CanOpenSafetyInspectionTests : IClassFixture<VirtualAdapterFixture>
         private Action? _reply;
         private bool _recording;
 
-        public Rig()
+        public Rig(CanOpenDeviceDescription? description = null)
         {
             Bus = ControllableBus.Plain($"inspection-{Guid.NewGuid():N}");
             Bus.OnTransmitting = frame =>
@@ -104,7 +104,7 @@ public class CanOpenSafetyInspectionTests : IClassFixture<VirtualAdapterFixture>
                 else Reply();
             };
             Master = new CanOpenNode(new CanBusService(Bus), 1, new CanOpenNodeOptions(), ownsService: true, Clock);
-            Master.BindPeerDeviceDescription(5, Description());
+            Master.BindPeerDeviceDescription(5, description ?? Description());
         }
         public async Task Start()
         {
@@ -116,6 +116,57 @@ public class CanOpenSafetyInspectionTests : IClassFixture<VirtualAdapterFixture>
         public Task<PeerSafetySnapshot> Read(PeerSafetyConfiguration? expected = null, CancellationToken ct = default)
             => Master.Safety().ReadPeerSafetyConfigurationAsync(5, expected, ct).WaitAsync(Watchdog);
         public void Dispose() { Master.Dispose(); Bus.Dispose(); }
+    }
+
+    /// <summary>A peer whose even slot names an object of its own, as wide (EN 50325-5:2010
+    /// §6.4.1.4, Table 8; #506), has a valid mapping: no InvalidMapping, the inverted objects in
+    /// the snapshot, the signature over the stored slots, and a monitor configuration from it
+    /// that pairs frames as for any SRDO. An even slot of another width is still flagged.</summary>
+    [Theory]
+    [InlineData(0x2003_0010u, true)]
+    [InlineData(0x2004_0008u, false)]
+    public async Task A_Separate_Inverted_Object_Is_A_Valid_Mapping_When_It_Is_As_Wide(uint inverted, bool valid)
+    {
+        using var r = new Rig(SeparateInvertedObjectsFixture.File());
+        r.Values[(0x1381, 2)] = ObjectDictionary.EncodeU32(inverted);
+        var mapping = new SrdoMapping().Add(new CanKit.Pro.CANopen.Pdo.PdoMappingEntry(0x2000, 0, 16),
+            new CanKit.Pro.CANopen.Pdo.PdoMappingEntry(0x2003, 0, 16));
+        ushort crc = SrdoCrc.Crc16Xmodem(SrdoCrc.CanonicalBytes(1, 30, 20, 0x109, 0x10A, 2,
+            new[] { ((byte)1, 0x2000_0010u), ((byte)2, inverted) }));
+        if (valid) crc.Should().Be(SrdoCrc.Compute(Parameter, mapping), "the configuration and the record give one checksum");
+        r.Values[(0x13FF, 1)] = new[] { (byte)crc, (byte)(crc >> 8) };
+        await r.Start();
+        var snapshot = await r.Read();
+        var srdo = snapshot.Srdos.Single();
+        srdo.SignatureComparison.Should().Be(SafetyComparison.Match);
+        if (!valid)
+        {
+            snapshot.Findings.Should().Contain(f => f.Kind == PeerSafetyFindingKind.InvalidMapping);
+            srdo.Mapping.Should().BeEmpty();
+            srdo.InvertedMapping.Should().BeEmpty();
+            srdo.EligibleForMonitoring.Should().BeFalse();
+            return;
+        }
+        snapshot.Findings.Should().NotContain(f => f.Kind == PeerSafetyFindingKind.InvalidMapping);
+        srdo.Mapping.Single().Index.Should().Be(0x2000);
+        srdo.InvertedMapping.Single().Index.Should().Be(0x2003);
+        srdo.EligibleForMonitoring.Should().BeTrue();
+        var config = ForeignSrdoConfiguration.FromSnapshot(snapshot, 1, TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(100));
+        config.Mapping.Single().Index.Should().Be(0x2000);
+        config.InvertedMapping.Single().Index.Should().Be(0x2003);
+    }
+
+    /// <summary>A separate inverted object the bound file does not declare is refused as a plain
+    /// one is, at its own (even) sub-index.</summary>
+    [Fact]
+    public async Task A_Separate_Inverted_Object_The_File_Does_Not_Declare_Is_Flagged_At_Its_Slot()
+    {
+        using var r = new Rig(SeparateInvertedObjectsFixture.File());
+        r.Values[(0x1381, 2)] = ObjectDictionary.EncodeU32(0x2005_0010);
+        await r.Start();
+        var snapshot = await r.Read();
+        snapshot.Findings.Should().Contain(f => f.Kind == PeerSafetyFindingKind.InvalidMapping && f.Index == 0x1381 && f.Subindex == 2);
+        snapshot.Srdos.Single().EligibleForMonitoring.Should().BeFalse();
     }
 
     [Fact]

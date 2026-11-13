@@ -2,7 +2,7 @@ using System;
 
 namespace CanKit.Pro.CANopen.Safety;
 
-/// <summary>Consumer side (CiA DSP 304 V1.0 §8.1.1, §8.1.3.1, §9.5) and the global failsafe
+/// <summary>Consumer side (CiA DSP 304 V1.0 §8.1.1, §8.1.3.1, §9.5; EN 50325-5:2010 §7.1.1, §7.1.2, §7.1.3) and the global failsafe
 /// command (§8.2).</summary>
 internal sealed partial class SrdoEngine
 {
@@ -147,7 +147,7 @@ internal sealed partial class SrdoEngine
             Invalidate(rt, SrdoInvalidReason.Mismatch);
             return;
         }
-        // §8.1.3.1: "If L is less than 'n' the data of the received SRDO is not processed and an
+        // §8.1.3.1 (EN 50325-5:2010 §7.1.3): "If L is less than 'n' the data of the received SRDO is not processed and an
         // Emergency message with error code 8210h shall be produced" — once per run, like RPDOs.
         if (first.Length < rt.TotalBytes)
         {

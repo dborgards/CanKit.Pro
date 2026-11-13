@@ -14,6 +14,26 @@ public sealed class ForeignSrdoConfiguration
     public ForeignSrdoConfiguration(byte peerNodeId, int number, uint cobId1, uint cobId2,
         IEnumerable<PdoMappingEntry> mapping, TimeSpan validationTime, TimeSpan safeguardCycleTime,
         string provenance)
+        : this(peerNodeId, number, cobId1, cobId2, CopyPlain(mapping), validationTime, safeguardCycleTime, provenance)
+    {
+    }
+
+    /// <summary>As the constructor, for a peer whose mapping may name separate inverted objects
+    /// (EN 50325-5:2010 §6.4.1.4, Table 8; #506): <paramref name="mapping"/> carries the pairs. The
+    /// monitor checks the second frame against the inverse of the first, as for any SRDO
+    /// (§7.1.1), and decodes the plain objects; <see cref="InvertedMapping"/> records what the
+    /// even slots name.</summary>
+    public static ForeignSrdoConfiguration Create(byte peerNodeId, int number, uint cobId1, uint cobId2,
+        SrdoMapping mapping, TimeSpan validationTime, TimeSpan safeguardCycleTime, string provenance)
+    {
+        if (mapping is null) throw new ArgumentNullException(nameof(mapping));
+        return new ForeignSrdoConfiguration(peerNodeId, number, cobId1, cobId2, mapping.Clone(),
+            validationTime, safeguardCycleTime, provenance);
+    }
+
+    private ForeignSrdoConfiguration(byte peerNodeId, int number, uint cobId1, uint cobId2,
+        SrdoMapping? mapping, TimeSpan validationTime, TimeSpan safeguardCycleTime,
+        string provenance)
     {
         if (peerNodeId is < 1 or > 127) throw new ArgumentOutOfRangeException(nameof(peerNodeId));
         if (number is < 1 or > 64) throw new ArgumentOutOfRangeException(nameof(number));
@@ -24,9 +44,9 @@ public sealed class ForeignSrdoConfiguration
             throw new ArgumentOutOfRangeException(nameof(safeguardCycleTime));
         if (mapping is null) throw new ArgumentNullException(nameof(mapping));
         if (string.IsNullOrWhiteSpace(provenance)) throw new ArgumentException("Configuration provenance is required.", nameof(provenance));
-        var validated = new SrdoMapping();
-        foreach (var entry in mapping) validated.Add(entry);
+        var validated = mapping;
         Mapping = Array.AsReadOnly(validated.ToArray());
+        InvertedMapping = Array.AsReadOnly(validated.InvertedEntries.ToArray());
         TotalBytes = validated.TotalBytes;
         PeerNodeId = peerNodeId; Number = number; CobId1 = cobId1; CobId2 = cobId2;
         ValidationTime = validationTime; SafeguardCycleTime = safeguardCycleTime;
@@ -45,8 +65,11 @@ public sealed class ForeignSrdoConfiguration
             throw new ArgumentException("The snapshot has no eligible SRDO with this number.", nameof(number));
         if (parameter.Direction == SrdoDirection.Transmit && (!validationTime.HasValue || !safeguardCycleTime.HasValue))
             throw new ArgumentException("Producer snapshots require explicit observer SRVT and SCT.", nameof(snapshot));
+        var mapping = new SrdoMapping();
+        for (int i = 0; i < record.Mapping.Count; i++)
+            mapping.Add(record.Mapping[i], record.InvertedMapping[i]); // a snapshot keeps one inverted entry per plain one
         return new ForeignSrdoConfiguration(snapshot.PeerNodeId, number, parameter.CobId1, parameter.CobId2,
-            record.Mapping, validationTime ?? parameter.ValidationTime,
+            mapping, validationTime ?? parameter.ValidationTime,
             safeguardCycleTime ?? parameter.RefreshOrSafeguardCycleTime, "PeerSafetySnapshot")
         { SourceSnapshot = snapshot, ConfigurationId = snapshot.ConfigurationId };
     }
@@ -63,6 +86,9 @@ public sealed class ForeignSrdoConfiguration
     public uint CobId2 { get; }
     /// <summary>Owned, validated mapping in payload order.</summary>
     public IReadOnlyList<PdoMappingEntry> Mapping { get; }
+    /// <summary>The object of each entry's inverted data, in the same order: the entry itself
+    /// unless the configuration names a separate one.</summary>
+    public IReadOnlyList<PdoMappingEntry> InvertedMapping { get; }
     /// <summary>Observer SRVT.</summary>
     public TimeSpan ValidationTime { get; }
     /// <summary>Observer SCT.</summary>
@@ -72,4 +98,12 @@ public sealed class ForeignSrdoConfiguration
     /// <summary>Full acquisition and per-entry provenance when created from a snapshot.</summary>
     public PeerSafetySnapshot? SourceSnapshot { get; private set; }
     internal int TotalBytes { get; }
+
+    private static SrdoMapping CopyPlain(IEnumerable<PdoMappingEntry> mapping)
+    {
+        if (mapping is null) return null!; // the constructor reports it, after the other arguments
+        var validated = new SrdoMapping();
+        foreach (var entry in mapping) validated.Add(entry);
+        return validated;
+    }
 }

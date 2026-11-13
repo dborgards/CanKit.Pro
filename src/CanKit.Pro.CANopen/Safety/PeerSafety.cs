@@ -75,7 +75,7 @@ public sealed class PeerSafetyConfiguration
                 throw new ArgumentException(
                     $"SRDO {srdoNumber}: COB-IDs {parameter.CobId1:X}h/{parameter.CobId2:X}h are used by SRDO {other.Key} of this configuration; one CAN-ID carries one SRDO (CiA DSP 304 §8.4.2.2).", nameof(parameter));
         }
-        _srdos[srdoNumber] = (parameter, SrdoMapping.FromEntries(mapping.ToArray()));
+        _srdos[srdoNumber] = (parameter, mapping.Clone());
         return this;
     }
 
@@ -86,7 +86,7 @@ public sealed class PeerSafetyConfiguration
     {
         var copy = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = GlobalFailsafeCommandEnabled, Storage = Storage };
         foreach (var pair in _srdos)
-            copy._srdos[pair.Key] = (pair.Value.Parameter, SrdoMapping.FromEntries(pair.Value.Mapping.ToArray()));
+            copy._srdos[pair.Key] = (pair.Value.Parameter, pair.Value.Mapping.Clone());
         return copy;
     }
 
@@ -114,7 +114,8 @@ public sealed class PeerSafetyConfiguration
     /// a dictionary of its own — not by a second reading of the file: the §8.4.2.2 defaults for
     /// what the file leaves out or the device refuses (25 ms, 20 ms, the pre-defined COB-IDs of
     /// SRDO 1 for a node-id 1..64, §8.3.3), the device's write rules (§8.4.2.2:
-    /// consecutive COB-IDs, an inverted slot equal to its plain one, no COB-ID of another
+    /// consecutive COB-IDs, an inverted slot as wide as its plain one — the same object or one of
+    /// its own, EN 50325-5:2010 §6.4.1.4 Table 8 (#506) —, no COB-ID of another
     /// existing SRDO, mapped objects the file declares), and the SRDO left deleted where the
     /// loader leaves it deleted. So step D against a slave's own DCF expects what the slave
     /// holds. Parameter values are read as ParameterValue, DefaultValue where none, $NODEID
@@ -138,7 +139,7 @@ public sealed class PeerSafetyConfiguration
         for (int n = 1; n <= SrdoRecords.MaxSrdoCount; n++)
         {
             if (!SrdoRecords.TryReadCommunication(od, n, out var parameter) || parameter.Direction == SrdoDirection.None) continue;
-            configuration.Add(n, parameter, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, n)));
+            configuration.Add(n, parameter, SrdoMapping.FromPairs(SrdoRecords.ReadMappingPairs(od, n)));
         }
         return configuration;
     }

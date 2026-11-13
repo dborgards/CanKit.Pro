@@ -117,6 +117,24 @@ public class ForeignSrdoMonitorTests : IClassFixture<VirtualAdapterFixture>
         valid.IsCurrent.Should().BeTrue("retained results are immutable historical snapshots");
     }
 
+    /// <summary>A peer with a separate inverted object (EN 50325-5:2010 §6.4.1.4, Table 8; #506)
+    /// sends the same frames: the monitor pairs them as for any SRDO (§7.1.1), decodes the plain
+    /// object and reports a second frame that is not the inverse as a mismatch.</summary>
+    [Fact]
+    public void A_Separate_Inverted_Object_Pairs_Frames_As_Any_Srdo()
+    {
+        var mapping = new SrdoMapping().Add(new PdoMappingEntry(0x2000, 1, 16), new PdoMappingEntry(0x2003, 1, 16));
+        using var rig = new Rig(true, ForeignSrdoConfiguration.Create(5, 1, 0x101, 0x102, mapping, Srvt, Sct, "test DCF revision 8"));
+        rig.Pair();
+        rig.Add(0x101, 20, 0x12, 0x34); rig.Add(0x102, 21, 0xED, 0xCC);
+        rig.Until(30);
+        var batch = rig.Monitor.Poll();
+        batch.Observations.Select(x => x.Status).Should().Equal(ForeignSrdoStatus.WaitingForInverted, ForeignSrdoStatus.Valid,
+            ForeignSrdoStatus.WaitingForInverted, ForeignSrdoStatus.Mismatch);
+        var state = batch.States.Single();
+        state.Configuration.InvertedMapping.Single().Index.Should().Be(0x2003);
+    }
+
     [Fact]
     public void Interleaved_Srdos_And_Buses_Have_Independent_Pairs_And_Deadlines()
     {

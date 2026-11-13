@@ -416,7 +416,7 @@ internal sealed partial class CanOpenNode
     {
         foreach (var srdo in configuration.Srdos)
         {
-            foreach (var entry in srdo.Value.Mapping.Entries)
+            foreach (var entry in srdo.Value.Mapping.Entries.Concat(srdo.Value.Mapping.InvertedEntries).Distinct())
             {
                 if (MappingEntryRefusal(description, entry, srdo.Value.Parameter.Direction) is { } reason)
                     throw new ArgumentException(
@@ -553,10 +553,14 @@ internal sealed partial class CanOpenNode
             }
             var (p, mapping) = srdo;
             var entries = mapping.ToArray();
+            var inverted = mapping.InvertedEntries;
             yield return new SafetyWrite(comm, 0x01, new byte[] { 0 });
             yield return new SafetyWrite(map, 0x00, new byte[] { 0 });
+            // Odd sub-index the plain object, even the object of its inverted data (EN 50325-5:2010
+            // §6.4.1.4, Table 8): the same entry unless the mapping names a separate one (#506).
             for (byte s = 1; s <= 2 * entries.Length; s++)
-                yield return new SafetyWrite(map, s, ObjectDictionary.EncodeU32(EncodeMappingEntry(entries[(s - 1) / 2])));
+                yield return new SafetyWrite(map, s, ObjectDictionary.EncodeU32(EncodeMappingEntry(
+                    (s & 1) == 1 ? entries[(s - 1) / 2] : inverted[(s - 1) / 2])));
             yield return new SafetyWrite(map, 0x00, new[] { (byte)(2 * entries.Length) });
             ushort cycle = PeerSafetyConfiguration.CheckMilliseconds(n, "cycle time", p.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue, paramName);
             yield return new SafetyWrite(comm, 0x02, new[] { (byte)cycle, (byte)(cycle >> 8) });

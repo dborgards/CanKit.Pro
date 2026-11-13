@@ -209,6 +209,72 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x13FE, 0).Should().Be(0u);
     }
 
+    /// <summary>A peer that keeps its inverted data in objects of their own (EN 50325-5:2010
+    /// §6.4.1.4, Table 8; #506): the configuration read off its file writes those objects at the
+    /// even sub-indices, its checksum covers them (§6.4.1.5, Table 9), the readback compares
+    /// them, and a verification expects them.</summary>
+    [Fact]
+    public async Task Separate_Inverted_Objects_Are_Written_At_The_Even_Slots_And_Checksummed()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        var file = SeparateInvertedObjectsFixture.File();
+        master.BindPeerDeviceDescription(Device, file);
+        var configuration = PeerSafetyConfiguration.FromDeviceDescription(file, Device);
+        var (parameter, mapping) = configuration.Srdos[1];
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join(", ", result.Mismatches));
+        ushort crc = SrdoCrc.Compute(parameter, mapping);
+        lock (fake.Written)
+        {
+            fake.Written[(0x1381, 1)].Should().Equal(ObjectDictionary.EncodeU32(SeparateInvertedObjectsFixture.Plain1));
+            fake.Written[(0x1381, 2)].Should().Equal(ObjectDictionary.EncodeU32(SeparateInvertedObjectsFixture.Inverted1));
+            fake.Written[(0x1381, 3)].Should().Equal(ObjectDictionary.EncodeU32(SeparateInvertedObjectsFixture.Plain2));
+            fake.Written[(0x1381, 4)].Should().Equal(ObjectDictionary.EncodeU32(SeparateInvertedObjectsFixture.Inverted2));
+            fake.Written[(0x13FF, 1)].Should().Equal((byte)crc, (byte)(crc >> 8));
+        }
+        crc.Should().NotBe(SrdoCrc.Compute(parameter, SrdoMapping.FromEntries(mapping.ToArray())));
+        (await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration).WithTimeoutAsync(ShortTimeout))
+            .Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_Readback_That_Differs_At_An_Even_Slot_Is_Reported()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0x1381, 0x02));
+        var file = SeparateInvertedObjectsFixture.File();
+        master.BindPeerDeviceDescription(Device, file);
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, PeerSafetyConfiguration.FromDeviceDescription(file, Device))
+            .WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        var mismatch = result.Mismatches.Single();
+        (mismatch.Index, mismatch.Subindex).Should().Be(((ushort)0x1381, (byte)0x02));
+        mismatch.Expected.Should().Equal(ObjectDictionary.EncodeU32(SeparateInvertedObjectsFixture.Inverted1));
+    }
+
+    /// <summary>The inverted object is checked against the bound file as the plain one is, before
+    /// the first frame.</summary>
+    [Fact]
+    public async Task A_Separate_Inverted_Object_The_File_Does_Not_Declare_Is_Refused_Before_Any_Frame()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, SeparateInvertedObjectsFixture.File());
+        var configuration = new PeerSafetyConfiguration()
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(new CanKit.Pro.CANopen.Pdo.PdoMappingEntry(0x2000, 0, 16), new CanKit.Pro.CANopen.Pdo.PdoMappingEntry(0x2005, 0, 16)));
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("2005h");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
     /// <summary>All three identity entries are read and reported, and they are the only transfers
     /// of a configuration that ends there: no count, no write.</summary>
     [Fact]

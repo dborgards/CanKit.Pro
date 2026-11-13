@@ -8,7 +8,7 @@ using CanKit.Pro.Reliability;
 namespace CanKit.Pro.CANopen.Safety;
 
 /// <summary>
-/// The SRDO runtime of a node (CiA DSP 304 V1.0 §8.1, §8.2): one producer or consumer per
+/// The SRDO runtime of a node (CiA DSP 304 V1.0 §8.1, §8.2; EN 50325-5:2010 §7.1.1 frames, §7.1.2 timing): one producer or consumer per
 /// record 1301h–1340h, derived from the records like the PDO engine derives its PDOs. Owned
 /// and driven by <see cref="CanOpenNode"/> on its actor loop; every member except
 /// <see cref="GetState"/> and <see cref="CollectChangeOfStateEntries"/> is actor-only.
@@ -99,7 +99,7 @@ internal sealed partial class SrdoEngine : IDisposable
         else SetInvalid(rt, rt.Direction == SrdoDirection.None ? null : SrdoInvalidReason.NotOperational);
     }
 
-    /// <summary>§8.3.2.2: "Safety communication is only supported in this state." Every SRDO is
+    /// <summary>§8.3.2.2 (EN 50325-5:2010 §8.2.2): "Safety communication is only supported in this state." Every SRDO is
     /// re-read — 13FEh/13FFh may have changed in Pre-Operational — and armed.</summary>
     public void EnterOperational()
     {

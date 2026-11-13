@@ -893,6 +893,7 @@ namespace CanKit.Pro.CANopen.Safety
         public uint CobId1 { get; }
         public uint CobId2 { get; }
         public System.Guid ConfigurationId { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> InvertedMapping { get; }
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Mapping { get; }
         public int Number { get; }
         public byte PeerNodeId { get; }
@@ -900,6 +901,7 @@ namespace CanKit.Pro.CANopen.Safety
         public System.TimeSpan SafeguardCycleTime { get; }
         public CanKit.Pro.CANopen.Safety.PeerSafetySnapshot? SourceSnapshot { get; }
         public System.TimeSpan ValidationTime { get; }
+        public static CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration Create(byte peerNodeId, int number, uint cobId1, uint cobId2, CanKit.Pro.CANopen.Safety.SrdoMapping mapping, System.TimeSpan validationTime, System.TimeSpan safeguardCycleTime, string provenance) { }
         public static CanKit.Pro.CANopen.Safety.ForeignSrdoConfiguration FromSnapshot(CanKit.Pro.CANopen.Safety.PeerSafetySnapshot snapshot, int number, System.TimeSpan? validationTime = default, System.TimeSpan? safeguardCycleTime = default) { }
     }
     public sealed class ForeignSrdoMonitor : System.IDisposable
@@ -1081,6 +1083,7 @@ namespace CanKit.Pro.CANopen.Safety
     {
         public ushort? ComputedSignature { get; }
         public bool EligibleForMonitoring { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> InvertedMapping { get; }
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Mapping { get; }
         public int Number { get; }
         public CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter? Parameter { get; }
@@ -1144,8 +1147,11 @@ namespace CanKit.Pro.CANopen.Safety
         public const int MaxEntries = 8;
         public SrdoMapping() { }
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Entries { get; }
+        public bool HasSeparateInvertedObjects { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> InvertedEntries { get; }
         public int TotalBytes { get; }
         public CanKit.Pro.CANopen.Safety.SrdoMapping Add(CanKit.Pro.CANopen.Pdo.PdoMappingEntry entry) { }
+        public CanKit.Pro.CANopen.Safety.SrdoMapping Add(CanKit.Pro.CANopen.Pdo.PdoMappingEntry plain, CanKit.Pro.CANopen.Pdo.PdoMappingEntry inverted) { }
         public CanKit.Pro.CANopen.Safety.SrdoMapping Add(ushort index, byte subindex, byte bitLength) { }
         public CanKit.Pro.CANopen.Pdo.PdoMappingEntry[] ToArray() { }
     }

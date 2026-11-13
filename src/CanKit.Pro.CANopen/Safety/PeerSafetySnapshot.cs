@@ -62,7 +62,7 @@ public enum PeerSafetyFindingKind
     ExpectedUnavailable,
     /// <summary>Repeated live uploads differ.</summary>
     ConfigurationChanged,
-    /// <summary>An interoperability/normative choice remains open in #289.</summary>
+    /// <summary>An interoperability note: a device built to another edition of the profile may read a rule differently.</summary>
     NormativeUncertainty,
 }
 
@@ -118,8 +118,15 @@ public sealed class PeerSafetySrdoSnapshot
 {
     internal PeerSafetySrdoSnapshot(int number, SrdoCommunicationParameter? parameter, PdoMappingEntry[] mapping,
         ushort? stored, ushort? computed, SafetyComparison signature, bool eligible)
+        : this(number, parameter, mapping, mapping, stored, computed, signature, eligible)
+    {
+    }
+
+    internal PeerSafetySrdoSnapshot(int number, SrdoCommunicationParameter? parameter, PdoMappingEntry[] mapping,
+        PdoMappingEntry[] invertedMapping, ushort? stored, ushort? computed, SafetyComparison signature, bool eligible)
     {
         Number = number; Parameter = parameter; Mapping = Array.AsReadOnly((PdoMappingEntry[])mapping.Clone());
+        InvertedMapping = Array.AsReadOnly((PdoMappingEntry[])invertedMapping.Clone());
         StoredSignature = stored; ComputedSignature = computed; SignatureComparison = signature; EligibleForMonitoring = eligible;
     }
     /// <summary>SRDO number, 1..64.</summary>
@@ -128,6 +135,10 @@ public sealed class PeerSafetySrdoSnapshot
     public SrdoCommunicationParameter? Parameter { get; }
     /// <summary>Validated plain mapping entries; empty for an invalid or deleted record.</summary>
     public IReadOnlyList<PdoMappingEntry> Mapping { get; }
+    /// <summary>The object at the even sub-index of each entry of <see cref="Mapping"/>, in the
+    /// same order: the plain entry itself, or a separate object of the inverted data
+    /// (EN 50325-5:2010 §6.4.1.4, Table 8; #506). Empty when <see cref="Mapping"/> is.</summary>
+    public IReadOnlyList<PdoMappingEntry> InvertedMapping { get; }
     /// <summary>Live 13FFh:n, when available with its required width.</summary>
     public ushort? StoredSignature { get; }
     /// <summary>Independently computed signature over live fields (and explicit CiA 319 SRVT rule only).</summary>
@@ -141,8 +152,9 @@ public sealed class PeerSafetySrdoSnapshot
 
 /// <summary>One immutable, read-only acquisition of a peer's safety communication configuration (#403).</summary>
 /// <remarks>Each acquisition has a new identity. Replacing a running monitor's snapshot must start
-/// a new evaluation period. No snapshot is an atomic device image or a safety approval. #289's
-/// unresolved byte-order/version questions also apply to the signature comparisons here.</remarks>
+/// a new evaluation period. No snapshot is an atomic device image or a safety approval. The
+/// signature comparisons follow EN 50325-5:2010 §6.4.1.5; a device built to another edition of
+/// CiA 304 may compute its signature differently.</remarks>
 public sealed class PeerSafetySnapshot
 {
     internal PeerSafetySnapshot(byte peer, DateTimeOffset started, TimeSpan duration,

@@ -99,8 +99,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private OdWriteDecision ValidateSafetyWrite(ushort index, byte subindex, byte[] value)
         => ValidateSafetyWrite(_od, _srdoCount, _state == NmtState.Operational, index, subindex, value);
 
+    // peerMapping: the mapping rule of a peer (tool role, #506) -- an even slot may name an
+    // inverted object of its own (SrdoRecords.IsPeerInvertedSlotOf). False for this device's own
+    // dictionary, whose even slot repeats the odd one.
     private static OdWriteDecision ValidateSafetyWrite(ObjectDictionary od, int srdoCount, bool operational,
-        ushort index, byte subindex, byte[] value)
+        ushort index, byte subindex, byte[] value, bool peerMapping = false)
     {
         // §8.3.2.4 note 1: "Writing to a safety entry in the OPERATIONAL state leads to an abort
         // message (abort code: 0800 0022h). Reading … is allowed." This runs under the write gate,
@@ -118,7 +121,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             return subindex == 0 ? OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly) : OdWriteDecision.Accept;
         if (SrdoRecords.IsCommunicationRecord(index))
             return ValidateSrdoCommunicationWrite(od, srdoCount, index, subindex, value);
-        return ValidateSrdoMappingWrite(od, index, subindex, value);
+        return ValidateSrdoMappingWrite(od, index, subindex, value, peerMapping);
     }
 
     private static OdWriteDecision ValidateSrdoCommunicationWrite(ObjectDictionary od, int srdoCount, ushort index, byte subindex, byte[] value)
@@ -141,10 +144,15 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     if (IsCanIdOfAnExistingSrdo(od, srdoCount, cob1, n) || IsCanIdOfAnExistingSrdo(od, srdoCount, cob2, n))
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-                    foreach (var entry in SrdoRecords.ReadMapping(od, n))
+                    // Both objects of a pair: a separate inverted object (a peer's, #506) is read or
+                    // written like its plain one.
+                    foreach (var (plain, inverted) in SrdoRecords.ReadMappingPairs(od, n))
                     {
-                        uint raw = ((uint)entry.Index << 16) | ((uint)entry.Subindex << 8) | entry.BitLength;
-                        if (ValidateSrdoMappingEntry(od, raw, (SrdoDirection)direction) is { } abort) return OdWriteDecision.Reject(abort);
+                        foreach (var entry in plain.Equals(inverted) ? new[] { plain } : new[] { plain, inverted })
+                        {
+                            uint raw = ((uint)entry.Index << 16) | ((uint)entry.Subindex << 8) | entry.BitLength;
+                            if (ValidateSrdoMappingEntry(od, raw, (SrdoDirection)direction) is { } abort) return OdWriteDecision.Reject(abort);
+                        }
                     }
                     return OdWriteDecision.Accept;
                 }
@@ -207,8 +215,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         return false;
     }
 
-    private static OdWriteDecision ValidateSrdoMappingWrite(ObjectDictionary od, ushort index, byte subindex, byte[] value)
+    private static OdWriteDecision ValidateSrdoMappingWrite(ObjectDictionary od, ushort index, byte subindex, byte[] value, bool peerMapping)
     {
+        Func<uint, uint, bool> isInvertedSlotOf = peerMapping ? SrdoRecords.IsPeerInvertedSlotOf : SrdoRecords.IsInvertedSlotOf;
         int n = index - SrdoRecords.MappingBase;
         // "For changing the SRDO mapping first the SRDO shall be deleted." — same code as the
         // PDO re-mapping procedure uses for a live PDO.
@@ -225,7 +234,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                 if (!od.TryReadUnsigned(index, s, out var raw) || raw == 0) return OdWriteDecision.Reject(SdoAbortCode.ObjectDoesNotExist);
                 if ((s & 1) == 0)
                 {
-                    if (!SrdoRecords.IsInvertedSlotOf(od.ReadUnsigned(index, (byte)(s - 1)), raw)) return OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped); // inverted slot repeats the plain slot
+                    // EN 50325-5:2010 §6.4.1.4, Table 8: the inverted object of the plain one before it.
+                    // A separate inverted object (peer rule) passed the entry checks on its own write.
+                    if (!isInvertedSlotOf(od.ReadUnsigned(index, (byte)(s - 1)), raw)) return OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped);
                     continue;
                 }
                 if (ValidateSrdoMappingEntry(od, raw, SrdoDirection.None) is { } abort) return OdWriteDecision.Reject(abort);
@@ -240,7 +251,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         if ((subindex & 1) == 0)
         {
             uint plain = od.ReadUnsigned(index, (byte)(subindex - 1));
-            return plain != 0 && !SrdoRecords.IsInvertedSlotOf(plain, entry) ? OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped) : OdWriteDecision.Accept;
+            return plain != 0 && !isInvertedSlotOf(plain, entry) ? OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped) : OdWriteDecision.Accept;
         }
         int precedingBytes = 0;
         for (byte s = 1; s < subindex; s += 2)
@@ -305,6 +316,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         ThrowIfDisposed();
         RequireSrdo(srdoNumber);
         if (mapping is null) throw new ArgumentNullException(nameof(mapping));
+        if (mapping.HasSeparateInvertedObjects)
+            throw new ArgumentException(
+                "This device's SRDO mapping repeats each object at the even sub-index; a separate inverted object is for configuring or monitoring a peer (EN 50325-5:2010 §6.4.1.4, Table 8; #506).",
+                nameof(mapping));
         ushort cycleMs = ToMilliseconds16(cycle, cycleParamName, allowZero: false);
         byte srvtMs = 0;
         if (validation is { } v)
