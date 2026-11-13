@@ -2054,6 +2054,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+#if NET5_0_OR_GREATER // DispatchProxy
     [Fact]
     public async Task A_Keep_Alive_Tick_Waits_For_A_Plain_Request_That_Holds_The_Client()
     {
@@ -2258,6 +2259,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             return await ((Task<IsoTpTransmitStamps>)method.Invoke(Inner, args)!).ConfigureAwait(false);
         }
     }
+#endif
 
     // -----------------------------------------------------------------------------------
     // After P2 timeout, a late ECU reply must not be consumed as the next request's answer
