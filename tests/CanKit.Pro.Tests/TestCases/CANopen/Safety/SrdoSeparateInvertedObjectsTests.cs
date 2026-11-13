@@ -40,6 +40,8 @@ public class SrdoSeparateInvertedObjectsTests
         wider.Should().Throw<ArgumentException>().WithMessage("*7.1.1*");
         Action dummy = () => mapping.Add(new PdoMappingEntry(0x2000, 0, 8), new PdoMappingEntry(0x0005, 0, 8));
         dummy.Should().Throw<InvalidOperationException>();
+        Action plainDummy = () => mapping.Add(new PdoMappingEntry(0x0005, 0, 8), new PdoMappingEntry(0x2000, 0, 8));
+        plainDummy.Should().Throw<InvalidOperationException>();
         mapping.Entries.Should().BeEmpty();
         mapping.InvertedEntries.Should().BeEmpty();
     }
@@ -51,6 +53,8 @@ public class SrdoSeparateInvertedObjectsTests
     [InlineData(0x2000_0010u, 0u, false)]            // not set
     [InlineData(0x2000_0010u, 0x0006_0010u, false)]  // a dummy
     [InlineData(0x2000_0010u, 0x0006_0110u, true)]   // 0006h:01 is no dummy: only sub-index 0 is
+    [InlineData(0x0000_0008u, 0x0000_0008u, true)]   // index 0 sub 0: below the dummy range
+    [InlineData(0x0008_0010u, 0x0008_0010u, true)]   // index 8 sub 0: above the dummy range
     public void The_Peer_Rule_Takes_An_Object_Of_Its_Own_As_Wide_As_The_Plain_One(uint plain, uint inverted, bool accepted)
     {
         SrdoRecords.IsPeerInvertedSlotOf(plain, inverted).Should().Be(accepted);
@@ -97,6 +101,10 @@ public class SrdoSeparateInvertedObjectsTests
         SrdoRecords.ReadMappingPairs(od, 1).Should().BeEmpty();
         od.WriteUnsigned(0x1381, 0, 0);
         SrdoRecords.ReadMappingPairs(od, 1).Should().BeEmpty();
+
+        var withoutEvenSlot = new ObjectDictionary();
+        withoutEvenSlot.AddU8(0x1381, 0, 2); withoutEvenSlot.AddU32(0x1381, 1, 0x6000_0108);
+        SrdoRecords.ReadMappingPairs(withoutEvenSlot, 1).Should().BeEmpty();
     }
 
     /// <summary>The tool role reads a peer's file with the peer rule: the separate objects are the

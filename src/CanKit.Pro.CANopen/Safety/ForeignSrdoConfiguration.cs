@@ -67,7 +67,7 @@ public sealed class ForeignSrdoConfiguration
             throw new ArgumentException("Producer snapshots require explicit observer SRVT and SCT.", nameof(snapshot));
         var mapping = new SrdoMapping();
         for (int i = 0; i < record.Mapping.Count; i++)
-            mapping.Add(record.Mapping[i], i < record.InvertedMapping.Count ? record.InvertedMapping[i] : record.Mapping[i]);
+            mapping.Add(record.Mapping[i], record.InvertedMapping[i]); // a snapshot keeps one inverted entry per plain one
         return new ForeignSrdoConfiguration(snapshot.PeerNodeId, number, parameter.CobId1, parameter.CobId2,
             mapping, validationTime ?? parameter.ValidationTime,
             safeguardCycleTime ?? parameter.RefreshOrSafeguardCycleTime, "PeerSafetySnapshot")

@@ -235,8 +235,8 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                 if ((s & 1) == 0)
                 {
                     // EN 50325-5:2010 §6.4.1.4, Table 8: the inverted object of the plain one before it.
+                    // A separate inverted object (peer rule) passed the entry checks on its own write.
                     if (!isInvertedSlotOf(od.ReadUnsigned(index, (byte)(s - 1)), raw)) return OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped);
-                    if (peerMapping && ValidateSrdoMappingEntry(od, raw, SrdoDirection.None) is { } invertedAbort) return OdWriteDecision.Reject(invertedAbort);
                     continue;
                 }
                 if (ValidateSrdoMappingEntry(od, raw, SrdoDirection.None) is { } abort) return OdWriteDecision.Reject(abort);
