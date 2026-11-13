@@ -5,7 +5,7 @@ namespace CanKit.Pro.Uds;
 /// <summary>
 /// The server timing a DiagnosticSessionControl positive response declares for the session it
 /// has started: the sessionParameterRecord after the echoed session type, P2Server_max in
-/// 1 ms units then P2*Server_max in 10 ms units, both big-endian (ISO 14229-1 §9.2.2.4) (#340,
+/// 1 ms units then P2*Server_max in 10 ms units, both big-endian (ISO 14229-1:2026 §9.2.3.2, Tables 27/28) (#340,
 /// carried-over finding U2).
 /// </summary>
 internal readonly struct UdsSessionTiming

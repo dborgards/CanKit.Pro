@@ -9,7 +9,7 @@ using CanKit.Pro.IsoTp;
 namespace CanKit.Pro.Uds;
 
 /// <summary>
-/// UDS over functional addressing (ISO 14229-1 §7.5.4): one request on the functional CAN
+/// UDS over functional addressing (ISO 14229-1:2026 §7.7.1, §7.7.6): one request on the functional CAN
 /// identifier, every ECU in the response range may answer. Built on
 /// <see cref="IsoTpFunctionalClient"/>, which carries only Single Frames both ways; a request
 /// that needs more than one frame, or an ECU whose answer does, is not for this path (#57).

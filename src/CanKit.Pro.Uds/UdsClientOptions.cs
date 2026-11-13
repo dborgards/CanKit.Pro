@@ -7,7 +7,7 @@ namespace CanKit.Pro.Uds;
 /// treated as immutable for the client's lifetime.
 /// </summary>
 /// <remarks>
-/// <para>Timing terminology follows ISO 14229-1 §7.3:</para>
+/// <para>Timing terminology follows ISO 14229-2 (session layer), where P2/P2*/S3 are defined:</para>
 /// <list type="bullet">
 ///   <item><description><see cref="P2ClientMax"/> is the default response window a tester waits
 ///   after transmitting a request before treating the ECU as unresponsive. The specification's
@@ -93,29 +93,39 @@ public sealed class UdsClientOptions
 
     /// <summary>
     /// When <c>true</c>, TesterPresent frames sent by the keep-alive helper use the ISO 14229-1
-    /// §7.5 "suppressPositiveResponse" bit (sub-function <c>0x80</c>) so the ECU stays silent.
-    /// Defaults to <c>true</c> to keep the bus quiet.
+    /// suppressPosRspMsgIndicationBit (§8.2.2, Table 10; sub-function <c>0x80</c>) so the ECU
+    /// stays silent. Defaults to <c>true</c> to keep the bus quiet. While
+    /// <see cref="IUdsClient.SecurityAccessAsync"/> runs its <c>computeKey</c> callback the
+    /// keep-alive always sets the bit.
     /// </summary>
+    /// <remarks>
+    /// The keep-alive goes out physically addressed, on the client's own channel. ISO 14229-1:2026
+    /// §7.7.6 describes the keep-alive as a functionally addressed TesterPresent handled by the
+    /// server's bypass logic; a physical one keeps the session of the one server this client
+    /// talks to alive as well, and needs no functional identifier. Send a functional one with
+    /// <see cref="UdsFunctionalClient"/> where every server on the bus has to be kept awake.
+    /// </remarks>
     public bool KeepAliveSuppressPositiveResponse { get; init; } = true;
 
     /// <summary>
     /// How many times a request is repeated after NRC 0x21 (busyRepeatRequest) before the
-    /// negative response is surfaced. The NRC exists to ask for a repeat (ISO 14229-1 §A.1),
-    /// so the default repeats; zero surfaces the first 0x21 as an
-    /// <see cref="UdsNegativeResponseException"/> (#57). Default 3.
+    /// negative response is surfaced. ISO 14229-1:2026 §A.1 (Table A.1, NRC 21h) has the
+    /// client repeat the request, so the default repeats; zero surfaces the first 0x21 as an
+    /// <see cref="UdsNegativeResponseException"/> (#57), which is an opt-out from that rule.
+    /// Default 3.
     /// </summary>
     public int MaxBusyRepeatRequests { get; init; } = 3;
 
     /// <summary>
     /// The pause before a request is repeated after NRC 0x21. Default zero: the request is
-    /// repeated at once, with a fresh P2 budget. Set it where the server's documentation asks
-    /// for a delay before the repeat; the client does not derive one (#354).
+    /// repeated at once, with a fresh P2 budget. Set it from the ECU's or OEM's specification.
     /// </summary>
     /// <remarks>
-    /// The zero default is not taken from ISO 14229-1. A review recalled, from memory, that the
-    /// standard has the repeat delayed by a time given in the implementation documents; that has
-    /// not been checked against the text, and the default stays zero until it is (#354). A
-    /// non-zero default would change when every caller's repeat goes out.
+    /// ISO 14229-1:2026 §A.1 (Table A.1, NRC 21h) has the repeat delayed by a time given in the
+    /// implementation documents -- the vehicle manufacturer's or ECU's specification, or the
+    /// data-link part such as ISO 14229-3 for CAN -- and gives no value itself. The client has no
+    /// such document, so it defaults to zero; a non-zero default would not be a value from the
+    /// standard either, and would change when every caller's repeat goes out (#354).
     /// </remarks>
     public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
 

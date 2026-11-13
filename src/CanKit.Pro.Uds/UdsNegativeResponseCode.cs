@@ -1,7 +1,7 @@
 namespace CanKit.Pro.Uds;
 
 /// <summary>
-/// Named subset of Negative Response Codes from ISO 14229-1:2020 Table A.1. Values not listed
+/// Named subset of Negative Response Codes from ISO 14229-1:2026 Table A.1. Values not listed
 /// here are still delivered as their raw <see cref="byte"/> value on
 /// <see cref="UdsNegativeResponseException.Code"/>; the enum only names the ones the MVP client
 /// documents behaviour for.
@@ -59,7 +59,7 @@ public enum UdsNegativeResponseCode : byte
     /// <summary>
     /// requestCorrectlyReceived-ResponsePending (0x78). Server acknowledges the request but needs
     /// more time; the client MUST restart its P2* timer and keep waiting until the final response
-    /// arrives or the P2* budget is exhausted (SRS FR-UDS-009, ISO 14229-1 §7.3.3).
+    /// arrives or the P2* budget is exhausted (SRS FR-UDS-009, ISO 14229-1:2026 Table A.1 NRC 78h; P2* per ISO 14229-2).
     /// </summary>
     RequestCorrectlyReceivedResponsePending = 0x78,
 

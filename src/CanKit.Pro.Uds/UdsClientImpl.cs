@@ -11,7 +11,7 @@ namespace CanKit.Pro.Uds;
 
 /// <summary>
 /// Default <see cref="IUdsClient"/> implementation. Owns a single request lock so at most one
-/// UDS request is on the wire at any time (ISO 14229-1 §7.3), plus the P2/P2* wait loop that
+/// UDS request is on the wire at any time (ISO 14229-2 client timing), plus the P2/P2* wait loop that
 /// implements NRC 0x78 handling.
 /// </summary>
 /// <remarks>
@@ -20,7 +20,7 @@ namespace CanKit.Pro.Uds;
 /// concurrency — every write is a single <see cref="IIsoTpChannel.SendAsync"/> and every read
 /// is a single <see cref="IIsoTpChannel.ReceiveAsync"/>. Because we hold the request lock
 /// across the send + wait, we know the next reassembled PDU on the channel belongs to the
-/// current request (the ECU only speaks in response to a request, ISO 14229-1 §7.3).
+/// current request (the ECU only speaks in response to a request).
 /// Multi-step services such as SecurityAccess and DownloadAsync keep that same lock across
 /// every on-the-wire exchange so keep-alive traffic cannot interleave.
 /// </para>
@@ -83,6 +83,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     // the lock is held without guessing how long the acquisition itself takes (#171).
     internal event Action? RequestLockAcquired;
 
+    // Test hook: fires when a waiting keep-alive tick has seen the computeKey window open and
+    // is about to claim it, so a test can close the window in between (#354).
+    internal event Action? KeyWindowOpenSeen;
+
     /// <summary>
     /// Acquires <see cref="_requestLock"/>, raising <see cref="RequestLockContended"/> first if
     /// it is already held. The non-blocking probe
@@ -130,6 +134,24 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
     private TesterPresentKeepAlive? _keepAlive;
     private int _disposed;
+
+    // SecurityAccess holds the request lock from requestSeed to the sendKey response, but while
+    // its computeKey callback runs it lends the bus to the keep-alive: a seed stays valid across
+    // a TesterPresent, and an S3 timeout -- which the keep-alive is there to prevent -- would
+    // lock the server and drop it (ISO 14229-1:2026 Annex I, Figure I.1/Table I.2; §9.4.1).
+    // Nothing else gets through: a DiagnosticSessionControl or a second requestSeed would end
+    // the sequence. The window closes only once a keep-alive send in it has finished (#354).
+    private readonly object _keyWindowGate = new();
+    private bool _keyWindowOpen;
+    private int _keyWindowSends;
+    private TaskCompletionSource<bool> _keyWindowOpened = NewSignal();
+    private TaskCompletionSource<bool>? _keyWindowSendDone;
+
+    private static TaskCompletionSource<bool> NewSignal()
+        => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static readonly byte[] SuppressedTesterPresent =
+        { (byte)UdsServiceId.TesterPresent, SuppressPositiveResponseBit };
 
     public UdsClientImpl(IIsoTpChannel channel, UdsClientOptions options, bool ownsChannel)
         : this(channel, options, ownsChannel, clock: null)
@@ -217,7 +239,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var request = new byte[] { (byte)UdsServiceId.DiagnosticSessionControl, sub };
         return await ExecuteAsync(UdsServiceId.DiagnosticSessionControl, request, response =>
         {
-            // Positive response layout (ISO 14229-1 §9.2.2.4):
+            // Positive response layout (ISO 14229-1:2026 §9.2.3.2, Tables 27/28):
             //   [0]=0x50 [1]=sessionType [2..5]=sessionParameterRecord (P2_server/P2*_server timing)
             // Some ECUs omit the parameter record on legacy sessions; we accept >= 2 bytes. The
             // sub-function echo was checked in the receive loop: one for another session type is
@@ -322,7 +344,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var response = await ExecuteAsync(UdsServiceId.ReadDataByIdentifier, request,
             cancellationToken).ConfigureAwait(false);
 
-        // Multi-DID positive response (ISO 14229-1 §9.3.4.4): [0]=0x62 then
+        // Multi-DID positive response (ISO 14229-1:2026 §10.2.3): [0]=0x62 then
         // (DID[2 bytes] + dataRecord[len bytes])* for every returned DID. Lengths are not on
         // the wire — parse strictly from the caller-supplied DID definition so payload bytes
         // that happen to match another DID are never treated as record boundaries.
@@ -427,9 +449,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        // Hold the request lock across seed + sendKey so TesterPresent keep-alive (or another
-        // UDS call) cannot interleave and break the ISO 14229-1 security-access sequence
-        // (NRC requestSequenceError on real ECUs).
+        // Hold the request lock across seed + sendKey so no other UDS call can interleave and
+        // break the security-access sequence: a DiagnosticSessionControl locks the server and a
+        // second requestSeed replaces the seed (ISO 14229-1:2026 Annex I). Only the keep-alive
+        // gets through, and only while computeKey runs (see _keyWindowGate).
         await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
@@ -438,7 +461,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 linkedToken).ConfigureAwait(false);
 
             // Positive response: [0]=0x67 [1]=requestSeedLevel [2..]=seed. A seed of all zeroes
-            // means "already unlocked" per ISO 14229-1 §9.4.5.3 -- the length is the server's
+            // means "already unlocked" per ISO 14229-1:2026 §9.4.1 -- the length is the server's
             // usual seed length, the bytes are 0x00 -- and the client MUST NOT send the key
             // (#29): a key computed for that seed gets NRC 0x24 back. A zero-length seed is kept
             // as the defensive reading of the same answer. The sub-function echo was checked
@@ -452,8 +475,18 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
             var seed = new byte[seedLen];
             Buffer.BlockCopy(seedResponse, 2, seed, 0, seedLen);
-            byte[] key = computeKey(seed)
-                ?? throw new UdsProtocolException("SecurityAccess computeKey callback returned null.");
+            byte[]? key;
+            OpenKeyWindow();
+            try
+            {
+                key = computeKey(seed);
+            }
+            finally
+            {
+                await CloseKeyWindowAsync().ConfigureAwait(false);
+            }
+            if (key is null)
+                throw new UdsProtocolException("SecurityAccess computeKey callback returned null.");
             if (key.Length == 0)
                 throw new UdsProtocolException("SecurityAccess computeKey callback returned an empty key.");
 
@@ -488,6 +521,24 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         var response = await ExecuteAsync(UdsServiceId.TesterPresent, request,
             cancellationToken).ConfigureAwait(false);
+        CheckTesterPresentResponse(response);
+    }
+
+    // TesterPresentAsync for a caller that holds the request lock (the keep-alive).
+    private async Task TesterPresentCoreAsync(bool suppressPositiveResponse, CancellationToken linkedToken)
+    {
+        if (suppressPositiveResponse)
+        {
+            await SendWithoutResponseCoreAsync((byte[])SuppressedTesterPresent.Clone(), linkedToken).ConfigureAwait(false);
+            return;
+        }
+        var response = await ExecuteCoreAsync(UdsServiceId.TesterPresent,
+            new byte[] { (byte)UdsServiceId.TesterPresent, 0x00 }, linkedToken).ConfigureAwait(false);
+        CheckTesterPresentResponse(response);
+    }
+
+    private static void CheckTesterPresentResponse(byte[] response)
+    {
         // The zeroSubFunction echo was checked in the receive loop (#340).
         if (response.Length < 2)
             throw new UdsProtocolException(
@@ -559,40 +610,151 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
-            // The stale-reply discard the answered path runs before its send, here too: a late
-            // 0x78 to an earlier request for this service, queued since that request's abort,
-            // would otherwise be read by the next call's wait-out as inside this send's window
-            // -- it predates the send, which the window's end alone does not say -- and move
-            // the window out by P2* for nothing (Codex on #150). A 0x78 for a service with a
-            // window still open is routed to it by the discard, as always.
-            await DiscardStalePdusAsync(linkedToken).ConfigureAwait(false);
-            // Noted before the send as well: cancelled between the driver's acceptance and the
-            // confirmation, the frame is on the bus and may still be answered (Codex on #150).
-            // Moved out to the transmit stamp afterwards.
-            bool hadWindow = _suppressedWindows.TryGetDeadline(request[0], out var previousUntil);
-            bool hadExtension = _suppressedWindows.TryGetPendingExtension(request[0], out var previousExtension);
+            await SendWithoutResponseCoreAsync(request, linkedToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _requestLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SendWithoutResponseAsync"/> for a caller that holds the request lock, or the
+    /// SecurityAccess key window it lends.
+    /// </summary>
+    private async Task SendWithoutResponseCoreAsync(byte[] request, CancellationToken linkedToken)
+    {
+        // The stale-reply discard the answered path runs before its send, here too: a late
+        // 0x78 to an earlier request for this service, queued since that request's abort,
+        // would otherwise be read by the next call's wait-out as inside this send's window
+        // -- it predates the send, which the window's end alone does not say -- and move
+        // the window out by P2* for nothing (Codex on #150). A 0x78 for a service with a
+        // window still open is routed to it by the discard, as always.
+        await DiscardStalePdusAsync(linkedToken).ConfigureAwait(false);
+        // Noted before the send as well: cancelled between the driver's acceptance and the
+        // confirmation, the frame is on the bus and may still be answered (Codex on #150).
+        // Moved out to the transmit stamp afterwards.
+        bool hadWindow = _suppressedWindows.TryGetDeadline(request[0], out var previousUntil);
+        bool hadExtension = _suppressedWindows.TryGetPendingExtension(request[0], out var previousExtension);
+        NoteWindow(request[0], Now(), P2Budget);
+        IsoTpTransmitStamps stamps;
+        try
+        {
+            stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (RefusedBeforeTransmission(ex))
+        {
+            // Nothing reached the bus: the window noted for it is put back (Codex on #150).
+            _suppressedWindows.Restore(request[0], hadWindow, previousUntil, hadExtension, previousExtension);
+            throw;
+        }
+        catch
+        {
+            // A send that leaves by exception -- cancelled, or a transport fault -- may
+            // have put the frame on the bus after the provisional window ran out; its P2
+            // from the transmission is at most P2 from now (Codex on #150).
             NoteWindow(request[0], Now(), P2Budget);
-            IsoTpTransmitStamps stamps;
-            try
+            throw;
+        }
+        var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Now();
+        NoteWindow(request[0], sent, P2Budget);
+    }
+
+    private void OpenKeyWindow()
+    {
+        TaskCompletionSource<bool> opened;
+        lock (_keyWindowGate)
+        {
+            _keyWindowOpen = true;
+            opened = _keyWindowOpened;
+        }
+        opened.TrySetResult(true);
+    }
+
+    // Completes once no keep-alive send is using the window any more; the send is bounded by
+    // the transport's N_As and the client's lifetime, so this is not given the caller's token:
+    // giving up early would let sendKey overlap the TesterPresent on the bus.
+    private Task CloseKeyWindowAsync()
+    {
+        lock (_keyWindowGate)
+        {
+            _keyWindowOpen = false;
+            _keyWindowOpened = NewSignal();
+            if (_keyWindowSends == 0) return Task.CompletedTask;
+            return (_keyWindowSendDone ??= NewSignal()).Task;
+        }
+    }
+
+    private Task KeyWindowOpenedAsync()
+    {
+        lock (_keyWindowGate) return _keyWindowOpened.Task;
+    }
+
+    private bool TryBeginKeyWindowSend()
+    {
+        lock (_keyWindowGate)
+        {
+            if (!_keyWindowOpen) return false;
+            _keyWindowSends++;
+            return true;
+        }
+    }
+
+    private void EndKeyWindowSend()
+    {
+        TaskCompletionSource<bool>? done;
+        lock (_keyWindowGate)
+        {
+            if (--_keyWindowSends > 0) return;
+            done = _keyWindowSendDone;
+            _keyWindowSendDone = null;
+        }
+        done?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// One keep-alive tick: a TesterPresent under the request lock, or -- while SecurityAccess
+    /// holds the lock and runs computeKey -- a suppressed one in the window it lends (#354).
+    /// </summary>
+    internal async Task KeepAliveTickAsync(bool suppress, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, _lifetimeCts.Token);
+        var token = linked.Token;
+
+        if (!_requestLock.Wait(0, token))
+        {
+            RequestLockContended?.Invoke();
+            using var stopWaiting = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var lockWait = _requestLock.WaitAsync(stopWaiting.Token);
+            while (true)
             {
-                stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+                var opened = KeyWindowOpenedAsync();
+                if (await Task.WhenAny(lockWait, opened).ConfigureAwait(false) == lockWait) break;
+                KeyWindowOpenSeen?.Invoke();
+                if (!TryBeginKeyWindowSend()) continue; // closed again before we got to it
+                try
+                {
+                    // SecurityAccess holds the lock until this send has ended (CloseKeyWindowAsync
+                    // waits for it), so the wait cannot have been granted and simply ends here.
+                    stopWaiting.Cancel();
+                    // Always suppressed here: a positive response would land in the middle of
+                    // the security sequence, and the keep-alive only has to reset S3.
+                    await SendWithoutResponseCoreAsync((byte[])SuppressedTesterPresent.Clone(), token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    EndKeyWindowSend();
+                }
+                return;
             }
-            catch (Exception ex) when (RefusedBeforeTransmission(ex))
-            {
-                // Nothing reached the bus: the window noted for it is put back (Codex on #150).
-                _suppressedWindows.Restore(request[0], hadWindow, previousUntil, hadExtension, previousExtension);
-                throw;
-            }
-            catch
-            {
-                // A send that leaves by exception -- cancelled, or a transport fault -- may
-                // have put the frame on the bus after the provisional window ran out; its P2
-                // from the transmission is at most P2 from now (Codex on #150).
-                NoteWindow(request[0], Now(), P2Budget);
-                throw;
-            }
-            var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Now();
-            NoteWindow(request[0], sent, P2Budget);
+            await lockWait.ConfigureAwait(false);
+        }
+        RequestLockAcquired?.Invoke();
+        try
+        {
+            await TesterPresentCoreAsync(suppress, token).ConfigureAwait(false);
         }
         finally
         {
@@ -827,7 +989,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         var response = await ExecuteCoreAsync(serviceId, request, linkedToken).ConfigureAwait(false);
 
-        // Positive response layout (ISO 14229-1 §14.2.2.4 / §14.1.2.4):
+        // Positive response layout (ISO 14229-1:2026 §14.2.3 / §14.3.3):
         //   [0]=respSid  [1]=lengthFormatIdentifier  [2..]=maxNumberOfBlockLength (big-endian).
         if (response.Length < 2)
             throw new UdsProtocolException(
@@ -959,7 +1121,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         // target memory range while data holds the encoded bytes this client forwards
         // unchanged, so their lengths normally differ — skip decode and equality then.
         // RequestTransferSetupCoreAsync still forwards the original ALFI-width bytes.
-        // This client cites ISO 14229-1 §14.3 for the block-sequence counter only; the
+        // This client cites ISO 14229-1:2026 §14.4 for the block-sequence counter only; the
         // length check is ours. Reject before RequestDownload so the ECU is never given a
         // count we will not send, and refuse sizes that do not fit in ulong so a truncated
         // decode cannot let a mismatch through.
@@ -974,7 +1136,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         // Hold the request lock across the entire 0x34 → 0x36…0x36 → 0x37 sequence so
         // TesterPresent keep-alive (or any other UDS call) cannot interleave mid-download and
-        // desynchronise the ECU's block-sequence counter (ISO 14229-1 §14.3). Mirror of
+        // desynchronise the ECU's block-sequence counter (ISO 14229-1:2026 §14.4). Mirror of
         // SecurityAccessAsync: acquire the lock once, then call the *Core helpers that assume
         // the lock is held. The public RequestDownload/TransferData/RequestTransferExit APIs
         // remain unchanged for single-step callers.
@@ -1005,7 +1167,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             int chunkSize = maxBlock - 2 > int.MaxValue ? int.MaxValue : (int)(maxBlock - 2);
 
             int offset = 0;
-            byte bsc = 0x01; // ISO 14229-1 §14.3.2: first TransferData uses BSC=0x01.
+            byte bsc = 0x01; // ISO 14229-1:2026 §14.4.2: first TransferData uses BSC=0x01.
             while (offset < data.Length)
             {
                 int remaining = data.Length - offset;
@@ -1013,7 +1175,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 var chunk = data.Slice(offset, take);
                 _ = await TransferDataCoreAsync(bsc, chunk, linkedToken).ConfigureAwait(false);
                 offset += take;
-                unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … as required by ISO 14229-1 §14.3.2.
+                unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … as required by ISO 14229-1:2026 §14.4.2.
             }
 
             await RequestTransferExitCoreAsync(default, linkedToken).ConfigureAwait(false);
@@ -1060,7 +1222,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 linkedToken).ConfigureAwait(false);
 
             var result = new List<byte>();
-            byte bsc = 0x01; // ISO 14229-1 §14.3.2: first TransferData uses BSC=0x01.
+            byte bsc = 0x01; // ISO 14229-1:2026 §14.4.2: first TransferData uses BSC=0x01.
             while ((ulong)result.Count < totalBytes)
             {
                 var chunk = await TransferDataCoreAsync(bsc, ReadOnlyMemory<byte>.Empty,
@@ -1069,7 +1231,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                     throw new UdsProtocolException(
                         "ECU returned an empty TransferData payload before the declared memorySize was reached.");
                 result.AddRange(chunk);
-                unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … per ISO 14229-1 §14.3.2.
+                unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … per ISO 14229-1:2026 §14.4.2.
             }
 
             await RequestTransferExitCoreAsync(default, linkedToken).ConfigureAwait(false);
@@ -1310,7 +1472,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                             throw new UdsProtocolException(
                                 $"ECU sent {pendingCount} consecutive NRC 0x78 responses, exceeding MaxResponsePendingCount={_options.MaxResponsePendingCount}.");
 
-                        // Restart the wait budget on P2* (SRS FR-UDS-009, ISO 14229-1 §7.3.3)
+                        // Restart the wait budget on P2* (SRS FR-UDS-009, ISO 14229-1:2026 Table A.1 NRC 78h; P2* per ISO 14229-2)
                         // from when the pending response *arrived*, not from now. Restarting at
                         // "now" would hand the ECU whatever scheduling delay this client just
                         // suffered on top of its P2* budget: a 0x78 that arrived at 50 ms but is
@@ -1802,7 +1964,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
                     try
                     {
-                        await _owner.TesterPresentAsync(_suppress, ct).ConfigureAwait(false);
+                        await _owner.KeepAliveTickAsync(_suppress, ct).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) { return; }
                     catch (ObjectDisposedException) { return; }
