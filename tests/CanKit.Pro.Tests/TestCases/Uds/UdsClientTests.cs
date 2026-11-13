@@ -2239,7 +2239,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         {
             if (targetMethod!.Name == nameof(IIsoTpChannel.SendWithTransmitStampAsync)
                 && HoldSuppressedTesterPresent
-                && ((ReadOnlyMemory<byte>)args![0]!).Span.SequenceEqual((ReadOnlySpan<byte>)new byte[] { 0x3E, 0x80 }))
+                && ((ReadOnlyMemory<byte>)args![0]!).Span.SequenceEqual(new byte[] { 0x3E, 0x80 }))
                 return HeldSendAsync(targetMethod, args);
             try
             {
