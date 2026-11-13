@@ -24,8 +24,9 @@ public class IsoTpException : CanKitException
 }
 
 /// <summary>
-/// Raised when an ISO-TP timeout (N_As, N_Bs or N_Cr) expires on a still-active PDU
-/// (SRS FR-TP-010).
+/// Raised when an ISO-TP timeout (N_As, N_Ar, N_Bs or N_Cr) expires on a still-active PDU
+/// (SRS FR-TP-010; ISO 15765-2:2024 §9.8.2, Table 23: CTL_TIMEOUT_A, CTL_TIMEOUT_Bs,
+/// CTL_TIMEOUT_Cr).
 /// </summary>
 public sealed class IsoTpTimeoutException : IsoTpException
 {
@@ -48,6 +49,25 @@ public sealed class IsoTpOverflowException : IsoTpException
 {
     /// <summary>Creates an overflow exception.</summary>
     public IsoTpOverflowException(string message) : base(ProtocolErrorCodes.ProtocolPeerAbort, message) { }
+}
+
+/// <summary>
+/// Raised when the peer answers with a Flow Control whose FlowStatus is reserved (3..F) while the
+/// sender waits for one: the transmission is aborted at once (ISO 15765-2:2024 §9.6.5.2,
+/// CTL_INVALID_FS).
+/// </summary>
+public sealed class IsoTpInvalidFlowStatusException : IsoTpException
+{
+    /// <summary>The raw FlowStatus nibble the peer sent.</summary>
+    public byte FlowStatus { get; }
+
+    /// <summary>Creates an invalid-FlowStatus exception for the raw value received.</summary>
+    public IsoTpInvalidFlowStatusException(byte flowStatus)
+        : base(ProtocolErrorCodes.ProtocolPeerAbort,
+            $"Peer sent a Flow Control with reserved FlowStatus 0x{flowStatus:X1}; transmission aborted.")
+    {
+        FlowStatus = flowStatus;
+    }
 }
 
 /// <summary>
@@ -83,7 +103,8 @@ public sealed class IsoTpSendRejectedException : IsoTpException
 }
 
 /// <summary>
-/// ISO 15765-2 network-layer timers observed by <see cref="IsoTpTimeoutException"/>.
+/// ISO 15765-2 timers observed by <see cref="IsoTpTimeoutException"/>. The names are the 2016
+/// ones; ISO 15765-2:2024 calls them t_TL_As, t_TL_Ar, t_TL_Bs and t_TL_Cr (§9.8.1, Table 22).
 /// </summary>
 public enum IsoTpTimer
 {
@@ -93,6 +114,12 @@ public enum IsoTpTimer
     /// <summary>N_Bs — sender's Flow-Control-wait timer (last CF-of-block -> next FC).</summary>
     NBs,
 
-    /// <summary>N_Cr — receiver's Consecutive-Frame timer (CF -> next CF).</summary>
+    /// <summary>N_Cr — receiver's Consecutive-Frame timer (FC confirmation or CF -> next CF).</summary>
     NCr,
+
+    /// <summary>
+    /// N_Ar — receiver's TX-confirmation timer for the Flow Control it sends (FC -> driver
+    /// acknowledgment). Expiry aborts the reception (CTL_TIMEOUT_A).
+    /// </summary>
+    NAr,
 }

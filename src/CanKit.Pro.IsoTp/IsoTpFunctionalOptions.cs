@@ -7,7 +7,7 @@ namespace CanKit.Pro.IsoTp;
 /// </summary>
 /// <remarks>
 /// Functional (1:N) addressing uses Normal ISO-TP addressing (no address-extension byte) and
-/// restricts outbound messages to Single Frames only (ISO 15765-2 §9 / ISO 14229-1 §7.5.4).
+/// restricts outbound messages to Single Frames only (ISO 15765-2:2024 §8.3.2.4 / ISO 14229-1 §7.7.1).
 /// Options that only apply to multi-frame sessions (N_Bs, N_Cr, WftMax, LocalBlockSize,
 /// LocalStMin) are therefore absent.
 /// </remarks>
