@@ -21,10 +21,22 @@ public readonly struct Pci : IEquatable<Pci>
     /// </summary>
     public int Length { get; }
 
+    /// <summary>
+    /// The length as announced. The same as <see cref="Length"/> except for a CAN-FD escape First
+    /// Frame announcing more than <see cref="int.MaxValue"/> bytes (FF_DL goes up to
+    /// 2<sup>32</sup> − 1, ISO 15765-2:2024 §9.6.3.1): there <see cref="Length"/> is capped at
+    /// <see cref="int.MaxValue"/> and this holds the real value.
+    /// </summary>
+    public long LongLength { get; }
+
     /// <summary>Sequence number (0..15) for <see cref="PciType.ConsecutiveFrame"/>; otherwise 0.</summary>
     public byte SequenceNumber { get; }
 
-    /// <summary>Flow status for <see cref="PciType.FlowControl"/>; otherwise <see cref="FlowStatus.ClearToSend"/>.</summary>
+    /// <summary>
+    /// Flow status for <see cref="PciType.FlowControl"/>; otherwise <see cref="FlowStatus.ClearToSend"/>.
+    /// A reserved FlowStatus (3..F) is passed through raw, so this can hold a value the enum does
+    /// not name; a sender aborts on it (ISO 15765-2:2024 §9.6.5.2).
+    /// </summary>
     public FlowStatus FlowStatus { get; }
 
     /// <summary>Block size (BS) for <see cref="PciType.FlowControl"/>; otherwise 0.</summary>
@@ -50,9 +62,16 @@ public readonly struct Pci : IEquatable<Pci>
 
     internal Pci(PciType type, int length, byte sequenceNumber, FlowStatus flowStatus,
         byte blockSize, byte stMinRaw, TimeSpan stMin, int dataOffset)
+        : this(type, length, length, sequenceNumber, flowStatus, blockSize, stMinRaw, stMin, dataOffset)
+    {
+    }
+
+    internal Pci(PciType type, int length, long longLength, byte sequenceNumber, FlowStatus flowStatus,
+        byte blockSize, byte stMinRaw, TimeSpan stMin, int dataOffset)
     {
         Type = type;
         Length = length;
+        LongLength = longLength;
         SequenceNumber = sequenceNumber;
         FlowStatus = flowStatus;
         BlockSize = blockSize;
@@ -65,6 +84,7 @@ public readonly struct Pci : IEquatable<Pci>
     public bool Equals(Pci other) =>
         Type == other.Type &&
         Length == other.Length &&
+        LongLength == other.LongLength &&
         SequenceNumber == other.SequenceNumber &&
         FlowStatus == other.FlowStatus &&
         BlockSize == other.BlockSize &&
@@ -82,6 +102,7 @@ public readonly struct Pci : IEquatable<Pci>
             int hash = 17;
             hash = (hash * 31) ^ (int)Type;
             hash = (hash * 31) ^ Length;
+            hash = (hash * 31) ^ LongLength.GetHashCode();
             hash = (hash * 31) ^ SequenceNumber;
             hash = (hash * 31) ^ (int)FlowStatus;
             hash = (hash * 31) ^ BlockSize;

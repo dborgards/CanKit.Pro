@@ -497,15 +497,15 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
-    // #353: characterize the documented drop of reserved FS during an active transfer.
-    // This pins the current contract, not a reading of ISO 15765-2; the normative question
-    // remains open. Moving virtual time before the reserved FC distinguishes a drop from a
-    // Wait that would silently re-arm N_Bs and extend the transfer.
+    // #353: a reserved FlowStatus received while the sender waits for a Flow Control aborts the
+    // transmission at once (ISO 15765-2:2024 §9.6.5.2, CTL_INVALID_FS). The clock is moved part
+    // of N_Bs before it and not after: the send must fail without N_Bs running out, and a
+    // reserved FS taken for a Wait would leave it pending instead.
     // --------------------------------------------------------------------------------
     [Theory]
     [InlineData(3)]
     [InlineData(15)]
-    public async Task A_Reserved_FlowStatus_After_A_Block_Leaves_The_Original_NBs_Deadline(int flowStatus)
+    public async Task A_Reserved_FlowStatus_After_A_Block_Aborts_The_Send_At_Once(int flowStatus)
     {
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
@@ -546,16 +546,40 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         fc[0] = (byte)(0x30 | flowStatus);
         busB.Transmit(CanFrame.Classic(0x421, fc));
         (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue();
-        await sender.SettleAsync().WaitAsync(ShortTimeout);
-        sendTask.IsCompleted.Should().BeFalse("a reserved FS neither completes nor aborts the active send");
-        (await senderActor.NextTimerDelayAsync()).Should().Be(TimeSpan.FromMilliseconds(300),
-            "a dropped reserved FS must not re-arm N_Bs as Wait would");
 
-        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(299));
-        sendTask.IsCompleted.Should().BeFalse("the original deadline has not elapsed");
-        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(2));
         Func<Task> act = () => sendTask.WaitAsync(ShortTimeout);
-        (await act.Should().ThrowAsync<IsoTpTimeoutException>()).Which.Timer.Should().Be(IsoTpTimer.NBs);
+        (await act.Should().ThrowAsync<IsoTpInvalidFlowStatusException>())
+            .Which.FlowStatus.Should().Be((byte)flowStatus);
+    }
+
+    // A reserved FlowStatus answering the First Frame itself aborts too, and one arriving when
+    // nothing waits for a Flow Control is ignored (ISO 15765-2:2024 §9.8.3, Table 24).
+    [Fact]
+    public async Task A_Reserved_FlowStatus_Answering_The_First_Frame_Aborts_And_An_Idle_One_Is_Ignored()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        var epAB = IsoTpEndpoint.Normal(0x420, 0x421);
+        var epBA = IsoTpEndpoint.Normal(0x421, 0x420);
+        using var sender = IsoTpFactory.Open(busA, epAB, FastOptions());
+
+        var reserved = IsoTpFrameCodec.BuildFlowControl(epBA, FlowStatus.ClearToSend, 0, 0, isCanFd: false, padding: true);
+        reserved[0] = 0x3A;
+        busB.Transmit(CanFrame.Classic(0x421, reserved)); // idle: ignored
+        await sender.SettleAsync().WaitAsync(ShortTimeout);
+
+        busB.FrameObserved += (_, e) =>
+        {
+            var data = e.CanFrame.Data.ToArray();
+            if (e.CanFrame.ID == 0x420 && data.Length > 0 && (data[0] >> 4) == 0x1)
+                busB.Transmit(CanFrame.Classic(0x421, reserved));
+        };
+        Func<Task> act = () => sender.SendAsync(new byte[20]).WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<IsoTpInvalidFlowStatusException>()).Which.FlowStatus.Should().Be(0xA);
+
+        // The channel stays usable.
+        await sender.SendAsync(new byte[] { 1, 2, 3 }).WaitAsync(ShortTimeout);
     }
 
     // --------------------------------------------------------------------------------
@@ -1767,6 +1791,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     [Theory]
     [InlineData(nameof(IsoTpChannelOptions.NAs), 0)]
     [InlineData(nameof(IsoTpChannelOptions.NAs), -1)]
+    [InlineData(nameof(IsoTpChannelOptions.NAr), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NAr), -1)]
     [InlineData(nameof(IsoTpChannelOptions.NBs), 0)]
     [InlineData(nameof(IsoTpChannelOptions.NBs), -1)]
     [InlineData(nameof(IsoTpChannelOptions.NCr), 0)]
@@ -1779,6 +1805,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var options = option switch
         {
             nameof(IsoTpChannelOptions.NAs) => new IsoTpChannelOptions { NAs = value },
+            nameof(IsoTpChannelOptions.NAr) => new IsoTpChannelOptions { NAr = value },
             nameof(IsoTpChannelOptions.NBs) => new IsoTpChannelOptions { NBs = value },
             _ => new IsoTpChannelOptions { NCr = value },
         };
@@ -3535,12 +3562,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await testerReceive).Should().Equal(0x62, 0xF1, 0x90, 0xAA);
     }
 
-    // #56 -- BS and STmin are the first FC.CTS's for the whole transfer; a later FC.CTS's
-    // values are ignored (ISO 15765-2). The peer grants two frames per block, then says one:
-    // the sender must still send two before waiting, or it waits for a Flow Control the peer
-    // never sends and N_Bs faults the send.
+    // #353 (reverses #56) -- the sender takes BS and STmin from every FC.CTS of a transfer
+    // (ISO 15765-2:2024 §9.6.5.6). The peer grants two frames per block, then says one: after
+    // CF3 the sender has to wait for a Flow Control, and as the peer sends none, N_Bs ends the
+    // send. Keeping the first FC's BS would send CF4 and complete instead.
     [Fact]
-    public async Task Flow_Parameters_Come_From_The_First_Flow_Control_Only()
+    public async Task Flow_Parameters_Come_From_Every_Flow_Control()
     {
         var session = NewSession();
         using var busSender = OpenClassic(session, 0);
@@ -3563,17 +3590,19 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
                     break;
                 case 0x2: // Consecutive Frame
                     int n = Interlocked.Increment(ref cfs);
-                    // After the first block, a second FC.CTS that says one per block -- to be ignored.
+                    // After the first block, a second FC.CTS that says one per block, and then
+                    // silence: the sender has to stop after CF3 and wait for a Flow Control.
                     if (n == 2)
                         busPeer.Transmit(CanFrame.Classic(0x7E8, IsoTpFrameCodec.BuildFlowControl(epPeer, FlowStatus.ClearToSend, blockSize: 1, stMinRaw: 0, isCanFd: false, padding: true, paddingByte: 0xCC)));
                     break;
             }
         };
 
-        // 34 bytes: FF (6) + 4 CFs. Blocks of two: CF1, CF2, FC, CF3, CF4 -- done.
+        // 34 bytes: FF (6) + 4 CFs. CF1, CF2, FC(BS 1), CF3 -- then N_Bs, as BS is now 1.
         byte[] pdu = Enumerable.Range(0, 34).Select(i => (byte)i).ToArray();
-        await sender.SendAsync(pdu).WaitAsync(ShortTimeout);
-        cfs.Should().Be(4);
+        Func<Task> act = () => sender.SendAsync(pdu).WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<IsoTpTimeoutException>()).Which.Timer.Should().Be(IsoTpTimer.NBs);
+        Volatile.Read(ref cfs).Should().Be(3);
     }
 
     // #56 -- DiscardPendingPdus called from a BackgroundExceptionOccurred handler, which runs on

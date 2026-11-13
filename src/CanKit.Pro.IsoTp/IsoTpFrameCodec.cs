@@ -478,19 +478,19 @@ public static class IsoTpFrameCodec
     /// <param name="pci">On success, the parsed PCI view.</param>
     /// <returns>
     /// <c>true</c> when the frame has enough bytes and a valid PCI nibble; <c>false</c> for
-    /// truncated frames, reserved PCI nibbles (&gt; 3), reserved Flow-Status values (&gt; 2),
-    /// escape-form PCIs on classic CAN, a CAN-FD escape-form First Frame whose FF_DL is not above
-    /// 4095 or is above <see cref="int.MaxValue"/>, or CAN-FD Single-Frame short-form SF_DL values above
-    /// <see cref="SingleFrameShortFormMaxDataLength"/> for the endpoint's addressing mode
-    /// (those lengths must use the <c>0x00 LEN</c> escape — 8..15 without address extension,
-    /// 7..15 with extended/mixed addressing).
+    /// truncated frames, reserved PCI nibbles (&gt; 3), escape-form PCIs on classic CAN, a CAN-FD
+    /// escape-form First Frame whose FF_DL is not above 4095, or CAN-FD Single-Frame short-form
+    /// SF_DL values above <see cref="SingleFrameShortFormMaxDataLength"/> for the endpoint's
+    /// addressing mode (those lengths must use the <c>0x00 LEN</c> escape — 8..15 without address
+    /// extension, 7..15 with extended/mixed addressing).
     /// </returns>
     /// <remarks>
-    /// A channel drops a frame this returns <c>false</c> for without answering it. For a Flow
-    /// Control with a reserved Flow-Status that leaves the transfer waiting until N_Bs expires, and
-    /// for an escape First Frame above <see cref="int.MaxValue"/> it means no <c>FC(OVFLW)</c>.
-    /// Whether ISO 15765-2 asks for an abort (N_INVALID_FS) and an <c>FC(OVFLW)</c> there is an
-    /// open question; the text has not been checked (#353, see the package README).
+    /// A Flow Control with a reserved FlowStatus (3..F) parses, and <see cref="Pci.FlowStatus"/>
+    /// carries the raw value: the sender has to abort on it (ISO 15765-2:2024 §9.6.5.2,
+    /// CTL_INVALID_FS), so it cannot be dropped here. An escape First Frame announcing more than
+    /// <see cref="int.MaxValue"/> bytes parses too, with <see cref="Pci.Length"/> capped at
+    /// <see cref="int.MaxValue"/> and the announced value in <see cref="Pci.LongLength"/>: the
+    /// receiver answers it with <c>FC(OVFLW)</c> (§9.6.3.2).
     /// </remarks>
     public static bool TryParsePci(ReadOnlySpan<byte> canPayload, in IsoTpEndpoint endpoint,
         bool isCanFd, out Pci pci)
@@ -573,17 +573,16 @@ public static class IsoTpFrameCodec
                             ((uint)canPayload[lenStart + 1] << 16) |
                             ((uint)canPayload[lenStart + 2] << 8) |
                             canPayload[lenStart + 3];
-                        if (longLen > int.MaxValue)
-                            return false;
                         // The escape form carries the lengths the 12-bit short form cannot: above 4095.
                         // BuildFirstFrame never emits it below 4096, and a shorter length in it --
                         // zero included, which announces no PDU at all -- is not a First Frame
-                        // (#207). Deliberately strict: the standard's text was not checked, and
-                        // accepting more later only turns a false into a true.
+                        // (#207); ISO 15765-2:2024 §9.6.3.2 has the receiver ignore it. One above
+                        // int.MaxValue keeps its announced length in LongLength, so the channel
+                        // can answer it with FC(OVFLW) like any other oversize First Frame.
                         if (longLen <= MaxClassicFirstFrameLength)
                             return false;
-                        pci = new Pci(type, (int)longLen, 0, FlowStatus.ClearToSend, 0, 0, TimeSpan.Zero,
-                            pciIndex + 6);
+                        pci = new Pci(type, (int)Math.Min(longLen, int.MaxValue), longLen, 0,
+                            FlowStatus.ClearToSend, 0, 0, TimeSpan.Zero, pciIndex + 6);
                         return true;
                     }
                     else
@@ -606,9 +605,9 @@ public static class IsoTpFrameCodec
 
             case PciType.FlowControl:
                 {
+                    // A reserved FlowStatus (3..F) is passed through raw: the sender aborts on it
+                    // (ISO 15765-2:2024 §9.6.5.2), which it cannot do for a frame dropped here.
                     int fsNibble = first & 0x0F;
-                    if (fsNibble > (int)FlowStatus.Overflow)
-                        return false;
                     int bsIndex = pciIndex + 1;
                     int stIndex = pciIndex + 2;
                     if (canPayload.Length <= stIndex)
@@ -629,7 +628,8 @@ public static class IsoTpFrameCodec
     // -------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Encodes a <see cref="TimeSpan"/> STmin value as an ISO 15765-2 raw byte.
+    /// Encodes a <see cref="TimeSpan"/> STmin value as an ISO 15765-2 raw byte (ISO 15765-2:2024
+    /// §9.6.5.4, Table 21).
     /// <list type="bullet">
     ///   <item><description><c>0..127 ms</c> in 1-ms steps → <c>0x00..0x7F</c></description></item>
     ///   <item><description><c>100..900 µs</c> in 100-µs steps → <c>0xF1..0xF9</c></description></item>
@@ -637,16 +637,13 @@ public static class IsoTpFrameCodec
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The commonly-used values <c>0 ms</c> and <c>1 ms</c> encode as <c>0x00</c> and <c>0x01</c>
-    /// respectively (fixes review §1.1 point 5). A value of 1 ms or more is rounded to the nearest
-    /// millisecond, half up, and capped at 127 ms (<c>0x7F</c>). A smaller one is truncated down to
-    /// its 100 µs step, but not below 100 µs (<c>0xF1</c>); under 1 µs encodes as <c>0x00</c>. So
-    /// 190 µs encodes as 100 µs, 999 µs as 900 µs and 1.4 ms as 1 ms.
-    /// </para>
-    /// <para>
-    /// Rounding down advertises less separation than was asked for. Whether a minimum separation
-    /// has to be rounded up is an open ISO 15765-2 question; the text has not been checked, and the
-    /// encoding stays as it is until it is (#353, see the package README).
+    /// STmin is the minimum gap the receiver asks for, so a value between two codes is rounded
+    /// <em>up</em> to the next one: the receiver never advertises less separation than it was
+    /// configured for. Up to 900 µs that is the next 100 µs step (anything above zero but at most
+    /// 100 µs encodes as <c>0xF1</c>, 190 µs as <c>0xF2</c>); above 900 µs it is the next whole
+    /// millisecond (999 µs encodes as <c>0x01</c>, 1.4 ms as <c>0x02</c>). Exact codes stay as
+    /// they are, and anything above 127 ms is capped at <c>0x7F</c>. The standard defines only
+    /// the codes; the rounding direction is this library's choice (#353).
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="value"/> is negative.</exception>
@@ -655,25 +652,16 @@ public static class IsoTpFrameCodec
         if (value < TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(value), value, "STmin must be non-negative.");
 
-        // Ticks are 100 ns each -> 10 ticks per microsecond.
-        long micro = value.Ticks / 10;
-        if (micro <= 0)
+        // Ticks are 100 ns each: 1000 ticks per 100 µs step, 10 000 per millisecond.
+        long ticks = value.Ticks;
+        if (ticks == 0)
             return 0x00;
 
-        if (micro >= 1000)
-        {
-            long ms = (micro + 500) / 1000; // round-nearest to milliseconds
-            if (ms <= 0) return 0x00;
-            if (ms >= 127) return 0x7F;
-            return (byte)ms;
-        }
+        if (ticks <= 9 * 1000)
+            return (byte)(0xF0 + ((ticks + 999) / 1000)); // 0xF1..0xF9, rounded up
 
-        // Sub-millisecond band 100..900 µs, granularity 100 µs.
-        if (micro < 100)
-            return 0xF1; // clamp to smallest sub-ms step
-        long step = micro / 100;
-        if (step >= 9) return 0xF9;
-        return (byte)(0xF0 + step);
+        long ms = (ticks + 9_999) / 10_000; // rounded up to whole milliseconds
+        return ms >= 0x7F ? (byte)0x7F : (byte)ms;
     }
 
     /// <summary>
