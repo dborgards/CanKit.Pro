@@ -7,6 +7,7 @@ using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Safety;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
@@ -422,6 +423,29 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.AddDomain(0x2004, 0x00, new byte[2]);
         Rejected(() => od.WriteUnsigned(0x1381, 0, 2)).Should().Be(SdoAbortCode.ObjectCannotBeMapped);
         od.ReadUnsigned(0x1381, 0).Should().Be(0u);
+    }
+
+    /// <summary>The device role keeps its narrowing (#506): a CanKit device's even slot repeats the
+    /// odd one, so an object of its own -- as wide, and one a peer may name (EN 50325-5:2010
+    /// §6.4.1.4, Table 8) -- is refused here with 0604 0041h, and a configuration that names one
+    /// is refused before anything is written.</summary>
+    [Fact]
+    public void The_Device_Refuses_A_Separate_Inverted_Object()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0);
+        od.AddU16(0x2003, 0x00, 0);
+        od.WriteUnsigned(0x1381, 1, 0x2000_0010);
+        Rejected(() => od.WriteUnsigned(0x1381, 2, 0x2003_0010)).Should().Be(SdoAbortCode.ObjectCannotBeMapped);
+        od.ReadUnsigned(0x1381, 2).Should().Be(0u);
+
+        var mapping = new SrdoMapping().Add(new PdoMappingEntry(0x2000, 0, 16), new PdoMappingEntry(0x2003, 0, 16));
+        Action producer = () => node.Safety().ConfigureSrdoProducer(1, mapping, TimeSpan.FromMilliseconds(25), 0x109, 0x10A);
+        producer.Should().Throw<ArgumentException>().WithMessage("*6.4.1.4*");
+        od.ReadUnsigned(0x1381, 1).Should().Be(0x2000_0010u, "nothing was written");
     }
 
     [Fact]

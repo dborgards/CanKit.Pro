@@ -8,7 +8,8 @@ using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
-/// <summary>Splitting a peer's SRDO pair (CiA DSP 304 V1.0 §8.1) with the rules of
+/// <summary>Splitting a peer's SRDO pair (CiA DSP 304 V1.0 §8.1; EN 50325-5:2010 §7.1.1 frames,
+/// §7.1.3 length) with the rules of
 /// <see cref="ObserveForeignPdoAsync"/>: live record before file, nothing written here, and the
 /// live reads of one observation run in the peer's SDO channel, held for the whole snapshot.</summary>
 internal sealed partial class CanOpenNode
@@ -173,13 +174,13 @@ internal sealed partial class CanOpenNode
         {
             if (!TryDescribedValue(record, s, out var text) || ParseDescribedUnsigned(text, peerNodeId) is not { } word || word == 0)
             { reason = $"the file's mapping entry {s} is missing or unreadable"; return false; }
-            // The device's own loader refuses a record whose inverted slot does not repeat its
-            // plain slot (the mapping validator), so such a record never reaches its dictionary.
+            // The even slot names the object of the inverted data, the same or one of its own
+            // (EN 50325-5:2010 §6.4.1.4, Table 8; #506), as wide as the plain one.
             byte inv = (byte)(s + 1);
             if (!TryDescribedValue(record, inv, out var invText) || ParseDescribedUnsigned(invText, peerNodeId) is not { } inverted || inverted == 0)
             { reason = $"the file's mapping entry {inv} (the inverted object) is missing or unreadable"; return false; }
-            if (!SrdoRecords.IsInvertedSlotOf(word, inverted))
-            { reason = $"the file's mapping entry {inv} does not repeat entry {s} (CiA DSP 304 §8.4.2.2: the inverted object of the one before it)"; return false; }
+            if (!SrdoRecords.IsPeerInvertedSlotOf(word, inverted))
+            { reason = $"the file's mapping entry {inv} is not an inverted object as wide as entry {s} (EN 50325-5:2010 §6.4.1.4, Table 8; §7.1.1: the second frame is the bitwise inverse of the first)"; return false; }
             try { list.Add(new PdoMappingEntry((ushort)(word >> 16), (byte)(word >> 8), (byte)word)); }
             catch (ArgumentOutOfRangeException) { reason = $"the file's mapping entry {s} is not byte-aligned"; return false; }
             if (list[list.Count - 1].BitLength % 8 != 0)

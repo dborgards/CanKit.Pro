@@ -8,7 +8,9 @@ using CanKit.Pro.RawCan;
 
 namespace CanKit.Pro.CANopen.Safety;
 
-/// <summary>Passive continuous SRDO/GFC analysis (FR-CO-061), independent of any CANopen node or object dictionary.</summary>
+/// <summary>Passive continuous SRDO/GFC analysis (FR-CO-061), independent of any CANopen node or object dictionary:
+/// the second frame checked as the bitwise inverse of the first (EN 50325-5:2010 §7.1.1), SRVT and SCT
+/// (§7.1.2), and the frame length against the mapping (§7.1.3).</summary>
 /// <remarks>
 /// This monitor has only a receive subscription. It sends nothing, performs no SDO acquisition,
 /// and never actuates process data. Polls are serialized with replacement and disposal.

@@ -176,14 +176,15 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         master.ObjectDictionary.ContainsIndex(0x2002).Should().BeFalse("nothing is written here");
     }
 
-    /// <summary>The live path applies the rule the file path applies (§8.4.2.2, 1381h–13C0h: the
-    /// even sub-index carries the inverted object of the odd one before it): every slot up to the
-    /// count is read, and a live even slot that was read and differs from its odd slot makes the
-    /// pair not decoded, with a reason naming the slot. The live record was read, so it wins: the
-    /// file is no fallback for it. The device's own validator would refuse such a record, so the
-    /// test writes it past the validator (WriteRawUnchecked).</summary>
+    /// <summary>The live path applies the rule the file path applies (EN 50325-5:2010 §6.4.1.4,
+    /// Table 8: the even sub-index names the object of the inverted data of the odd one before it,
+    /// as wide): every slot up to the count is read, and a live even slot that was read and names
+    /// an object of another width makes the pair not decoded, with a reason naming the slot. The
+    /// live record was read, so it wins: the file is no fallback for it. The device's own
+    /// validator would refuse such a record, so the test writes it past the validator
+    /// (WriteRawUnchecked).</summary>
     [Fact]
-    public async Task A_Live_Mapping_Whose_Inverted_Slot_Does_Not_Repeat_Its_Plain_Slot_Is_Not_Decoded()
+    public async Task A_Live_Mapping_Whose_Inverted_Slot_Has_Another_Width_Is_Not_Decoded()
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
@@ -198,8 +199,30 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         result.Observation.Should().NotBeNull(result.Reason);
         result.Observation!.Decoded.Should().BeFalse();
         result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping, "the live record was read; the file is no fallback for it");
-        result.Observation.Reason.Should().Contain("entry 2").And.Contain("does not repeat entry 1");
+        result.Observation.Reason.Should().Contain("entry 2").And.Contain("as wide as entry 1");
         sink.Signals.Should().BeEmpty();
+    }
+
+    /// <summary>A peer whose even slot names an object of its own, as wide (EN 50325-5:2010
+    /// §6.4.1.4, Table 8; #506), is decoded from its live record: the first frame into the plain
+    /// objects, the second checked as its inverse and not decoded on its own.</summary>
+    [Fact]
+    public async Task A_Live_Mapping_With_A_Separate_Inverted_Object_Is_Decoded()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        using var device = OpenDeviceDivergingFromFile(busB);
+        device.ObjectDictionary.WriteRawUnchecked(0x1381, 0x02, ObjectDictionary.EncodeU32(0x2003_0020));
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x111,
+            new byte[] { 0x78, 0x56, 0x34, 0x12 }, new byte[] { 0x87, 0xA9, 0xCB, 0xED }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation!.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        sink.Signals.Select(x => x.Index).Should().Equal((ushort)0x2002);
+        sink.Signals[0].Value.Should().Equal(0x78, 0x56, 0x34, 0x12);
     }
 
     /// <summary>A live even slot that cannot be read is treated like an unreadable odd slot: the
@@ -545,23 +568,28 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         device.ObjectDictionary.ReadUnsigned(0x1301, 5).Should().Be(0x109u, "the transaction ran after the observer released the channel");
     }
 
-    /// <summary>The file fallback applies the rule the device's own loader applies (§8.4.2.2,
-    /// 1381h–13C0h: the even sub-index carries the inverted object of the odd one before it):
-    /// a slot that is missing, or that does not repeat its plain slot, is no mapping to decode
+    /// <summary>The file fallback applies the peer rule (EN 50325-5:2010 §6.4.1.4, Table 8: the
+    /// even sub-index names the object of the inverted data of the odd one before it, as wide):
+    /// a slot that is missing, zero, or names an object of another width is no mapping to decode
     /// with, and the reason names the slot. The shipped fixture still decodes
-    /// (<see cref="Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer"/>).</summary>
+    /// (<see cref="Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer"/>), and so does one with
+    /// a separate inverted object (<see cref="A_File_Mapping_With_Separate_Inverted_Objects_Is_Decoded"/>).</summary>
     [Theory]
     [InlineData("missing")]
-    [InlineData("different")]
-    public async Task A_File_Mapping_Whose_Inverted_Slot_Does_Not_Repeat_Its_Plain_Slot_Is_Not_Decoded(string fault)
+    [InlineData("zero")]
+    [InlineData("wider")]
+    public async Task A_File_Mapping_Whose_Inverted_Slot_Is_Not_An_Inverted_Object_Is_Not_Decoded(string fault)
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var rig = new UnansweredPeerRig(session, busA);
         var master = rig.Master;
-        var file = fault == "missing"
-            ? PeerFileWithout("[1381sub4]")
-            : PeerFilePatched("[1381sub4]", "0x20010008", "0x20020008");
+        var file = fault switch
+        {
+            "missing" => PeerFileWithout("[1381sub4]"),
+            "zero" => PeerFilePatched("[1381sub4]", "0x20010008", "0x00000000"),
+            _ => PeerFilePatched("[1381sub4]", "0x20010008", "0x20020010"),
+        };
         master.BindPeerDeviceDescription(Device, file);
         var sink = new ListSink();
         var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
@@ -569,8 +597,25 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         result.Observation!.Decoded.Should().BeFalse();
         result.Observation.Origin.Should().BeNull();
         result.Observation.Reason.Should().Contain("entry 4");
-        result.Observation.Reason.Should().Contain(fault == "missing" ? "missing" : "does not repeat entry 3");
+        result.Observation.Reason.Should().Contain(fault == "wider" ? "as wide as entry 3" : "missing");
         sink.Signals.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_File_Mapping_With_Separate_Inverted_Objects_Is_Decoded()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
+        var file = SeparateInvertedObjectsFixture.File();
+        master.BindPeerDeviceDescription(Device, file);
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 0x34, 0x12, 0x5A }, new byte[] { 0xCB, 0xED, 0xA5 }, file, sink).WithTimeoutAsync(TimeSpan.FromSeconds(30));
+        result.Observation!.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+        sink.Signals.Select(x => x.Index).Should().Equal((ushort)0x2000, (ushort)0x2001);
     }
 
     [Fact]
@@ -580,8 +625,9 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 1);
         using var rig = new UnansweredPeerRig(session, busA);
         var master = rig.Master;
-        var file = CanOpenDeviceDescription.ParseDcf(PatchedText(PatchedText(PeerFileText(),
-            "[1381sub1]", "0x20000010", "0x00050010"), "[1381sub2]", "0x20000010", "0x00050010"));
+        // The plain slot is the dummy; its inverted slot names a real object as wide.
+        var file = CanOpenDeviceDescription.ParseDcf(PatchedText(PeerFileText(),
+            "[1381sub1]", "0x20000010", "0x00050010"));
         master.BindPeerDeviceDescription(Device, file);
         var sink = new ListSink();
         var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,

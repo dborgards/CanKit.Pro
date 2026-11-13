@@ -269,7 +269,7 @@ internal sealed partial class CanOpenNode
         => new(CaptureBoundPeerDescription(peerNodeId),
             configuration is null
                 ? Array.Empty<(ushort, byte)>()
-                : configuration.Srdos.Values.SelectMany(s => s.Mapping.Entries).Select(e => (e.Index, e.Subindex)));
+                : configuration.Srdos.Values.SelectMany(s => s.Mapping.Entries.Concat(s.Mapping.InvertedEntries)).Select(e => (e.Index, e.Subindex)));
 
     /// <summary>
     /// CiA DSP 304 §8.4.2.2: 13FFh:00 is the number of SRDOs, so a file whose highest SRDO record

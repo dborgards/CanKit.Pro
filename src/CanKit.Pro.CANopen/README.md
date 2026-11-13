@@ -143,10 +143,11 @@ Deliberate omissions, each checked against the norm text:
   (EN 50325-5:2010 Table 11: `rw` in Pre-operational, `ro` in Operational — the records' rule, which
   this implementation applies; a file that declares `13FFh:n` `ro` or `const` is honoured, #289).
 * **Bit-granular SRDO mapping and more than 8 objects per SRDO** — the safety mapping retains its own narrower limits; the PDO extensions do not widen them.
-* **A separate object for an SRDO's inverted data** — the even mapping slot must repeat the odd one
-  and the inverted frame is built from the plain one. EN 50325-5:2010 Table 8 does not require the
-  repetition. A device may refuse the other form, but as tool and monitor this implementation also
-  refuses a device that uses it (#506).
+* **A separate object for this device's own inverted data** — on the device side the even mapping
+  slot must repeat the odd one (`0604 0041h`), and the inverted frame is built from the plain one.
+  EN 50325-5:2010 §6.4.1.4, Table 8 allows an object of its own there; the narrower form is
+  permitted. As tool and monitor the implementation takes a peer that uses it:
+  [Peers whose inverted data live in objects of their own](#peers-whose-inverted-data-live-in-objects-of-their-own).
 * **The safety application layer of CiA 319 clauses 7 and 8** — the *Safety application
   configuration valid* and *… signature* objects a CiA profile or a manufacturer-specific profile
   places in its own area, and the data set they sign. Which objects, in which order, is the
@@ -1293,6 +1294,31 @@ one frame per slave instead of one broadcast, and a keep-alive slave that never 
 heartbeat, no boot-up) is not started by this master — as with bit 1 clear.
 Only the boot-up is gated: an NMT Start to node 0 the application requests itself — through
 `SendNmtCommandAsync` with node 0 or `1F82h` sub-index `80h` — goes out as requested.
+
+### Peers whose inverted data live in objects of their own
+
+EN 50325-5:2010 §6.4.1.4, Table 8 names the object at an even mapping sub-index "the bitwise
+inverted data" of the object before it, and does not require it to be the same object. A peer may
+therefore map, say, `2000h:00` at sub-index 1 and `2003h:00` at sub-index 2. On the bus nothing
+changes: the second frame is still the bitwise inverse of the first (§7.1.1). The tool and monitor
+roles take such a peer (#506):
+
+* `SrdoMapping.Add(plain, inverted)` names the pair; `InvertedEntries` lists the even slots
+  (the plain entries themselves after `Add(entry)`), `HasSeparateInvertedObjects` says whether one
+  differs. The two objects of a pair have the same width, and neither is a dummy.
+* `ConfigurePeerSafetyAsync` writes the inverted object at the even sub-index, reads it back, and
+  the checksum covers the stored even entry (§6.4.1.5, Table 9), so it differs from the checksum of
+  a repeated entry. `FromDeviceDescription` reads both slots of the file, with the peer rule: an
+  even slot as wide as its odd one, not a dummy, an object the file declares.
+* `ObserveForeignSrdoAsync`, `ReadPeerSafetyConfigurationAsync` and the monitor accept the same
+  form. The snapshot has `PeerSafetySrdoSnapshot.InvertedMapping`, the monitor configuration
+  `ForeignSrdoConfiguration.InvertedMapping` (and `ForeignSrdoConfiguration.Create` taking an
+  `SrdoMapping`). The inverted objects are not decoded on their own: the second frame is checked
+  as the inverse of the first, and the plain objects carry the values.
+
+This node's own dictionary keeps the narrower form: `ConfigureSrdoProducer` and
+`ConfigureSrdoConsumer` refuse a mapping with separate inverted objects (`ArgumentException`), and
+a write of such an even slot is refused with `0604 0041h`.
 
 ### Observing a peer SRDO
 
