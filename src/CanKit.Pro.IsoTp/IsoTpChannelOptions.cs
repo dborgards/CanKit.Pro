@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 
 namespace CanKit.Pro.IsoTp;
 
@@ -160,7 +161,8 @@ public sealed class IsoTpChannelOptions
         TimeSpan? nCr = null,
         int? wftMax = null,
         int? receiveBufferCapacity = null,
-        int? maxReceivePduLength = null)
+        int? maxReceivePduLength = null,
+        TimeSpan? nAr = null)
         => new()
         {
             UseCanFd = useCanFd ?? UseCanFd,
@@ -169,11 +171,31 @@ public sealed class IsoTpChannelOptions
             LocalBlockSize = localBlockSize ?? LocalBlockSize,
             LocalStMin = localStMin ?? LocalStMin,
             NAs = nAs ?? NAs,
-            NAr = NAr,
+            NAr = nAr ?? NAr,
             NBs = nBs ?? NBs,
             NCr = nCr ?? NCr,
             WftMax = wftMax ?? WftMax,
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
             MaxReceivePduLength = maxReceivePduLength ?? MaxReceivePduLength,
         };
+
+    /// <summary>
+    /// The <see cref="With(bool?, bool?, byte?, byte?, TimeSpan?, TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, TimeSpan?)"/>
+    /// overload from before <see cref="NAr"/>, kept so code compiled against it still binds.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public IsoTpChannelOptions With(
+        bool? useCanFd,
+        bool? usePadding,
+        byte? paddingByte,
+        byte? localBlockSize,
+        TimeSpan? localStMin,
+        TimeSpan? nAs,
+        TimeSpan? nBs,
+        TimeSpan? nCr,
+        int? wftMax,
+        int? receiveBufferCapacity,
+        int? maxReceivePduLength)
+        => With(useCanFd, usePadding, paddingByte, localBlockSize, localStMin, nAs, nBs, nCr,
+            wftMax, receiveBufferCapacity, maxReceivePduLength, nAr: null);
 }

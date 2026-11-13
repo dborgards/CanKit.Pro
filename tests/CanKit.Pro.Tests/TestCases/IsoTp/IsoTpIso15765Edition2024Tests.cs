@@ -199,6 +199,61 @@ public class IsoTpIso15765Edition2024Tests : IClassFixture<VirtualAdapterFixture
         never.TrySetResult(Rejected);
     }
 
+    // The driver's own N_Ar timeout arriving after the channel's deadline fired is the same
+    // timeout: it is reported once, by the abort, not a second time in the background. Any
+    // other late failure is still reported.
+    [Theory]
+    [InlineData(TxConfirmFailureReason.Timeout, 1)]
+    [InlineData(TxConfirmFailureReason.Rejected, 2)]
+    public async Task A_Driver_Timeout_After_NAr_Expired_Is_Not_Reported_Twice(
+        TxConfirmFailureReason lateReason, int expectedReports)
+    {
+        var nAr = TimeSpan.FromMilliseconds(200);
+        var late = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var r = new Receiver(nAr, TimeSpan.FromMilliseconds(500), 0,
+            async (_, send) => { await send(); return await late.Task; });
+        var reports = new List<Exception>();
+        r.Channel.BackgroundExceptionOccurred += (_, ex) => { lock (reports) reports.Add(ex); };
+
+        var receive = r.Channel.ReceiveAsync();
+        r.PeerBus.Transmit(FirstFrame20());
+        await r.Clock.WaitUntilTimerArmedAsync(r.Actor, nAr, ShortTimeout);
+        await r.Clock.AdvanceAsync(nAr + TimeSpan.FromMilliseconds(1));
+        Func<Task> act = () => receive.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<IsoTpTimeoutException>()).Which.Timer.Should().Be(IsoTpTimer.NAr);
+
+        late.SetResult(lateReason == TxConfirmFailureReason.Timeout ? TimedOut : Rejected);
+        // The late confirmation reaches the actor from a pool thread; give it the time the
+        // reported case needs, then count.
+        var until = DateTime.UtcNow + TimeSpan.FromMilliseconds(300);
+        while (DateTime.UtcNow < until)
+        {
+            lock (reports) if (reports.Count >= 2) break;
+            await Task.Delay(10);
+        }
+        await r.Channel.SettleAsync().WaitAsync(ShortTimeout);
+        lock (reports)
+        {
+            reports.Should().HaveCount(expectedReports);
+            reports[0].Should().BeOfType<IsoTpTimeoutException>();
+        }
+    }
+
+    [Fact]
+    public void With_Overrides_NAr_And_The_Old_Overload_Keeps_It()
+    {
+        var template = new IsoTpChannelOptions { NAr = TimeSpan.FromMilliseconds(70), NCr = TimeSpan.FromMilliseconds(90) };
+
+        var changed = template.With(nAr: TimeSpan.FromMilliseconds(40));
+        changed.NAr.Should().Be(TimeSpan.FromMilliseconds(40));
+        changed.NCr.Should().Be(TimeSpan.FromMilliseconds(90));
+
+        // All eleven arguments given: binds to the overload from before NAr existed.
+        var old = template.With(null, null, null, null, null, null, null, TimeSpan.FromMilliseconds(30), null, null, null);
+        old.NAr.Should().Be(TimeSpan.FromMilliseconds(70));
+        old.NCr.Should().Be(TimeSpan.FromMilliseconds(30));
+    }
+
     [Fact]
     public async Task An_Unconfirmed_Block_Flow_Control_Aborts_The_Reception_Mid_Transfer()
     {

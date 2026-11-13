@@ -1882,8 +1882,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             || failure is ObjectDisposedException)
         {
             // The reception ended, or a Consecutive Frame already showed the peer has this Flow
-            // Control: nothing to abort, but a failed send is still worth a report.
-            if (!confirmed)
+            // Control: nothing to abort, but a failed send is still worth a report. Not a driver
+            // timeout, though: that is the N_Ar the channel's own deadline has already reported,
+            // or one a Consecutive Frame proved harmless.
+            if (!confirmed && (failure is not null
+                    || confirmation!.Value.FailureReason != TxConfirmFailureReason.Timeout))
                 RaiseBackgroundException(failure ?? new IsoTpException(
                     $"ISO-TP Flow Control send failed: {confirmation!.Value.FailureReason}."));
             return;
