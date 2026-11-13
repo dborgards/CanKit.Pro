@@ -3,7 +3,7 @@ using System;
 namespace CanKit.Pro.Uds;
 
 /// <summary>
-/// Positive-response parameters returned by RequestDownload (0x34, ISO 14229-1 §14.2.2).
+/// Positive-response parameters returned by RequestDownload (0x34, ISO 14229-1:2026 §14.2.3).
 /// </summary>
 /// <remarks>
 /// The ECU echoes a <em>lengthFormatIdentifier</em> byte whose high nibble encodes how many
@@ -35,7 +35,7 @@ public readonly struct UdsDownloadResponse
 }
 
 /// <summary>
-/// Positive-response parameters returned by RequestUpload (0x35, ISO 14229-1 §14.1.2). Mirrors
+/// Positive-response parameters returned by RequestUpload (0x35, ISO 14229-1:2026 §14.3.3). Mirrors
 /// <see cref="UdsDownloadResponse"/>; the max block length constrains the size of the
 /// TransferData responses the ECU will send back to the tester.
 /// </summary>

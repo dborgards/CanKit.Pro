@@ -9,7 +9,7 @@ namespace CanKit.Pro.Uds;
 /// A single Unified Diagnostic Services (ISO 14229-1) client bound to one
 /// <see cref="IsoTp.IIsoTpChannel"/>. One client = one tester ↔ ECU relationship; overlapping
 /// requests from multiple callers are serialized by the client so at most one UDS request is
-/// outstanding at any time (mirrors ISO 14229-1 §7.3's "one active request per tester" model).
+/// outstanding at any time (one active request per client, as ISO 14229-2's client timing assumes).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -120,7 +120,7 @@ public interface IUdsClient : IDisposable
 
     /// <summary>
     /// Sends ReadDataByIdentifier (0x22) with more than one DID in a single request
-    /// (SRS FR-UDS-011, ISO 14229-1 §9.3.4). Returns a dictionary keyed by DID with the raw
+    /// (SRS FR-UDS-011, ISO 14229-1:2026 §10.2). Returns a dictionary keyed by DID with the raw
     /// data-record bytes of each identifier the ECU answered. An ECU that supports only some of
     /// the requested DIDs answers with those (ISO 14229-1 §10.2), so a requested DID that has no
     /// key in the result was not answered; if none is supported the ECU's negative response
@@ -128,7 +128,7 @@ public interface IUdsClient : IDisposable
     /// </summary>
     /// <param name="dataIdentifiers">DIDs to request, in the order they are placed on the wire.</param>
     /// <param name="dataRecordLengths">
-    /// Expected <c>dataRecord</c> length (bytes) for every requested DID. ISO 14229-1 §9.3.4.4
+    /// Expected <c>dataRecord</c> length (bytes) for every requested DID. ISO 14229-1:2026 §10.2.3
     /// does not encode lengths in the positive response — the client must know them from the
     /// ECU's DID definition (ODX/CDD/etc.). Zero-length records are allowed.
     /// </param>
@@ -163,7 +163,7 @@ public interface IUdsClient : IDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Runs the ISO 14229-1 §9.4 SecurityAccess (0x27, SRS FR-UDS-006) two-step exchange:
+    /// Runs the ISO 14229-1:2026 §9.4 SecurityAccess (0x27, SRS FR-UDS-006) two-step exchange:
     /// <list type="number">
     ///   <item><description>Send <c>0x27 requestSeedLevel</c>, receive the seed bytes.</description></item>
     ///   <item><description>Invoke <paramref name="computeKey"/> synchronously with the seed and
@@ -173,20 +173,19 @@ public interface IUdsClient : IDisposable
     /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7D</c> and
     /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically, so at most
     /// <c>0x7E</c>. A seed of all zeroes -- of any length, including none -- means "already
-    /// unlocked" (ISO 14229-1 §9.4.5.3) and short-circuits the exchange without invoking
+    /// unlocked" (ISO 14229-1:2026 §9.4.1) and short-circuits the exchange without invoking
     /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
     /// <remarks>
-    /// The client's request lock is held from the seed request to the key's answer, and so
-    /// across <paramref name="computeKey"/>: no other request -- the
-    /// <see cref="StartTesterPresentKeepAlive"/> TesterPresent included -- goes out in between,
-    /// so nothing can come between seed and key on the ECU's side. The cost is that a
-    /// <paramref name="computeKey"/> that takes longer than the server's S3 timer (an HSM-backed
-    /// one, say) also holds back the keep-alive, and the session may time out before the key is
-    /// sent. Whether ISO 14229-1 lets a TesterPresent between seed and key leave the seed valid --
-    /// in which case the keep-alive alone could be let through during
-    /// <paramref name="computeKey"/> -- has not been checked against the text; until it is, the
-    /// lock stays (#354).
+    /// The client's request lock is held from the seed request to the key's answer: no other
+    /// request goes out in between, since a DiagnosticSessionControl would lock the server and a
+    /// second requestSeed would replace the seed. The one exception is the
+    /// <see cref="StartTesterPresentKeepAlive"/> TesterPresent, which still goes out (always with
+    /// the suppressPosRspMsgIndicationBit) while <paramref name="computeKey"/> runs. A seed stays
+    /// valid across it, and an S3 timeout -- which it prevents -- would lock the server and drop
+    /// the seed (ISO 14229-1:2026 Annex I, Figure I.1/Table I.2; §9.4.1: security access must not
+    /// keep other diagnostic communication from going on). A keep-alive send under way when
+    /// <paramref name="computeKey"/> returns finishes before the key is sent (#354).
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="requestSeedLevel"/> is not
     /// an odd byte in the range <c>0x01..0x7D</c>.</exception>
@@ -196,8 +195,8 @@ public interface IUdsClient : IDisposable
 
     /// <summary>
     /// Sends a single TesterPresent (0x3E, SRS FR-UDS-007). When
-    /// <paramref name="suppressPositiveResponse"/> is <c>true</c> the ISO 14229-1 §7.5
-    /// suppressPositiveResponse bit is set (sub-function <c>0x80</c>) and the method returns as
+    /// <paramref name="suppressPositiveResponse"/> is <c>true</c> the ISO 14229-1 §8.2.2
+    /// suppressPosRspMsgIndicationBit is set (sub-function <c>0x80</c>) and the method returns as
     /// soon as the request is on the wire — the ECU is expected to stay silent. Otherwise the
     /// method awaits the positive response.
     /// </summary>
@@ -245,7 +244,7 @@ public interface IUdsClient : IDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sends RequestDownload (0x34, ISO 14229-1 §14.2, SRS FR-UDS-012). Negotiates a download
+    /// Sends RequestDownload (0x34, ISO 14229-1:2026 §14.2, SRS FR-UDS-012). Negotiates a download
     /// session with the ECU: the tester declares the payload format (compression / encryption
     /// via <paramref name="dataFormatIdentifier"/>) and the target memory range
     /// (<paramref name="memoryAddress"/>, <paramref name="memorySize"/>) whose widths are packed
@@ -273,7 +272,7 @@ public interface IUdsClient : IDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sends RequestUpload (0x35, ISO 14229-1 §14.1, SRS FR-UDS-012). Mirror of
+    /// Sends RequestUpload (0x35, ISO 14229-1:2026 §14.3, SRS FR-UDS-012). Mirror of
     /// <see cref="RequestDownloadAsync"/> for the tester-reads-from-ECU direction; the returned
     /// <see cref="UdsUploadResponse.MaxNumberOfBlockLength"/> constrains the size of TransferData
     /// responses the ECU will emit.
@@ -286,13 +285,13 @@ public interface IUdsClient : IDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sends TransferData (0x36, ISO 14229-1 §14.3, SRS FR-UDS-012) with the caller-supplied
+    /// Sends TransferData (0x36, ISO 14229-1:2026 §14.4, SRS FR-UDS-012) with the caller-supplied
     /// block sequence counter and payload chunk. Returns the ECU's <c>transferResponseParameterRecord</c>
     /// (the bytes that follow the echoed block sequence counter in the positive response — may
     /// be empty). The client validates that the ECU echoes back the exact
     /// <paramref name="blockSequenceCounter"/>.
     /// </summary>
-    /// <param name="blockSequenceCounter">Per ISO 14229-1 §14.3.2 the counter starts at
+    /// <param name="blockSequenceCounter">Per ISO 14229-1:2026 §14.4.2 the counter starts at
     /// <c>0x01</c> for the first TransferData following RequestDownload/Upload, is incremented
     /// on each successful transfer, and wraps from <c>0xFF</c> back to <c>0x00</c>.</param>
     /// <param name="data">
@@ -307,7 +306,7 @@ public interface IUdsClient : IDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sends RequestTransferExit (0x37, ISO 14229-1 §14.4, SRS FR-UDS-012) to close the current
+    /// Sends RequestTransferExit (0x37, ISO 14229-1:2026 §14.5, SRS FR-UDS-012) to close the current
     /// transfer session. <paramref name="transferRequestParameterRecord"/> is an optional
     /// vendor-specific record (e.g. checksum) appended after the SID.
     /// </summary>
@@ -335,9 +334,9 @@ public interface IUdsClient : IDisposable
     /// a TransferData -- a negative response such as NRC 0x73 (wrongBlockSequenceCounter), a
     /// timeout, a transport error -- ends the call with that exception, and no
     /// RequestTransferExit follows, so the server's download is
-    /// left where the failed block left it. This is a scope limit of this convenience method, not
-    /// a reading of ISO 14229-1: whether and how the standard has a client repeat a block has not
-    /// been checked against the text (#354). A caller that wants to repeat blocks drives
+    /// left where the failed block left it. ISO 14229-1:2026 §14.4 lets a client repeat a block
+    /// with the same counter after a lost response; this convenience method does not (#426). A
+    /// caller that wants to repeat blocks drives
     /// <see cref="RequestDownloadAsync"/>, <see cref="TransferDataAsync"/> and
     /// <see cref="RequestTransferExitAsync"/> itself.
     /// </remarks>

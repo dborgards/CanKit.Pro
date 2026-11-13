@@ -318,18 +318,25 @@ public class IsoTpFrameCodecTests
         IsoTpFrameCodec.DecodeStMin(raw).Should().Be(TimeSpan.FromTicks(microseconds * 10));
     }
 
-    // #353: the rounding EncodeStMin's remarks and the README's open norm question 5 describe --
-    // 1 ms and more rounded to the nearest millisecond, half up, capped at 127 ms; less truncated
-    // down to its 100 µs step but not below 100 µs; under 1 µs is 0. Pinned so the text cannot
-    // drift from the code while the question (round a minimum separation up?) is open.
+    // #353: STmin is a minimum, so a value between two codes is rounded up to the next one
+    // (ISO 15765-2:2024 §9.6.5.4 defines only the codes). Exact codes stay; above 127 ms caps.
     [Theory]
-    [InlineData(1_900, 0xF1)]      // 190 µs -> 100 µs
-    [InlineData(9_990, 0xF9)]      // 999 µs -> 900 µs
+    [InlineData(0, 0x00)]          // 0 -> 0
+    [InlineData(5, 0xF1)]          // 0.5 µs -> 100 µs
+    [InlineData(10, 0xF1)]         // 1 µs -> 100 µs
     [InlineData(500, 0xF1)]        // 50 µs -> 100 µs, the smallest step
-    [InlineData(5, 0x00)]          // 0.5 µs -> 0
-    [InlineData(14_000, 0x01)]     // 1.4 ms -> 1 ms
+    [InlineData(1_000, 0xF1)]      // 100 µs stays
+    [InlineData(1_001, 0xF2)]      // just above 100 µs -> 200 µs
+    [InlineData(1_900, 0xF2)]      // 190 µs -> 200 µs
+    [InlineData(9_000, 0xF9)]      // 900 µs stays
+    [InlineData(9_001, 0x01)]      // just above 900 µs -> 1 ms
+    [InlineData(9_990, 0x01)]      // 999 µs -> 1 ms
+    [InlineData(10_000, 0x01)]     // 1 ms stays
+    [InlineData(14_000, 0x02)]     // 1.4 ms -> 2 ms
     [InlineData(15_000, 0x02)]     // 1.5 ms -> 2 ms
+    [InlineData(1_270_000, 0x7F)]  // 127 ms stays
     [InlineData(1_280_000, 0x7F)]  // 128 ms -> 127 ms
+    [InlineData(int.MaxValue, 0x7F)]
     public void EncodeStMin_Rounds_As_Documented(int ticks, byte expectedRaw)
     {
         IsoTpFrameCodec.EncodeStMin(TimeSpan.FromTicks(ticks)).Should().Be(expectedRaw);
@@ -402,13 +409,22 @@ public class IsoTpFrameCodecTests
         IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: false, out _).Should().BeFalse();
     }
 
-    [Fact]
-    public void TryParsePci_Reserved_FlowControl_FlowStatus_Returns_False()
+    // #353: a reserved FlowStatus (3..F) parses with its raw value, so the sender can abort on it
+    // (ISO 15765-2:2024 §9.6.5.2) instead of never seeing it.
+    [Theory]
+    [InlineData(0x3)]
+    [InlineData(0x7)]
+    [InlineData(0xF)]
+    public void TryParsePci_Reserved_FlowControl_FlowStatus_Parses_With_Its_Raw_Value(int fs)
     {
-        var frame = new byte[] { 0x33, 0x00, 0x00 }; // FS = 3 is reserved
+        var frame = new byte[] { (byte)(0x30 | fs), 0x05, 0x0A };
         var ep = IsoTpEndpoint.Normal(0x1, 0x2);
 
-        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: false, out _).Should().BeFalse();
+        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: false, out var pci).Should().BeTrue();
+        pci.Type.Should().Be(PciType.FlowControl);
+        ((int)pci.FlowStatus).Should().Be(fs);
+        pci.BlockSize.Should().Be(5);
+        pci.StMinRaw.Should().Be(0x0A);
     }
 
     [Fact]
@@ -798,7 +814,8 @@ public class IsoTpFrameCodecTests
     [InlineData(4096u, true)]  // the smallest length only the escape form carries
     [InlineData(65_536u, true)]
     [InlineData(0x7FFF_FFFFu, true)]
-    [InlineData(0x8000_0000u, false)] // beyond int.MaxValue: cannot be a PDU length here
+    [InlineData(0x8000_0000u, true)] // beyond int.MaxValue: parsed so it can be refused with FC(OVFLW)
+    [InlineData(0xFFFF_FFFFu, true)]
     public void TryParsePci_FirstFrame_CanFd_Escape_Accepts_Only_Lengths_Above_The_Short_Form(uint announced, bool accepted)
     {
         var frame = new byte[]
@@ -814,7 +831,8 @@ public class IsoTpFrameCodecTests
         if (accepted)
         {
             pci.Type.Should().Be(PciType.FirstFrame);
-            pci.Length.Should().Be((int)announced);
+            pci.Length.Should().Be((int)Math.Min(announced, int.MaxValue));
+            pci.LongLength.Should().Be(announced);
             pci.DataOffset.Should().Be(6);
         }
     }

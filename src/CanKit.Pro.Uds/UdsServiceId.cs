@@ -4,8 +4,8 @@ namespace CanKit.Pro.Uds;
 /// UDS Service Identifiers (SIDs) supported by the CanKit.Pro.Uds MVP client.
 /// </summary>
 /// <remarks>
-/// Values map 1:1 to the request-SID bytes defined by ISO 14229-1:2020. Positive responses use
-/// the request SID plus <c>0x40</c> (per ISO 14229-1 §7.3). Negative responses are always framed
+/// Values map 1:1 to the request-SID bytes defined by ISO 14229-1:2026. Positive responses use
+/// the request SID plus <c>0x40</c> (per ISO 14229-1 §7.4). Negative responses are always framed
 /// as <c>0x7F, requestSid, NRC</c>. The enum only covers the services the MVP client actually
 /// implements; unknown SIDs are still supported via the <see cref="IUdsClient.SendRawAsync"/>
 /// escape hatch.
@@ -15,39 +15,39 @@ public enum UdsServiceId : byte
     /// <summary>DiagnosticSessionControl — ISO 14229-1 §9.2 (SRS FR-UDS-001).</summary>
     DiagnosticSessionControl = 0x10,
 
-    /// <summary>ECUReset — ISO 14229-1 §9.1 (SRS FR-UDS-005).</summary>
+    /// <summary>ECUReset — ISO 14229-1 §9.3 (SRS FR-UDS-005).</summary>
     EcuReset = 0x11,
 
-    /// <summary>ReadDataByIdentifier — ISO 14229-1 §9.3 (SRS FR-UDS-002 / FR-UDS-011).</summary>
+    /// <summary>ReadDataByIdentifier — ISO 14229-1 §10.2 (SRS FR-UDS-002 / FR-UDS-011).</summary>
     ReadDataByIdentifier = 0x22,
 
     /// <summary>SecurityAccess — ISO 14229-1 §9.4 (SRS FR-UDS-006).</summary>
     SecurityAccess = 0x27,
 
-    /// <summary>WriteDataByIdentifier — ISO 14229-1 §9.6 (SRS FR-UDS-003).</summary>
+    /// <summary>WriteDataByIdentifier — ISO 14229-1 §10.7 (SRS FR-UDS-003).</summary>
     WriteDataByIdentifier = 0x2E,
 
-    /// <summary>RoutineControl — ISO 14229-1 §9.10 (SRS FR-UDS-004).</summary>
+    /// <summary>RoutineControl — ISO 14229-1 §13.2 (SRS FR-UDS-004).</summary>
     RoutineControl = 0x31,
 
     /// <summary>RequestDownload — ISO 14229-1 §14.2 (SRS FR-UDS-012).</summary>
     RequestDownload = 0x34,
 
-    /// <summary>RequestUpload — ISO 14229-1 §14.1 (SRS FR-UDS-012).</summary>
+    /// <summary>RequestUpload — ISO 14229-1 §14.3 (SRS FR-UDS-012).</summary>
     RequestUpload = 0x35,
 
-    /// <summary>TransferData — ISO 14229-1 §14.3 (SRS FR-UDS-012).</summary>
+    /// <summary>TransferData — ISO 14229-1 §14.4 (SRS FR-UDS-012).</summary>
     TransferData = 0x36,
 
-    /// <summary>RequestTransferExit — ISO 14229-1 §14.4 (SRS FR-UDS-012).</summary>
+    /// <summary>RequestTransferExit — ISO 14229-1 §14.5 (SRS FR-UDS-012).</summary>
     RequestTransferExit = 0x37,
 
-    /// <summary>TesterPresent — ISO 14229-1 §9.12 (SRS FR-UDS-007).</summary>
+    /// <summary>TesterPresent — ISO 14229-1 §9.7 (SRS FR-UDS-007).</summary>
     TesterPresent = 0x3E,
 }
 
 /// <summary>
-/// DiagnosticSessionControl (0x10) session type sub-functions from ISO 14229-1 §9.2.2.
+/// DiagnosticSessionControl (0x10) session type sub-functions from ISO 14229-1 §9.2.2.2.
 /// </summary>
 public enum UdsSessionType : byte
 {
@@ -65,7 +65,7 @@ public enum UdsSessionType : byte
 }
 
 /// <summary>
-/// ECUReset (0x11) reset-type sub-functions from ISO 14229-1 §9.1.2.
+/// ECUReset (0x11) reset-type sub-functions from ISO 14229-1 §9.3.2.2.
 /// </summary>
 public enum UdsEcuResetType : byte
 {
@@ -86,7 +86,7 @@ public enum UdsEcuResetType : byte
 }
 
 /// <summary>
-/// RoutineControl (0x31) sub-functions from ISO 14229-1 §9.10.2.
+/// RoutineControl (0x31) sub-functions from ISO 14229-1 §13.2.2.2.
 /// </summary>
 public enum UdsRoutineControlType : byte
 {

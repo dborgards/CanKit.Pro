@@ -12,7 +12,7 @@ using CanKit.Pro.RawCan;
 namespace CanKit.Pro.IsoTp;
 
 /// <summary>
-/// ISO-TP functional (1:N broadcast) client per ISO 15765-2 §9 / ISO 14229-1 §7.5.4.
+/// ISO-TP functional (1:N broadcast) client per ISO 15765-2:2024 §8.3.2.4 / ISO 14229-1 §7.7.1.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,7 +21,7 @@ namespace CanKit.Pro.IsoTp;
 /// replying on its own physical response CAN identifier.
 /// </para>
 /// <para>
-/// <strong>Send restriction:</strong> ISO 15765-2 §9.4 requires that functional requests are
+/// <strong>Send restriction:</strong> ISO 15765-2:2024 §8.3.2.4 requires that functional requests are
 /// Single Frames only. Attempting to send a PDU that exceeds the Single-Frame capacity for
 /// the configured frame kind faults the returned task with
 /// <see cref="InvalidOperationException"/>. This is intentional: the standard prohibits
@@ -116,7 +116,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// User-data payload. Must fit in one ISO-TP Single Frame (≤ 7 bytes for classic CAN without
     /// address extension, ≤ 62 bytes for CAN-FD). Violating this limit faults the task with
     /// <see cref="InvalidOperationException"/> — multi-frame functional requests are prohibited
-    /// by ISO 15765-2 §9.4.
+    /// by ISO 15765-2:2024 §8.3.2.4.
     /// </param>
     /// <param name="window">
     /// Duration to wait for responses after the Single Frame is TX-confirmed. Expired windows
@@ -297,7 +297,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         if (pdu.Length > sfMax)
             throw new InvalidOperationException(
                 $"ISO-TP functional addressing restricts outbound requests to Single Frames " +
-                $"(ISO 15765-2 §9.4). The supplied PDU is {pdu.Length} bytes but the maximum " +
+                $"(ISO 15765-2:2024 §8.3.2.4). The supplied PDU is {pdu.Length} bytes but the maximum " +
                 $"Single-Frame payload for {(_options.UseCanFd ? "CAN-FD" : "classic CAN")} " +
                 $"is {sfMax} bytes.");
 
@@ -405,7 +405,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         // Functional addressing: collect only Single-Frame responses.
         // First-Frame responses cannot be reassembled without a physical TX address for
-        // each ECU's Flow-Control reply (ISO 15765-2 §9.4). CF and FC are stray frames.
+        // each ECU's Flow-Control reply (ISO 15765-2:2024 §8.3.2.4; a functional FF is ignored,
+        // §9.8.3). CF and FC are stray frames.
         if (pci.Type != PciType.SingleFrame)
         {
             response = null;
