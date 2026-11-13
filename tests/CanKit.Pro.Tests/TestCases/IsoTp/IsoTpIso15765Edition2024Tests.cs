@@ -158,6 +158,9 @@ public class IsoTpIso15765Edition2024Tests : IClassFixture<VirtualAdapterFixture
         r.PeerBus.Transmit(FirstFrame20());
         (await reported.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(failure);
         await r.Channel.SettleAsync().WaitAsync(ShortTimeout);
+        // Nor does the N_Ar deadline of that Flow Control fault the reception.
+        await r.Clock.AdvanceAsync(TimeSpan.FromSeconds(1));
+        await r.Channel.SettleAsync().WaitAsync(ShortTimeout);
         receive.IsCompleted.Should().BeFalse();
 
         r.PeerBus.Transmit(Cf20(0));

@@ -1875,10 +1875,17 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         TxConfirmation? confirmation, Exception? failure)
     {
         bool confirmed = failure is null && confirmation!.Value.Confirmed;
+        bool live = ReferenceEquals(_rx, rx) && ReferenceEquals(rx.PendingFlowControl, token);
         // A service disposed under the channel ends the subscription too, and that loss is what
-        // ends the inbox; aborting here would put a transport fault in front of it.
-        if (!ReferenceEquals(_rx, rx) || !ReferenceEquals(rx.PendingFlowControl, token)
-            || failure is ObjectDisposedException)
+        // ends the inbox; aborting here would put a transport fault in front of it, and so would
+        // the N_Ar deadline still waiting for this Flow Control. A Consecutive Frame that still
+        // arrives arms N_Cr as usual.
+        if (live && failure is ObjectDisposedException)
+        {
+            rx.PendingFlowControl = null;
+            rx.CancelDeadline();
+        }
+        if (!live || failure is ObjectDisposedException)
         {
             // The reception ended, or a Consecutive Frame already showed the peer has this Flow
             // Control: nothing to abort, but a failed send is still worth a report. Not a driver
