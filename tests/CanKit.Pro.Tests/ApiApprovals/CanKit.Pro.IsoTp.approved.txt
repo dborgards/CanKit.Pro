@@ -44,6 +44,7 @@ namespace CanKit.Pro.IsoTp
         public byte LocalBlockSize { get; init; }
         public System.TimeSpan LocalStMin { get; init; }
         public int MaxReceivePduLength { get; init; }
+        public System.TimeSpan NAr { get; init; }
         public System.TimeSpan NAs { get; init; }
         public System.TimeSpan NBs { get; init; }
         public System.TimeSpan NCr { get; init; }
@@ -151,6 +152,11 @@ namespace CanKit.Pro.IsoTp
         public long HostArrivalTimestamp { get; }
         public uint SourceCanId { get; }
     }
+    public sealed class IsoTpInvalidFlowStatusException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpInvalidFlowStatusException(byte flowStatus) { }
+        public byte FlowStatus { get; }
+    }
     public sealed class IsoTpOverflowException : CanKit.Pro.IsoTp.IsoTpException
     {
         public IsoTpOverflowException(string message) { }
@@ -184,6 +190,7 @@ namespace CanKit.Pro.IsoTp
         NAs = 0,
         NBs = 1,
         NCr = 2,
+        NAr = 3,
     }
     public readonly struct IsoTpTransmitStamps : System.IEquatable<CanKit.Pro.IsoTp.IsoTpTransmitStamps>
     {
@@ -208,6 +215,7 @@ namespace CanKit.Pro.IsoTp
         public int DataOffset { get; }
         public CanKit.Pro.IsoTp.FlowStatus FlowStatus { get; }
         public int Length { get; }
+        public long LongLength { get; }
         public byte SequenceNumber { get; }
         public System.TimeSpan StMin { get; }
         public byte StMinRaw { get; }

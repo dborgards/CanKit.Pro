@@ -7,29 +7,29 @@ namespace CanKit.Pro.IsoTp;
 /// </summary>
 /// <remarks>
 /// All values are set at channel creation time and treated as immutable for the channel's
-/// lifetime. Timeouts follow ISO 15765-2 §6.5 naming and their defaults are intentionally
-/// conservative (1 second each) so tests and virtual-loopback sessions never sit for the
-/// standard's much larger recommended values (e.g. 1000 ms N_As) when the transport itself is
-/// only microseconds slow. Production callers are expected to override the timing values that
-/// matter for their bus.
+/// lifetime. The timers keep the ISO 15765-2:2016 names (N_As, N_Ar, N_Bs, N_Cr); ISO 15765-2:2024
+/// calls them t_TL_As, t_TL_Ar, t_TL_Bs and t_TL_Cr (§9.8.1, Table 22). Their defaults are the
+/// standard's timeout values (1000 ms each).
 /// <para>
-/// The ISO 15765-2 clause numbers cited here and in the channel and codec sources have not been
-/// reconciled to one edition of the standard or checked against its text; read them as pointers.
-/// This and the other open norm questions -- no N_Ar, where N_Cr starts, no TX_DL or BRS, STmin
-/// rounding, STmin before the first Consecutive Frame -- are listed in the package README (#353).
+/// Clause numbers in this package refer to ISO 15765-2:2024. The package README lists how the
+/// channel reads the standard where it leaves a choice, and where it is narrower (#353).
 /// </para>
 /// </remarks>
 public sealed class IsoTpChannelOptions
 {
-    /// <summary>Default value for <see cref="NAs"/>, <see cref="NBs"/>, <see cref="NCr"/>.</summary>
+    /// <summary>Default value for <see cref="NAs"/>, <see cref="NAr"/>, <see cref="NBs"/>, <see cref="NCr"/>.</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// <c>true</c> to build ISO-TP frames as CAN-FD (up to 64-byte per frame); <c>false</c> for
     /// classic CAN (8-byte per frame). Must match the underlying <see cref="Abstractions.API.Can.ICanBus"/>
     /// mode; if the bus is classic-CAN, <c>true</c> here will produce frames the driver rejects.
-    /// The sender then fills frames up to 64 bytes; a smaller TX_DL cannot be configured, and the
-    /// channel never sets a frame's bit-rate-switch (BRS) flag (an open ISO 15765-2 question, #353).
+    /// The sender then fills frames up to 64 bytes: TX_DL is fixed at 64, one of the values ISO
+    /// 15765-2:2024 §9.5.1 (Table 7) permits, and a smaller TX_DL cannot be configured. Receiving
+    /// adapts to whatever TX_DL the peer uses (§9.5.2). The bit-rate-switch (BRS) flag is not set
+    /// by the channel; the data bit rate is a bus/adapter setting, outside ISO 15765-2.
+    /// On a CAN FD channel a reception started with CAN FD frames is not continued or ended by a
+    /// classic frame, and the other way round (§9.5.2).
     /// </summary>
     public bool UseCanFd { get; init; }
 
@@ -38,7 +38,7 @@ public sealed class IsoTpChannelOptions
     /// <see cref="PaddingByte"/>; <c>false</c> to send the exact minimum payload. Many ISO 15765-2
     /// stacks expect padding on classic CAN. On CAN-FD the data length of a frame can only be 0 to
     /// 8, 12, 16, 20, 24, 32, 48 or 64 bytes, so a frame that falls between two steps is always
-    /// padded up to the next one (ISO 15765-2 requires that rounding), whatever this property
+    /// padded up to the next one (ISO 15765-2:2024 §11.3.2.3 requires that rounding), whatever this property
     /// says; it only decides whether frames of 8 bytes or fewer are padded as well.
     /// </summary>
     public bool UsePadding { get; init; } = true;
@@ -59,9 +59,9 @@ public sealed class IsoTpChannelOptions
 
     /// <summary>
     /// STmin advertised on Flow-Control frames sent by this channel while receiving multi-frame
-    /// PDUs. Encoded per ISO 15765-2 (0..127 ms in 1-ms steps, 100..900 µs in 100-µs steps) by
-    /// <see cref="IsoTpFrameCodec.EncodeStMin"/>, which can round a value down -- 190 µs is
-    /// advertised as 100 µs; see there.
+    /// PDUs. Encoded per ISO 15765-2:2024 §9.6.5.4 (0..127 ms in 1-ms steps, 100..900 µs in
+    /// 100-µs steps) by <see cref="IsoTpFrameCodec.EncodeStMin"/>, which rounds a value between
+    /// two codes up -- 190 µs is advertised as 200 µs; see there.
     /// Defaults to <see cref="TimeSpan.Zero"/> (no minimum separation requested).
     /// Must be non-negative — a negative value fails channel open via
     /// <see cref="IsoTpFrameCodec.EncodeStMin"/>.
@@ -70,30 +70,40 @@ public sealed class IsoTpChannelOptions
 
     /// <summary>
     /// N_As — maximum time between the sender handing an SF/FF/CF to the driver and the driver
-    /// confirming it was sent (ISO 15765-2 §6.5, corresponds to the FR-TP-010 acceptance
+    /// confirming it was sent (ISO 15765-2:2024 §9.8.1, t_TL_As; FR-TP-010 acceptance
     /// criterion). Modelled here as the TX-confirmation timeout the channel uses when calling
     /// <see cref="RawCan.ICanBusService.SendConfirmedAsync"/>. It bounds the wait for the echo on an
     /// echo-capable bus and the wait for the driver to accept the frame on any other, so a stalled
     /// frame send always ends within it instead of blocking later sends on the channel.
-    /// It is also the confirmation timeout of the Flow Control this channel sends while receiving.
-    /// An unconfirmed Flow Control is reported through
-    /// <see cref="IIsoTpChannel.BackgroundExceptionOccurred"/> and does not abort the reception:
-    /// there is no N_Ar (an open ISO 15765-2 question, #353).
+    /// The Flow Control this channel sends while receiving has its own timer, <see cref="NAr"/>.
     /// Defaults to <see cref="DefaultTimeout"/>.
     /// </summary>
     public TimeSpan NAs { get; init; } = DefaultTimeout;
 
     /// <summary>
+    /// N_Ar — maximum time between the receiver handing a Flow Control to the driver and the
+    /// driver confirming it was sent (ISO 15765-2:2024 §9.8.1, t_TL_Ar). If it expires, or the
+    /// driver definitely fails the Flow Control, the reception is aborted and a pending
+    /// <see cref="IIsoTpChannel.ReceiveAsync"/> faults with <see cref="IsoTpTimeoutException"/>
+    /// (<see cref="IsoTpTimer.NAr"/>) or <see cref="IsoTpException"/> (§9.8.2, Table 23,
+    /// CTL_TIMEOUT_A). A Consecutive Frame arriving first shows the peer has the Flow Control and
+    /// stops the timer. <c>FC(OVFLW)</c> starts no reception and is sent without it.
+    /// Defaults to <see cref="DefaultTimeout"/>.
+    /// </summary>
+    public TimeSpan NAr { get; init; } = DefaultTimeout;
+
+    /// <summary>
     /// N_Bs — maximum time between the sender's FF/last-CF-of-a-block and the peer's Flow Control
-    /// (ISO 15765-2 §6.5). Expiring aborts the outgoing PDU with a timeout error (FR-TP-010).
+    /// (ISO 15765-2:2024 §9.8.1, t_TL_Bs). Restarted by every <c>FC(WAIT)</c>. Expiring aborts the
+    /// outgoing PDU with a timeout error (FR-TP-010).
     /// Defaults to <see cref="DefaultTimeout"/>.
     /// </summary>
     public TimeSpan NBs { get; init; } = DefaultTimeout;
 
     /// <summary>
-    /// N_Cr — maximum time between two Consecutive Frames on the receive side (ISO 15765-2 §6.5).
-    /// After a Flow Control it runs from the moment the channel queues that Flow Control for
-    /// sending, not from its confirmation (an open ISO 15765-2 question, #353).
+    /// N_Cr — maximum time between two Consecutive Frames on the receive side (ISO 15765-2:2024
+    /// §9.8.1, t_TL_Cr). After a Flow Control it starts when the driver confirms that Flow Control
+    /// (until then <see cref="NAr"/> runs), or at the next Consecutive Frame if that arrives first.
     /// Expiring aborts the incoming reassembly and faults a pending
     /// <see cref="IIsoTpChannel.ReceiveAsync"/> with <see cref="IsoTpTimeoutException"/>
     /// (FR-TP-010). Defaults to <see cref="DefaultTimeout"/>.
@@ -102,8 +112,14 @@ public sealed class IsoTpChannelOptions
 
     /// <summary>
     /// WFTmax — maximum number of consecutive <see cref="FlowStatus.Wait"/> FCs the sender is
-    /// willing to accept before aborting (ISO 15765-2 §6.3, FR-TP-011). Defaults to 10.
+    /// willing to accept before aborting (FR-TP-011). Defaults to 10.
     /// </summary>
+    /// <remarks>
+    /// ISO 15765-2:2024 §9.7 makes WFTmax a receiver parameter: the limit on the Waits a
+    /// <em>receiver</em> sends. This channel never sends <c>FC(WAIT)</c>, and applies the value as
+    /// a sender-side guard instead, so a peer cannot hold a transfer open forever with Waits. A
+    /// conforming peer that needs more Waits is cut off by it; raise the value for such a peer.
+    /// </remarks>
     public int WftMax { get; init; } = 10;
 
     /// <summary>
@@ -121,9 +137,9 @@ public sealed class IsoTpChannelOptions
 
     /// <summary>
     /// Largest PDU this channel reassembles. A First Frame announcing more is answered with
-    /// <c>FC(OVFLW)</c> and nothing is allocated for it (ISO 15765-2 §9.6.5.2: the receiver
-    /// "does not have enough buffer"), so six bytes from any bus participant cannot make the
-    /// process reserve the ~2 GB a CAN-FD escape First Frame may announce (#26). Defaults to
+    /// <c>FC(OVFLW)</c> and nothing is allocated for it (ISO 15765-2:2024 §9.6.3.2, Table 19),
+    /// so six bytes from any bus participant cannot make the process reserve the up to 4 GB a
+    /// CAN-FD escape First Frame may announce (#26). Defaults to
     /// 65 535 bytes; classic CAN transfers are bounded by the codec at 4095 regardless.
     /// Outbound <see cref="IIsoTpChannel.SendAsync"/> is not bounded by this.
     /// </summary>
@@ -153,6 +169,7 @@ public sealed class IsoTpChannelOptions
             LocalBlockSize = localBlockSize ?? LocalBlockSize,
             LocalStMin = localStMin ?? LocalStMin,
             NAs = nAs ?? NAs,
+            NAr = NAr,
             NBs = nBs ?? NBs,
             NCr = nCr ?? NCr,
             WftMax = wftMax ?? WftMax,

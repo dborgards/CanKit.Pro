@@ -206,12 +206,17 @@ public class IsoTpFrameCodecPropertyTests
                     break;
                 case PciType.FirstFrame:
                     pci.Length.Should().BeGreaterThan(0, because);
+                    if (pci.LongLength <= int.MaxValue)
+                        pci.LongLength.Should().Be(pci.Length, because);
+                    else
+                        pci.Length.Should().Be(int.MaxValue, because);
                     break;
                 case PciType.ConsecutiveFrame:
                     pci.SequenceNumber.Should().BeLessThan(16, because);
                     break;
                 case PciType.FlowControl:
-                    ((int)pci.FlowStatus).Should().BeInRange(0, 2, because);
+                    // Reserved values (3..F) are passed through raw (#353).
+                    ((int)pci.FlowStatus).Should().BeInRange(0, 15, because);
                     break;
                 default:
                     Assert.Fail("unknown PCI type accepted; " + because);

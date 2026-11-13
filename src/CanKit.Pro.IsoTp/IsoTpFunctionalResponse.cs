@@ -6,7 +6,7 @@ namespace CanKit.Pro.IsoTp;
 /// A single ISO-TP PDU received from one ECU in response to a functional (1:N) request.
 /// </summary>
 /// <remarks>
-/// Functional addressing is a broadcast mechanism (ISO 15765-2 §9): the tester transmits a
+/// Functional addressing is a broadcast mechanism (ISO 15765-2:2024 §8.3.2.4): the tester transmits a
 /// Single Frame on the shared functional CAN identifier, and each ECU that recognises the
 /// request replies on its own physical response CAN identifier. One
 /// <see cref="IsoTpFunctionalResponse"/> is produced for every Single-Frame response that

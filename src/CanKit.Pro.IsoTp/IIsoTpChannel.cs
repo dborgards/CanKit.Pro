@@ -17,8 +17,8 @@ namespace CanKit.Pro.IsoTp;
 /// One channel = one PDU at a time on the wire: an outgoing multi-frame PDU
 /// (First-Frame + Consecutive-Frames) is completed (or aborted with an
 /// <see cref="IsoTpException"/>) before the next <see cref="SendAsync"/> call is transmitted.
-/// This mirrors ISO 15765-2 §6.4's "one N-USData at a time" model; overlapping sends from
-/// different callers are serialized by the channel.
+/// Overlapping sends from different callers are serialized by the channel. Transfers on
+/// different address pairs run in parallel on channels of their own (ISO 15765-2:2024 §9.9).
 /// </para>
 /// <para>
 /// Received PDUs are delivered both as an event (<see cref="DatagramReceived"/>) and as an

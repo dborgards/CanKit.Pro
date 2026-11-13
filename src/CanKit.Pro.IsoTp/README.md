@@ -84,17 +84,21 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   arrived before the caller's own stamp rather than before now, so a caller that reads the
   inbox after taking the stamp and discards after reading has seen everything it drops, and a
   frame from between the read and the discard is kept.
-- Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NBs` (peer-FC wait), `NCr` (next CF wait) and
-  `WftMax` (max consecutive `Wait` FCs) are configurable; defaults are conservative 1 s / 10.
+- Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NAr` (confirm of the Flow Control sent while
+  receiving), `NBs` (peer-FC wait), `NCr` (next CF wait) and `WftMax` (max consecutive `Wait`
+  FCs) are configurable; defaults are the standard's 1000 ms each, and 10.
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535
   bytes; classic CAN is bounded at 4095 by the codec anyway) is answered with `FC(OVFLW)` and
   nothing is allocated for it, so a CAN-FD escape First Frame cannot make the process reserve
   the ~2 GB it may announce. A Consecutive Frame whose CAN_DL is not the First Frame's, unless
-  it is the last one, is ignored as ISO 15765-2 §9.8 requires — it is not copied short. A First
-  Frame announcing no more than a Single Frame of the same CAN_DL could carry is ignored too
-  (§9.6.3.1): no Flow Control, no reassembly (#56).
-- Flow parameters: the sender takes BS and STmin from the first FC.CTS of a transfer and ignores
-  the values a later FC.CTS carries, as ISO 15765-2 requires (#56).
+  it is the last one, is ignored as ISO 15765-2:2024 §9.5.3/§9.6.4.1 require — it is not copied
+  short. A First Frame announcing no more than a Single Frame of the same CAN_DL could carry is
+  ignored too (§9.6.3.2): no Flow Control, no reassembly (#56).
+- Flow parameters: the sender takes BS and STmin from every FC(CTS) of a transfer, as ISO
+  15765-2:2024 §9.6.5.6 requires of a client sending to a server that may change them between
+  blocks. A reserved STmin makes it use 127 ms for the rest of that transfer (§9.6.5.5). The
+  receiver side advertises the same `LocalBlockSize`/`LocalStMin` in every FC, as a client
+  receiving must.
 - Echoes: a channel receives on `RxCanId` and transmits on `TxCanId`, so on an echo-capable bus
   its own frames never match its filter and host echoes are kept — two reciprocal channels in
   one process are peers. The one exception is an endpoint with `TxCanId == RxCanId` and no
@@ -126,7 +130,7 @@ not a measured result.
 
 ## Functional (1:N) addressing — `IsoTpFunctionalClient` (FR-TP-019)
 
-Per ISO 15765-2 §9 / ISO 14229-1 §7.5.4, a tester can broadcast a request to all ECUs on the bus
+Per ISO 15765-2:2024 §8.3.2.4 / ISO 14229-1 §7.7.1, a tester can broadcast a request to all ECUs on the bus
 using a shared functional CAN identifier and collect Single-Frame responses from multiple ECUs.
 
 ```csharp
@@ -150,7 +154,7 @@ foreach (var r in responses)
 - `IsoTp.OpenFunctional(ICanBus, …)` — client owns a private `CanBusService`.
 - `IsoTp.OpenFunctional(ICanBusService, …, leaveOpen)` — shares an existing service with
   physical `IIsoTpChannel` instances (disjoint ID ranges required, FR-TP-018).
-- **SF-only send** (ISO 15765-2 §9.4 restriction): a PDU that exceeds the Single-Frame capacity
+- **SF-only send** (ISO 15765-2:2024 §8.3.2.4 restriction): a PDU that exceeds the Single-Frame capacity
   for the configured frame kind faults the task with `InvalidOperationException`.
 - **SF-only collection**: First-Frame responses (which would require per-ECU physical Flow-Control
   addresses) are silently dropped; Single-Frame responses from all ECUs within the range are
@@ -170,41 +174,49 @@ foreach (var r in responses)
   it hears the fastest reply, and what arrives between two collections is buffered for the
   next. Dispose it to end the subscription.
 
-## Open ISO 15765-2 questions
+## ISO 15765-2:2024 — how the channel reads it
 
-These behaviours of the package depend on what ISO 15765-2 says, and its text has not been
-checked for them — the reviews that raised them cited it from memory (#353). Until it is, each
-behaves as described here and nothing is changed:
+Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition (#353). The
+2024 text moves the whole protocol into clause 9 and renames the timers to `t_TL_As`,
+`t_TL_Ar`, `t_TL_Bs`, `t_TL_Cr` and the results to `CTL_*`; this package keeps the familiar
+`NAs`/`NAr`/`NBs`/`NCr` names, and its clause numbers refer to the 2024 edition.
 
-1. **No N_Ar.** A Flow Control this channel sends while receiving is sent on its own, with
-   `NAs` as its confirmation timeout; if it is not confirmed, an `IsoTpException` is raised through
-   `BackgroundExceptionOccurred` and the reception goes on, bounded by `NCr` as any other. Open:
-   whether an unconfirmed Flow Control has to abort the reception (N_Ar).
-2. **Where N_Cr starts.** After a Flow Control, `NCr` runs from the moment the channel queues that
-   Flow Control for sending, not from its confirmation, so the peer's time includes the Flow
-   Control's own way to the wire. Open: whether N_Cr starts at the Flow Control's confirmation.
-3. **Reserved FlowStatus.** A Flow Control with a FlowStatus above 2 does not parse
-   (`TryParsePci` returns false) and is dropped without notice; the transfer it was meant for
-   keeps waiting and ends with `IsoTpTimeoutException` when `NBs` runs out. Open: whether it has to
-   abort the transfer at once (N_INVALID_FS).
-4. **Escape First Frame beyond `int.MaxValue`.** A CAN-FD escape First Frame whose FF_DL is above
-   `int.MaxValue` does not parse and is dropped without a Flow Control, while one above
-   `MaxReceivePduLength` but within `int.MaxValue` is answered with `FC(OVFLW)`. Open: whether the
-   larger one has to be answered with `FC(OVFLW)` too.
-5. **STmin rounding.** `EncodeStMin` rounds a value of 1 ms or more to the nearest millisecond
-   (half up, capped at 127 ms) and truncates a smaller one down to its 100 µs step, but not below
-   100 µs (under 1 µs encodes as 0). So `LocalStMin` = 190 µs advertises 100 µs, 999 µs advertises
-   900 µs and 1.4 ms advertises 1 ms: less separation than was asked for. Open: whether a minimum separation has to be rounded up.
-6. **No TX_DL, no BRS.** With `UseCanFd` the sender fills frames up to 64 bytes; no smaller TX_DL
-   can be configured. The channel never sets a frame's bit-rate-switch (BRS) flag. Open: whether
-   either has to be configurable.
-7. **Section numbers.** The ISO 15765-2 clauses cited in this package's XML docs and comments
-   (`IsoTpChannelOptions`, `IsoTpChannel`, the codec) have not been reconciled to one edition of the
-   standard or checked against its text; read them as pointers, not as references.
-8. **STmin before the first Consecutive Frame.** After every `FC(CTS)` — the first of a transfer
-   and each one after a block — the sender waits STmin before the first Consecutive Frame, not only
-   between Consecutive Frames. That is the conservative reading. Open: whether the first
-   Consecutive Frame after a Flow Control may go out at once.
+1. **N_Ar.** The Flow Control a receiving channel sends has its own confirmation timer, `NAr`
+   (default 1000 ms). If it expires, or the driver fails the frame, the reception is aborted and
+   `ReceiveAsync` faults with `IsoTpTimeoutException` (`IsoTpTimer.NAr`) or `IsoTpException`
+   (§9.8.1 Table 22, §9.8.2 Table 23: `CTL_TIMEOUT_A`). A Consecutive Frame that arrives before
+   the confirmation shows the peer has the Flow Control and ends N_Ar as well. `FC(OVFLW)`
+   starts no reception and is sent without it.
+2. **Where N_Cr starts.** At the Flow Control's confirmation, or at a Consecutive Frame that
+   arrives first (Table 22). Until then only N_Ar runs.
+3. **Reserved FlowStatus.** A Flow Control with a FlowStatus of 3..F aborts the send at once with
+   `IsoTpInvalidFlowStatusException` when the sender is waiting for a Flow Control (§9.6.5.2,
+   `CTL_INVALID_FS`). Received at any other time it is ignored (§9.8.3, Table 24).
+   `TryParsePci` returns such a Flow Control with the raw value in `Pci.FlowStatus`.
+4. **First Frames too large to take.** Any First Frame announcing more than
+   `MaxReceivePduLength` — up to the CAN FD escape form's 2³² − 1 bytes — is answered with
+   `FC(OVFLW)` and nothing is allocated (§9.6.3.2). `Pci.LongLength` carries an escape FF_DL above
+   `int.MaxValue`.
+5. **STmin rounding.** `EncodeStMin` rounds a value between two codes up: `LocalStMin` = 190 µs
+   advertises 200 µs, 999 µs advertises 1 ms and 1.4 ms advertises 2 ms; above 127 ms it is
+   capped at 127 ms. The standard defines only the codes (§9.6.5.4, Table 21); rounding up keeps
+   the receiver from advertising less separation than it was configured for.
+6. **TX_DL and BRS.** With `UseCanFd` the sender uses TX_DL = 64, one of the configuration values
+   §9.5.1 (Table 7) permits; a smaller TX_DL cannot be configured, so an FD bus whose nodes take
+   only shorter frames cannot be served. Receiving adapts to any TX_DL the peer uses (§9.5.2,
+   RX_DL from the First Frame). The bit-rate switch is a bus/adapter setting outside ISO
+   15765-2; the channel does not set BRS.
+7. **Classic and CAN FD frames on one link.** A reception started with CAN FD frames is neither
+   continued nor ended by a classic frame, and the other way round (§9.5.2); such a frame is
+   ignored while the reception runs.
+8. **STmin before the first Consecutive Frame.** After every `FC(CTS)` the sender waits STmin
+   before the first Consecutive Frame, not only between Consecutive Frames. §9.6.5.4 only
+   requires the gap between two Consecutive Frames, so this is the conservative reading and
+   costs at most one STmin per block.
+9. **WFTmax.** §9.7 makes WFTmax a receiver parameter (how many `FC(WAIT)` a receiver may send).
+   The channel never sends `FC(WAIT)` and uses `WftMax` (default 10) as a sender-side guard: more
+   consecutive Waits than that abort the send with `IsoTpWaitFrameLimitExceededException`. A
+   conforming peer that needs more Waits is cut off by it; raise `WftMax` for such a peer.
 
 ## Non-scope (yet)
 
@@ -229,7 +241,7 @@ and deliberately avoids the following defects:
    (`((data[0] & 0x0F) << 8) | data[1]`), so lengths in `[256, 4095]` round-trip (FR-TP-005).
 5. `EncodeStMin` accepts the commonly-used 0 ms and 1 ms values (FR-TP-006).
 6. `DecodeStMin` maps the reserved raw values `0x80..0xF0` and `0xFA..0xFF` to 127 ms
-   (`0x7F`) per ISO 15765-2 instead of throwing (FR-TP-007, FR-RAW-052).
+   (`0x7F`) per ISO 15765-2:2024 §9.6.5.5 instead of throwing (FR-TP-007, FR-RAW-052).
 7. Consecutive-Frame sequence numbers start at `1` and wrap `0..15` (FR-TP-008).
 8. `TryParsePci` is bounds-safe and never throws `IndexOutOfRangeException`, even for a 1-byte
    frame or a truncated Flow-Control frame (FR-TP-007).

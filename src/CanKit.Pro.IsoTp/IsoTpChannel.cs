@@ -224,6 +224,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // after a send is already on the wire or a reception already started, which leaves it
         // with no deadline at all. Zero would fire on the next loop iteration, i.e. never wait.
         RequirePositive(nameof(_options.NAs), _options.NAs);
+        RequirePositive(nameof(_options.NAr), _options.NAr);
         RequirePositive(nameof(_options.NBs), _options.NBs);
         RequirePositive(nameof(_options.NCr), _options.NCr);
 
@@ -961,8 +962,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var payload = frame.Data.ToArray();
         var addrExt = _endpoint.UsesAddressExtension;
         // Endpoint uses an address-extension byte and the first byte does not match:
-        // skip this frame silently (matches ISO 15765-2 §5.2.4.4 semantics for a foreign
-        // address-extension on the same CAN-ID).
+        // skip this frame silently -- it is addressed to another node (ISO 15765-2:2024
+        // §10.3.4/§10.3.5, extended and mixed addressing).
         //
         // Fix: filter on the *RX* address extension. For Extended
         // addressing that is the local node's source address (which the peer writes into
@@ -980,8 +981,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // still in the mailbox is a reception in progress too, and the next First Frame must
         // not hide it (Codex, again). The actor withdraws each record on its outcome.
         IsoTpReceptionInProgress? announce = null;
+        // An escape First Frame beyond int.MaxValue is answered with FC(OVFLW) and starts
+        // nothing, so it is not announced either (ISO 15765-2:2024 §9.6.3.2).
         if (IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci)
             && pci.Type == PciType.FirstFrame
+            && pci.LongLength <= int.MaxValue
             && !FitsASingleFrame(pci, payload.Length)
             && frameArrival >= Volatile.Read(ref _discardStamp))
         {
@@ -1159,11 +1163,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // so a canceled/timed-out send that we already failed doesn't touch _tx twice.
     private void SendFrameOnBus(byte[] payload, TxExpect expectTx)
     {
-        var frame = _options.UseCanFd
-            ? CanFrame.Fd(unchecked((int)_endpoint.TxCanId), payload,
-                isExtendedFrame: _endpoint.IsExtendedCanId)
-            : CanFrame.Classic(unchecked((int)_endpoint.TxCanId), payload,
-                isExtendedFrame: _endpoint.IsExtendedCanId);
+        var frame = BuildTxFrame(payload);
 
         // Capture the current TX for closure identity: if _tx has been replaced by a subsequent
         // send by the time confirmation lands, we must not touch that unrelated operation.
@@ -1372,6 +1372,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
+    // STmin is waited before the first Consecutive Frame after an FC(CTS) too, not only between
+    // Consecutive Frames. ISO 15765-2:2024 §9.6.5.4 only asks for the gap between two of them, so
+    // this is the conservative reading; it costs at most one STmin per block (#353).
     private void ScheduleNextCf(TxState tx)
     {
         if (tx.StMin > TimeSpan.Zero)
@@ -1469,13 +1472,26 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
+        {
+            if (announce is not null) WithdrawReception(announce);
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
+        }
 
         // Arrived before the latest DiscardPendingPdus: part of what it was asked to drop,
         // wherever the frame was at the time. Dropped unanswered -- a Flow Control for a
         // First Frame here would invite the rest of a transfer nobody waits for. Flow Control
         // itself is exempt: it belongs to an outbound transfer the discard does not concern.
         if (pci.Type != PciType.FlowControl && frameArrival < Volatile.Read(ref _discardStamp))
+        {
+            if (announce is not null) WithdrawReception(announce);
+            return;
+        }
+
+        // A reception carried by CAN FD frames is neither continued nor ended by a classic frame,
+        // nor the other way round: on a link carrying both, a frame of the other kind is ignored
+        // while the reception runs (ISO 15765-2:2024 §9.5.2). Flow Control belongs to the send
+        // side and is not affected.
+        if (pci.Type != PciType.FlowControl && _rx is not null && _rx.IsCanFd != isCanFd)
         {
             if (announce is not null) WithdrawReception(announce);
             return;
@@ -1492,7 +1508,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 announce ??= new IsoTpReceptionInProgress(frameArrival, pci.Length,
                     new ReadOnlyMemory<byte>(payload, pci.DataOffset,
                         Math.Max(0, payload.Length - pci.DataOffset)));
-                if (!TryBeginRx(payload, pci, frameArrival, announce))
+                if (!TryBeginRx(payload, pci, isCanFd, announce))
                 {
                     // Refused, or complete in the one frame (and then already in the inbox):
                     // the reader's record is withdrawn.
@@ -1510,9 +1526,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private void HandleRxSingleFrame(byte[] payload, Pci pci, long frameArrival)
     {
-        // A racing SF starts a fresh PDU: abort any in-flight reassembly (matches ISO 15765-2
-        // §6.5.2's "an unexpected N_PCI type shall abort reception"). Must go through AbortRx —
-        // a silent _rx clear leaves ReceiveAsync parked on an empty inbox.
+        // A racing SF starts a fresh PDU: abort any in-flight reassembly and process the SF
+        // (ISO 15765-2:2024 §9.8.3, Table 24: CTL_UNEXP_PDU). Must go through AbortRx — a silent
+        // _rx clear leaves ReceiveAsync parked on an empty inbox.
         if (_rx is not null)
         {
             AbortRx(new IsoTpException(
@@ -1526,7 +1542,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     // A First Frame announcing no more than a Single Frame of the same CAN_DL could carry is
-    // ignored (ISO 15765-2 §9.6.3.1, #56): the capacity is 7 less the address extension in the
+    // ignored (ISO 15765-2:2024 §9.6.3.1 Table 15, §9.6.3.2; #56): the capacity is 7 less the address extension in the
     // short PCI form (CAN_DL 8), CAN_DL - 2 less the extension in the escape form beyond it.
     private bool FitsASingleFrame(in Pci pci, int canDl)
     {
@@ -1539,21 +1555,22 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     // True when a reassembly is now in progress for this First Frame; false when the frame was
     // ignored or refused.
-    private bool TryBeginRx(byte[] payload, Pci pci, long frameArrival,
+    private bool TryBeginRx(byte[] payload, Pci pci, bool isCanFd,
         IsoTpReceptionInProgress announce)
     {
         // Two frames are not First Frames and are ignored -- with no effect on a reassembly in
         // flight, which only a First Frame proper aborts (Bugbot on #147). A First Frame must
         // be a full frame: classic CAN_DL 8, CAN FD at least 8 -- its CAN_DL is the RX_DL every
-        // Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8, #27); a shorter one
-        // is ignored. And one announcing what a Single Frame of the same CAN_DL could have
-        // carried is ignored too (§9.6.3.1, #56): no Flow Control, no reassembly. The Single
+        // Consecutive Frame of the transfer is held to (ISO 15765-2:2024 §9.5.3, §9.6.4.1, #27);
+        // a shorter one is ignored (§9.6.3.2). And one announcing what a Single Frame of the
+        // same CAN_DL could have carried is ignored too (§9.6.3.2, #56): no Flow Control, no
+        // reassembly. The Single
         // Frame capacity at that CAN_DL is 7 less the address extension in the short PCI form
         // (CAN_DL 8) and CAN_DL - 2 less the extension in the escape form beyond it.
         if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return false;
         if (FitsASingleFrame(pci, payload.Length)) return false;
 
-        // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
+        // A new FF aborts any half-built reassembly (ISO 15765-2:2024 §9.8.3, Table 24). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
         // FC(OVFLW) and no replacement session is started.
         if (_rx is not null)
@@ -1562,10 +1579,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 "ISO-TP First Frame aborted in-flight multi-frame reception."));
         }
 
-        // Cap reassembly allocation to the codec limit for this frame kind
-        // and to MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to int.MaxValue;
-        // refuse with FC(OVFLW) and do not allocate.
-        if (pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
+        // Cap reassembly allocation to the codec limit for this frame kind and to
+        // MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to 2^32 - 1 bytes;
+        // refuse with FC(OVFLW) and do not allocate (ISO 15765-2:2024 §9.6.3.2).
+        if (pci.LongLength > int.MaxValue
+            || pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
         {
             SendOverflowFlowControl();
             return false;
@@ -1589,30 +1607,28 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         Array.Copy(payload, pci.DataOffset, buffer, 0, firstChunk);
 
-        // Reply with FC(CTS, BS, STmin) advertising our own block size / separation time. The
-        // announced length exceeds what one frame carries (checked above), so at least one
-        // Consecutive Frame follows.
-        var fc = IsoTpFrameCodec.BuildFlowControl(_endpoint, FlowStatus.ClearToSend,
-            _options.LocalBlockSize, _localStMinRaw,
-            _options.UseCanFd, _options.UsePadding, _options.PaddingByte);
-        SendUnsequencedFrame(fc);
-
-        _rx = new RxState(buffer, received: firstChunk,
+        var rx = new RxState(buffer, received: firstChunk,
             expectedSn: IsoTpFrameCodec.FirstConsecutiveSequenceNumber,
             blockCounter: _options.LocalBlockSize,
             rxDl: payload.Length,
+            isCanFd,
             announce);
+        _rx = rx;
         // The reader published the record; re-published here only if a DiscardPendingPdus
         // posted between the two removed it, so the list states what is in progress.
         PublishReception(announce);
-        ArmNCr();
+
+        // Reply with FC(CTS, BS, STmin) advertising our own block size / separation time. The
+        // announced length exceeds what one frame carries (checked above), so at least one
+        // Consecutive Frame follows. N_Ar runs until the FC is confirmed, then N_Cr.
+        SendReceptionFlowControl(rx);
         return true;
     }
 
     private void HandleRxConsecutiveFrame(byte[] payload, Pci pci, long frameArrival)
     {
         var rx = _rx;
-        if (rx is null) return; // stray CF, no reassembly in progress: drop per ISO 15765-2 §6.5.2.
+        if (rx is null) return; // stray CF, no reassembly in progress: ignored (ISO 15765-2:2024 §9.8.3, Table 24).
 
         if (pci.SequenceNumber != rx.ExpectedSn)
         {
@@ -1627,7 +1643,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         int remaining = rx.Buffer.Length - rx.Received;
         int available = payload.Length - pci.DataOffset;
-        // CAN_DL validation (ISO 15765-2 §9.8, #27): a Consecutive Frame that is not the last
+        // CAN_DL validation (ISO 15765-2:2024 §9.5.3, §9.6.4.1, #27): a Consecutive Frame that is not the last
         // carries RX_DL bytes, the CAN_DL the First Frame set; the last one carries at least the
         // remaining bytes and no more than RX_DL. Anything else — a shortened CF whose 4 bytes
         // would shift everything after it, a PCI-only CF — is ignored: not
@@ -1638,6 +1654,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             : payload.Length == rx.RxDl;
         if (!conforming) return;
         int copy = Math.Min(remaining, available);
+
+        // A Consecutive Frame the peer sends after our Flow Control shows the peer has it, even
+        // if its confirmation is still outstanding: N_Ar has done its job.
+        rx.PendingFlowControl = null;
 
         Array.Copy(payload, pci.DataOffset, rx.Buffer, rx.Received, copy);
         rx.Received += copy;
@@ -1666,16 +1686,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             rx.BlockCounter--;
             if (rx.BlockCounter <= 0)
             {
-                var fc = IsoTpFrameCodec.BuildFlowControl(_endpoint, FlowStatus.ClearToSend,
-                    _options.LocalBlockSize, _localStMinRaw,
-                    _options.UseCanFd, _options.UsePadding, _options.PaddingByte);
-                SendUnsequencedFrame(fc);
                 rx.BlockCounter = _options.LocalBlockSize;
+                // N_Ar for the block's Flow Control, then N_Cr from its confirmation.
+                SendReceptionFlowControl(rx);
+                return;
             }
         }
 
-        // Any CF (including the one we just wrote a fresh FC after) refreshes N_Cr for the next CF.
-        rx.RearmDeadline(_deadlines, _options.NCr, OnNCrExpired);
+        // Any other CF refreshes N_Cr for the next CF.
+        rx.RearmDeadline(_deadlines, _options.NCr, OnRxDeadlineExpired);
     }
 
     private void HandleRxFlowControl(Pci pci) => HandleRxFlowControl(pci, deferIfBusy: true);
@@ -1684,7 +1703,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         var tx = _tx;
         if (tx is null)
-            return; // FC with no matching pending TX: drop (matches ISO 15765-2 §6.5.5.2).
+            return; // FC with no matching pending TX: ignored (ISO 15765-2:2024 §9.8.3, Table 24).
 
         // FF handed to the driver but not yet TX-confirmed: defer FC until FirstFrameConfirm so
         // we neither arm N_Bs early nor emit CF before FF confirm.
@@ -1715,14 +1734,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         switch (pci.FlowStatus)
         {
             case FlowStatus.ClearToSend:
-                // BS and STmin are the first FC.CTS's for the whole transfer; ISO 15765-2 has
-                // the sender ignore the values a later FC.CTS carries (#56).
-                if (!tx.FlowParametersTaken)
-                {
-                    tx.BlockSize = pci.BlockSize;
-                    tx.StMin = pci.StMin;
-                    tx.FlowParametersTaken = true;
-                }
+                // BS and STmin come from every FC(CTS) of the transfer: a server may change them
+                // from block to block and the client, sending, has to follow (ISO 15765-2:2024
+                // §9.6.5.6). A reserved STmin makes the sender use 127 ms for the rest of the
+                // transfer, whatever later FCs say (§9.6.5.5).
+                tx.BlockSize = pci.BlockSize;
+                if (IsReservedStMin(pci.StMinRaw))
+                    tx.StMinReservedSeen = true;
+                tx.StMin = tx.StMinReservedSeen ? ReservedStMinFallback : pci.StMin;
                 tx.CfsInCurrentBlock = 0;
                 tx.WaitFramesReceived = 0;
                 tx.State = TxStage.SendingCf;
@@ -1745,8 +1764,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 FailTx(new IsoTpOverflowException(
                     "Peer indicated Flow-Control Overflow (FS=OVFLW); PDU too large for the receiver."));
                 break;
+
+            default:
+                // A reserved FlowStatus aborts the transmission at once (ISO 15765-2:2024
+                // §9.6.5.2, CTL_INVALID_FS) rather than leaving it to N_Bs.
+                FailTx(new IsoTpInvalidFlowStatusException((byte)pci.FlowStatus));
+                break;
         }
     }
+
+    private static readonly TimeSpan ReservedStMinFallback = TimeSpan.FromMilliseconds(0x7F);
+
+    private static bool IsReservedStMin(byte raw) => raw > 0x7F && (raw < 0xF1 || raw > 0xF9);
 
     /// <summary>
     /// Applies Flow-Control frames that arrived while FF/CF TX-confirm was still outstanding,
@@ -1782,20 +1811,102 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private void ArmNCr()
+    /// <summary>
+    /// The one deadline of a reception: N_Ar while its latest Flow Control is unconfirmed, N_Cr
+    /// otherwise (ISO 15765-2:2024 §9.8.1, Table 22). Either expiry aborts the reception
+    /// (Table 23: CTL_TIMEOUT_A, CTL_TIMEOUT_Cr).
+    /// </summary>
+    private void OnRxDeadlineExpired()
     {
         var rx = _rx;
         if (rx is null) return;
-        rx.RearmDeadline(_deadlines, _options.NCr, OnNCrExpired);
-    }
-
-    private void OnNCrExpired()
-    {
-        if (_rx is null) return;
-        // FR-TP-010: N_Cr expiry must complete the receive with an observable error — not only
+        // FR-TP-010: expiry must complete the receive with an observable error — not only
         // BackgroundExceptionOccurred (which leaves ReceiveAsync parked on an empty inbox).
+        if (rx.PendingFlowControl is not null)
+        {
+            AbortRx(new IsoTpTimeoutException(IsoTpTimer.NAr,
+                "N_Ar timer expired waiting for the CAN driver to confirm the Flow Control."));
+            return;
+        }
         AbortRx(new IsoTpTimeoutException(IsoTpTimer.NCr,
             "N_Cr timer expired waiting for next Consecutive Frame."));
+    }
+
+    /// <summary>
+    /// Sends the FC(CTS) of a reception and runs N_Ar for it. Its confirmation starts N_Cr; a
+    /// confirmation that times out or fails aborts the reception (ISO 15765-2:2024 §9.8.1,
+    /// Table 22; §9.8.2, Table 23). A Consecutive Frame arriving first ends N_Ar as well.
+    /// </summary>
+    private void SendReceptionFlowControl(RxState rx)
+    {
+        var fc = IsoTpFrameCodec.BuildFlowControl(_endpoint, FlowStatus.ClearToSend,
+            _options.LocalBlockSize, _localStMinRaw,
+            _options.UseCanFd, _options.UsePadding, _options.PaddingByte);
+        var token = new object();
+        rx.PendingFlowControl = token;
+        rx.RearmDeadline(_deadlines, _options.NAr, OnRxDeadlineExpired);
+
+        var frame = BuildTxFrame(fc);
+        var timeout = _options.NAr;
+        _ = Task.Run(async () =>
+        {
+            TxConfirmation? confirmation = null;
+            Exception? failure = null;
+            try
+            {
+                confirmation = await _service.SendConfirmedAsync(frame, timeout).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+
+            try
+            {
+                _actor.Post(() => OnReceptionFlowControlConfirmed(rx, token, confirmation, failure));
+            }
+            catch (ObjectDisposedException)
+            {
+                // Actor gone: the channel is tearing down and the reception with it.
+            }
+        });
+    }
+
+    private void OnReceptionFlowControlConfirmed(RxState rx, object token,
+        TxConfirmation? confirmation, Exception? failure)
+    {
+        bool confirmed = failure is null && confirmation!.Value.Confirmed;
+        // A service disposed under the channel ends the subscription too, and that loss is what
+        // ends the inbox; aborting here would put a transport fault in front of it.
+        if (!ReferenceEquals(_rx, rx) || !ReferenceEquals(rx.PendingFlowControl, token)
+            || failure is ObjectDisposedException)
+        {
+            // The reception ended, or a Consecutive Frame already showed the peer has this Flow
+            // Control: nothing to abort, but a failed send is still worth a report.
+            if (!confirmed)
+                RaiseBackgroundException(failure ?? new IsoTpException(
+                    $"ISO-TP Flow Control send failed: {confirmation!.Value.FailureReason}."));
+            return;
+        }
+
+        if (confirmed)
+        {
+            rx.PendingFlowControl = null;
+            rx.RearmDeadline(_deadlines, _options.NCr, OnRxDeadlineExpired);
+            return;
+        }
+
+        if (failure is not null)
+        {
+            AbortRx(new IsoTpException("ISO-TP Flow Control send failed; reception aborted.", failure));
+            return;
+        }
+
+        var reason = confirmation!.Value.FailureReason;
+        AbortRx(reason == TxConfirmFailureReason.Timeout
+            ? new IsoTpTimeoutException(IsoTpTimer.NAr,
+                "N_Ar timer expired waiting for the CAN driver to confirm the Flow Control.")
+            : new IsoTpException($"ISO-TP Flow Control send failed ({reason}); reception aborted."));
     }
 
     /// <summary>
@@ -1843,17 +1954,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         SendUnsequencedFrame(ovflw);
     }
 
-    // Fire-and-forget send of a frame that is NOT part of the current TX PDU (typically a FC we
-    // emit while receiving). Confirmation failures don't fail an outbound PDU; they surface as
-    // background exceptions instead so a broken FC doesn't kill an unrelated in-flight send.
+    private CanFrame BuildTxFrame(byte[] payload) => _options.UseCanFd
+        ? CanFrame.Fd(unchecked((int)_endpoint.TxCanId), payload,
+            isExtendedFrame: _endpoint.IsExtendedCanId)
+        : CanFrame.Classic(unchecked((int)_endpoint.TxCanId), payload,
+            isExtendedFrame: _endpoint.IsExtendedCanId);
+
+    // Fire-and-forget send of FC(OVFLW): it starts no reception, so there is nothing for N_Ar to
+    // abort. Confirmation failures surface as background exceptions.
     private void SendUnsequencedFrame(byte[] payload)
     {
-        var frame = _options.UseCanFd
-            ? CanFrame.Fd(unchecked((int)_endpoint.TxCanId), payload,
-                isExtendedFrame: _endpoint.IsExtendedCanId)
-            : CanFrame.Classic(unchecked((int)_endpoint.TxCanId), payload,
-                isExtendedFrame: _endpoint.IsExtendedCanId);
-        var timeout = _options.NAs;
+        var frame = BuildTxFrame(payload);
+        var timeout = _options.NAr;
 
         _ = Task.Run(async () =>
         {
@@ -1983,11 +2095,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         public byte NextSn { get; set; }
         public int LastCfChunkLen { get; set; }
 
-        // Peer-provided from the last CTS-FC.
+        // Peer-provided from the latest CTS-FC (ISO 15765-2:2024 §9.6.5.6).
         public byte BlockSize { get; set; }
         public TimeSpan StMin { get; set; }
-        /// <summary>Whether the first FC.CTS of this transfer has set BS and STmin.</summary>
-        public bool FlowParametersTaken { get; set; }
+        /// <summary>A reserved STmin was seen: 127 ms for the rest of the transfer (§9.6.5.5).</summary>
+        public bool StMinReservedSeen { get; set; }
 
         // Wait frame tracking (FR-TP-011).
         public int WaitFramesReceived { get; set; }
@@ -2019,8 +2131,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private sealed class RxState
     {
         public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter, int rxDl,
-            IsoTpReceptionInProgress announce)
+            bool isCanFd, IsoTpReceptionInProgress announce)
         {
+            IsCanFd = isCanFd;
             Buffer = buffer;
             Received = received;
             ExpectedSn = expectedSn;
@@ -2036,8 +2149,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         public byte[] Buffer { get; }
 
         /// <summary>The First Frame's CAN_DL: the data length every Consecutive Frame of this
-        /// transfer but the last must have (ISO 15765-2 §9.8).</summary>
+        /// transfer but the last must have (ISO 15765-2:2024 §9.5.3, §9.6.4.1).</summary>
         public int RxDl { get; }
+
+        /// <summary>Whether the First Frame was a CAN FD frame; frames of the other kind neither
+        /// continue nor end this reception (§9.5.2).</summary>
+        public bool IsCanFd { get; }
+
+        /// <summary>The Flow Control whose confirmation N_Ar is waiting for; null once it is
+        /// confirmed or a Consecutive Frame showed the peer has it.</summary>
+        public object? PendingFlowControl { get; set; }
         public int Received { get; set; }
         public byte ExpectedSn { get; set; }
         public int BlockCounter { get; set; }
