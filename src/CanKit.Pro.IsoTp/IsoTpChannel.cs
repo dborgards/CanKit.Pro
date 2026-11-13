@@ -1471,11 +1471,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             return;
         }
 
+        // The reader announces a frame only after the same parse succeeded, so a frame that fails
+        // here was never announced.
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
-        {
-            if (announce is not null) WithdrawReception(announce);
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
-        }
 
         // Arrived before the latest DiscardPendingPdus: part of what it was asked to drop,
         // wherever the frame was at the time. Dropped unanswered -- a Flow Control for a
@@ -1775,7 +1774,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private static readonly TimeSpan ReservedStMinFallback = TimeSpan.FromMilliseconds(0x7F);
 
-    private static bool IsReservedStMin(byte raw) => raw > 0x7F && (raw < 0xF1 || raw > 0xF9);
+    internal static bool IsReservedStMin(byte raw) => raw > 0x7F && (raw < 0xF1 || raw > 0xF9);
 
     /// <summary>
     /// Applies Flow-Control frames that arrived while FF/CF TX-confirm was still outstanding,

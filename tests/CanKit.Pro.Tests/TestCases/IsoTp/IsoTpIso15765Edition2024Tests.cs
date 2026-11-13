@@ -407,6 +407,9 @@ public class IsoTpIso15765Edition2024Tests : IClassFixture<VirtualAdapterFixture
             IsoTpFrameCodec.BuildSingleFrame(EpPeer, new byte[] { 0xEE }, isCanFd: false, padding: true)));
         busPeer.Transmit(CanFrame.Classic(0x7E0,
             IsoTpFrameCodec.BuildConsecutiveFrame(EpPeer, 1, pdu.AsSpan(62, 7), isCanFd: false, padding: true)));
+        // A classic First Frame is announced on arrival like any other and withdrawn when ignored.
+        busPeer.Transmit(CanFrame.Classic(0x7E0,
+            IsoTpFrameCodec.BuildFirstFrame(EpPeer, 20, pdu.AsSpan(0, 6), isCanFd: false)));
         await receiver.SettleAsync().WaitAsync(ShortTimeout);
         receive.IsCompleted.Should().BeFalse("a classic frame must not end the CAN FD reception");
         receiver.GetReceptionsInProgress().Should().HaveCount(1);
@@ -477,6 +480,29 @@ public class IsoTpIso15765Edition2024Tests : IClassFixture<VirtualAdapterFixture
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(127));
         await send.WaitAsync(ShortTimeout);
         Volatile.Read(ref cfs).Should().Be(4);
+    }
+
+    // §9.6.5.5: 80h..F0h and FAh..FFh are reserved; F1h..F9h are 100..900 µs.
+    [Theory]
+    [InlineData(0x00, false)]
+    [InlineData(0x7F, false)]
+    [InlineData(0x80, true)]
+    [InlineData(0xF0, true)]
+    [InlineData(0xF1, false)]
+    [InlineData(0xF9, false)]
+    [InlineData(0xFA, true)]
+    [InlineData(0xFF, true)]
+    public void Reserved_StMin_Values_Are_Recognised(int raw, bool reserved)
+        => IsoTpChannel.IsReservedStMin((byte)raw).Should().Be(reserved);
+
+    [Fact]
+    public void Pcis_That_Differ_Only_In_The_Long_Length_Are_Not_Equal()
+    {
+        static Pci Ff(long length) => new(PciType.FirstFrame, 0, length, 0, default, 0, 0, TimeSpan.Zero, 6);
+        Ff(0x1_0000_0000L).Should().Be(Ff(0x1_0000_0000L));
+        Ff(0x1_0000_0000L).GetHashCode().Should().Be(Ff(0x1_0000_0000L).GetHashCode());
+        Ff(0x1_0000_0000L).Should().NotBe(Ff(0x1_0000_0001L));
+        Ff(0x1_0000_0000L).GetHashCode().Should().NotBe(Ff(0x1_0000_0001L).GetHashCode());
     }
 
     /// <summary>
