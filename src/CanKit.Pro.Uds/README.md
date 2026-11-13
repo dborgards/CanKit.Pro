@@ -1,6 +1,6 @@
 # CanKit.Pro.Uds
 
-Unified Diagnostic Services (UDS, ISO 14229-1:2020) client for CanKit.Pro. Sits
+Unified Diagnostic Services (UDS, ISO 14229-1:2026) client for CanKit.Pro. Sits
 directly on top of `CanKit.Pro.IsoTp`'s `IIsoTpChannel`, so anything that speaks ISO-TP
 (virtual loopback, PCAN, SocketCAN, Vector, Kvaser, ZLG, ControlCAN, ...) can be driven with
 the same client.
@@ -30,7 +30,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 | FR-UDS-008 | P2 / P2* timing | Yes — configurable `UdsClientOptions.P2ClientMax` / `P2StarClientMax`; `UdsTimeoutException` on expiry |
 | FR-UDS-009 | NRC 0x78 responsePending | Yes — client stays inside P2* while the ECU keeps replying 0x78, bounded by `MaxResponsePendingCount` |
 | FR-UDS-010 | Structured NRC | Yes — `UdsNegativeResponseException` carries requested SID + raw NRC byte + named enum |
-| FR-UDS-011 | Multi-DID `0x22` | Yes (SHOULD) — `ReadDataByIdentifierAsync(IReadOnlyList<ushort>, IReadOnlyDictionary<ushort, int>)` (caller supplies per-DID `dataRecord` lengths per ISO 14229-1 §9.3.4.4) |
+| FR-UDS-011 | Multi-DID `0x22` | Yes (SHOULD) — `ReadDataByIdentifierAsync(IReadOnlyList<ushort>, IReadOnlyDictionary<ushort, int>)` (caller supplies per-DID `dataRecord` lengths per ISO 14229-1:2026 §10.2.3) |
 | FR-UDS-012 | 0x34 / 0x35 / 0x36 / 0x37 upload/download | Yes (COULD) — `RequestDownloadAsync` / `RequestUploadAsync` / `TransferDataAsync(byte bsc, ReadOnlyMemory<byte>)` / `RequestTransferExitAsync(ReadOnlyMemory<byte>)`, plus one-shot `DownloadAsync` that negotiates `maxNumberOfBlockLength`, chunks the payload and walks the BSC with `0xFF → 0x00` wrap |
 
 ## Quick start
@@ -79,7 +79,7 @@ await uds.DownloadAsync(
 ## Design notes
 
 * One client = one tester ↔ ECU relationship. Requests are serialized through an internal
-  `SemaphoreSlim` so at most one UDS transaction is on the wire (ISO 14229-1 §7.3).
+  `SemaphoreSlim` so at most one UDS transaction is on the wire.
 * The client never buffers responses; each `ReceiveAsync` is a bounded wait derived from the
   active timing budget (P2 first, then P2* after every 0x78).
 * Stray or mismatched responses received while a request is pending are silently discarded;
@@ -125,20 +125,27 @@ await uds.DownloadAsync(
 * NRC 0x21 (busyRepeatRequest) is what it says: the request is repeated, up to
   `UdsClientOptions.MaxBusyRepeatRequests` times (default 3, after `BusyRepeatRequestDelay`,
   default zero), each with a fresh P2; the negative response surfaces only once the repeats are
-  used up (#57). The zero delay is not taken from ISO 14229-1: whether the standard asks for a
-  delay before the repeat has not been checked against its text, and the default stays zero until
-  it is (#354).
+  used up (#57). ISO 14229-1:2026 §A.1 (Table A.1, NRC 21h) has the repeat delayed by a time
+  given in the implementation documents (OEM/ECU specification, or the data-link part such as
+  ISO 14229-3) and gives no value, so the client defaults to zero; set `BusyRepeatRequestDelay`
+  from the ECU's specification. `MaxBusyRepeatRequests = 0` surfaces the first 0x21 instead of
+  repeating, which opts out of the standard's "client shall repeat" (#354).
 * `DownloadAsync` retries no block: apart from the NRC 0x21 repeat above, the first failed
   TransferData — NRC 0x73 (wrongBlockSequenceCounter), a timeout, a transport error — ends the
-  call with its exception and sends no RequestTransferExit. That is a scope limit of the
-  convenience method, not a reading of ISO 14229-1 (not checked against the text); a caller that
-  wants to repeat blocks drives `RequestDownloadAsync` / `TransferDataAsync` /
-  `RequestTransferExitAsync` itself (#354).
-* `SecurityAccessAsync` holds the request lock from the seed request to the key's answer, so
-  across `computeKey`: the keep-alive's TesterPresent waits too, and a `computeKey` slower than
-  the server's S3 timer can let the session time out before the key is sent. Whether
-  ISO 14229-1 would let a TesterPresent between seed and key leave the seed valid is not checked
-  against the text; until it is, the lock stays (#354).
+  call with its exception and sends no RequestTransferExit. ISO 14229-1:2026 §14.4 lets a client
+  repeat a block with the same counter after a lost response; the convenience method does not
+  yet (#426). A caller that wants to repeat blocks drives `RequestDownloadAsync` /
+  `TransferDataAsync` / `RequestTransferExitAsync` itself.
+* `SecurityAccessAsync` holds the request lock from the seed request to the key's answer, so no
+  other request comes between seed and key. Only the keep-alive's TesterPresent still goes out
+  while `computeKey` runs, always with the suppressPosRspMsgIndicationBit: the seed stays valid
+  across it, and the S3 timeout it prevents would lock the server and drop the seed
+  (ISO 14229-1:2026 Annex I, Figure I.1/Table I.2; §9.4.1). A keep-alive send under way when
+  `computeKey` returns finishes before the key goes out (#354).
+* The keep-alive is sent physically on the client's channel. ISO 14229-1:2026 §7.7.6 describes
+  the keep-alive as a functional TesterPresent for the servers' bypass logic; the physical one
+  keeps this client's server awake as well. `UdsFunctionalClient.TesterPresentAsync()` sends a
+  functional one where every server on the bus needs it.
 * `UdsTimeoutException.Elapsed` is the budget of the timer that expired (P2 or P2*) on every
   path, never a measurement of how late the client noticed (#57).
 * `DiagnosticSessionControlAsync(byte)` rejects 0x00 and any value with bit 7 set rather than
@@ -171,7 +178,7 @@ await uds.DownloadAsync(
   merely slow (#57). `await uds.DisposeAsync()` (`UdsClientExtensions`) does the same without
   holding a thread while it waits (#271).
 * `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
-  *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
+  *already unlocked* (ISO 14229-1:2026 §9.4.1) and returns without sending a key; the ECU would
   answer a key for that seed with NRC 0x24.
 * Transport-layer failures are re-thrown as they are, never wrapped: the ISO-TP protocol errors
   (timeout, overflow, WFTmax, etc.) as their `IsoTpException` subclasses, so callers can tell

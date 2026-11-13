@@ -791,7 +791,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
-    // #29 — ISO 14229-1 §9.4.5.3: a seed of all zeroes says the level is already unlocked.
+    // #29 — ISO 14229-1:2026 §9.4.1: a seed of all zeroes says the level is already unlocked.
     // The client must complete without sending a key; a key for that seed earns NRC 0x24.
     // -----------------------------------------------------------------------------------
     [Fact]
@@ -1911,86 +1911,122 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
-    // SecurityAccess must hold the request lock across seed + sendKey so TesterPresent
-    // keep-alive cannot interleave and provoke NRC requestSequenceError on real ECUs.
+    // SecurityAccess holds the request lock across seed + sendKey, so no other request can
+    // come between them; only the keep-alive's TesterPresent still goes out while computeKey
+    // runs, so a slow computeKey does not let S3 expire (#354).
     // -----------------------------------------------------------------------------------
-    [Fact]
-    public async Task SecurityAccess_Holds_Lock_Across_Seed_And_Key()
+    private static (IUdsClient client, IDisposable dispose, List<(byte Sid, byte Sub)> wire, object gate,
+        TaskCompletionSource<bool> testerPresentSeen) BuildSecurityPair(bool keepAliveSuppress)
     {
-        var wireOrder = new List<byte>();
-        var orderGate = new object();
-        byte[] seed = { 0x01, 0x02, 0x03, 0x04 };
-        var keyStarted = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseKey = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-
+        var wire = new List<(byte, byte)>();
+        var gate = new object();
+        var testerPresentSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var (client, _, dispose) = BuildPair(e => e
             .On(0x27, req =>
             {
-                lock (orderGate) wireOrder.Add(req[1]);
-                if (req[1] == 0x01)
-                {
-                    var body = new byte[1 + seed.Length];
-                    body[0] = 0x01;
-                    Buffer.BlockCopy(seed, 0, body, 1, seed.Length);
-                    return body;
-                }
-                if (req[1] == 0x02)
-                    return new byte[] { 0x02 };
-                throw new EcuNegativeResponse(0x12);
+                lock (gate) wire.Add((0x27, req[1]));
+                return req[1] == 0x01 ? new byte[] { 0x01, 0x11, 0x22 } : new byte[] { 0x02 };
+            })
+            .On(0x22, req =>
+            {
+                lock (gate) wire.Add((0x22, req[1]));
+                return new byte[] { req[1], req[2], 0xAA };
             })
             .On(0x3E, req =>
             {
-                lock (orderGate) wireOrder.Add(0x3E);
-                return Array.Empty<byte>();
+                lock (gate) wire.Add((0x3E, req[1]));
+                testerPresentSeen.TrySetResult(true);
+                return new byte[] { 0x00 };
             }),
             options: new UdsClientOptions
             {
                 TesterPresentPeriod = TimeSpan.FromMilliseconds(30),
-                KeepAliveSuppressPositiveResponse = true,
+                KeepAliveSuppressPositiveResponse = keepAliveSuppress,
             });
+        return (client, dispose, wire, gate, testerPresentSeen);
+    }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SecurityAccess_Lets_Only_The_Keep_Alive_Through_While_ComputeKey_Runs(bool keepAliveSuppress)
+    {
+        var (client, dispose, wire, gate, testerPresentSeen) = BuildSecurityPair(keepAliveSuppress);
+        using (dispose)
+        {
+            var keyStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseKey = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var cts = new CancellationTokenSource(ShortTimeout);
+
+            var unlock = client.SecurityAccessAsync(0x01, s =>
+            {
+                keyStarted.TrySetResult(true);
+                // Blocks like an HSM-backed key computation: the keep-alive must still go out.
+                releaseKey.Task.Wait(ShortTimeout);
+                return s.Select(b => (byte)(b ^ 0x55)).ToArray();
+            }, cts.Token);
+
+            await keyStarted.Task.WaitAsync(ShortTimeout);
+            // Queued behind SecurityAccess while computeKey runs; it must wait for the key.
+            var read = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            using var keepAlive = client.StartTesterPresentKeepAlive();
+            await testerPresentSeen.Task.WaitAsync(ShortTimeout);
+            releaseKey.TrySetResult(true);
+            await unlock;
+            (await read).Should().Equal(0xAA);
+
+            lock (gate)
+            {
+                int seed = wire.IndexOf((0x27, 0x01));
+                int key = wire.IndexOf((0x27, 0x02));
+                int readAt = wire.IndexOf((0x22, 0xF1));
+                seed.Should().Be(0);
+                key.Should().BeGreaterThan(seed + 1, "a TesterPresent went out while computeKey ran");
+                wire.Skip(seed + 1).Take(key - seed - 1).Should().AllBeEquivalentTo(
+                    ((byte)0x3E, (byte)0x80),
+                    "only a suppressed TesterPresent may come between seed and key");
+                readAt.Should().BeGreaterThan(key);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SecurityAccess_Cancelled_During_ComputeKey_Closes_The_Window_And_Frees_The_Client()
+    {
+        var (client, dispose, wire, gate, testerPresentSeen) = BuildSecurityPair(keepAliveSuppress: true);
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            using var keepAlive = client.StartTesterPresentKeepAlive();
+            Func<Task> act = () => client.SecurityAccessAsync(0x01, s =>
+            {
+                testerPresentSeen.Task.Wait(ShortTimeout);
+                cts.Cancel();
+                return s;
+            }, cts.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>();
+
+            (await client.ReadDataByIdentifierAsync(0xF190).WaitAsync(ShortTimeout)).Should().Equal(0xAA);
+            lock (gate) wire.Should().NotContain((0x27, 0x02), "the key is not sent once cancelled");
+        }
+    }
+
+    [Fact]
+    public async Task SecurityAccess_ComputeKey_That_Throws_Closes_The_Window()
+    {
+        var (client, dispose, wire, gate, _) = BuildSecurityPair(keepAliveSuppress: true);
         using (dispose)
         {
             var impl = (UdsClientImpl)client;
-            // The property is that a keep-alive tick queued behind SecurityAccess does not
-            // transmit until the lock is released -- proven by observing at least one tick
-            // actually contend for the lock while computeKey blocks, not by guessing how many
-            // 30 ms periods a fixed wait covers (#171). Stronger than the counted-periods guess
-            // it replaces: that could pass with zero ticks ever firing.
-            var keepAliveContended = new TaskCompletionSource<bool>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            impl.RequestLockContended += () => keepAliveContended.TrySetResult(true);
+            Func<Task> act = () => client.SecurityAccessAsync(0x01, _ => throw new InvalidOperationException("hsm"));
+            (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("hsm");
 
-            using var keepAlive = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
-
-            var unlock = client.SecurityAccessAsync(
-                requestSeedLevel: 0x01,
-                computeKey: s =>
-                {
-                    keyStarted.TrySetResult(true);
-                    // Block inside computeKey (still under the request lock) long enough that
-                    // a keep-alive tick contends for it; it must not transmit until unlock ends.
-                    releaseKey.Task.Wait(ShortTimeout);
-                    return s.Select(b => (byte)(b ^ 0x55)).ToArray();
-                },
-                cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
-
-            await keyStarted.Task.WaitAsync(ShortTimeout);
-            await keepAliveContended.Task.WaitAsync(ShortTimeout); // a keep-alive tick queued behind SecurityAccess
-            releaseKey.TrySetResult(true);
-            await unlock;
-
-            lock (orderGate)
-            {
-                // Seed (0x01) then key (0x02) must be adjacent; 0x3E may appear only outside.
-                int seedIdx = wireOrder.IndexOf(0x01);
-                int keyIdx = wireOrder.IndexOf(0x02);
-                seedIdx.Should().BeGreaterThanOrEqualTo(0);
-                keyIdx.Should().Be(seedIdx + 1);
-                wireOrder.Skip(seedIdx).Take(2).Should().Equal((byte)0x01, (byte)0x02);
-            }
+            // With the window closed, a keep-alive tick takes the request lock again.
+            var acquired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            impl.RequestLockAcquired += () => acquired.TrySetResult(true);
+            using var keepAlive = client.StartTesterPresentKeepAlive();
+            await acquired.Task.WaitAsync(ShortTimeout);
+            lock (gate) wire.Should().NotContain((0x27, 0x02));
         }
     }
 

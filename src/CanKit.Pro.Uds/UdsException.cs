@@ -120,7 +120,7 @@ public sealed class UdsProtocolException : UdsException
 }
 
 /// <summary>
-/// Identifies which ISO 14229-1 §7.3 timing budget expired in <see cref="UdsTimeoutException"/>.
+/// Identifies which timing budget (ISO 14229-2) expired in <see cref="UdsTimeoutException"/>.
 /// </summary>
 public enum UdsTimeoutTimer
 {
