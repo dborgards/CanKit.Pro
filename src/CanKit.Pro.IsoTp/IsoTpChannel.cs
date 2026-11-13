@@ -1878,12 +1878,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         bool live = ReferenceEquals(_rx, rx) && ReferenceEquals(rx.PendingFlowControl, token);
         // A service disposed under the channel ends the subscription too, and that loss is what
         // ends the inbox; aborting here would put a transport fault in front of it, and so would
-        // the N_Ar deadline still waiting for this Flow Control. A Consecutive Frame that still
-        // arrives arms N_Cr as usual.
+        // the N_Ar deadline still waiting for this Flow Control. The reception keeps N_Cr, though:
+        // a bus disposed under a live service ends no subscription, and nothing else would end it.
         if (live && failure is ObjectDisposedException)
         {
             rx.PendingFlowControl = null;
-            rx.CancelDeadline();
+            rx.RearmDeadline(_deadlines, _options.NCr, OnRxDeadlineExpired);
         }
         if (!live || failure is ObjectDisposedException)
         {

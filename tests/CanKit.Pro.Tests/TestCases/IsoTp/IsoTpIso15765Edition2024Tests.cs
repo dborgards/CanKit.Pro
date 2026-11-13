@@ -158,14 +158,34 @@ public class IsoTpIso15765Edition2024Tests : IClassFixture<VirtualAdapterFixture
         r.PeerBus.Transmit(FirstFrame20());
         (await reported.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(failure);
         await r.Channel.SettleAsync().WaitAsync(ShortTimeout);
-        // Nor does the N_Ar deadline of that Flow Control fault the reception.
-        await r.Clock.AdvanceAsync(TimeSpan.FromSeconds(1));
+        // Nor does the N_Ar deadline of that Flow Control (200 ms) fault the reception.
+        await r.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
         await r.Channel.SettleAsync().WaitAsync(ShortTimeout);
         receive.IsCompleted.Should().BeFalse();
 
         r.PeerBus.Transmit(Cf20(0));
         r.PeerBus.Transmit(Cf20(1));
         (await receive.WaitAsync(ShortTimeout)).Should().Equal(Pdu20);
+    }
+
+    // A bus disposed under a live service ends no subscription: the reception still ends at N_Cr.
+    [Fact]
+    public async Task A_Flow_Control_Refused_By_A_Disposed_Bus_Still_Ends_At_NCr()
+    {
+        var nCr = TimeSpan.FromMilliseconds(500);
+        using var r = new Receiver(TimeSpan.FromMilliseconds(200), nCr, 0,
+            (_, _) => Task.FromException<TxConfirmation>(new ObjectDisposedException("bus")));
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        r.Channel.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        var receive = r.Channel.ReceiveAsync();
+        r.PeerBus.Transmit(FirstFrame20());
+        await reported.Task.WaitAsync(ShortTimeout);
+        await r.Clock.WaitUntilTimerArmedAsync(r.Actor, nCr, ShortTimeout);
+        await r.Clock.AdvanceAsync(nCr + TimeSpan.FromMilliseconds(1));
+
+        Func<Task> act = () => receive.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<IsoTpTimeoutException>()).Which.Timer.Should().Be(IsoTpTimer.NCr);
     }
 
     [Fact]
