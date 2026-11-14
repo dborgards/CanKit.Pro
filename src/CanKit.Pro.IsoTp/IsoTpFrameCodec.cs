@@ -524,7 +524,11 @@ public static class IsoTpFrameCodec
                             return false;
                         int longLen = canPayload[lenIndex];
                         int dataOffset = pciIndex + 2;
-                        if (longLen < 1 || canPayload.Length < dataOffset + longLen)
+                        // ISO 15765-2:2024 §9.6.2.2, Table 14: the escape form is only for a
+                        // CAN_DL above 8, and its SF_DL must need that CAN_DL -- one that would
+                        // have fit the next smaller frame is ignored, as is one beyond it.
+                        if (longLen < EscapeSingleFrameMinDataLength(canPayload.Length, addrExt)
+                            || canPayload.Length < dataOffset + longLen)
                             return false;
                         pci = new Pci(type, longLen, 0, FlowStatus.ClearToSend, 0, 0, TimeSpan.Zero, dataOffset);
                         return true;
@@ -621,6 +625,28 @@ public static class IsoTpFrameCodec
         }
 
         return false;
+    }
+
+    // The CAN FD data lengths above 8 and below 64.
+    private static readonly int[] FdDataLengthSteps = { 12, 16, 20, 24, 32, 48 };
+
+    // The smallest SF_DL an escape Single Frame may carry at this CAN_DL (Table 14): one more than
+    // the next smaller CAN_DL could carry -- 7 less the extension in the short form at CAN_DL 8,
+    // CAN_DL - 2 less the extension in the escape form above it. Int.MaxValue at CAN_DL 8 or
+    // less, where the escape form is not allowed at all.
+    internal static int EscapeSingleFrameMinDataLength(int canDl, int addrExt)
+    {
+        if (canDl <= ClassicCanMaxData) return int.MaxValue;
+        int below = ClassicCanMaxData;
+        foreach (int step in FdDataLengthSteps)
+        {
+            if (step >= canDl) break;
+            below = step;
+        }
+        int belowCapacity = below == ClassicCanMaxData
+            ? ClassicCanMaxData - 1 - addrExt
+            : below - 2 - addrExt;
+        return belowCapacity + 1;
     }
 
     // -------------------------------------------------------------------------------------------
