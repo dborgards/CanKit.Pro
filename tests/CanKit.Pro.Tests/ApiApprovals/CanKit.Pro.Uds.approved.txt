@@ -46,6 +46,7 @@ namespace CanKit.Pro.Uds
         public System.TimeSpan P2StarClientMax { get; init; }
         public bool QuarantineLateResponses { get; init; }
         public System.TimeSpan TesterPresentPeriod { get; init; }
+        public int TransferDataRetryCount { get; init; }
         public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default, int? maxBusyRepeatRequests = default, System.TimeSpan? busyRepeatRequestDelay = default) { }
     }
     public readonly struct UdsDownloadResponse

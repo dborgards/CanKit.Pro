@@ -149,9 +149,47 @@ public sealed class UdsClientOptions
     public bool QuarantineLateResponses { get; init; }
 
     /// <summary>
+    /// How many times <see cref="IUdsClient.DownloadAsync"/> and <see cref="IUdsClient.UploadAsync"/>
+    /// repeat a TransferData block whose answer did not arrive, before the failure surfaces.
+    /// Default 0: no block is repeated (#426).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ISO 14229-1:2026 §14.4 (Table 451) lets a client repeat a TransferData request with the
+    /// same blockSequenceCounter when its positive response did not arrive, whether or not the
+    /// server processed the request: a server recognises the repeat by the counter, answers a
+    /// download block without writing it again and sends an upload block again. A block is
+    /// repeated, byte for byte and with the same counter, after a P2 or P2* timeout
+    /// (<see cref="UdsTimeoutException"/>) and after an ISO-TP transport error on its request or
+    /// response (an <see cref="IsoTp.IsoTpException"/> other than
+    /// <see cref="IsoTp.IsoTpOverflowException"/>, which says the request is too large for the
+    /// server and would only be refused again).
+    /// </para>
+    /// <para>
+    /// A negative response is never repeated this way: NRC 0x73 (wrongBlockSequenceCounter),
+    /// 0x24, 0x71, 0x72 and the others surface at once, and NRC 0x21 keeps its own repeat
+    /// (<see cref="MaxBusyRepeatRequests"/>), which does not count against this one. Nor are
+    /// cancellation, disposal, or an exception that is not an ISO-TP one, such as the bus
+    /// layer's own when a driver call fails. The budget is per block: every
+    /// block may be repeated this many times, each attempt with a fresh P2. When the budget is
+    /// spent, the last failure surfaces and no RequestTransferExit is sent, as without repeats.
+    /// </para>
+    /// <para>
+    /// With <see cref="QuarantineLateResponses"/>, the repeat waits out the abandoned attempt's
+    /// window first. Without it, a late positive answer to the abandoned attempt can be taken
+    /// for the repeat's: it echoes the same counter, and the server treats both requests as the
+    /// same block, so either answer is the block's. An upload appends each block's data once.
+    /// <see cref="IUdsClient.TransferDataAsync"/> called on its own is not repeated. Must not be
+    /// negative.
+    /// </para>
+    /// </remarks>
+    public int TransferDataRetryCount { get; init; }
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that only want to tweak one field of a shared default template. Settings it takes
-    /// no parameter for -- <see cref="QuarantineLateResponses"/> -- are carried over unchanged.
+    /// no parameter for -- <see cref="QuarantineLateResponses"/> and
+    /// <see cref="TransferDataRetryCount"/> -- are carried over unchanged.
     /// </summary>
     public UdsClientOptions With(
         TimeSpan? p2ClientMax = null,
@@ -173,5 +211,6 @@ public sealed class UdsClientOptions
             // Not a parameter: one more optional parameter would change the method's signature,
             // which is a binary break since 1.3.0 (package validation).
             QuarantineLateResponses = QuarantineLateResponses,
+            TransferDataRetryCount = TransferDataRetryCount,
         };
 }

@@ -130,12 +130,17 @@ await uds.DownloadAsync(
   ISO 14229-3) and gives no value, so the client defaults to zero; set `BusyRepeatRequestDelay`
   from the ECU's specification. `MaxBusyRepeatRequests = 0` surfaces the first 0x21 instead of
   repeating, which opts out of the standard's "client shall repeat" (#354).
-* `DownloadAsync` retries no block: apart from the NRC 0x21 repeat above, the first failed
-  TransferData — NRC 0x73 (wrongBlockSequenceCounter), a timeout, a transport error — ends the
-  call with its exception and sends no RequestTransferExit. ISO 14229-1:2026 §14.4 lets a client
-  repeat a block with the same counter after a lost response; the convenience method does not
-  yet (#426). A caller that wants to repeat blocks drives `RequestDownloadAsync` /
-  `TransferDataAsync` / `RequestTransferExitAsync` itself.
+* `DownloadAsync` and `UploadAsync` retry no block by default: apart from the NRC 0x21 repeat
+  above, the first failed TransferData — NRC 0x73 (wrongBlockSequenceCounter), a timeout, a
+  transport error — ends the call with its exception and sends no RequestTransferExit.
+  `UdsClientOptions.TransferDataRetryCount` (default 0) opts in to what ISO 14229-1:2026 §14.4
+  (Table 451) allows: a block whose answer did not arrive — a P2/P2* timeout, or an ISO-TP
+  transport error other than an overflow on the request — is sent again with the same counter
+  and bytes, up to that many times per block, each with a fresh P2. A negative response is never
+  repeated this way, and NRC 0x21 keeps its own budget. An upload appends a repeated block once.
+  When the budget is spent the last failure surfaces and no RequestTransferExit is sent (#426).
+  `TransferDataAsync` on its own is not repeated; a caller with other rules drives
+  `RequestDownloadAsync` / `TransferDataAsync` / `RequestTransferExitAsync` itself.
 * `SecurityAccessAsync` holds the request lock from the seed request to the key's answer, so no
   other request comes between seed and key. Only the keep-alive's TesterPresent still goes out
   while `computeKey` runs, always with the suppressPosRspMsgIndicationBit: the seed stays valid

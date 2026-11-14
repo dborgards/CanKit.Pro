@@ -185,6 +185,9 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         if (options.MaxBusyRepeatRequests < 0)
             throw new ArgumentOutOfRangeException(nameof(options),
                 "MaxBusyRepeatRequests must be >= 0 (0 disables the repeat).");
+        if (options.TransferDataRetryCount < 0)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                "TransferDataRetryCount must be >= 0 (0 disables the repeat).");
         if (options.BusyRepeatRequestDelay < TimeSpan.Zero || options.BusyRepeatRequestDelay > MaxTimerSpan)
             throw new ArgumentOutOfRangeException(nameof(options),
                 "BusyRepeatRequestDelay must not be negative, and must be within a timer's reach (about 49 days).");
@@ -1062,6 +1065,41 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         return record;
     }
 
+    /// <summary>
+    /// <see cref="TransferDataCoreAsync"/>, repeated with the same block-sequence counter and
+    /// data up to <see cref="UdsClientOptions.TransferDataRetryCount"/> times after a P2/P2*
+    /// timeout or an ISO-TP transport error (ISO 14229-1:2026 §14.4, Table 451; #426). A
+    /// negative response, cancellation and disposal pass through at once. Assumes the request
+    /// lock is held.
+    /// </summary>
+    private async Task<byte[]> TransferDataRepeatingAsync(byte blockSequenceCounter,
+        ReadOnlyMemory<byte> data, CancellationToken linkedToken)
+    {
+        for (int repeats = 0; ; repeats++)
+        {
+            try
+            {
+                return await TransferDataCoreAsync(blockSequenceCounter, data, linkedToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (repeats < _options.TransferDataRetryCount
+                && !linkedToken.IsCancellationRequested
+                && IsRepeatableTransferFault(ex))
+            {
+                // The repeat goes out as a new request: ExchangeOnceAsync waits out the
+                // quarantine window the abandoned attempt left (QuarantineLateResponses) and
+                // drops stale answers first, and the response wait starts with a fresh P2.
+            }
+        }
+    }
+
+    // A TransferData whose answer did not arrive: P2/P2* ran out, or the transport failed on
+    // the request or the response. An overflow on our own request is not, the server cannot
+    // take a request that large.
+    private static bool IsRepeatableTransferFault(Exception ex)
+        => ex is UdsTimeoutException
+            || (ex is IsoTpException && ex is not IsoTpOverflowException);
+
     public async Task RequestTransferExitAsync(
         ReadOnlyMemory<byte> transferRequestParameterRecord = default,
         CancellationToken cancellationToken = default)
@@ -1173,7 +1211,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 int remaining = data.Length - offset;
                 int take = remaining < chunkSize ? remaining : chunkSize;
                 var chunk = data.Slice(offset, take);
-                _ = await TransferDataCoreAsync(bsc, chunk, linkedToken).ConfigureAwait(false);
+                _ = await TransferDataRepeatingAsync(bsc, chunk, linkedToken).ConfigureAwait(false);
                 offset += take;
                 unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … as required by ISO 14229-1:2026 §14.4.2.
             }
@@ -1225,7 +1263,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             byte bsc = 0x01; // ISO 14229-1:2026 §14.4.2: first TransferData uses BSC=0x01.
             while ((ulong)result.Count < totalBytes)
             {
-                var chunk = await TransferDataCoreAsync(bsc, ReadOnlyMemory<byte>.Empty,
+                var chunk = await TransferDataRepeatingAsync(bsc, ReadOnlyMemory<byte>.Empty,
                     linkedToken).ConfigureAwait(false);
                 if (chunk.Length == 0)
                     throw new UdsProtocolException(

@@ -329,14 +329,15 @@ public interface IUdsClient : IDisposable
     /// their lengths are not compared.
     /// </summary>
     /// <remarks>
-    /// No block is retried. Beyond the repeat after NRC 0x21 (busyRepeatRequest) that every
-    /// request gets (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>), the first failure of
-    /// a TransferData -- a negative response such as NRC 0x73 (wrongBlockSequenceCounter), a
-    /// timeout, a transport error -- ends the call with that exception, and no
-    /// RequestTransferExit follows, so the server's download is
-    /// left where the failed block left it. ISO 14229-1:2026 §14.4 lets a client repeat a block
-    /// with the same counter after a lost response; this convenience method does not (#426). A
-    /// caller that wants to repeat blocks drives
+    /// By default no block is retried. Beyond the repeat after NRC 0x21 (busyRepeatRequest) that
+    /// every request gets (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>), the first
+    /// failure of a TransferData -- a negative response such as NRC 0x73
+    /// (wrongBlockSequenceCounter), a timeout, a transport error -- ends the call with that
+    /// exception, and no RequestTransferExit follows, so the server's download is left where the
+    /// failed block left it. With <see cref="UdsClientOptions.TransferDataRetryCount"/> above
+    /// zero, a block whose answer timed out or whose transport failed is repeated with the same
+    /// counter as ISO 14229-1:2026 §14.4 allows, up to that many times per block; a negative
+    /// response is still never repeated (#426). A caller that wants other rules drives
     /// <see cref="RequestDownloadAsync"/>, <see cref="TransferDataAsync"/> and
     /// <see cref="RequestTransferExitAsync"/> itself.
     /// </remarks>
@@ -366,6 +367,11 @@ public interface IUdsClient : IDisposable
     /// <paramref name="memorySize"/> bytes were read, and finally calls
     /// <see cref="RequestTransferExitAsync"/>.
     /// </summary>
+    /// <remarks>
+    /// Blocks are repeated as <see cref="DownloadAsync"/> repeats them, under
+    /// <see cref="UdsClientOptions.TransferDataRetryCount"/> (default: never). A repeated block's
+    /// data is appended once.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="memorySize"/> has nonzero
     /// high-order bytes beyond what a <see cref="ulong"/> can represent; nothing is sent.</exception>
     /// <exception cref="UdsProtocolException">The ECU delivered an empty TransferData payload
