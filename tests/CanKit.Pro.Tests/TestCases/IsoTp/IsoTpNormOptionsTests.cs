@@ -1,0 +1,526 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using AwesomeAssertions;
+using CanKit.Abstractions.API.Can;
+using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core;
+using CanKit.Pro.IsoTp;
+using CanKit.Pro.Tests.Infrastructure;
+using Xunit;
+using IsoTpFactory = CanKit.Pro.IsoTp.IsoTp;
+
+namespace CanKit.Pro.Tests.TestCases.IsoTp;
+
+/// <summary>
+/// The configurable TX_DL (ISO 15765-2:2024 §9.5.1) and <see cref="IsoTpChannelOptions.StrictReceive"/>
+/// (§9.6.2.2, §11.3.2.1).
+/// </summary>
+public class IsoTpNormOptionsTests : IClassFixture<VirtualAdapterFixture>
+{
+    private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan LongTimeout = TimeSpan.FromSeconds(30);
+
+    private static string NewSession() => $"isotp-norm-{Guid.NewGuid():N}";
+
+    private static ICanBus OpenClassic(string session, int channel) => CanBus.Open(
+        $"virtual://{session}/{channel}",
+        cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
+
+    private static ICanBus OpenCanFd(string session, int channel) => CanBus.Open(
+        $"virtual://{session}/{channel}",
+        cfg => cfg.SetProtocolMode(CanProtocolMode.CanFd).Fd(VirtualAdapterFixture.Bitrate, VirtualAdapterFixture.DataBitrate));
+
+    private static IsoTpChannelOptions Options(bool useCanFd, bool usePadding = true, int txDl = 64,
+        bool strictReceive = false)
+        => new()
+        {
+            UseCanFd = useCanFd,
+            UsePadding = usePadding,
+            TxDl = txDl,
+            StrictReceive = strictReceive,
+            NAs = TimeSpan.FromMilliseconds(500),
+            NBs = TimeSpan.FromMilliseconds(500),
+            NCr = TimeSpan.FromMilliseconds(500),
+        };
+
+    // ---------------------------------------------------------------------------------------
+    // TX_DL
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void TxDl_Defaults_To_64_And_StrictReceive_To_False()
+    {
+        var options = new IsoTpChannelOptions();
+        options.TxDl.Should().Be(64);
+        options.StrictReceive.Should().BeFalse();
+    }
+
+    // Every frame the sender builds is at most TX_DL long, the First Frame exactly TX_DL; the
+    // PDU arrives whole at a receiver with the default options, which adapts to the TX_DL used.
+    // 9 bytes at TX_DL 12: an escape SF in a 12-byte frame. 11 bytes at TX_DL 12: one byte more
+    // than an SF takes there, so FF + CF. 4200 bytes: the escape First Frame (6-byte PCI).
+    [Theory]
+    [InlineData(8, 7, false)]
+    [InlineData(8, 100, false)]
+    [InlineData(8, 4200, false)]
+    [InlineData(12, 9, false)]
+    [InlineData(12, 11, false)]
+    [InlineData(20, 300, false)]
+    [InlineData(32, 200, true)]
+    [InlineData(48, 4200, false)]
+    [InlineData(64, 200, false)]
+    public async Task Fd_Sender_Holds_Every_Frame_To_TxDl(int txDl, int pduLength, bool extended)
+    {
+        var session = NewSession();
+        using var busA = OpenCanFd(session, 0);
+        using var busB = OpenCanFd(session, 1);
+        using var snifferBus = OpenCanFd(session, 2);
+
+        var senderEp = extended
+            ? IsoTpEndpoint.Extended(0x7E0, 0x7E8, sourceAddress: 0x10, targetAddress: 0x20)
+            : IsoTpEndpoint.Normal(0x7E0, 0x7E8);
+        var receiverEp = extended
+            ? IsoTpEndpoint.Extended(0x7E8, 0x7E0, sourceAddress: 0x20, targetAddress: 0x10)
+            : IsoTpEndpoint.Normal(0x7E8, 0x7E0);
+        using var sender = IsoTpFactory.Open(busA, senderEp, Options(useCanFd: true, txDl: txDl));
+        using var receiver = IsoTpFactory.Open(busB, receiverEp, Options(useCanFd: true));
+
+        int ext = extended ? 1 : 0;
+        int sfMax = (txDl == 8 ? 7 : txDl - 2) - ext;
+        int ffData = txDl - (pduLength > 4095 ? 6 : 2) - ext;
+        int cfData = txDl - 1 - ext;
+        int expectedFrames = pduLength <= sfMax ? 1 : 1 + (pduLength - ffData + cfData - 1) / cfData;
+
+        var lengths = new List<int>();
+        var sniffedAll = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        snifferBus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x7E0) return;
+            lock (lengths)
+            {
+                lengths.Add(e.CanFrame.Data.Length);
+                if (lengths.Count >= expectedFrames) sniffedAll.TrySetResult(true);
+            }
+        };
+
+        var pdu = Enumerable.Range(0, pduLength).Select(i => (byte)(i * 7)).ToArray();
+        using var receiveTimeout = new CancellationTokenSource(LongTimeout);
+        var recvTask = receiver.ReceiveAsync(receiveTimeout.Token);
+        await sender.SendAsync(pdu).WaitAsync(LongTimeout);
+        (await recvTask).Should().Equal(pdu);
+
+        await sniffedAll.Task.WaitAsync(ShortTimeout);
+        lock (lengths)
+        {
+            lengths.Should().HaveCount(expectedFrames);
+            lengths.Should().OnlyContain(l => l <= txDl, "no frame may exceed TX_DL");
+            if (expectedFrames > 1)
+                lengths[0].Should().Be(txDl, "a First Frame fills TX_DL");
+        }
+    }
+
+    [Fact]
+    public async Task TxDl_Is_Ignored_On_A_Classic_Channel()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var sender = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x7E0, 0x7E8), Options(useCanFd: false, txDl: 32));
+        using var receiver = IsoTpFactory.Open(busB, IsoTpEndpoint.Normal(0x7E8, 0x7E0), Options(useCanFd: false));
+
+        var pdu = Enumerable.Range(0, 40).Select(i => (byte)i).ToArray();
+        using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvTask = receiver.ReceiveAsync(receiveTimeout.Token);
+        await sender.SendAsync(pdu).WaitAsync(ShortTimeout);
+        (await recvTask).Should().Equal(pdu);
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(12)]
+    [InlineData(16)]
+    [InlineData(20)]
+    [InlineData(24)]
+    [InlineData(32)]
+    [InlineData(48)]
+    [InlineData(64)]
+    public void Every_Permitted_TxDl_Opens_A_Channel(int txDl)
+    {
+        var session = NewSession();
+        using var bus = OpenCanFd(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x7E0, 0x7E8), Options(useCanFd: true, txDl: txDl));
+        channel.Options.TxDl.Should().Be(txDl);
+    }
+
+    [Theory]
+    [InlineData(true, 0)]
+    [InlineData(true, 7)]
+    [InlineData(true, 9)]
+    [InlineData(true, 63)]
+    [InlineData(true, 65)]
+    [InlineData(false, -1)]
+    [InlineData(false, 10)]
+    public void An_Invalid_TxDl_Fails_Channel_Creation(bool useCanFd, int txDl)
+    {
+        var session = NewSession();
+        using var bus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+
+        Action act = () => IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            Options(useCanFd, txDl: txDl)).Dispose();
+
+        act.Should().Throw<ArgumentOutOfRangeException>()
+            .Which.ParamName.Should().Be(nameof(IsoTpChannelOptions.TxDl));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // StrictReceive
+    // ---------------------------------------------------------------------------------------
+
+    // A 3-byte unpadded Single Frame (CAN_DL 4), then a padded one. With StrictReceive on a
+    // padded link the first is ignored and the second is what arrives; otherwise the first is
+    // taken as before.
+    [Theory]
+    // On an unpadded link StrictReceive holds a Single Frame to its optimized length (Table 13),
+    // so there the padded frame is the one that is ignored.
+    [InlineData(true, true, false, true)]
+    [InlineData(true, false, true, false)]
+    [InlineData(false, true, true, true)]
+    [InlineData(false, false, true, true)]
+    public async Task StrictReceive_Ignores_An_Unpadded_Single_Frame_On_A_Padded_Link(
+        bool strictReceive, bool usePadding, bool unpaddedIsDelivered, bool paddedIsDelivered)
+    {
+        var session = NewSession();
+        using var peerBus = OpenClassic(session, 0);
+        using var receiverBus = OpenClassic(session, 1);
+        var peer = IsoTpEndpoint.Normal(0x7E0, 0x7E8);
+        using var receiver = IsoTpFactory.Open(receiverBus, IsoTpEndpoint.Normal(0x7E8, 0x7E0),
+            Options(useCanFd: false, usePadding: usePadding, strictReceive: strictReceive));
+
+        var unpadded = IsoTpFrameCodec.BuildSingleFrame(peer, new byte[] { 0x11, 0x22, 0x33 },
+            isCanFd: false, padding: false);
+        unpadded.Should().HaveCount(4);
+        var padded = IsoTpFrameCodec.BuildSingleFrame(peer, new byte[] { 0x44 },
+            isCanFd: false, padding: true);
+
+        using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+        peerBus.Transmit(CanFrame.Classic(0x7E0, unpadded));
+        peerBus.Transmit(CanFrame.Classic(0x7E0, padded));
+
+        var first = await receiver.ReceiveAsync(receiveTimeout.Token);
+        if (!unpaddedIsDelivered)
+        {
+            first.Should().Equal(new byte[] { 0x44 }, "the unpadded Single Frame is ignored");
+            return;
+        }
+
+        first.Should().Equal(0x11, 0x22, 0x33);
+        if (paddedIsDelivered)
+        {
+            (await receiver.ReceiveAsync(receiveTimeout.Token)).Should().Equal(0x44);
+        }
+        else
+        {
+            using var quiet = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+            var act = async () => await receiver.ReceiveAsync(quiet.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>(
+                "the padded Single Frame is longer than Table 13 allows on an unpadded link");
+        }
+    }
+
+    // The other StrictReceive checks (§9.6.2.2): on an unpadded link a Single Frame of up to 8
+    // bytes must be exactly PCI + address extension + SF_DL long (Table 13), and a frame longer
+    // than 8 bytes must use the escape form. Each case sends the frame under test, then a valid
+    // marker; with StrictReceive an invalid frame is skipped and the marker arrives first.
+    // Without it every frame is taken, as before.
+    [Theory]
+    // classic, unpadded, normal addressing: 3 data bytes in a 4-byte frame is right, in 5 not.
+    [InlineData(false, false, false, "03112233", true)]
+    [InlineData(false, false, false, "03112233CC", false)]
+    [InlineData(false, false, false, "0311223344", false)]
+    // classic, unpadded: a padded 8-byte frame whose SF_DL is shorter is dropped too (Table 13).
+    [InlineData(false, false, false, "03112233CCCCCCCC", false)]
+    // classic, unpadded, extended addressing: the extension byte counts.
+    [InlineData(false, false, true, "AA021122", true)]
+    [InlineData(false, false, true, "AA021122CC", false)]
+    // classic, padded: 8 bytes is right whatever SF_DL says.
+    [InlineData(false, true, false, "03112233CCCCCCCC", true)]
+    // CAN FD, longer than 8 bytes: the short PCI form is not allowed there, the escape form is.
+    [InlineData(true, true, false, "03112233CCCCCCCCCCCCCCCC", false)]
+    [InlineData(true, false, false, "03112233CCCCCCCCCCCCCCCC", false)]
+    [InlineData(true, true, false, "000811223344556677" + "88CCCC", true)]
+    [InlineData(true, true, true, "AA0007112233445566" + "77CCCC", true)]
+    // CAN FD, up to 8 bytes: the classic rules.
+    [InlineData(true, true, false, "03112233CCCCCCCC", true)]
+    [InlineData(true, true, false, "03112233", false)]
+    [InlineData(true, false, false, "03112233", true)]
+    public async Task StrictReceive_Holds_A_Single_Frame_To_Its_CAN_DL(bool useCanFd, bool usePadding,
+        bool extended, string frameHex, bool valid)
+    {
+        var frame = Enumerable.Range(0, frameHex.Length / 2).Select(i => Convert.ToByte(frameHex.Substring(2 * i, 2), 16)).ToArray();
+        var receiverEp = extended
+            ? IsoTpEndpoint.Extended(0x7E8, 0x7E0, sourceAddress: 0xAA, targetAddress: 0x20)
+            : IsoTpEndpoint.Normal(0x7E8, 0x7E0);
+        var peerEp = extended
+            ? IsoTpEndpoint.Extended(0x7E0, 0x7E8, sourceAddress: 0x20, targetAddress: 0xAA)
+            : IsoTpEndpoint.Normal(0x7E0, 0x7E8);
+        int dataOffset = (extended ? 1 : 0) + (frame[extended ? 1 : 0] == 0 ? 2 : 1);
+        int sfDl = frame[extended ? 1 : 0] == 0 ? frame[dataOffset - 1] : frame[extended ? 1 : 0] & 0x0F;
+        var data = frame.Skip(dataOffset).Take(sfDl).ToArray();
+        var marker = IsoTpFrameCodec.BuildSingleFrame(peerEp, new byte[] { 0x7A }, isCanFd: false, padding: usePadding);
+
+        foreach (bool strict in new[] { true, false })
+        {
+            var session = NewSession();
+            using var peerBus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+            using var receiverBus = useCanFd ? OpenCanFd(session, 1) : OpenClassic(session, 1);
+            using var receiver = IsoTpFactory.Open(receiverBus, receiverEp,
+                Options(useCanFd, usePadding: usePadding, strictReceive: strict));
+
+            peerBus.Transmit(useCanFd ? CanFrame.Fd(0x7E0, frame) : CanFrame.Classic(0x7E0, frame));
+            peerBus.Transmit(useCanFd ? CanFrame.Fd(0x7E0, marker) : CanFrame.Classic(0x7E0, marker));
+
+            using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+            var first = await receiver.ReceiveAsync(receiveTimeout.Token);
+            if (valid || !strict)
+            {
+                first.Should().Equal(data, $"StrictReceive={strict} takes this frame");
+                (await receiver.ReceiveAsync(receiveTimeout.Token)).Should().Equal(0x7A);
+            }
+            else
+            {
+                first.Should().Equal(new byte[] { 0x7A }, "StrictReceive ignores this frame");
+            }
+        }
+    }
+
+    // The ignored frame is ignored outright: it does not abort a reception in progress, which a
+    // Single Frame taken as such would (CTL_UNEXP_PDU).
+    [Fact]
+    public async Task StrictReceive_An_Ignored_Single_Frame_Leaves_A_Reception_Running()
+    {
+        var session = NewSession();
+        using var peerBus = OpenClassic(session, 0);
+        using var receiverBus = OpenClassic(session, 1);
+        var peer = IsoTpEndpoint.Normal(0x7E0, 0x7E8);
+        using var receiver = IsoTpFactory.Open(receiverBus, IsoTpEndpoint.Normal(0x7E8, 0x7E0),
+            Options(useCanFd: false, strictReceive: true));
+        var faults = new List<Exception>();
+        receiver.BackgroundExceptionOccurred += (_, ex) => { lock (faults) faults.Add(ex); };
+
+        var fcSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peerBus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == 0x7E8 && e.CanFrame.Data.Length > 0 && (e.CanFrame.Data.Span[0] >> 4) == 0x3)
+                fcSeen.TrySetResult(true);
+        };
+
+        var pdu = Enumerable.Range(0, 10).Select(i => (byte)(0x80 + i)).ToArray();
+        using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvTask = receiver.ReceiveAsync(receiveTimeout.Token);
+        peerBus.Transmit(CanFrame.Classic(0x7E0, IsoTpFrameCodec.BuildFirstFrame(peer, pdu.Length, pdu.AsSpan(0, 6), isCanFd: false)));
+        await fcSeen.Task.WaitAsync(ShortTimeout);
+
+        peerBus.Transmit(CanFrame.Classic(0x7E0, IsoTpFrameCodec.BuildSingleFrame(peer, new byte[] { 0x01 },
+            isCanFd: false, padding: false)));
+        peerBus.Transmit(CanFrame.Classic(0x7E0, IsoTpFrameCodec.BuildConsecutiveFrame(peer, 1, pdu.AsSpan(6),
+            isCanFd: false, padding: true)));
+
+        (await recvTask).Should().Equal(pdu);
+        lock (faults) faults.Should().BeEmpty();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // TX_DL on the functional client
+    // ---------------------------------------------------------------------------------------
+
+    private static IsoTpFunctionalOptions FunctionalOptions(bool useCanFd, int txDl) => new()
+    {
+        UseCanFd = useCanFd,
+        TxDl = txDl,
+        NAs = TimeSpan.FromMilliseconds(500),
+    };
+
+    [Fact]
+    public void Functional_TxDl_Defaults_To_64()
+        => new IsoTpFunctionalOptions().TxDl.Should().Be(64);
+
+    // The functional Single Frame is held to TX_DL: at TX_DL 12 it takes 10 bytes in a 12-byte
+    // frame and refuses 11; at TX_DL 8 it takes the short form's 7.
+    [Theory]
+    [InlineData(12, 10, 12)]
+    [InlineData(12, 11, 0)]
+    [InlineData(8, 7, 8)]
+    [InlineData(8, 8, 0)]
+    [InlineData(64, 62, 64)]
+    public async Task Functional_Fd_Single_Frame_Is_Held_To_TxDl(int txDl, int pduLength, int expectedFrameLength)
+    {
+        var session = NewSession();
+        using var bus = OpenCanFd(session, 0);
+        using var sniffer = OpenCanFd(session, 1);
+        var seen = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sniffer.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == 0x7DF) seen.TrySetResult(e.CanFrame.Data.Length);
+        };
+        using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, FunctionalOptions(true, txDl));
+
+        Func<Task> act = () => client.SendAndCollectAsync(new byte[pduLength], TimeSpan.FromMilliseconds(20));
+
+        if (expectedFrameLength == 0)
+        {
+            (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage($"*TX_DL {txDl}*");
+        }
+        else
+        {
+            await act.Should().NotThrowAsync();
+            (await seen.Task.WaitAsync(ShortTimeout)).Should().Be(expectedFrameLength);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, 0)]
+    [InlineData(true, 10)]
+    [InlineData(true, 65)]
+    [InlineData(false, 7)]
+    public void An_Invalid_Functional_TxDl_Fails_Client_Creation(bool useCanFd, int txDl)
+    {
+        var session = NewSession();
+        using var bus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+
+        Action act = () => IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, FunctionalOptions(useCanFd, txDl)).Dispose();
+
+        act.Should().Throw<ArgumentOutOfRangeException>()
+            .Which.ParamName.Should().Be(nameof(IsoTpFunctionalOptions.TxDl));
+    }
+
+    // A classic client ignores TX_DL: its Single Frame stays at 7 bytes whatever TX_DL says.
+    [Fact]
+    public async Task Functional_TxDl_Is_Ignored_On_Classic_Can()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, FunctionalOptions(false, 32));
+
+        Func<Task> act = () => client.SendAndCollectAsync(new byte[8], TimeSpan.FromMilliseconds(20));
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*classic CAN*is 7 bytes*");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // StrictReceive on the functional client
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Functional_StrictReceive_Defaults_To_False()
+        => new IsoTpFunctionalOptions().StrictReceive.Should().BeFalse();
+
+    // The functional client applies the channel's Single Frame length checks to the responses it
+    // collects (Normal addressing, no extension byte). Each case sends the response under test
+    // and a valid one to a listener; with StrictReceive only the valid one is collected.
+    [Theory]
+    [InlineData(false, false, "03112233", true)]
+    [InlineData(false, false, "03112233CC", false)]
+    [InlineData(false, false, "03112233CCCCCCCC", false)]
+    [InlineData(false, true, "03112233CCCCCCCC", true)]
+    [InlineData(false, true, "03112233", false)]
+    [InlineData(true, true, "03112233CCCCCCCCCCCCCCCC", false)]
+    [InlineData(true, true, "000811223344556677" + "88CCCC", true)]
+    public async Task Functional_StrictReceive_Holds_A_Response_To_Its_CAN_DL(bool useCanFd, bool usePadding,
+        string frameHex, bool valid)
+    {
+        var frame = Enumerable.Range(0, frameHex.Length / 2).Select(i => Convert.ToByte(frameHex.Substring(2 * i, 2), 16)).ToArray();
+        var marker = IsoTpFrameCodec.BuildSingleFrame(IsoTpEndpoint.Normal(0x7E9, 0), new byte[] { 0x7A },
+            isCanFd: false, padding: usePadding);
+
+        foreach (bool strict in new[] { true, false })
+        {
+            var session = NewSession();
+            using var bus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+            using var ecuBus = useCanFd ? OpenCanFd(session, 1) : OpenClassic(session, 1);
+            using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, new IsoTpFunctionalOptions
+            {
+                UseCanFd = useCanFd,
+                UsePadding = usePadding,
+                StrictReceive = strict,
+            });
+            int seen = 0;
+            var bothSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            bus.FrameObserved += (_, e) =>
+            {
+                if (e.CanFrame.ID is 0x7E8 or 0x7E9 && Interlocked.Increment(ref seen) == 2) bothSeen.TrySetResult(true);
+            };
+            using var listener = client.Listen();
+
+            ecuBus.Transmit(useCanFd ? CanFrame.Fd(0x7E8, frame) : CanFrame.Classic(0x7E8, frame));
+            ecuBus.Transmit(useCanFd ? CanFrame.Fd(0x7E9, marker) : CanFrame.Classic(0x7E9, marker));
+            await bothSeen.Task.WaitAsync(ShortTimeout);
+
+            var responses = await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout);
+            var sources = responses.Select(r => r.SourceCanId).ToArray();
+            if (valid || !strict)
+                sources.Should().Equal(new uint[] { 0x7E8, 0x7E9 }, $"StrictReceive={strict} collects this response");
+            else
+                sources.Should().Equal(new uint[] { 0x7E9 }, "StrictReceive drops this response");
+        }
+    }
+
+    // SendAndCollectAsync applies the same checks: an ECU answering with a short frame on a
+    // padded link is not collected under StrictReceive.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Functional_StrictReceive_Applies_To_SendAndCollect(bool strict)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var ecuBus = OpenClassic(session, 1);
+        ecuBus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x7DF) return;
+            ecuBus.Transmit(CanFrame.Classic(0x7E8, new byte[] { 0x02, 0x50, 0x01 }));
+            ecuBus.Transmit(CanFrame.Classic(0x7E9, new byte[] { 0x02, 0x50, 0x01, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        };
+        using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, new IsoTpFunctionalOptions
+        {
+            StrictReceive = strict,
+            NAs = TimeSpan.FromMilliseconds(500),
+        });
+
+        var responses = await client.SendAndCollectAsync(new byte[] { 0x10, 0x01 }, TimeSpan.FromMilliseconds(300))
+            .WaitAsync(ShortTimeout);
+
+        responses.Select(r => r.SourceCanId).Should().Equal(strict ? new uint[] { 0x7E9 } : new uint[] { 0x7E8, 0x7E9 });
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // With()
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void With_Overrides_TxDl_And_StrictReceive_And_The_Older_Overloads_Keep_Them()
+    {
+        var template = new IsoTpChannelOptions { TxDl = 16, StrictReceive = true, NCr = TimeSpan.FromMilliseconds(90) };
+
+        var changed = template.With(txDl: 24, strictReceive: false);
+        changed.TxDl.Should().Be(24);
+        changed.StrictReceive.Should().BeFalse();
+        changed.NCr.Should().Be(TimeSpan.FromMilliseconds(90));
+
+        // Twelve arguments: the overload from before TxDl and StrictReceive.
+        var twelve = template.With(null, null, null, null, null, null, null, TimeSpan.FromMilliseconds(30), null, null, null,
+            TimeSpan.FromMilliseconds(40));
+        twelve.TxDl.Should().Be(16);
+        twelve.StrictReceive.Should().BeTrue();
+        twelve.NCr.Should().Be(TimeSpan.FromMilliseconds(30));
+        twelve.NAr.Should().Be(TimeSpan.FromMilliseconds(40));
+
+        // Eleven arguments: the overload from before NAr.
+        var eleven = template.With(null, null, null, null, null, null, null, null, null, null, null);
+        eleven.TxDl.Should().Be(16);
+        eleven.StrictReceive.Should().BeTrue();
+    }
+}

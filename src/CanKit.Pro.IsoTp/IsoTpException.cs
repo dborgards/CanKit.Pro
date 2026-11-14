@@ -71,6 +71,59 @@ public sealed class IsoTpInvalidFlowStatusException : IsoTpException
 }
 
 /// <summary>
+/// Raised when a reception is aborted because a Consecutive Frame carries a sequence number
+/// other than the expected one (SRS FR-TP-002; ISO 15765-2:2024 §9.6.4.4, §9.8.2 Table 23:
+/// CTL_WRONG_SN). Surfaced through <see cref="IIsoTpChannel.BackgroundExceptionOccurred"/> and to
+/// a pending <see cref="IIsoTpChannel.ReceiveAsync"/>.
+/// </summary>
+/// <remarks>
+/// Its <see cref="CanKitException.ErrorCode"/> is the one <see cref="IsoTpException"/> carried
+/// for this case before the type existed, so code that checks the code is unaffected.
+/// </remarks>
+public sealed class IsoTpWrongSequenceNumberException : IsoTpException
+{
+    /// <summary>The sequence number the reception expected next (0..15).</summary>
+    public byte ExpectedSequenceNumber { get; }
+
+    /// <summary>The sequence number the Consecutive Frame carried (0..15).</summary>
+    public byte ReceivedSequenceNumber { get; }
+
+    /// <summary>Creates a wrong-sequence-number exception for the two values.</summary>
+    public IsoTpWrongSequenceNumberException(byte expectedSequenceNumber, byte receivedSequenceNumber)
+        : base($"ISO-TP CF sequence-number mismatch: expected {expectedSequenceNumber}, got {receivedSequenceNumber}.")
+    {
+        ExpectedSequenceNumber = expectedSequenceNumber;
+        ReceivedSequenceNumber = receivedSequenceNumber;
+    }
+}
+
+/// <summary>
+/// Raised when a reception in progress is aborted because a Single Frame or a new First Frame
+/// arrived in its place (ISO 15765-2:2024 §9.8.3, Table 24: CTL_UNEXP_PDU). The new frame is
+/// processed as the start of a new PDU. Surfaced through
+/// <see cref="IIsoTpChannel.BackgroundExceptionOccurred"/> and to a pending
+/// <see cref="IIsoTpChannel.ReceiveAsync"/>.
+/// </summary>
+/// <remarks>
+/// Its <see cref="CanKitException.ErrorCode"/> is the one <see cref="IsoTpException"/> carried
+/// for this case before the type existed, so code that checks the code is unaffected.
+/// </remarks>
+public sealed class IsoTpUnexpectedPduException : IsoTpException
+{
+    /// <summary>The kind of frame that arrived (<see cref="PciType.SingleFrame"/> or <see cref="PciType.FirstFrame"/>).</summary>
+    public PciType ReceivedFrameType { get; }
+
+    /// <summary>Creates an unexpected-PDU exception naming the frame that arrived.</summary>
+    public IsoTpUnexpectedPduException(PciType receivedFrameType)
+        : base(receivedFrameType == PciType.SingleFrame
+            ? "ISO-TP Single Frame aborted in-flight multi-frame reception (unexpected N_PCI)."
+            : "ISO-TP First Frame aborted in-flight multi-frame reception.")
+    {
+        ReceivedFrameType = receivedFrameType;
+    }
+}
+
+/// <summary>
 /// Raised when the sender receives more than <see cref="IsoTpChannelOptions.WftMax"/>
 /// consecutive <see cref="FlowStatus.Wait"/> Flow-Control frames (SRS FR-TP-011).
 /// </summary>

@@ -52,7 +52,10 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   answers only a complete request) and no later than the driver accepted it (where a response
   deadline starts); the two are not interchangeable (#146). Faults with `IsoTpTimeoutException`, `IsoTpOverflowException`,
   `IsoTpWaitFrameLimitExceededException`, or `IsoTpSendRejectedException` on the corresponding
-  ISO 15765-2 error cases.
+  ISO 15765-2 error cases. A reception aborted by a Consecutive Frame with the wrong sequence
+  number faults `ReceiveAsync` and is reported with `IsoTpWrongSequenceNumberException`; one
+  aborted by a Single Frame or a new First Frame arriving in its place with
+  `IsoTpUnexpectedPduException` (both derive from `IsoTpException` and keep its error code).
 - `ReceiveAsync` / `ReceiveAllAsync` — two surfaces onto the same bounded, drop-oldest PDU inbox
   (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64), in arrival order. The
   drop is silent — no `BackgroundExceptionOccurred`, no counter — and takes a queued
@@ -86,7 +89,10 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   frame from between the read and the discard is kept.
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NAr` (confirm of the Flow Control sent while
   receiving), `NBs` (peer-FC wait), `NCr` (next CF wait) and `WftMax` (max consecutive `Wait`
-  FCs) are configurable; defaults are the standard's 1000 ms each, and 10.
+  FCs) are configurable; defaults are the standard's 1000 ms each, and 10 (see item 9 below).
+- Frame size: `IsoTpChannelOptions.TxDl` sets the CAN FD TX_DL — 8, 12, 16, 20, 24, 32, 48 or
+  64 (default), checked when the channel is created. `StrictReceive` (default off) makes the
+  channel ignore a Single Frame whose CAN frame length does not fit its form (item 11 below).
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535
   bytes; classic CAN is bounded at 4095 by the codec anyway) is answered with `FC(OVFLW)` and
   nothing is allocated for it, so a CAN-FD escape First Frame cannot make the process reserve
@@ -159,8 +165,10 @@ foreach (var r in responses)
 - **SF-only collection**: First-Frame responses (which would require per-ECU physical Flow-Control
   addresses) are silently dropped; Single-Frame responses from all ECUs within the range are
   collected in arrival order.
-- `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `UsePadding`, `PaddingByte`,
-  and `NAs` (TX-confirm timeout).
+- `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `TxDl` (CAN FD TX_DL, same
+  values and default 64 as the channel's, checked when the client is opened), `UsePadding`,
+  `PaddingByte`, `NAs` (TX-confirm timeout) and `StrictReceive` (default off: the channel's Single
+  Frame length checks of item 11, applied to the collected responses).
 - **When the request went out**: `SendWithTransmitStampAsync` and
   `SendAndCollectWithTransmitStampAsync` return `IsoTpTransmitStamps` — the instant the frame was
   handed to the driver and the instant it was transmitted — for a caller that keeps a deadline
@@ -201,10 +209,9 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
    advertises 200 µs, 999 µs advertises 1 ms and 1.4 ms advertises 2 ms; above 127 ms it is
    capped at 127 ms. The standard defines only the codes (§9.6.5.4, Table 21); rounding up keeps
    the receiver from advertising less separation than it was configured for.
-6. **TX_DL and BRS.** With `UseCanFd` the sender uses TX_DL = 64, one of the configuration values
-   §9.5.1 (Table 7) permits; a smaller TX_DL cannot be configured, so an FD bus whose nodes take
-   only shorter frames cannot be served. Receiving adapts to any TX_DL the peer uses (§9.5.2,
-   RX_DL from the First Frame). The bit-rate switch is a bus/adapter setting outside ISO
+6. **TX_DL and BRS.** With `UseCanFd` the sender uses `TxDl` (default 64), one of the values
+   §9.5.1 (Table 7) permits; any other value fails channel creation. A classic channel always
+   uses 8. Receiving adapts to any TX_DL the peer uses (§9.5.2, RX_DL from the First Frame). The bit-rate switch is a bus/adapter setting outside ISO
    15765-2; the channel does not set BRS.
 7. **Classic and CAN FD frames on one link.** A reception started with CAN FD frames is neither
    continued nor ended by a classic frame, and the other way round (§9.5.2); such a frame is
@@ -217,6 +224,19 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
    The channel never sends `FC(WAIT)` and uses `WftMax` (default 10) as a sender-side guard: more
    consecutive Waits than that abort the send with `IsoTpWaitFrameLimitExceededException`. A
    conforming peer that needs more Waits is cut off by it; raise `WftMax` for such a peer.
+   The default of 10 is this library's choice — the standard gives none — and bounds the wait
+   at about ten times `NBs`.
+10. **Escape Single Frames.** A received CAN FD Single Frame in the escape form (`0x00 LEN`) is
+    ignored unless its CAN_DL is above 8 and its SF_DL needs that CAN_DL, i.e. would not have fit
+    the next smaller one (§9.6.2.2, Table 14). Earlier versions took such frames.
+11. **Single Frame length checks on receive.** §9.6.2.2 asks a receiver to ignore a Single Frame
+    whose CAN_DL does not fit its form: on a padded link one whose CAN_DL is not 8; on an
+    unpadded (optimised) link one up to 8 bytes whose CAN_DL is not SF_DL plus the PCI and
+    address-extension bytes (Table 13); and one longer than 8 bytes in the short PCI form. The
+    channel does these checks only with `StrictReceive`; by default it takes such frames, as
+    peers that get them wrong are common. On an unpadded link this also drops a padded 8-byte
+    frame whose SF_DL is shorter. The functional client has the same option for the responses
+    it collects. The escape-form bounds of item 10 apply always.
 
 ## Non-scope (yet)
 

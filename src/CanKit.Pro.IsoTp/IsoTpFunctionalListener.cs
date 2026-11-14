@@ -29,6 +29,7 @@ public sealed class IsoTpFunctionalListener : IDisposable
 
     private readonly ISubscription _subscription;
     private readonly ProtocolActor? _clock;
+    private readonly IsoTpFunctionalOptions? _options;
     private readonly ITimeSource _time;
     // Arrived after a collection's deadline but before its drain read the buffer: kept for the
     // next collection, whose window they are in (Codex on #150).
@@ -36,9 +37,11 @@ public sealed class IsoTpFunctionalListener : IDisposable
     private bool _ended;
     private int _disposed;
 
-    internal IsoTpFunctionalListener(ISubscription subscription, ProtocolActor? clock = null)
+    internal IsoTpFunctionalListener(ISubscription subscription, ProtocolActor? clock = null,
+        IsoTpFunctionalOptions? options = null)
     {
         _subscription = subscription;
+        _options = options;
         _clock = clock;
         _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
     }
@@ -113,7 +116,7 @@ public sealed class IsoTpFunctionalListener : IDisposable
     {
         while (_subscription.TryRead(out var frameEvent))
         {
-            if (!IsoTpFunctionalClient.TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)) continue;
+            if (!IsoTpFunctionalClient.TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp, _options)) continue;
             if (response!.HostArrivalTimestamp <= deadline) responses.Add(response);
             else _carried.Enqueue(response);
         }

@@ -177,6 +177,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             ? (int)Math.Min(IsoTpFrameCodec.MaxFdFirstFrameLength, int.MaxValue)
             : IsoTpFrameCodec.MaxClassicFirstFrameLength;
 
+    // The sender's TX_DL (ISO 15765-2:2024 §9.5.1): the configured value on CAN FD, 8 on
+    // classic CAN.
+    private int TxDl => _options.UseCanFd ? _options.TxDl : IsoTpFrameCodec.ClassicCanMaxData;
+
     /// <inheritdoc />
     public IsoTpEndpoint Endpoint => _endpoint;
 
@@ -227,6 +231,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         RequirePositive(nameof(_options.NAr), _options.NAr);
         RequirePositive(nameof(_options.NBs), _options.NBs);
         RequirePositive(nameof(_options.NCr), _options.NCr);
+        if (!IsoTpFrameCodec.IsValidTxDl(_options.TxDl))
+            throw new ArgumentOutOfRangeException(nameof(_options.TxDl), _options.TxDl,
+                $"{nameof(IsoTpChannelOptions.TxDl)} must be one of 8, 12, 16, 20, 24, 32, 48 or 64 " +
+                "(ISO 15765-2:2024 §9.5.1).");
 
         var inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
         {
@@ -1074,7 +1082,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // sees the "gate leaked" branch above forever.
         try
         {
-            int sfMax = IsoTpFrameCodec.SingleFrameMaxDataLength(_options.UseCanFd, _endpoint.UsesAddressExtension);
+            int sfMax = IsoTpFrameCodec.SingleFrameMaxDataLengthForTxDl(TxDl, _endpoint.UsesAddressExtension);
             if (pdu.Length <= sfMax)
             {
                 SendSingleFrame();
@@ -1110,7 +1118,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         var tx = _tx!;
         bool useLong = tx.Pdu.Length > IsoTpFrameCodec.MaxClassicFirstFrameLength;
-        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(_options.UseCanFd,
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLengthForTxDl(TxDl,
             _endpoint.UsesAddressExtension, useLong);
         if (ffData <= 0)
         {
@@ -1120,8 +1128,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         var firstChunk = tx.Pdu.AsSpan(0, Math.Min(ffData, tx.Pdu.Length));
-        var payload = IsoTpFrameCodec.BuildFirstFrame(_endpoint, tx.Pdu.Length, firstChunk,
-            _options.UseCanFd);
+        var payload = IsoTpFrameCodec.BuildFirstFrameForTxDl(_endpoint, tx.Pdu.Length, firstChunk,
+            _options.UseCanFd, TxDl);
 
         tx.Offset = firstChunk.Length;
         tx.NextSn = IsoTpFrameCodec.FirstConsecutiveSequenceNumber;
@@ -1138,7 +1146,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (!ReferenceEquals(_tx, tx)) return; // canceled/failed/replaced while STmin scheduled
         tx.StMinTimer = null;
 
-        int cfCap = IsoTpFrameCodec.ConsecutiveFrameMaxDataLength(_options.UseCanFd,
+        int cfCap = IsoTpFrameCodec.ConsecutiveFrameMaxDataLengthForTxDl(TxDl,
             _endpoint.UsesAddressExtension);
         int remaining = tx.Pdu.Length - tx.Offset;
         int chunkLen = Math.Min(cfCap, remaining);
@@ -1525,13 +1533,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private void HandleRxSingleFrame(byte[] payload, Pci pci, long frameArrival)
     {
+        // StrictReceive (ISO 15765-2:2024 §9.6.2.2): a Single Frame whose CAN_DL does not fit
+        // its form is invalid and ignored -- before it can touch a reception in progress.
+        if (_options.StrictReceive && !IsoTpFrameCodec.IsStrictlyValidSingleFrame(payload.Length, pci,
+                _endpoint.AddressExtensionSize, _options.UsePadding))
+            return;
+
         // A racing SF starts a fresh PDU: abort any in-flight reassembly and process the SF
         // (ISO 15765-2:2024 §9.8.3, Table 24: CTL_UNEXP_PDU). Must go through AbortRx — a silent
         // _rx clear leaves ReceiveAsync parked on an empty inbox.
         if (_rx is not null)
         {
-            AbortRx(new IsoTpException(
-                "ISO-TP Single Frame aborted in-flight multi-frame reception (unexpected N_PCI)."));
+            AbortRx(new IsoTpUnexpectedPduException(PciType.SingleFrame));
         }
 
         if (pci.DataOffset + pci.Length > payload.Length) return; // codec already validates but guard again
@@ -1574,8 +1587,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // FC(OVFLW) and no replacement session is started.
         if (_rx is not null)
         {
-            AbortRx(new IsoTpException(
-                "ISO-TP First Frame aborted in-flight multi-frame reception."));
+            AbortRx(new IsoTpUnexpectedPduException(PciType.FirstFrame));
         }
 
         // Cap reassembly allocation to the codec limit for this frame kind and to
@@ -1635,8 +1647,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // BackgroundExceptionOccurred and fault any blocked ReceiveAsync (FailTx analogue)
             // so the waiter does not hang on _pduInbox. The peer sender
             // will hit its own N_Cr / missing-FC path independently.
-            AbortRx(new IsoTpException(
-                $"ISO-TP CF sequence-number mismatch: expected {rx.ExpectedSn}, got {pci.SequenceNumber}."));
+            AbortRx(new IsoTpWrongSequenceNumberException(rx.ExpectedSn, pci.SequenceNumber));
             return;
         }
 

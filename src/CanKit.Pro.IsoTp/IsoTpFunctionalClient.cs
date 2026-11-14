@@ -89,6 +89,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        if (!IsoTpFrameCodec.IsValidTxDl(options.TxDl))
+            throw new ArgumentOutOfRangeException(nameof(options.TxDl), options.TxDl,
+                $"{nameof(IsoTpFunctionalOptions.TxDl)} must be one of 8, 12, 16, 20, 24, 32, 48 or 64 " +
+                "(ISO 15765-2:2024 §9.5.1).");
         _ownsService = ownsService;
         _clock = clock;
         _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
@@ -270,7 +274,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     public IsoTpFunctionalListener Listen()
     {
         ThrowIfDisposed();
-        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true), _clock);
+        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true), _clock, _options);
     }
 
     /// <inheritdoc/>
@@ -291,14 +295,16 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// </summary>
     private async Task<IsoTpTransmitStamps> SendSingleFrameAsync(ReadOnlyMemory<byte> pdu, CancellationToken ct)
     {
-        int sfMax = IsoTpFrameCodec.SingleFrameMaxDataLength(_options.UseCanFd,
+        // TX_DL: the configured value on CAN FD, 8 on classic CAN (ISO 15765-2:2024 §9.5.1).
+        int txDl = _options.UseCanFd ? _options.TxDl : IsoTpFrameCodec.ClassicCanMaxData;
+        int sfMax = IsoTpFrameCodec.SingleFrameMaxDataLengthForTxDl(txDl,
             _txEndpoint.UsesAddressExtension);
 
         if (pdu.Length > sfMax)
             throw new InvalidOperationException(
                 $"ISO-TP functional addressing restricts outbound requests to Single Frames " +
                 $"(ISO 15765-2:2024 §8.3.2.4). The supplied PDU is {pdu.Length} bytes but the maximum " +
-                $"Single-Frame payload for {(_options.UseCanFd ? "CAN-FD" : "classic CAN")} " +
+                $"Single-Frame payload for {(_options.UseCanFd ? $"CAN-FD with TX_DL {txDl}" : "classic CAN")} " +
                 $"is {sfMax} bytes.");
 
         var payload = IsoTpFrameCodec.BuildSingleFrame(_txEndpoint, pdu.Span,
@@ -349,7 +355,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         {
             await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)
+                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp, _options)
                     && response!.HostArrivalTimestamp <= deadline)
                     responses.Add(response);
             }
@@ -370,7 +376,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
             sub.Dispose();
             while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)
+                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp, _options)
                     && response!.HostArrivalTimestamp <= deadline)
                     responses.Add(response);
             }
@@ -390,7 +396,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     }
 
     internal static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
-        out IsoTpFunctionalResponse? response, Func<long> now)
+        out IsoTpFunctionalResponse? response, Func<long> now, IsoTpFunctionalOptions? options = null)
     {
         var frame = frameEvent.Frame;
         var payload = frame.Data.ToArray();
@@ -408,6 +414,15 @@ public sealed class IsoTpFunctionalClient : IDisposable
         // each ECU's Flow-Control reply (ISO 15765-2:2024 §8.3.2.4; a functional FF is ignored,
         // §9.8.3). CF and FC are stray frames.
         if (pci.Type != PciType.SingleFrame)
+        {
+            response = null;
+            return false;
+        }
+
+        // StrictReceive: the same Single Frame length checks as the channel's (§9.6.2.2), for
+        // Normal addressing (no address extension).
+        if (options is { StrictReceive: true }
+            && !IsoTpFrameCodec.IsStrictlyValidSingleFrame(payload.Length, pci, 0, options.UsePadding))
         {
             response = null;
             return false;

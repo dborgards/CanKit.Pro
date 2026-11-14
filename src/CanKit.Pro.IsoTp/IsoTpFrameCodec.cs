@@ -67,12 +67,36 @@ public static class IsoTpFrameCodec
     /// <c>64 - 2 - (extension ? 1 : 0)</c>.
     /// </remarks>
     public static int SingleFrameMaxDataLength(bool isCanFd, bool usesAddressExtension)
+        => SingleFrameMaxDataLengthForTxDl(isCanFd ? CanFdMaxData : ClassicCanMaxData, usesAddressExtension);
+
+    // The same for a sender configured with TX_DL (ISO 15765-2:2024 §9.5.1, §9.6.2.1): TX_DL 8
+    // carries the short PCI form only, a larger TX_DL the escape form up to TX_DL - 2.
+    internal static int SingleFrameMaxDataLengthForTxDl(int txDl, bool usesAddressExtension)
     {
-        int frameSize = isCanFd ? CanFdMaxData : ClassicCanMaxData;
-        int pci = isCanFd ? 2 : 1;
+        int pci = txDl > ClassicCanMaxData ? 2 : 1;
         int addrExt = usesAddressExtension ? 1 : 0;
-        return frameSize - pci - addrExt;
+        return txDl - pci - addrExt;
     }
+
+    // The CAN_DL checks of §9.6.2.2 that StrictReceive adds, shared by the channel and the
+    // functional client. Up to 8 bytes: with padding the frame is 8 bytes long (§11.3.2.1);
+    // without, it is exactly SF_DL + PCI + address extension (§11.3.2.2, Table 13). Above 8 bytes
+    // only the escape form is valid, so a short PCI (low nibble not zero) is ignored; the escape
+    // form's own bounds (Table 14) TryParsePci checks always.
+    internal static bool IsStrictlyValidSingleFrame(int canDl, in Pci pci, int addressExtensionSize,
+        bool usePadding)
+    {
+        int shortFormOffset = addressExtensionSize + 1;
+        if (canDl > ClassicCanMaxData)
+            return pci.DataOffset != shortFormOffset;
+        return usePadding
+            ? canDl == ClassicCanMaxData
+            : canDl == shortFormOffset + pci.Length;
+    }
+
+    /// <summary>The TX_DL values ISO 15765-2:2024 §9.5.1 (Table 7) permits for CAN FD.</summary>
+    internal static bool IsValidTxDl(int txDl)
+        => txDl is 8 or 12 or 16 or 20 or 24 or 32 or 48 or 64;
 
     /// <summary>
     /// Returns the maximum number of Single-Frame data bytes that still fit into the classic
@@ -100,8 +124,10 @@ public static class IsoTpFrameCodec
     /// <paramref name="useLongLength"/> is <c>true</c>.
     /// </remarks>
     public static int FirstFrameMaxDataLength(bool isCanFd, bool usesAddressExtension, bool useLongLength)
+        => FirstFrameMaxDataLengthForTxDl(isCanFd ? CanFdMaxData : ClassicCanMaxData, usesAddressExtension, useLongLength);
+
+    internal static int FirstFrameMaxDataLengthForTxDl(int frameSize, bool usesAddressExtension, bool useLongLength)
     {
-        int frameSize = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         int pci = useLongLength ? 6 : 2;
         int addrExt = usesAddressExtension ? 1 : 0;
         return frameSize - pci - addrExt;
@@ -112,8 +138,10 @@ public static class IsoTpFrameCodec
     /// 1-byte PCI on both classic CAN and CAN-FD.
     /// </summary>
     public static int ConsecutiveFrameMaxDataLength(bool isCanFd, bool usesAddressExtension)
+        => ConsecutiveFrameMaxDataLengthForTxDl(isCanFd ? CanFdMaxData : ClassicCanMaxData, usesAddressExtension);
+
+    internal static int ConsecutiveFrameMaxDataLengthForTxDl(int frameSize, bool usesAddressExtension)
     {
-        int frameSize = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         int addrExt = usesAddressExtension ? 1 : 0;
         return frameSize - 1 - addrExt;
     }
@@ -269,6 +297,17 @@ public static class IsoTpFrameCodec
         return slice.Slice(0, written).ToArray();
     }
 
+    // The same for a CAN FD sender configured with a TX_DL below 64 (ISO 15765-2:2024 §9.5.1):
+    // the First Frame fills exactly TX_DL bytes.
+    internal static byte[] BuildFirstFrameForTxDl(in IsoTpEndpoint endpoint, int totalLength,
+        ReadOnlySpan<byte> firstChunk, bool isCanFd, int frameSize)
+    {
+        Span<byte> buffer = stackalloc byte[CanFdMaxData];
+        var slice = buffer.Slice(0, frameSize);
+        int written = BuildFirstFrameCore(slice, endpoint, totalLength, firstChunk, isCanFd, frameSize);
+        return slice.Slice(0, written).ToArray();
+    }
+
     /// <summary>
     /// Writes a First-Frame CAN payload into <paramref name="destination"/>. First Frames never
     /// use padding — they always fill the underlying CAN frame completely.
@@ -285,6 +324,11 @@ public static class IsoTpFrameCodec
     /// </exception>
     public static int BuildFirstFrame(Span<byte> destination, in IsoTpEndpoint endpoint,
         int totalLength, ReadOnlySpan<byte> firstChunk, bool isCanFd)
+        => BuildFirstFrameCore(destination, endpoint, totalLength, firstChunk, isCanFd,
+            isCanFd ? CanFdMaxData : ClassicCanMaxData);
+
+    private static int BuildFirstFrameCore(Span<byte> destination, in IsoTpEndpoint endpoint,
+        int totalLength, ReadOnlySpan<byte> firstChunk, bool isCanFd, int maxFrame)
     {
         // FF_DL == 0 is not a valid First Frame: 0x10 0x00 is the CAN-FD escape header, so a
         // zero-length FF would not round-trip through TryParsePci (#207).
@@ -292,7 +336,6 @@ public static class IsoTpFrameCodec
             throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength,
                 "Total PDU length must be positive; a First Frame cannot announce zero bytes.");
         int addrExt = endpoint.AddressExtensionSize;
-        int maxFrame = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         bool useLongLength = totalLength > MaxClassicFirstFrameLength;
         if (useLongLength && !isCanFd)
             throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength,
@@ -524,7 +567,11 @@ public static class IsoTpFrameCodec
                             return false;
                         int longLen = canPayload[lenIndex];
                         int dataOffset = pciIndex + 2;
-                        if (longLen < 1 || canPayload.Length < dataOffset + longLen)
+                        // ISO 15765-2:2024 §9.6.2.2, Table 14: the escape form is only for a
+                        // CAN_DL above 8, and its SF_DL must need that CAN_DL -- one that would
+                        // have fit the next smaller frame is ignored, as is one beyond it.
+                        if (longLen < EscapeSingleFrameMinDataLength(canPayload.Length, addrExt)
+                            || canPayload.Length < dataOffset + longLen)
                             return false;
                         pci = new Pci(type, longLen, 0, FlowStatus.ClearToSend, 0, 0, TimeSpan.Zero, dataOffset);
                         return true;
@@ -621,6 +668,28 @@ public static class IsoTpFrameCodec
         }
 
         return false;
+    }
+
+    // The CAN FD data lengths above 8 and below 64.
+    private static readonly int[] FdDataLengthSteps = { 12, 16, 20, 24, 32, 48 };
+
+    // The smallest SF_DL an escape Single Frame may carry at this CAN_DL (Table 14): one more than
+    // the next smaller CAN_DL could carry -- 7 less the extension in the short form at CAN_DL 8,
+    // CAN_DL - 2 less the extension in the escape form above it. Int.MaxValue at CAN_DL 8 or
+    // less, where the escape form is not allowed at all.
+    internal static int EscapeSingleFrameMinDataLength(int canDl, int addrExt)
+    {
+        if (canDl <= ClassicCanMaxData) return int.MaxValue;
+        int below = ClassicCanMaxData;
+        foreach (int step in FdDataLengthSteps)
+        {
+            if (step >= canDl) break;
+            below = step;
+        }
+        int belowCapacity = below == ClassicCanMaxData
+            ? ClassicCanMaxData - 1 - addrExt
+            : below - 2 - addrExt;
+        return belowCapacity + 1;
     }
 
     // -------------------------------------------------------------------------------------------
