@@ -90,6 +90,9 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NAr` (confirm of the Flow Control sent while
   receiving), `NBs` (peer-FC wait), `NCr` (next CF wait) and `WftMax` (max consecutive `Wait`
   FCs) are configurable; defaults are the standard's 1000 ms each, and 10.
+- Frame size: `IsoTpChannelOptions.TxDl` sets the CAN FD TX_DL — 8, 12, 16, 20, 24, 32, 48 or
+  64 (default), checked when the channel is created. `StrictReceive` (default off) makes a
+  padded channel ignore a Single Frame received in a frame shorter than 8 bytes.
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535
   bytes; classic CAN is bounded at 4095 by the codec anyway) is answered with `FC(OVFLW)` and
   nothing is allocated for it, so a CAN-FD escape First Frame cannot make the process reserve
@@ -204,10 +207,9 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
    advertises 200 µs, 999 µs advertises 1 ms and 1.4 ms advertises 2 ms; above 127 ms it is
    capped at 127 ms. The standard defines only the codes (§9.6.5.4, Table 21); rounding up keeps
    the receiver from advertising less separation than it was configured for.
-6. **TX_DL and BRS.** With `UseCanFd` the sender uses TX_DL = 64, one of the configuration values
-   §9.5.1 (Table 7) permits; a smaller TX_DL cannot be configured, so an FD bus whose nodes take
-   only shorter frames cannot be served. Receiving adapts to any TX_DL the peer uses (§9.5.2,
-   RX_DL from the First Frame). The bit-rate switch is a bus/adapter setting outside ISO
+6. **TX_DL and BRS.** With `UseCanFd` the sender uses `TxDl` (default 64), one of the values
+   §9.5.1 (Table 7) permits; any other value fails channel creation. A classic channel always
+   uses 8. Receiving adapts to any TX_DL the peer uses (§9.5.2, RX_DL from the First Frame). The bit-rate switch is a bus/adapter setting outside ISO
    15765-2; the channel does not set BRS.
 7. **Classic and CAN FD frames on one link.** A reception started with CAN FD frames is neither
    continued nor ended by a classic frame, and the other way round (§9.5.2); such a frame is
@@ -223,6 +225,9 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
 10. **Escape Single Frames.** A received CAN FD Single Frame in the escape form (`0x00 LEN`) is
     ignored unless its CAN_DL is above 8 and its SF_DL needs that CAN_DL, i.e. would not have fit
     the next smaller one (§9.6.2.2, Table 14). Earlier versions took such frames.
+11. **Padding check on receive.** §9.6.2.2 asks a receiver on a padded link to ignore a Single
+    Frame whose CAN_DL is not 8. The channel does that only with `StrictReceive`; by default it
+    takes such frames, as peers that do not pad are common.
 
 ## Non-scope (yet)
 

@@ -534,6 +534,8 @@ classDiagram
     class IsoTpChannelOptions {
         +TimeSpan NAs NBs NCr
         +int WftMax
+        +int TxDl
+        +bool StrictReceive
         +int ReceiveBufferCapacity
         +int MaxReceivePduLength
     }
