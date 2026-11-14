@@ -1421,7 +1421,7 @@ carry the L3/L4 packages. Open is whatever stands in this table without
 | **STmin** | Separation Time minimum; minimum spacing between CFs. |
 | **SN** | Sequence Number of the Consecutive Frames (1..15, mod 16). |
 | **N_As/N_Ar/N_Bs/N_Br/N_Cs/N_Cr** | ISO 15765-2 timing supervisions (sender/receiver, per frame phase). |
-| **WFTmax** | Maximum number of consecutive FC=WT before aborting. |
+| **WFTmax** | Maximum number of consecutive FC=WT before aborting; a receiver parameter in ISO 15765-2:2024 §9.7, applied by the sender as a guard (`WftMax`, default 10). |
 | **Addressing (Normal/NormalFixed/Extended/Mixed)** | ISO-TP addressing formats; for Extended/Mixed one payload byte carries the address (`UsePayload`). |
 | **J1939** | SAE J1939 protocol family (29-bit) for commercial vehicles. |
 | **PGN** | Parameter Group Number (J1939 message ID portion). |
