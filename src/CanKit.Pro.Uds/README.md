@@ -29,7 +29,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 | FR-UDS-007 | 0x3E TesterPresent + keep-alive | Yes — `TesterPresentAsync(bool)` + `StartTesterPresentKeepAlive(TimeSpan?)` |
 | FR-UDS-008 | P2 / P2* timing | Yes — configurable `UdsClientOptions.P2ClientMax` / `P2StarClientMax`; `UdsTimeoutException` on expiry |
 | FR-UDS-009 | NRC 0x78 responsePending | Yes — client stays inside P2* while the ECU keeps replying 0x78, bounded by `MaxResponsePendingCount` |
-| FR-UDS-010 | Structured NRC | Yes — `UdsNegativeResponseException` carries requested SID + raw NRC byte + named enum |
+| FR-UDS-010 | Structured NRC | Yes — `UdsNegativeResponseException` carries requested SID + raw NRC byte + named enum (`UdsNegativeResponseCode` names every code of ISO 14229-1:2026 Table A.1) |
 | FR-UDS-011 | Multi-DID `0x22` | Yes (SHOULD) — `ReadDataByIdentifierAsync(IReadOnlyList<ushort>, IReadOnlyDictionary<ushort, int>)` (caller supplies per-DID `dataRecord` lengths per ISO 14229-1:2026 §10.2.3) |
 | FR-UDS-012 | 0x34 / 0x35 / 0x36 / 0x37 upload/download | Yes (COULD) — `RequestDownloadAsync` / `RequestUploadAsync` / `TransferDataAsync(byte bsc, ReadOnlyMemory<byte>)` / `RequestTransferExitAsync(ReadOnlyMemory<byte>)`, plus one-shot `DownloadAsync` that negotiates `maxNumberOfBlockLength`, chunks the payload and walks the BSC with `0xFF → 0x00` wrap |
 
