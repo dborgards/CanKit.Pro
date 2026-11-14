@@ -78,6 +78,22 @@ public static class IsoTpFrameCodec
         return txDl - pci - addrExt;
     }
 
+    // The CAN_DL checks of §9.6.2.2 that StrictReceive adds, shared by the channel and the
+    // functional client. Up to 8 bytes: with padding the frame is 8 bytes long (§11.3.2.1);
+    // without, it is exactly SF_DL + PCI + address extension (§11.3.2.2, Table 13). Above 8 bytes
+    // only the escape form is valid, so a short PCI (low nibble not zero) is ignored; the escape
+    // form's own bounds (Table 14) TryParsePci checks always.
+    internal static bool IsStrictlyValidSingleFrame(int canDl, in Pci pci, int addressExtensionSize,
+        bool usePadding)
+    {
+        int shortFormOffset = addressExtensionSize + 1;
+        if (canDl > ClassicCanMaxData)
+            return pci.DataOffset != shortFormOffset;
+        return usePadding
+            ? canDl == ClassicCanMaxData
+            : canDl == shortFormOffset + pci.Length;
+    }
+
     /// <summary>The TX_DL values ISO 15765-2:2024 §9.5.1 (Table 7) permits for CAN FD.</summary>
     internal static bool IsValidTxDl(int txDl)
         => txDl is 8 or 12 or 16 or 20 or 24 or 32 or 48 or 64;

@@ -411,6 +411,92 @@ public class IsoTpNormOptionsTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // ---------------------------------------------------------------------------------------
+    // StrictReceive on the functional client
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Functional_StrictReceive_Defaults_To_False()
+        => new IsoTpFunctionalOptions().StrictReceive.Should().BeFalse();
+
+    // The functional client applies the channel's Single Frame length checks to the responses it
+    // collects (Normal addressing, no extension byte). Each case sends the response under test
+    // and a valid one to a listener; with StrictReceive only the valid one is collected.
+    [Theory]
+    [InlineData(false, false, "03112233", true)]
+    [InlineData(false, false, "03112233CC", false)]
+    [InlineData(false, false, "03112233CCCCCCCC", false)]
+    [InlineData(false, true, "03112233CCCCCCCC", true)]
+    [InlineData(false, true, "03112233", false)]
+    [InlineData(true, true, "03112233CCCCCCCCCCCCCCCC", false)]
+    [InlineData(true, true, "000811223344556677" + "88CCCC", true)]
+    public async Task Functional_StrictReceive_Holds_A_Response_To_Its_CAN_DL(bool useCanFd, bool usePadding,
+        string frameHex, bool valid)
+    {
+        var frame = Enumerable.Range(0, frameHex.Length / 2).Select(i => Convert.ToByte(frameHex.Substring(2 * i, 2), 16)).ToArray();
+        var marker = IsoTpFrameCodec.BuildSingleFrame(IsoTpEndpoint.Normal(0x7E9, 0), new byte[] { 0x7A },
+            isCanFd: false, padding: usePadding);
+
+        foreach (bool strict in new[] { true, false })
+        {
+            var session = NewSession();
+            using var bus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+            using var ecuBus = useCanFd ? OpenCanFd(session, 1) : OpenClassic(session, 1);
+            using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, new IsoTpFunctionalOptions
+            {
+                UseCanFd = useCanFd,
+                UsePadding = usePadding,
+                StrictReceive = strict,
+            });
+            int seen = 0;
+            var bothSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            bus.FrameObserved += (_, e) =>
+            {
+                if (e.CanFrame.ID is 0x7E8 or 0x7E9 && Interlocked.Increment(ref seen) == 2) bothSeen.TrySetResult(true);
+            };
+            using var listener = client.Listen();
+
+            ecuBus.Transmit(useCanFd ? CanFrame.Fd(0x7E8, frame) : CanFrame.Classic(0x7E8, frame));
+            ecuBus.Transmit(useCanFd ? CanFrame.Fd(0x7E9, marker) : CanFrame.Classic(0x7E9, marker));
+            await bothSeen.Task.WaitAsync(ShortTimeout);
+
+            var responses = await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout);
+            var sources = responses.Select(r => r.SourceCanId).ToArray();
+            if (valid || !strict)
+                sources.Should().Equal(new uint[] { 0x7E8, 0x7E9 }, $"StrictReceive={strict} collects this response");
+            else
+                sources.Should().Equal(new uint[] { 0x7E9 }, "StrictReceive drops this response");
+        }
+    }
+
+    // SendAndCollectAsync applies the same checks: an ECU answering with a short frame on a
+    // padded link is not collected under StrictReceive.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Functional_StrictReceive_Applies_To_SendAndCollect(bool strict)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var ecuBus = OpenClassic(session, 1);
+        ecuBus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x7DF) return;
+            ecuBus.Transmit(CanFrame.Classic(0x7E8, new byte[] { 0x02, 0x50, 0x01 }));
+            ecuBus.Transmit(CanFrame.Classic(0x7E9, new byte[] { 0x02, 0x50, 0x01, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        };
+        using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, new IsoTpFunctionalOptions
+        {
+            StrictReceive = strict,
+            NAs = TimeSpan.FromMilliseconds(500),
+        });
+
+        var responses = await client.SendAndCollectAsync(new byte[] { 0x10, 0x01 }, TimeSpan.FromMilliseconds(300))
+            .WaitAsync(ShortTimeout);
+
+        responses.Select(r => r.SourceCanId).Should().Equal(strict ? new uint[] { 0x7E9 } : new uint[] { 0x7E8, 0x7E9 });
+    }
+
+    // ---------------------------------------------------------------------------------------
     // With()
     // ---------------------------------------------------------------------------------------
 

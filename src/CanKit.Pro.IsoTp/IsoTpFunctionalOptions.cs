@@ -63,4 +63,27 @@ public sealed class IsoTpFunctionalOptions
     /// accepted. Defaults to <see cref="DefaultTimeout"/> (1 second).
     /// </summary>
     public TimeSpan NAs { get; init; } = DefaultTimeout;
+
+    /// <summary>
+    /// <c>true</c> to ignore received Single Frame responses whose CAN frame length does not fit
+    /// their form (ISO 15765-2:2024 §9.6.2.2), with the same checks as
+    /// <see cref="IsoTpChannelOptions.StrictReceive"/>. Defaults to <c>false</c>, which takes
+    /// such frames as before.
+    /// </summary>
+    /// <remarks>
+    /// Responses use Normal addressing, so there is no address extension. With it, a response
+    /// Single Frame is not collected when:
+    /// <list type="bullet">
+    ///   <item><description>it is 8 bytes or shorter and <see cref="UsePadding"/> is on, but the
+    ///   frame is not 8 bytes long (§11.3.2.1);</description></item>
+    ///   <item><description>it is 8 bytes or shorter and <see cref="UsePadding"/> is off, but
+    ///   the frame is not exactly the PCI and the SF_DL data bytes long (§11.3.2.2, Table 13);
+    ///   </description></item>
+    ///   <item><description>it is longer than 8 bytes but uses the short PCI form.</description></item>
+    /// </list>
+    /// <see cref="UsePadding"/> thus describes the link in both directions, as it does for the
+    /// channel. An escape-form Single Frame whose SF_DL does not need its CAN_DL (Table 14) is
+    /// ignored whatever this says. Applies to <see cref="IsoTpFunctionalClient.Listen"/> too.
+    /// </remarks>
+    public bool StrictReceive { get; init; }
 }

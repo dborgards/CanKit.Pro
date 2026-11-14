@@ -274,7 +274,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     public IsoTpFunctionalListener Listen()
     {
         ThrowIfDisposed();
-        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true), _clock);
+        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true), _clock, _options);
     }
 
     /// <inheritdoc/>
@@ -355,7 +355,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         {
             await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)
+                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp, _options)
                     && response!.HostArrivalTimestamp <= deadline)
                     responses.Add(response);
             }
@@ -376,7 +376,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
             sub.Dispose();
             while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)
+                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp, _options)
                     && response!.HostArrivalTimestamp <= deadline)
                     responses.Add(response);
             }
@@ -396,7 +396,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     }
 
     internal static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
-        out IsoTpFunctionalResponse? response, Func<long> now)
+        out IsoTpFunctionalResponse? response, Func<long> now, IsoTpFunctionalOptions? options = null)
     {
         var frame = frameEvent.Frame;
         var payload = frame.Data.ToArray();
@@ -414,6 +414,15 @@ public sealed class IsoTpFunctionalClient : IDisposable
         // each ECU's Flow-Control reply (ISO 15765-2:2024 §8.3.2.4; a functional FF is ignored,
         // §9.8.3). CF and FC are stray frames.
         if (pci.Type != PciType.SingleFrame)
+        {
+            response = null;
+            return false;
+        }
+
+        // StrictReceive: the same Single Frame length checks as the channel's (§9.6.2.2), for
+        // Normal addressing (no address extension).
+        if (options is { StrictReceive: true }
+            && !IsoTpFrameCodec.IsStrictlyValidSingleFrame(payload.Length, pci, 0, options.UsePadding))
         {
             response = null;
             return false;

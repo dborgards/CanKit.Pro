@@ -167,7 +167,8 @@ foreach (var r in responses)
   collected in arrival order.
 - `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `TxDl` (CAN FD TX_DL, same
   values and default 64 as the channel's, checked when the client is opened), `UsePadding`,
-  `PaddingByte`, and `NAs` (TX-confirm timeout).
+  `PaddingByte`, `NAs` (TX-confirm timeout) and `StrictReceive` (default off: the channel's Single
+  Frame length checks of item 11, applied to the collected responses).
 - **When the request went out**: `SendWithTransmitStampAsync` and
   `SendAndCollectWithTransmitStampAsync` return `IsoTpTransmitStamps` — the instant the frame was
   handed to the driver and the instant it was transmitted — for a caller that keeps a deadline
@@ -233,7 +234,9 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
     unpadded (optimised) link one up to 8 bytes whose CAN_DL is not SF_DL plus the PCI and
     address-extension bytes (Table 13); and one longer than 8 bytes in the short PCI form. The
     channel does these checks only with `StrictReceive`; by default it takes such frames, as
-    peers that get them wrong are common. The escape-form bounds of item 10 apply always.
+    peers that get them wrong are common. On an unpadded link this also drops a padded 8-byte
+    frame whose SF_DL is shorter. The functional client has the same option for the responses
+    it collects. The escape-form bounds of item 10 apply always.
 
 ## Non-scope (yet)
 

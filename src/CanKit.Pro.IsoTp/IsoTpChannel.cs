@@ -1535,7 +1535,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         // StrictReceive (ISO 15765-2:2024 §9.6.2.2): a Single Frame whose CAN_DL does not fit
         // its form is invalid and ignored -- before it can touch a reception in progress.
-        if (_options.StrictReceive && !IsStrictlyValidSingleFrame(payload.Length, pci))
+        if (_options.StrictReceive && !IsoTpFrameCodec.IsStrictlyValidSingleFrame(payload.Length, pci,
+                _endpoint.AddressExtensionSize, _options.UsePadding))
             return;
 
         // A racing SF starts a fresh PDU: abort any in-flight reassembly and process the SF
@@ -1550,20 +1551,6 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
         EmitPdu(pdu, frameArrival);
-    }
-
-    // The CAN_DL checks of §9.6.2.2 that StrictReceive adds. Up to 8 bytes: with padding the
-    // frame is 8 bytes long (§11.3.2.1); without, it is exactly SF_DL + PCI + address extension
-    // (§11.3.2.2, Table 13). Above 8 bytes only the escape form is valid, so a short PCI (low
-    // nibble not zero) is ignored; the escape form's own bounds (Table 14) the codec checks always.
-    private bool IsStrictlyValidSingleFrame(int canDl, in Pci pci)
-    {
-        int shortFormOffset = _endpoint.AddressExtensionSize + 1;
-        if (canDl > IsoTpFrameCodec.ClassicCanMaxData)
-            return pci.DataOffset != shortFormOffset;
-        return _options.UsePadding
-            ? canDl == IsoTpFrameCodec.ClassicCanMaxData
-            : canDl == shortFormOffset + pci.Length;
     }
 
     // A First Frame announcing no more than a Single Frame of the same CAN_DL could carry is
