@@ -1949,8 +1949,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), badCf));
 
         Func<Task> act = () => recvTask;
-        (await act.Should().ThrowAsync<IsoTpException>())
-            .WithMessage("*sequence-number mismatch*");
+        var wrongSn = (await act.Should().ThrowAsync<IsoTpWrongSequenceNumberException>())
+            .WithMessage("*sequence-number mismatch*").Which;
+        wrongSn.ExpectedSequenceNumber.Should().Be(1);
+        wrongSn.ReceivedSequenceNumber.Should().Be(2);
+        wrongSn.ErrorCode.Should().Be(new IsoTpException("x").ErrorCode,
+            "the dedicated type keeps the error code the base exception carried");
     }
 
     // --------------------------------------------------------------------------------
@@ -1995,11 +1999,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), sf));
 
         Func<Task> act = () => recvTask;
-        (await act.Should().ThrowAsync<IsoTpException>())
-            .WithMessage("*Single Frame aborted in-flight*");
+        (await act.Should().ThrowAsync<IsoTpUnexpectedPduException>())
+            .WithMessage("*Single Frame aborted in-flight*")
+            .Which.ReceivedFrameType.Should().Be(PciType.SingleFrame);
 
         var bg = await bgFault.Task.WaitAsync(ShortTimeout);
-        bg.Should().BeOfType<IsoTpException>().Which.Message.Should().Contain("Single Frame aborted");
+        bg.Should().BeOfType<IsoTpUnexpectedPduException>().Which.Message.Should().Contain("Single Frame aborted");
 
         // The superseding SF is still delivered as the next PDU.
         var next = await receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
@@ -2055,8 +2060,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         busA.Transmit(CanFrame.Fd(unchecked((int)epPeer.TxCanId), hugeFf));
 
         Func<Task> act = () => recvTask;
-        (await act.Should().ThrowAsync<IsoTpException>())
-            .WithMessage("*First Frame aborted in-flight*");
+        (await act.Should().ThrowAsync<IsoTpUnexpectedPduException>())
+            .WithMessage("*First Frame aborted in-flight*")
+            .Which.ReceivedFrameType.Should().Be(PciType.FirstFrame);
 
         for (int i = 0; i < 50 && Volatile.Read(ref overflowFc) == 0; i++)
             await Task.Delay(20);

@@ -52,7 +52,10 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   answers only a complete request) and no later than the driver accepted it (where a response
   deadline starts); the two are not interchangeable (#146). Faults with `IsoTpTimeoutException`, `IsoTpOverflowException`,
   `IsoTpWaitFrameLimitExceededException`, or `IsoTpSendRejectedException` on the corresponding
-  ISO 15765-2 error cases.
+  ISO 15765-2 error cases. A reception aborted by a Consecutive Frame with the wrong sequence
+  number faults `ReceiveAsync` and is reported with `IsoTpWrongSequenceNumberException`; one
+  aborted by a Single Frame or a new First Frame arriving in its place with
+  `IsoTpUnexpectedPduException` (both derive from `IsoTpException` and keep its error code).
 - `ReceiveAsync` / `ReceiveAllAsync` — two surfaces onto the same bounded, drop-oldest PDU inbox
   (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64), in arrival order. The
   drop is silent — no `BackgroundExceptionOccurred`, no counter — and takes a queued
