@@ -143,15 +143,23 @@ public sealed class IsoTpChannelOptions
     public int TxDl { get; init; } = IsoTpFrameCodec.CanFdMaxData;
 
     /// <summary>
-    /// <c>true</c> to ignore received Single Frames whose CAN frame length does not follow the
-    /// padding rule the channel is configured for (ISO 15765-2:2024 §9.6.2.2, §11.3.2.1). Defaults to
-    /// <c>false</c>, which takes such frames as before.
+    /// <c>true</c> to ignore received Single Frames whose CAN frame length does not fit their
+    /// form (ISO 15765-2:2024 §9.6.2.2). Defaults to <c>false</c>, which takes such frames as
+    /// before.
     /// </summary>
     /// <remarks>
-    /// Checked only with <see cref="UsePadding"/>: a padded link uses 8-byte frames for anything
-    /// up to 8 bytes, so a Single Frame received in a frame of fewer than 8 bytes is dropped
-    /// without a reply, as an invalid frame. Frames longer than 8 bytes are already held to the CAN FD data length
-    /// steps by the bus and the codec.
+    /// With it, a Single Frame is dropped without a reply, as an invalid frame, when:
+    /// <list type="bullet">
+    ///   <item><description>it is 8 bytes or shorter and <see cref="UsePadding"/> is on, but the
+    ///   frame is not 8 bytes long (§11.3.2.1);</description></item>
+    ///   <item><description>it is 8 bytes or shorter and <see cref="UsePadding"/> is off, but
+    ///   the frame is not exactly the PCI, the address extension and the SF_DL data bytes long
+    ///   (§11.3.2.2, Table 13);</description></item>
+    ///   <item><description>it is longer than 8 bytes but uses the short PCI form, i.e. the low
+    ///   nibble of its PCI byte is not zero.</description></item>
+    /// </list>
+    /// An escape-form Single Frame whose SF_DL does not need its CAN_DL (Table 14) is ignored
+    /// whatever this says. A dropped frame does not touch a reception in progress.
     /// </remarks>
     public bool StrictReceive { get; init; }
 

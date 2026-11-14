@@ -184,12 +184,14 @@ public class IsoTpNormOptionsTests : IClassFixture<VirtualAdapterFixture>
     // padded link the first is ignored and the second is what arrives; otherwise the first is
     // taken as before.
     [Theory]
-    [InlineData(true, true, false)]
-    [InlineData(true, false, true)]
-    [InlineData(false, true, true)]
-    [InlineData(false, false, true)]
+    // On an unpadded link StrictReceive holds a Single Frame to its optimized length (Table 13),
+    // so there the padded frame is the one that is ignored.
+    [InlineData(true, true, false, true)]
+    [InlineData(true, false, true, false)]
+    [InlineData(false, true, true, true)]
+    [InlineData(false, false, true, true)]
     public async Task StrictReceive_Ignores_An_Unpadded_Single_Frame_On_A_Padded_Link(
-        bool strictReceive, bool usePadding, bool unpaddedIsDelivered)
+        bool strictReceive, bool usePadding, bool unpaddedIsDelivered, bool paddedIsDelivered)
     {
         var session = NewSession();
         using var peerBus = OpenClassic(session, 0);
@@ -209,14 +211,87 @@ public class IsoTpNormOptionsTests : IClassFixture<VirtualAdapterFixture>
         peerBus.Transmit(CanFrame.Classic(0x7E0, padded));
 
         var first = await receiver.ReceiveAsync(receiveTimeout.Token);
-        if (unpaddedIsDelivered)
+        if (!unpaddedIsDelivered)
         {
-            first.Should().Equal(0x11, 0x22, 0x33);
+            first.Should().Equal(new byte[] { 0x44 }, "the unpadded Single Frame is ignored");
+            return;
+        }
+
+        first.Should().Equal(0x11, 0x22, 0x33);
+        if (paddedIsDelivered)
+        {
             (await receiver.ReceiveAsync(receiveTimeout.Token)).Should().Equal(0x44);
         }
         else
         {
-            first.Should().Equal(new byte[] { 0x44 }, "the unpadded Single Frame is ignored");
+            using var quiet = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+            var act = async () => await receiver.ReceiveAsync(quiet.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>(
+                "the padded Single Frame is longer than Table 13 allows on an unpadded link");
+        }
+    }
+
+    // The other StrictReceive checks (§9.6.2.2): on an unpadded link a Single Frame of up to 8
+    // bytes must be exactly PCI + address extension + SF_DL long (Table 13), and a frame longer
+    // than 8 bytes must use the escape form. Each case sends the frame under test, then a valid
+    // marker; with StrictReceive an invalid frame is skipped and the marker arrives first.
+    // Without it every frame is taken, as before.
+    [Theory]
+    // classic, unpadded, normal addressing: 3 data bytes in a 4-byte frame is right, in 5 not.
+    [InlineData(false, false, false, "03112233", true)]
+    [InlineData(false, false, false, "03112233CC", false)]
+    [InlineData(false, false, false, "0311223344", false)]
+    // classic, unpadded, extended addressing: the extension byte counts.
+    [InlineData(false, false, true, "AA021122", true)]
+    [InlineData(false, false, true, "AA021122CC", false)]
+    // classic, padded: 8 bytes is right whatever SF_DL says.
+    [InlineData(false, true, false, "03112233CCCCCCCC", true)]
+    // CAN FD, longer than 8 bytes: the short PCI form is not allowed there, the escape form is.
+    [InlineData(true, true, false, "03112233CCCCCCCCCCCCCCCC", false)]
+    [InlineData(true, false, false, "03112233CCCCCCCCCCCCCCCC", false)]
+    [InlineData(true, true, false, "000811223344556677" + "88CCCC", true)]
+    [InlineData(true, true, true, "AA0007112233445566" + "77CCCC", true)]
+    // CAN FD, up to 8 bytes: the classic rules.
+    [InlineData(true, true, false, "03112233CCCCCCCC", true)]
+    [InlineData(true, true, false, "03112233", false)]
+    [InlineData(true, false, false, "03112233", true)]
+    public async Task StrictReceive_Holds_A_Single_Frame_To_Its_CAN_DL(bool useCanFd, bool usePadding,
+        bool extended, string frameHex, bool valid)
+    {
+        var frame = Enumerable.Range(0, frameHex.Length / 2).Select(i => Convert.ToByte(frameHex.Substring(2 * i, 2), 16)).ToArray();
+        var receiverEp = extended
+            ? IsoTpEndpoint.Extended(0x7E8, 0x7E0, sourceAddress: 0xAA, targetAddress: 0x20)
+            : IsoTpEndpoint.Normal(0x7E8, 0x7E0);
+        var peerEp = extended
+            ? IsoTpEndpoint.Extended(0x7E0, 0x7E8, sourceAddress: 0x20, targetAddress: 0xAA)
+            : IsoTpEndpoint.Normal(0x7E0, 0x7E8);
+        int dataOffset = (extended ? 1 : 0) + (frame[extended ? 1 : 0] == 0 ? 2 : 1);
+        int sfDl = frame[extended ? 1 : 0] == 0 ? frame[dataOffset - 1] : frame[extended ? 1 : 0] & 0x0F;
+        var data = frame.Skip(dataOffset).Take(sfDl).ToArray();
+        var marker = IsoTpFrameCodec.BuildSingleFrame(peerEp, new byte[] { 0x7A }, isCanFd: false, padding: usePadding);
+
+        foreach (bool strict in new[] { true, false })
+        {
+            var session = NewSession();
+            using var peerBus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+            using var receiverBus = useCanFd ? OpenCanFd(session, 1) : OpenClassic(session, 1);
+            using var receiver = IsoTpFactory.Open(receiverBus, receiverEp,
+                Options(useCanFd, usePadding: usePadding, strictReceive: strict));
+
+            peerBus.Transmit(useCanFd ? CanFrame.Fd(0x7E0, frame) : CanFrame.Classic(0x7E0, frame));
+            peerBus.Transmit(useCanFd ? CanFrame.Fd(0x7E0, marker) : CanFrame.Classic(0x7E0, marker));
+
+            using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+            var first = await receiver.ReceiveAsync(receiveTimeout.Token);
+            if (valid || !strict)
+            {
+                first.Should().Equal(data, $"StrictReceive={strict} takes this frame");
+                (await receiver.ReceiveAsync(receiveTimeout.Token)).Should().Equal(0x7A);
+            }
+            else
+            {
+                first.Should().Equal(new byte[] { 0x7A }, "StrictReceive ignores this frame");
+            }
         }
     }
 
