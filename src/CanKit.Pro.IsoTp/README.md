@@ -220,6 +220,9 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
    The channel never sends `FC(WAIT)` and uses `WftMax` (default 10) as a sender-side guard: more
    consecutive Waits than that abort the send with `IsoTpWaitFrameLimitExceededException`. A
    conforming peer that needs more Waits is cut off by it; raise `WftMax` for such a peer.
+10. **Escape Single Frames.** A received CAN FD Single Frame in the escape form (`0x00 LEN`) is
+    ignored unless its CAN_DL is above 8 and its SF_DL needs that CAN_DL, i.e. would not have fit
+    the next smaller one (§9.6.2.2, Table 14). Earlier versions took such frames.
 
 ## Non-scope (yet)
 

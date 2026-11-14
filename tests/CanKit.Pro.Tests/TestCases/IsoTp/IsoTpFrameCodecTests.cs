@@ -630,17 +630,15 @@ public class IsoTpFrameCodecTests
     [Fact]
     public void TryParsePci_SingleFrame_CanFd_Zero_Nibble_Still_Parses_Escape_Form()
     {
-        // Same first byte, but on CAN-FD it is the escape header: LEN then user data.
-        var frame = new byte[]
-        {
-            0x00, 0x03, 0x11, 0x22, 0x33,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        };
+        // Same first byte, but on CAN-FD it is the escape header: LEN then user data. SF_DL 13
+        // is one a CAN_DL of 16 is needed for (ISO 15765-2:2024 Table 14).
+        var frame = new byte[16];
+        frame[1] = 13;
         var ep = IsoTpEndpoint.Normal(0x1, 0x2);
 
         IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: true, out var pci).Should().BeTrue();
         pci.Type.Should().Be(PciType.SingleFrame);
-        pci.Length.Should().Be(3);
+        pci.Length.Should().Be(13);
         pci.DataOffset.Should().Be(2);
     }
 
