@@ -773,7 +773,7 @@ stateDiagram-v2
     Idle --> Reassembling : FF (Länge im Limit)<br/>Puffer anlegen, ExpectedSn=1,<br/>FC(CTS) senden, N_Cr läuft
     Reassembling --> Reassembling : CF mit erwarteter SN<br/>Bytes kopieren, N_Cr neu,<br/>ggf. FC(CTS) je Block
     Reassembling --> Idle : SN-Abweichung oder N_Cr abgelaufen<br/>→ AbortRx (Fehler an Empfänger)
-    Reassembling --> Reassembling : neuer FF (ISO 15765-2 §6.5.5)<br/>alte Reassemblierung per AbortRx beendet,<br/>neue beginnt
+    Reassembling --> Reassembling : neuer FF (ISO 15765-2:2024 §9.8.3, Tabelle 24)<br/>alte Reassemblierung per AbortRx beendet,<br/>neue beginnt
     Reassembling --> Idle : alle Bytes empfangen<br/>→ PDU in die Inbox
     Idle --> [*]
 ```

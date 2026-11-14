@@ -134,7 +134,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
     // ─────────────────────────────────────────────────────────────────────────────────────────
     // FR-TP-019 — outbound PDU too large for a Single Frame must fault with
-    // InvalidOperationException (ISO 15765-2 §9.4 SF-only restriction).
+    // InvalidOperationException (ISO 15765-2:2024 §8.3.2.4 SF-only restriction).
     // ─────────────────────────────────────────────────────────────────────────────────────────
     [Fact]
     public async Task Functional_Send_Rejects_MultiFrame_Sized_Pdu()
