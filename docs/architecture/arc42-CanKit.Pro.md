@@ -1420,7 +1420,7 @@ des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
 | **STmin** | Separation Time minimum; Mindestabstand zwischen CFs. |
 | **SN** | Sequence Number der Consecutive Frames (1..15, mod 16). |
 | **N_As/N_Ar/N_Bs/N_Br/N_Cs/N_Cr** | ISO-15765-2-Zeitüberwachungen (Sender/Empfänger, je Frame-Phase). |
-| **WFTmax** | Maximale Anzahl aufeinanderfolgender FC=WT, bevor abgebrochen wird. |
+| **WFTmax** | Maximale Anzahl aufeinanderfolgender FC=WT, bevor abgebrochen wird; in ISO 15765-2:2024 §9.7 ein Empfängerparameter, vom Sender als Schranke angewandt (`WftMax`, Voreinstellung 10). |
 | **Addressing (Normal/NormalFixed/Extended/Mixed)** | ISO-TP-Adressierungsformate; bei Extended/Mixed belegt ein Nutzbyte die Adresse (`UsePayload`). |
 | **J1939** | SAE-J1939-Protokollfamilie (29-bit) für Nutzfahrzeuge. |
 | **PGN** | Parameter Group Number (J1939-Nachrichten-ID-Anteil). |

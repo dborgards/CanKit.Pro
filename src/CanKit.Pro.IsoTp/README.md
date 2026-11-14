@@ -89,7 +89,7 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   frame from between the read and the discard is kept.
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NAr` (confirm of the Flow Control sent while
   receiving), `NBs` (peer-FC wait), `NCr` (next CF wait) and `WftMax` (max consecutive `Wait`
-  FCs) are configurable; defaults are the standard's 1000 ms each, and 10.
+  FCs) are configurable; defaults are the standard's 1000 ms each, and 10 (see item 9 below).
 - Frame size: `IsoTpChannelOptions.TxDl` sets the CAN FD TX_DL — 8, 12, 16, 20, 24, 32, 48 or
   64 (default), checked when the channel is created. `StrictReceive` (default off) makes a
   padded channel ignore a Single Frame received in a frame shorter than 8 bytes.
@@ -222,6 +222,8 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
    The channel never sends `FC(WAIT)` and uses `WftMax` (default 10) as a sender-side guard: more
    consecutive Waits than that abort the send with `IsoTpWaitFrameLimitExceededException`. A
    conforming peer that needs more Waits is cut off by it; raise `WftMax` for such a peer.
+   The default of 10 is this library's choice — the standard gives none — and bounds the wait
+   at about ten times `NBs`.
 10. **Escape Single Frames.** A received CAN FD Single Frame in the escape form (`0x00 LEN`) is
     ignored unless its CAN_DL is above 8 and its SF_DL needs that CAN_DL, i.e. would not have fit
     the next smaller one (§9.6.2.2, Table 14). Earlier versions took such frames.

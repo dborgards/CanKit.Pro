@@ -119,6 +119,12 @@ public sealed class IsoTpChannelOptions
     /// <em>receiver</em> sends. This channel never sends <c>FC(WAIT)</c>, and applies the value as
     /// a sender-side guard instead, so a peer cannot hold a transfer open forever with Waits. A
     /// conforming peer that needs more Waits is cut off by it; raise the value for such a peer.
+    /// <para>
+    /// The default of 10 is this library's choice: the standard leaves WFTmax to the receiver and
+    /// gives no default, and a sender has no way to learn the peer's value. Ten Waits, each
+    /// restarting <see cref="NBs"/>, bound the wait at about ten times N_Bs (10 s with the
+    /// defaults) before the send ends with <see cref="IsoTpWaitFrameLimitExceededException"/>.
+    /// </para>
     /// </remarks>
     public int WftMax { get; init; } = 10;
 
