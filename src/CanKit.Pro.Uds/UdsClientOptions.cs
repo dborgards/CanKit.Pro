@@ -149,9 +149,9 @@ public sealed class UdsClientOptions
     public bool QuarantineLateResponses { get; init; }
 
     /// <summary>
-    /// How many times <see cref="IUdsClient.DownloadAsync"/> and <see cref="IUdsClient.UploadAsync"/>
-    /// repeat a TransferData block whose answer did not arrive, before the failure surfaces.
-    /// Default 0: no block is repeated (#426).
+    /// How many times <see cref="IUdsClient.DownloadAsync"/>, <see cref="IUdsClient.UploadAsync"/>
+    /// and <see cref="IUdsClient.TransferDataAsync"/> repeat a TransferData block whose answer did
+    /// not arrive, before the failure surfaces. Default 0: no block is repeated (#426).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -179,8 +179,9 @@ public sealed class UdsClientOptions
     /// window first. Without it, a late positive answer to the abandoned attempt can be taken
     /// for the repeat's: it echoes the same counter, and the server treats both requests as the
     /// same block, so either answer is the block's. An upload appends each block's data once.
-    /// <see cref="IUdsClient.TransferDataAsync"/> called on its own is not repeated. Must not be
-    /// negative.
+    /// <see cref="IUdsClient.TransferDataAsync"/> called on its own follows the same rules: its
+    /// block is repeated with the caller's counter and bytes, and the call returns the answer to
+    /// the attempt that got one. Must not be negative.
     /// </para>
     /// </remarks>
     public int TransferDataRetryCount { get; init; }

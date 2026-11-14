@@ -294,6 +294,13 @@ public interface IUdsClient : IDisposable
     /// be empty). The client validates that the ECU echoes back the exact
     /// <paramref name="blockSequenceCounter"/>.
     /// </summary>
+    /// <remarks>
+    /// With <see cref="UdsClientOptions.TransferDataRetryCount"/> above zero (default 0), a
+    /// request whose answer did not arrive -- a P2/P2* timeout or an ISO-TP transport error other
+    /// than an overflow on the request -- is sent again with the same counter and bytes, up to
+    /// that many times, as ISO 14229-1:2026 §14.4 allows. A negative response is never repeated
+    /// this way, and NRC 0x21 keeps its own budget (#426).
+    /// </remarks>
     /// <param name="blockSequenceCounter">Per ISO 14229-1:2026 §14.4.2 the counter starts at
     /// <c>0x01</c> for the first TransferData following RequestDownload/Upload, is incremented
     /// on each successful transfer, and wraps from <c>0xFF</c> back to <c>0x00</c>.</param>
@@ -342,7 +349,8 @@ public interface IUdsClient : IDisposable
     /// counter as ISO 14229-1:2026 §14.4 allows, up to that many times per block; a negative
     /// response is still never repeated (#426). A caller that wants other rules drives
     /// <see cref="RequestDownloadAsync"/>, <see cref="TransferDataAsync"/> and
-    /// <see cref="RequestTransferExitAsync"/> itself.
+    /// <see cref="RequestTransferExitAsync"/> itself; <see cref="TransferDataAsync"/> repeats
+    /// under the same option.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="dataFormatIdentifier"/> is
     /// <c>0x00</c> and <paramref name="memorySize"/> does not decode to the length of

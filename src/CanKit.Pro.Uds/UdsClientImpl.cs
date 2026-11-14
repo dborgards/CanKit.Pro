@@ -1028,7 +1028,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
-            return await TransferDataCoreAsync(blockSequenceCounter, data, linkedToken)
+            return await TransferDataRepeatingAsync(blockSequenceCounter, data, linkedToken)
                 .ConfigureAwait(false);
         }
         finally

@@ -382,6 +382,73 @@ public class UdsTransferDataRetryTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref exits).Should().Be(1);
     }
 
+    // A standalone TransferDataAsync repeats under the same option: a timed-out request goes out
+    // again with the caller's counter and bytes, up to the budget; with the default of 0 the
+    // first timeout surfaces at once.
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    public async Task A_Standalone_TransferData_Is_Repeated_With_The_Same_Counter_And_Bytes(
+        int retries, bool processedBeforeTheAnswerWasLost)
+    {
+        var server = new DownloadServer
+        {
+            Fault = (_, attempt) => attempt <= 1 ? new EcuSilent() : null,
+            ProcessSilentRequests = processedBeforeTheAnswerWasLost,
+        };
+        using var pair = BuildPair(e => server.Wire(e, maxBlockLength: 6), Options(retries));
+        var block = Payload(4);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Func<Task<byte[]>> act = () => pair.Client.TransferDataAsync(0x01, block, cts.Token);
+
+        if (retries == 0)
+        {
+            (await act.Should().ThrowAsync<UdsTimeoutException>())
+                .Which.RequestedService.Should().Be(UdsServiceId.TransferData);
+            server.Counters().Should().Equal(0x01);
+            return;
+        }
+
+        (await act.Should().NotThrowAsync()).Which.Should().BeEmpty();
+        server.Counters().Should().Equal(0x01, 0x01);
+        server.TransferRequests[1].Should().Equal(server.TransferRequests[0], "the repeat is byte for byte the request it repeats");
+        server.Written.Should().Equal(block);
+        Volatile.Read(ref server.Exits).Should().Be(0, "a standalone TransferData sends no RequestTransferExit");
+    }
+
+    // A standalone TransferDataAsync whose budget is spent surfaces the last timeout.
+    [Fact]
+    public async Task A_Standalone_TransferData_Surfaces_The_Timeout_When_The_Budget_Is_Spent()
+    {
+        var server = new DownloadServer { Fault = (_, _) => new EcuSilent() };
+        using var pair = BuildPair(e => server.Wire(e, maxBlockLength: 6), Options(retries: 2));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Func<Task> act = () => pair.Client.TransferDataAsync(0x01, Payload(4), cts.Token);
+
+        await act.Should().ThrowAsync<UdsTimeoutException>();
+        server.Counters().Should().Equal(0x01, 0x01, 0x01);
+    }
+
+    // A negative response to a standalone TransferDataAsync is never repeated by the budget.
+    [Theory]
+    [InlineData(0x73)]
+    [InlineData(0x24)]
+    public async Task A_Negative_Response_To_A_Standalone_TransferData_Is_Not_Repeated(byte nrc)
+    {
+        var server = new DownloadServer { Fault = (_, _) => new EcuNegativeResponse(nrc) };
+        using var pair = BuildPair(e => server.Wire(e, maxBlockLength: 6), Options(retries: 3));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Func<Task> act = () => pair.Client.TransferDataAsync(0x01, Payload(4), cts.Token);
+
+        (await act.Should().ThrowAsync<UdsNegativeResponseException>()).Which.Code.Should().Be(nrc);
+        server.Counters().Should().Equal(0x01);
+    }
+
     [Fact]
     public void A_Negative_TransferDataRetryCount_Is_Refused()
     {
@@ -448,6 +515,46 @@ public class UdsTransferDataRetryTests : IClassFixture<VirtualAdapterFixture>
             stub!.Faulted.Should().Be(1);
             Volatile.Read(ref server.Exits).Should().Be(0);
         }
+    }
+
+    // A transport fault on a standalone TransferDataAsync is repeated like a block's; an overflow
+    // on the request is not.
+    [Theory]
+    [InlineData("otherIsoTp", true)]
+    [InlineData("overflow", false)]
+    public async Task A_Transport_Fault_On_A_Standalone_TransferData_Is_Repeated_Unless_It_Is_An_Overflow(
+        string kind, bool repeated)
+    {
+        var server = new DownloadServer();
+        Exception fault = kind == "overflow"
+            ? new IsoTpOverflowException("peer overflow")
+            : new OtherIsoTpException();
+        FaultingChannel? stub = null;
+        using var pair = BuildPair(e => server.Wire(e, maxBlockLength: 6), Options(retries: 1), inner =>
+        {
+            var proxy = System.Reflection.DispatchProxy.Create<IIsoTpChannel, FaultingChannel>();
+            stub = (FaultingChannel)proxy;
+            stub.Inner = inner;
+            stub.FaultFor = request => request.Length > 1 && request[0] == 0x36 ? fault : null;
+            return proxy;
+        });
+        var block = Payload(4);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        Func<Task> act = () => pair.Client.TransferDataAsync(0x01, block, cts.Token);
+
+        if (repeated)
+        {
+            await act.Should().NotThrowAsync();
+            server.Counters().Should().Equal(0x01);
+            server.Written.Should().Equal(block);
+        }
+        else
+        {
+            (await act.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(fault);
+            server.Counters().Should().BeEmpty();
+        }
+        stub!.Faulted.Should().Be(1);
     }
 
     // An IsoTpException that is not one of the named ones: any ISO-TP fault counts.

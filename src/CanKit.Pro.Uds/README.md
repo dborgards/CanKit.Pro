@@ -139,7 +139,8 @@ await uds.DownloadAsync(
   and bytes, up to that many times per block, each with a fresh P2. A negative response is never
   repeated this way, and NRC 0x21 keeps its own budget. An upload appends a repeated block once.
   When the budget is spent the last failure surfaces and no RequestTransferExit is sent (#426).
-  `TransferDataAsync` on its own is not repeated; a caller with other rules drives
+  `TransferDataAsync` called on its own is repeated under the same option and rules, with the
+  caller's counter and bytes; a caller with other rules leaves the option at 0 and drives
   `RequestDownloadAsync` / `TransferDataAsync` / `RequestTransferExitAsync` itself.
 * `SecurityAccessAsync` takes any odd `requestSeedLevel` from 0x01 to 0x7D, including the levels
   ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves for future definition (0x43–0x5D): the client does
