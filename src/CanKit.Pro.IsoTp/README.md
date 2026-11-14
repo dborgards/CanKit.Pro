@@ -165,8 +165,9 @@ foreach (var r in responses)
 - **SF-only collection**: First-Frame responses (which would require per-ECU physical Flow-Control
   addresses) are silently dropped; Single-Frame responses from all ECUs within the range are
   collected in arrival order.
-- `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `UsePadding`, `PaddingByte`,
-  and `NAs` (TX-confirm timeout).
+- `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `TxDl` (CAN FD TX_DL, same
+  values and default 64 as the channel's, checked when the client is opened), `UsePadding`,
+  `PaddingByte`, and `NAs` (TX-confirm timeout).
 - **When the request went out**: `SendWithTransmitStampAsync` and
   `SendAndCollectWithTransmitStampAsync` return `IsoTpTransmitStamps` — the instant the frame was
   handed to the driver and the instant it was transmitted — for a caller that keeps a deadline
