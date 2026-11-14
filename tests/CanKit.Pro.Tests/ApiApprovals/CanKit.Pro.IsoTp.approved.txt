@@ -204,11 +204,22 @@ namespace CanKit.Pro.IsoTp
         public static bool operator !=(CanKit.Pro.IsoTp.IsoTpTransmitStamps left, CanKit.Pro.IsoTp.IsoTpTransmitStamps right) { }
         public static bool operator ==(CanKit.Pro.IsoTp.IsoTpTransmitStamps left, CanKit.Pro.IsoTp.IsoTpTransmitStamps right) { }
     }
+    public sealed class IsoTpUnexpectedPduException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpUnexpectedPduException(CanKit.Pro.IsoTp.PciType receivedFrameType) { }
+        public CanKit.Pro.IsoTp.PciType ReceivedFrameType { get; }
+    }
     public sealed class IsoTpWaitFrameLimitExceededException : CanKit.Pro.IsoTp.IsoTpException
     {
         public IsoTpWaitFrameLimitExceededException(int received, int limit) { }
         public int Limit { get; }
         public int WaitFramesReceived { get; }
+    }
+    public sealed class IsoTpWrongSequenceNumberException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpWrongSequenceNumberException(byte expectedSequenceNumber, byte receivedSequenceNumber) { }
+        public byte ExpectedSequenceNumber { get; }
+        public byte ReceivedSequenceNumber { get; }
     }
     public readonly struct Pci : System.IEquatable<CanKit.Pro.IsoTp.Pci>
     {

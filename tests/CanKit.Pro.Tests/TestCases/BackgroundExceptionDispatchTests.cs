@@ -324,7 +324,7 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
         };
 
         await SendBrokenMultiFrame(peerBus);
-        (await Within(fault.Task)).Should().BeOfType<IsoTpException>()
+        (await Within(fault.Task)).Should().BeOfType<IsoTpWrongSequenceNumberException>()
             .Which.Message.Should().Contain("sequence-number mismatch");
 
         peerBus.Transmit(CanFrame.Classic(unchecked((int)IsoTpPeer.TxCanId),
@@ -345,7 +345,7 @@ public class BackgroundExceptionDispatchTests : IClassFixture<VirtualAdapterFixt
 
         await SendBrokenMultiFrame(peerBus);
 
-        (await Within(second.Task)).Should().BeOfType<IsoTpException>()
+        (await Within(second.Task)).Should().BeOfType<IsoTpWrongSequenceNumberException>()
             .Which.Message.Should().Contain("sequence-number mismatch");
     }
 

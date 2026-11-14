@@ -1530,8 +1530,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // _rx clear leaves ReceiveAsync parked on an empty inbox.
         if (_rx is not null)
         {
-            AbortRx(new IsoTpException(
-                "ISO-TP Single Frame aborted in-flight multi-frame reception (unexpected N_PCI)."));
+            AbortRx(new IsoTpUnexpectedPduException(PciType.SingleFrame));
         }
 
         if (pci.DataOffset + pci.Length > payload.Length) return; // codec already validates but guard again
@@ -1574,8 +1573,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // FC(OVFLW) and no replacement session is started.
         if (_rx is not null)
         {
-            AbortRx(new IsoTpException(
-                "ISO-TP First Frame aborted in-flight multi-frame reception."));
+            AbortRx(new IsoTpUnexpectedPduException(PciType.FirstFrame));
         }
 
         // Cap reassembly allocation to the codec limit for this frame kind and to
@@ -1635,8 +1633,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // BackgroundExceptionOccurred and fault any blocked ReceiveAsync (FailTx analogue)
             // so the waiter does not hang on _pduInbox. The peer sender
             // will hit its own N_Cr / missing-FC path independently.
-            AbortRx(new IsoTpException(
-                $"ISO-TP CF sequence-number mismatch: expected {rx.ExpectedSn}, got {pci.SequenceNumber}."));
+            AbortRx(new IsoTpWrongSequenceNumberException(rx.ExpectedSn, pci.SequenceNumber));
             return;
         }
 
