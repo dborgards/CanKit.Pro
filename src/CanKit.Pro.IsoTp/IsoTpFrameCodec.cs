@@ -67,12 +67,20 @@ public static class IsoTpFrameCodec
     /// <c>64 - 2 - (extension ? 1 : 0)</c>.
     /// </remarks>
     public static int SingleFrameMaxDataLength(bool isCanFd, bool usesAddressExtension)
+        => SingleFrameMaxDataLengthForTxDl(isCanFd ? CanFdMaxData : ClassicCanMaxData, usesAddressExtension);
+
+    // The same for a sender configured with TX_DL (ISO 15765-2:2024 §9.5.1, §9.6.2.1): TX_DL 8
+    // carries the short PCI form only, a larger TX_DL the escape form up to TX_DL - 2.
+    internal static int SingleFrameMaxDataLengthForTxDl(int txDl, bool usesAddressExtension)
     {
-        int frameSize = isCanFd ? CanFdMaxData : ClassicCanMaxData;
-        int pci = isCanFd ? 2 : 1;
+        int pci = txDl > ClassicCanMaxData ? 2 : 1;
         int addrExt = usesAddressExtension ? 1 : 0;
-        return frameSize - pci - addrExt;
+        return txDl - pci - addrExt;
     }
+
+    /// <summary>The TX_DL values ISO 15765-2:2024 §9.5.1 (Table 7) permits for CAN FD.</summary>
+    internal static bool IsValidTxDl(int txDl)
+        => txDl is 8 or 12 or 16 or 20 or 24 or 32 or 48 or 64;
 
     /// <summary>
     /// Returns the maximum number of Single-Frame data bytes that still fit into the classic
@@ -100,8 +108,10 @@ public static class IsoTpFrameCodec
     /// <paramref name="useLongLength"/> is <c>true</c>.
     /// </remarks>
     public static int FirstFrameMaxDataLength(bool isCanFd, bool usesAddressExtension, bool useLongLength)
+        => FirstFrameMaxDataLengthForTxDl(isCanFd ? CanFdMaxData : ClassicCanMaxData, usesAddressExtension, useLongLength);
+
+    internal static int FirstFrameMaxDataLengthForTxDl(int frameSize, bool usesAddressExtension, bool useLongLength)
     {
-        int frameSize = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         int pci = useLongLength ? 6 : 2;
         int addrExt = usesAddressExtension ? 1 : 0;
         return frameSize - pci - addrExt;
@@ -112,8 +122,10 @@ public static class IsoTpFrameCodec
     /// 1-byte PCI on both classic CAN and CAN-FD.
     /// </summary>
     public static int ConsecutiveFrameMaxDataLength(bool isCanFd, bool usesAddressExtension)
+        => ConsecutiveFrameMaxDataLengthForTxDl(isCanFd ? CanFdMaxData : ClassicCanMaxData, usesAddressExtension);
+
+    internal static int ConsecutiveFrameMaxDataLengthForTxDl(int frameSize, bool usesAddressExtension)
     {
-        int frameSize = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         int addrExt = usesAddressExtension ? 1 : 0;
         return frameSize - 1 - addrExt;
     }
@@ -269,6 +281,17 @@ public static class IsoTpFrameCodec
         return slice.Slice(0, written).ToArray();
     }
 
+    // The same for a CAN FD sender configured with a TX_DL below 64 (ISO 15765-2:2024 §9.5.1):
+    // the First Frame fills exactly TX_DL bytes.
+    internal static byte[] BuildFirstFrameForTxDl(in IsoTpEndpoint endpoint, int totalLength,
+        ReadOnlySpan<byte> firstChunk, bool isCanFd, int frameSize)
+    {
+        Span<byte> buffer = stackalloc byte[CanFdMaxData];
+        var slice = buffer.Slice(0, frameSize);
+        int written = BuildFirstFrameCore(slice, endpoint, totalLength, firstChunk, isCanFd, frameSize);
+        return slice.Slice(0, written).ToArray();
+    }
+
     /// <summary>
     /// Writes a First-Frame CAN payload into <paramref name="destination"/>. First Frames never
     /// use padding — they always fill the underlying CAN frame completely.
@@ -285,6 +308,11 @@ public static class IsoTpFrameCodec
     /// </exception>
     public static int BuildFirstFrame(Span<byte> destination, in IsoTpEndpoint endpoint,
         int totalLength, ReadOnlySpan<byte> firstChunk, bool isCanFd)
+        => BuildFirstFrameCore(destination, endpoint, totalLength, firstChunk, isCanFd,
+            isCanFd ? CanFdMaxData : ClassicCanMaxData);
+
+    private static int BuildFirstFrameCore(Span<byte> destination, in IsoTpEndpoint endpoint,
+        int totalLength, ReadOnlySpan<byte> firstChunk, bool isCanFd, int maxFrame)
     {
         // FF_DL == 0 is not a valid First Frame: 0x10 0x00 is the CAN-FD escape header, so a
         // zero-length FF would not round-trip through TryParsePci (#207).
@@ -292,7 +320,6 @@ public static class IsoTpFrameCodec
             throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength,
                 "Total PDU length must be positive; a First Frame cannot announce zero bytes.");
         int addrExt = endpoint.AddressExtensionSize;
-        int maxFrame = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         bool useLongLength = totalLength > MaxClassicFirstFrameLength;
         if (useLongLength && !isCanFd)
             throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength,

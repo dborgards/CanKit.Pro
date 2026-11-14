@@ -25,8 +25,7 @@ public sealed class IsoTpChannelOptions
     /// <c>true</c> to build ISO-TP frames as CAN-FD (up to 64-byte per frame); <c>false</c> for
     /// classic CAN (8-byte per frame). Must match the underlying <see cref="Abstractions.API.Can.ICanBus"/>
     /// mode; if the bus is classic-CAN, <c>true</c> here will produce frames the driver rejects.
-    /// The sender then fills frames up to 64 bytes: TX_DL is fixed at 64, one of the values ISO
-    /// 15765-2:2024 §9.5.1 (Table 7) permits, and a smaller TX_DL cannot be configured. Receiving
+    /// The sender then fills frames up to <see cref="TxDl"/> bytes (64 by default). Receiving
     /// adapts to whatever TX_DL the peer uses (§9.5.2). The bit-rate-switch (BRS) flag is not set
     /// by the channel; the data bit rate is a bus/adapter setting, outside ISO 15765-2.
     /// On a CAN FD channel a reception started with CAN FD frames is not continued or ended by a
@@ -124,6 +123,33 @@ public sealed class IsoTpChannelOptions
     public int WftMax { get; init; } = 10;
 
     /// <summary>
+    /// TX_DL — the largest CAN FD frame, in bytes, the sender builds (ISO 15765-2:2024 §9.5.1,
+    /// Table 7). Must be one of 8, 12, 16, 20, 24, 32, 48 or 64; any other value fails channel
+    /// creation with <see cref="ArgumentOutOfRangeException"/>. Defaults to 64.
+    /// </summary>
+    /// <remarks>
+    /// Applies only with <see cref="UseCanFd"/>: Single, First and Consecutive Frames then carry
+    /// at most TX_DL bytes, so a CAN FD network whose nodes take only shorter frames can be
+    /// served. TX_DL 8 sends CAN FD frames of classic size (Single Frames in the short form only).
+    /// A classic CAN channel always uses 8. Receiving is not affected: the channel adapts to the
+    /// TX_DL the peer uses (§9.5.2).
+    /// </remarks>
+    public int TxDl { get; init; } = IsoTpFrameCodec.CanFdMaxData;
+
+    /// <summary>
+    /// <c>true</c> to ignore received Single Frames whose CAN frame length does not follow the
+    /// padding rule the channel is configured for (ISO 15765-2:2024 §9.6.2.2, §11.3.2.1). Defaults to
+    /// <c>false</c>, which takes such frames as before.
+    /// </summary>
+    /// <remarks>
+    /// Checked only with <see cref="UsePadding"/>: a padded link uses 8-byte frames for anything
+    /// up to 8 bytes, so a Single Frame received in a frame of fewer than 8 bytes is dropped
+    /// without a reply, as an invalid frame. Frames longer than 8 bytes are already held to the CAN FD data length
+    /// steps by the bus and the codec.
+    /// </remarks>
+    public bool StrictReceive { get; init; }
+
+    /// <summary>
     /// Bounded capacity of the internal receive buffer that holds fully reassembled PDUs waiting
     /// for the consumer. When full, the oldest PDU is dropped so the RX loop never stalls.
     /// Defaults to 64.
@@ -162,7 +188,9 @@ public sealed class IsoTpChannelOptions
         int? wftMax = null,
         int? receiveBufferCapacity = null,
         int? maxReceivePduLength = null,
-        TimeSpan? nAr = null)
+        TimeSpan? nAr = null,
+        int? txDl = null,
+        bool? strictReceive = null)
         => new()
         {
             UseCanFd = useCanFd ?? UseCanFd,
@@ -177,10 +205,34 @@ public sealed class IsoTpChannelOptions
             WftMax = wftMax ?? WftMax,
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
             MaxReceivePduLength = maxReceivePduLength ?? MaxReceivePduLength,
+            TxDl = txDl ?? TxDl,
+            StrictReceive = strictReceive ?? StrictReceive,
         };
 
     /// <summary>
-    /// The <see cref="With(bool?, bool?, byte?, byte?, TimeSpan?, TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, TimeSpan?)"/>
+    /// The <see cref="With(bool?, bool?, byte?, byte?, TimeSpan?, TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, TimeSpan?, int?, bool?)"/>
+    /// overload from before <see cref="TxDl"/> and <see cref="StrictReceive"/>, kept so code
+    /// compiled against it still binds.
+    /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public IsoTpChannelOptions With(
+        bool? useCanFd,
+        bool? usePadding,
+        byte? paddingByte,
+        byte? localBlockSize,
+        TimeSpan? localStMin,
+        TimeSpan? nAs,
+        TimeSpan? nBs,
+        TimeSpan? nCr,
+        int? wftMax,
+        int? receiveBufferCapacity,
+        int? maxReceivePduLength,
+        TimeSpan? nAr)
+        => With(useCanFd, usePadding, paddingByte, localBlockSize, localStMin, nAs, nBs, nCr,
+            wftMax, receiveBufferCapacity, maxReceivePduLength, nAr, txDl: null, strictReceive: null);
+
+    /// <summary>
+    /// The <see cref="With(bool?, bool?, byte?, byte?, TimeSpan?, TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, TimeSpan?, int?, bool?)"/>
     /// overload from before <see cref="NAr"/>, kept so code compiled against it still binds.
     /// </summary>
     [EditorBrowsable(EditorBrowsableState.Never)]
@@ -197,5 +249,6 @@ public sealed class IsoTpChannelOptions
         int? receiveBufferCapacity,
         int? maxReceivePduLength)
         => With(useCanFd, usePadding, paddingByte, localBlockSize, localStMin, nAs, nBs, nCr,
-            wftMax, receiveBufferCapacity, maxReceivePduLength, nAr: null);
+            wftMax, receiveBufferCapacity, maxReceivePduLength, nAr: null, txDl: null,
+            strictReceive: null);
 }
