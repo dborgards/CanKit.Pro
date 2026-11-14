@@ -142,6 +142,10 @@ await uds.DownloadAsync(
   download, including all attempts and waits; there is no separate overall timeout. No
   RequestTransferExit follows a final failure. Single-step `TransferDataAsync` and `UploadAsync`
   retain their existing behavior.
+* `SecurityAccessAsync` takes any odd `requestSeedLevel` from 0x01 to 0x7D, including the levels
+  ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves for future definition (0x43–0x5D): the client does
+  not filter reserved levels, and a server that does not support one says so with a negative
+  response.
 * `SecurityAccessAsync` holds the request lock from the seed request to the key's answer, so no
   other request comes between seed and key. Only the keep-alive's TesterPresent still goes out
   while `computeKey` runs, always with the suppressPosRspMsgIndicationBit: the seed stays valid

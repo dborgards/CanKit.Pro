@@ -172,7 +172,10 @@ public interface IUdsClient : IDisposable
     /// </list>
     /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7D</c> and
     /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically, so at most
-    /// <c>0x7E</c>. A seed of all zeroes -- of any length, including none -- means "already
+    /// <c>0x7E</c>. The levels ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves for future
+    /// definition, <c>0x43..0x5D</c>, are accepted and sent as given, as are the ISO 26021-2
+    /// level <c>0x5F</c> and the system-supplier range: the client does not filter reserved levels, and a
+    /// server that does not support one answers with a negative response such as NRC 0x12. A seed of all zeroes -- of any length, including none -- means "already
     /// unlocked" (ISO 14229-1:2026 §9.4.1) and short-circuits the exchange without invoking
     /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
