@@ -31,6 +31,19 @@ public sealed class IsoTpFunctionalOptions
     public bool UseCanFd { get; init; }
 
     /// <summary>
+    /// TX_DL — the largest CAN FD frame, in bytes, the outbound Single Frame may use (ISO
+    /// 15765-2:2024 §9.5.1, Table 7). Must be one of 8, 12, 16, 20, 24, 32, 48 or 64; any other
+    /// value fails client creation with <see cref="ArgumentOutOfRangeException"/>. Defaults to
+    /// 64.
+    /// </summary>
+    /// <remarks>
+    /// Applies only with <see cref="UseCanFd"/>; it bounds the Single Frame payload to TX_DL - 2
+    /// bytes (7 at TX_DL 8). A classic CAN client always uses 8, and validates the value all the
+    /// same, as <see cref="IsoTpChannelOptions.TxDl"/> does.
+    /// </remarks>
+    public int TxDl { get; init; } = IsoTpFrameCodec.CanFdMaxData;
+
+    /// <summary>
     /// <c>true</c> to pad the outbound Single Frame to the next valid CAN/CAN-FD DLC step.
     /// On CAN-FD a Single Frame longer than 8 bytes is rounded up to its next valid data length
     /// (12, 16, 20, 24, 32, 48, 64) whatever this says, since no other length exists.

@@ -332,6 +332,83 @@ public class IsoTpNormOptionsTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // ---------------------------------------------------------------------------------------
+    // TX_DL on the functional client
+    // ---------------------------------------------------------------------------------------
+
+    private static IsoTpFunctionalOptions FunctionalOptions(bool useCanFd, int txDl) => new()
+    {
+        UseCanFd = useCanFd,
+        TxDl = txDl,
+        NAs = TimeSpan.FromMilliseconds(500),
+    };
+
+    [Fact]
+    public void Functional_TxDl_Defaults_To_64()
+        => new IsoTpFunctionalOptions().TxDl.Should().Be(64);
+
+    // The functional Single Frame is held to TX_DL: at TX_DL 12 it takes 10 bytes in a 12-byte
+    // frame and refuses 11; at TX_DL 8 it takes the short form's 7.
+    [Theory]
+    [InlineData(12, 10, 12)]
+    [InlineData(12, 11, 0)]
+    [InlineData(8, 7, 8)]
+    [InlineData(8, 8, 0)]
+    [InlineData(64, 62, 64)]
+    public async Task Functional_Fd_Single_Frame_Is_Held_To_TxDl(int txDl, int pduLength, int expectedFrameLength)
+    {
+        var session = NewSession();
+        using var bus = OpenCanFd(session, 0);
+        using var sniffer = OpenCanFd(session, 1);
+        var seen = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sniffer.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == 0x7DF) seen.TrySetResult(e.CanFrame.Data.Length);
+        };
+        using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, FunctionalOptions(true, txDl));
+
+        Func<Task> act = () => client.SendAndCollectAsync(new byte[pduLength], TimeSpan.FromMilliseconds(20));
+
+        if (expectedFrameLength == 0)
+        {
+            (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage($"*TX_DL {txDl}*");
+        }
+        else
+        {
+            await act.Should().NotThrowAsync();
+            (await seen.Task.WaitAsync(ShortTimeout)).Should().Be(expectedFrameLength);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, 0)]
+    [InlineData(true, 10)]
+    [InlineData(true, 65)]
+    [InlineData(false, 7)]
+    public void An_Invalid_Functional_TxDl_Fails_Client_Creation(bool useCanFd, int txDl)
+    {
+        var session = NewSession();
+        using var bus = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
+
+        Action act = () => IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, FunctionalOptions(useCanFd, txDl)).Dispose();
+
+        act.Should().Throw<ArgumentOutOfRangeException>()
+            .Which.ParamName.Should().Be(nameof(IsoTpFunctionalOptions.TxDl));
+    }
+
+    // A classic client ignores TX_DL: its Single Frame stays at 7 bytes whatever TX_DL says.
+    [Fact]
+    public async Task Functional_TxDl_Is_Ignored_On_Classic_Can()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var client = IsoTpFactory.OpenFunctional(bus, 0x7DF, 0x7E8, 0x7EF, FunctionalOptions(false, 32));
+
+        Func<Task> act = () => client.SendAndCollectAsync(new byte[8], TimeSpan.FromMilliseconds(20));
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).WithMessage("*classic CAN*is 7 bytes*");
+    }
+
+    // ---------------------------------------------------------------------------------------
     // With()
     // ---------------------------------------------------------------------------------------
 

@@ -147,6 +147,7 @@ namespace CanKit.Pro.IsoTp
         public bool IsExtendedCanId { get; init; }
         public System.TimeSpan NAs { get; init; }
         public byte PaddingByte { get; init; }
+        public int TxDl { get; init; }
         public bool UseCanFd { get; init; }
         public bool UsePadding { get; init; }
     }
