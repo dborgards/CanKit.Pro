@@ -2875,6 +2875,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
            && ReferenceEquals(live, session)
            && sendId == session.LatestSendId;
 
+    /// <summary>Test observer invoked on the actor after a send-outcome reaction has run.</summary>
+    internal Action? AfterSdoClientSendOutcomeForTests { get; set; }
+
     /// <summary>
     /// Runs a send-outcome reaction on the actor, where the session tables live. After disposal
     /// there is nothing left to report to: disposal has already completed every open transfer.
@@ -2883,7 +2886,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         try
         {
-            _actor.Post(react);
+            _actor.Post(() =>
+            {
+                react();
+                AfterSdoClientSendOutcomeForTests?.Invoke();
+            });
         }
         catch (ObjectDisposedException)
         {
