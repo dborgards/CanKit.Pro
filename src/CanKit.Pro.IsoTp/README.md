@@ -91,8 +91,8 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   receiving), `NBs` (peer-FC wait), `NCr` (next CF wait) and `WftMax` (max consecutive `Wait`
   FCs) are configurable; defaults are the standard's 1000 ms each, and 10 (see item 9 below).
 - Frame size: `IsoTpChannelOptions.TxDl` sets the CAN FD TX_DL — 8, 12, 16, 20, 24, 32, 48 or
-  64 (default), checked when the channel is created. `StrictReceive` (default off) makes a
-  padded channel ignore a Single Frame received in a frame shorter than 8 bytes.
+  64 (default), checked when the channel is created. `StrictReceive` (default off) makes the
+  channel ignore a Single Frame whose CAN frame length does not fit its form (item 11 below).
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535
   bytes; classic CAN is bounded at 4095 by the codec anyway) is answered with `FC(OVFLW)` and
   nothing is allocated for it, so a CAN-FD escape First Frame cannot make the process reserve
@@ -227,9 +227,12 @@ Checked against ISO 15765-2:2024 (4th edition), which replaced the 2016 edition 
 10. **Escape Single Frames.** A received CAN FD Single Frame in the escape form (`0x00 LEN`) is
     ignored unless its CAN_DL is above 8 and its SF_DL needs that CAN_DL, i.e. would not have fit
     the next smaller one (§9.6.2.2, Table 14). Earlier versions took such frames.
-11. **Padding check on receive.** §9.6.2.2 asks a receiver on a padded link to ignore a Single
-    Frame whose CAN_DL is not 8. The channel does that only with `StrictReceive`; by default it
-    takes such frames, as peers that do not pad are common.
+11. **Single Frame length checks on receive.** §9.6.2.2 asks a receiver to ignore a Single Frame
+    whose CAN_DL does not fit its form: on a padded link one whose CAN_DL is not 8; on an
+    unpadded (optimised) link one up to 8 bytes whose CAN_DL is not SF_DL plus the PCI and
+    address-extension bytes (Table 13); and one longer than 8 bytes in the short PCI form. The
+    channel does these checks only with `StrictReceive`; by default it takes such frames, as
+    peers that get them wrong are common. The escape-form bounds of item 10 apply always.
 
 ## Non-scope (yet)
 
