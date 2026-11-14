@@ -45,6 +45,7 @@ internal sealed partial class CanOpenNode
         HeartbeatTimeout = 6,
         LifeGuardingTimeout = 7,
         ControllerPassive = 8,
+        ControllerRecovery = 9,
     }
 
     // The application's part of 1001h: what its last transmitted SendEmcyAsync passed, or what it

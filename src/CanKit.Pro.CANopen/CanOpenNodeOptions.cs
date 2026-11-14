@@ -38,6 +38,22 @@ public sealed class CanOpenNodeOptions
     /// controller is reported when the node enters Pre-Operational. Existing <c>With</c> methods preserve this setting.</remarks>
     public bool EmitControllerErrorEmcy { get; init; }
 
+    /// <summary>
+    /// Emit optional <c>8140h</c> after an observed bus-off is followed by an observed
+    /// error-active, error-warning, error-passive or no-error controller state. Defaults to
+    /// <see langword="false"/>. An unknown reading does not prove recovery. Reset starts a
+    /// fresh observation history; no pre-reset recovery is replayed.
+    /// </summary>
+    /// <remarks>
+    /// The recovery indication is a transient communication-error event: <c>8140h</c>
+    /// carries bits 4/0, followed by <c>0000h</c> only if no other node communication error
+    /// remains. Application error bits are preserved. This sequence is this library's
+    /// opt-in contract; CiA 301 Table 26 names the code without prescribing its lifetime.
+    /// The existing EMCY producer-disable, inhibit and Stopped-state rules apply.
+    /// Does not enable <c>8120h</c> or overrun EMCYs. Existing copy methods preserve it.
+    /// </remarks>
+    public bool EmitBusOffRecoveryEmcy { get; init; }
+
     /// <summary>Client-side SDO transfer timeout, applied to every request (initiate as well as
     /// each segment ack). In a block download it also restarts at every confirmed segment of a
     /// sub-block, so it measures the server's silence and not the time a sub-block takes to send.
@@ -361,6 +377,7 @@ public sealed class CanOpenNodeOptions
         {
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,
+            EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

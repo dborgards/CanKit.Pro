@@ -11,13 +11,14 @@ internal sealed partial class CanOpenNode
 {
     private BusStateMonitor? _controllerEmcyMonitor;
     private bool _controllerErrorPassive;
+    private bool _controllerObservedBusOff;
     private bool _controllerEmcyStarted;
     private IDisposable? _controllerBaselineRetry;
     private long _controllerBaselineGeneration;
 
     private void InitializeControllerErrorMonitor()
     {
-        if (!_options.EmitControllerErrorEmcy) return;
+        if (!_options.EmitControllerErrorEmcy && !_options.EmitBusOffRecoveryEmcy) return;
         _controllerEmcyMonitor = new BusStateMonitor(_service.Bus, _actor);
         _controllerEmcyMonitor.StateChanged += OnControllerEmcyStateChanged;
     }
@@ -25,6 +26,7 @@ internal sealed partial class CanOpenNode
     private void InvalidateControllerErrorBaseline()
     {
         _controllerEmcyStarted = false;
+        _controllerObservedBusOff = false;
         _controllerBaselineGeneration++;
         _controllerBaselineRetry?.Dispose();
         _controllerBaselineRetry = null;
@@ -68,15 +70,29 @@ internal sealed partial class CanOpenNode
         DisposeControllerErrorMonitor();
         _controllerEmcyMonitor = fresh;
         _controllerErrorPassive = false;
+        _controllerObservedBusOff = false;
         _controllerEmcyStarted = true;
         ObserveControllerEmcyState(fresh.CurrentState);
     }
 
     private void OnControllerEmcyStateChanged(object? sender, BusStateChangedEventArgs e)
-        => ObserveControllerEmcyState(e.Current);
+    {
+        if (ReferenceEquals(sender, _controllerEmcyMonitor) && _disposed == 0)
+            ObserveControllerEmcyState(e.Current);
+    }
 
     private void ObserveControllerEmcyState(BusState state)
     {
+        if (!_controllerEmcyStarted) return;
+        if (state == BusState.BusOff) _controllerObservedBusOff = true;
+        bool recovered = _controllerObservedBusOff
+            && state is BusState.None or BusState.ErrActive or BusState.ErrWarning or BusState.ErrPassive;
+        if (recovered)
+        {
+            _controllerObservedBusOff = false;
+            if (_options.EmitBusOffRecoveryEmcy)
+                RaiseCommunicationError(CommunicationError.ControllerRecovery, 0, 0x8140);
+        }
         switch (state)
         {
             case BusState.ErrPassive:
@@ -87,14 +103,16 @@ internal sealed partial class CanOpenNode
             case BusState.ErrWarning:
                 _controllerErrorPassive = false;
                 EndCommunicationError(CommunicationError.ControllerPassive);
-                return;
+                break;
         }
         ReportActiveControllerError();
+        if (recovered && _options.EmitBusOffRecoveryEmcy)
+            EndCommunicationError(CommunicationError.ControllerRecovery);
     }
 
     private void ReportActiveControllerError()
     {
-        if (_controllerEmcyStarted && _controllerErrorPassive)
+        if (_options.EmitControllerErrorEmcy && _controllerEmcyStarted && _controllerErrorPassive)
             RaiseCommunicationError(CommunicationError.ControllerPassive, 0, 0x8120);
     }
 

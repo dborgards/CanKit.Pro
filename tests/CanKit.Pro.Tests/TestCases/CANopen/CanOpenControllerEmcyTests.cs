@@ -31,7 +31,8 @@ public partial class CanOpenPdoEngineTests
         internal readonly int BaselineErrors;
         internal readonly int BaselineFaults;
 
-        internal ControllerEmcyRig(BusState initial = BusState.ErrActive, bool enabled = true, bool unconfiguredLss = false)
+        internal ControllerEmcyRig(BusState initial = BusState.ErrActive, bool enabled = true, bool unconfiguredLss = false,
+            bool recoveryEnabled = false)
         {
             var session = NewSession();
             Bus = ControllableBus.Plain(session);
@@ -46,6 +47,7 @@ public partial class CanOpenPdoEngineTests
             Node = new CanOpenNode(NodeService, unconfiguredLss ? CanOpenCobId.UnconfiguredNodeId : Device, new CanOpenNodeOptions
             {
                 EmitControllerErrorEmcy = enabled,
+                EmitBusOffRecoveryEmcy = recoveryEnabled,
                 EmitGuardingErrorEmcy = true,
                 Lss = unconfiguredLss ? new LssSlaveOptions() : null,
             }, ownsService: false, Clock);
@@ -482,5 +484,141 @@ public partial class CanOpenPdoEngineTests
         options.With(sdoTimeout: TimeSpan.FromSeconds(2)).EmitControllerErrorEmcy.Should().BeTrue();
         options.WithSrdoConfigurationCheckInterval(null).EmitControllerErrorEmcy.Should().BeTrue();
         options.WithLss(new CanKit.Pro.CANopen.Lss.LssSlaveOptions()).EmitControllerErrorEmcy.Should().BeTrue();
+    }
+
+    // FR-CO-011, #423: 8140h is recovery from an observed bus-off, not bus-off entry.
+    [Theory]
+    [InlineData(BusState.ErrActive)]
+    [InlineData(BusState.ErrWarning)]
+    [InlineData(BusState.ErrPassive)]
+    [InlineData(BusState.None)]
+    public async Task BusOff_Recovery_Emcy_Is_OptIn_Once_Per_Observed_Recovery(BusState recovered)
+    {
+        using var rig = new ControllerEmcyRig(BusState.BusOff, enabled: false, recoveryEnabled: true);
+        rig.Observe(recovered);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8140, Communication);
+        await ExpectEmcyAsync(rig.Wire, 2, ErrorReset, 0);
+        rig.Observe(recovered);
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 3, 0x1000, 0);
+        rig.Wire.Count(EmcyId).Should().Be(3);
+        rig.Observe(BusState.BusOff);
+        rig.Observe(recovered);
+        await ExpectEmcyAsync(rig.Wire, 4, 0x8140, Communication);
+        await ExpectEmcyAsync(rig.Wire, 5, ErrorReset, 0);
+    }
+
+    [Fact]
+    public async Task BusOff_Recovery_Does_Not_Invent_A_Missing_BusOff_Or_An_Unknown_Recovery()
+    {
+        using var rig = new ControllerEmcyRig(enabled: false, recoveryEnabled: true);
+        rig.Observe(BusState.ErrWarning);
+        rig.Observe(BusState.ErrActive);
+        rig.Observe(BusState.BusOff);
+        rig.Observe(BusState.Unknown);
+        // The physical double must be able to transmit the witness without the monitor being
+        // told recovery yet. This changes the physical sample, not the actor's cached history.
+        rig.Bus.BusState = BusState.ErrActive;
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 0);
+        rig.Wire.Count(EmcyId).Should().Be(1);
+        rig.Observe(BusState.ErrActive);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x8140, Communication);
+        await ExpectEmcyAsync(rig.Wire, 3, ErrorReset, 0);
+    }
+
+    [Fact]
+    public async Task BusOff_Recovery_Keeps_Passive_Cause_And_Application_Bits_Until_Their_Repair()
+    {
+        using var rig = new ControllerEmcyRig(recoveryEnabled: true);
+        await rig.Node.SendEmcyAsync(0x1000, 4);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 4);
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x8120, 0x15);
+        rig.Observe(BusState.BusOff);
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 3, 0x8140, 0x15);
+        await rig.Node.SendEmcyAsync(0x1000, 4);
+        await ExpectEmcyAsync(rig.Wire, 4, 0x1000, 0x15);
+        rig.Wire.Count(EmcyId).Should().Be(4, "the passive cause still forbids an error-reset EMCY");
+        rig.Observe(BusState.ErrActive);
+        await ExpectEmcyAsync(rig.Wire, 5, ErrorReset, 4);
+    }
+
+    [Theory]
+    [InlineData(NmtCommand.ResetCommunication)]
+    [InlineData(NmtCommand.ResetNode)]
+    public async Task BusOff_Recovery_Reset_Discards_PreReset_Observation(NmtCommand reset)
+    {
+        using var rig = new ControllerEmcyRig(enabled: false, recoveryEnabled: true);
+        rig.Observe(BusState.BusOff);
+        rig.Bus.BusState = BusState.ErrActive;
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)reset, Device);
+        Settle(rig.Node);
+        rig.Observe(BusState.ErrWarning);
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 0);
+        rig.Wire.Count(EmcyId).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task BusOff_Recovery_Into_A_New_Passive_Cause_Emits_No_Intermediate_Reset()
+    {
+        using var rig = new ControllerEmcyRig(BusState.BusOff, recoveryEnabled: true);
+        rig.Observe(BusState.ErrPassive);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8140, Communication);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x8120, Communication);
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 3, 0x1000, Communication);
+        rig.Wire.Count(EmcyId).Should().Be(3);
+        rig.Observe(BusState.ErrActive);
+        await ExpectEmcyAsync(rig.Wire, 4, ErrorReset, 0);
+    }
+
+    [Fact]
+    public async Task BusOff_Recovery_While_Producer_Disabled_Is_Not_Replayed_On_Reenable()
+    {
+        using var rig = new ControllerEmcyRig(enabled: false, recoveryEnabled: true);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1014, 0, EmcyId | CanOpenCobId.InvalidBit);
+        Settle(rig.Node);
+        rig.Observe(BusState.BusOff);
+        rig.Observe(BusState.ErrActive);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1014, 0, EmcyId);
+        Settle(rig.Node);
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 0);
+        rig.Wire.Count(EmcyId).Should().Be(1);
+    }
+
+    [Fact]
+    public void BusOff_Recovery_Option_Clones_And_Cleans_Up_Its_Independent_Monitor()
+    {
+        new CanOpenNodeOptions().EmitBusOffRecoveryEmcy.Should().BeFalse();
+        var options = new CanOpenNodeOptions { EmitBusOffRecoveryEmcy = true };
+        options.With(sdoTimeout: TimeSpan.FromSeconds(2)).EmitBusOffRecoveryEmcy.Should().BeTrue();
+        options.WithSrdoConfigurationCheckInterval(null).EmitBusOffRecoveryEmcy.Should().BeTrue();
+        options.WithLss(new LssSlaveOptions()).EmitBusOffRecoveryEmcy.Should().BeTrue();
+        using var rig = new ControllerEmcyRig(enabled: false, recoveryEnabled: true);
+        rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors + 1);
+        rig.Node.Dispose();
+        rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
+        rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults);
+    }
+
+    [Fact]
+    public async Task BusOff_Recovery_Ignores_A_Notification_From_The_PreReset_Monitor()
+    {
+        using var rig = new ControllerEmcyRig(enabled: false, recoveryEnabled: true);
+        var node = (CanOpenNode)rig.Node;
+        var oldMonitor = typeof(CanOpenNode).GetField("_controllerEmcyMonitor", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(node);
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        Settle(rig.Node);
+        await node.PostToActorAsync(() => typeof(CanOpenNode).GetMethod("OnControllerEmcyStateChanged", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(node, new[] { oldMonitor, new CanKit.Pro.Reliability.BusStateChangedEventArgs(BusState.ErrActive, BusState.BusOff) }));
+        rig.Observe(BusState.ErrWarning);
+        await rig.Node.SendEmcyAsync(0x1000, 0);
+        await ExpectEmcyAsync(rig.Wire, 1, 0x1000, 0);
+        rig.Wire.Count(EmcyId).Should().Be(1);
     }
 }
