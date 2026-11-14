@@ -241,6 +241,8 @@ public class IsoTpNormOptionsTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(false, false, false, "03112233", true)]
     [InlineData(false, false, false, "03112233CC", false)]
     [InlineData(false, false, false, "0311223344", false)]
+    // classic, unpadded: a padded 8-byte frame whose SF_DL is shorter is dropped too (Table 13).
+    [InlineData(false, false, false, "03112233CCCCCCCC", false)]
     // classic, unpadded, extended addressing: the extension byte counts.
     [InlineData(false, false, true, "AA021122", true)]
     [InlineData(false, false, true, "AA021122CC", false)]
