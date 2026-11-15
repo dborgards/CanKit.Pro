@@ -742,6 +742,7 @@ internal sealed partial class CanOpenNode
         _emcyCobId = word & CanOpenCobId.CanIdMask;
         _emcyValid = (word & CanOpenCobId.InvalidBit) == 0;
         ReportActiveGuardingErrors();
+        ReportActiveControllerOverrun();
         ReportActiveControllerError();
     }
 
@@ -960,6 +961,7 @@ internal sealed partial class CanOpenNode
         _heartbeatProducer.RestartCycle();
         _ = EmitHeartbeat(0x00);
         if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
+        StartControllerOverrunMonitoring();
         StartControllerErrorMonitoring();
     }
 

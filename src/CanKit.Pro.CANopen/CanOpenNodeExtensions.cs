@@ -3,7 +3,7 @@ using System.Threading.Tasks;
 
 namespace CanKit.Pro.CANopen;
 
-/// <summary>Asynchronous disposal for <see cref="ICanOpenNode"/>.</summary>
+/// <summary>Additional operations for <see cref="ICanOpenNode"/> without widening its interface.</summary>
 /// <remarks>
 /// <see cref="ICanOpenNode"/> itself stays <see cref="IDisposable"/>: adding
 /// <see cref="IAsyncDisposable"/> to a published interface would break everyone who implements it.
@@ -13,6 +13,34 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 public static class CanOpenNodeExtensions
 {
+    /// <summary>
+    /// Acknowledges the local node's latched controller-overrun cause (<c>8110h</c>), including
+    /// both RxOverflow and TxOverflow. Idempotent when no cause is active or
+    /// <see cref="CanOpenNodeOptions.EmitControllerOverrunEmcy"/> is disabled. The application
+    /// decides when the consequences of lost objects have been handled; this call does not
+    /// repair the adapter, restore lost objects or clear another communication-error cause.
+    /// </summary>
+    /// <remarks>
+    /// Returns after acknowledgement is processed on the node actor, with any <c>0000h</c>
+    /// queued through the existing EMCY chain; it does not wait for transmission. A reset is
+    /// queued only when the last reported node communication-error cause ends. Application bits
+    /// are preserved. Notifications ordered after this acknowledgement on the actor may begin a
+    /// new error event, including a notification whose driver callback raced this call.
+    /// NMT reset also ends the cause, without an error-reset EMCY. This application acknowledgement
+    /// contract is a library choice, not a controller repair inferred from a healthy bus state.
+    /// </remarks>
+    /// <param name="node">The local node created by this library.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="node"/> is null.</exception>
+    /// <exception cref="NotSupportedException">The node is a third-party implementation.</exception>
+    /// <exception cref="ObjectDisposedException">The node has been disposed.</exception>
+    public static void AcknowledgeControllerOverrun(this ICanOpenNode node)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        if (node is not CanOpenNode local)
+            throw new NotSupportedException("Controller-overrun acknowledgement requires a node created by CanKit.Pro.");
+        local.AcknowledgeControllerOverrun();
+    }
+
     /// <summary>
     /// Disposes <paramref name="node"/> without holding a thread while it waits for the node's
     /// reader and event pump to finish, which <see cref="IDisposable.Dispose"/> does for up to two

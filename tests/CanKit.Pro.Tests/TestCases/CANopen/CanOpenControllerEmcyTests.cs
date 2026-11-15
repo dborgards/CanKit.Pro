@@ -32,7 +32,7 @@ public partial class CanOpenPdoEngineTests
         internal readonly int BaselineFaults;
 
         internal ControllerEmcyRig(BusState initial = BusState.ErrActive, bool enabled = true, bool unconfiguredLss = false,
-            bool recoveryEnabled = false)
+            bool recoveryEnabled = false, bool overrunEnabled = false)
         {
             var session = NewSession();
             Bus = ControllableBus.Plain(session);
@@ -48,6 +48,7 @@ public partial class CanOpenPdoEngineTests
             {
                 EmitControllerErrorEmcy = enabled,
                 EmitBusOffRecoveryEmcy = recoveryEnabled,
+                EmitControllerOverrunEmcy = overrunEnabled,
                 EmitGuardingErrorEmcy = true,
                 Lss = unconfiguredLss ? new LssSlaveOptions() : null,
             }, ownsService: false, Clock);

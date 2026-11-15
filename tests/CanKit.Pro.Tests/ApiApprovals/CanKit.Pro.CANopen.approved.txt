@@ -87,6 +87,7 @@ namespace CanKit.Pro.CANopen
     }
     public static class CanOpenNodeExtensions
     {
+        public static void AcknowledgeControllerOverrun(this CanKit.Pro.CANopen.ICanOpenNode node) { }
         public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.CANopen.ICanOpenNode node) { }
     }
     public sealed class CanOpenNodeOptions
@@ -95,6 +96,7 @@ namespace CanKit.Pro.CANopen
         public System.TimeSpan DefaultTpdoEventTimerInterval { get; init; }
         public bool EmitBusOffRecoveryEmcy { get; init; }
         public bool EmitControllerErrorEmcy { get; init; }
+        public bool EmitControllerOverrunEmcy { get; init; }
         public bool EmitGuardingErrorEmcy { get; init; }
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }

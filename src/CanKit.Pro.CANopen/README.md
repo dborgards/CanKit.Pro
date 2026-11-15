@@ -730,13 +730,44 @@ The recovery is represented as a transient communication-error event: `8140h` ca
 4/0, then the transient cause is cleared. `0000h` follows only when no other node
 communication cause remains; application bits survive. For example, a passive cause that
 survives bus-off keeps `1001h` active after recovery into passive and defers `0000h` until a
-healthy sample. Existing EMCY inhibit, producer-disable and Stopped coalescing apply, so
+healthy sample. Existing EMCY producer-disable and Stopped coalescing apply, so
 Stopped can retain only the final reset rather than every transient event. The option is
 preserved by all copy methods. This lifetime/sequence is a library choice within CiA 301
 V4.2.0 §7.2.7.1, Table 26/Figure 37, which names `8140h` but does not prescribe that lifetime.
 See [the contract decision](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-14-emcy-recovery-contract.md).
-Overrun (`8110h`) still needs a reliable repair signal or explicit application acknowledgement
-contract; a normal controller sample alone is not evidence that lost objects were repaired.
+`CanOpenNodeOptions.EmitControllerOverrunEmcy = true` independently enables optional `8110h`
+(default false). It subscribes directly to the adapter's `ErrorFrameReceived` notifications and
+accepts `ControllerStatus` containing `RxOverflow` or `TxOverflow`, including combined flags.
+It does not create a controller-state poller or change adapter capture settings. Error notifications
+must be enabled/supported by the adapter; rejecting the subscription fails opening the opted-in
+node, because there is no polling fallback for lost-object events. Only notifications received
+after entry to Pre-Operational are accepted, including in Stopped. This reports the adapter's
+notifications, not a complete count of lost CAN objects or RawCan subscription-buffer drops.
+
+Both directions share one latched communication-error cause: one `8110h` until the application
+calls `node.AcknowledgeControllerOverrun()` after handling the consequences of lost objects.
+Neither a normal controller sample nor a bus-off recovery clears it. Repeated notifications
+while latched are folded into the same error. Acknowledgement is idempotent, clears only this
+cause and preserves application bits; `0000h` follows only when no other reported node
+communication-error cause remains. It does not repair the adapter or recover lost objects.
+
+The extension returns after the acknowledgement has run on the actor and any reset EMCY has
+been queued; it does not wait for transmission. Notifications ordered after the acknowledgement
+on the actor may begin a new error, including a driver callback racing the call. Error bursts
+have at most one observation per reset history waiting in the mailbox. NMT reset clears the latch without an
+error-reset EMCY, discards observations queued from the old history and accepts fresh
+notifications after re-entry to Pre-Operational. Initialisation before a configured LSS node
+enters Pre-Operational is not replayed. Disposal and failed construction remove the handler.
+
+Existing EMCY Stopped coalescing applies; acknowledging in Stopped can replace a
+pending `8110h` with the final `0000h`. A disabled producer retains an unacknowledged cause for
+reporting once on re-enable; acknowledging while disabled prevents that replay and still clears
+a previously reported register. All options-copy methods preserve this opt-in. The extension
+leaves `ICanOpenNode` unchanged: null is rejected, a disposed local node throws
+`ObjectDisposedException`, and a third-party node implementation throws `NotSupportedException`.
+EMCY inhibit time (`1015h`) remains unimplemented as described above; this feature adds no
+inhibit timing. This acknowledged lifetime is a library choice; CiA 301 names `8110h` without
+supplying an adapter repair signal. See [the overrun contract decision](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-15-emcy-overrun-contract.md).
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
@@ -1965,10 +1996,11 @@ requirement over the `CanKit.Adapter.Virtual` loopback bus.
 CanKit.Pro.CANopen/
   CanOpen.cs                          // factory
   ICanOpenNode.cs                     // public contract
-  CanOpenNodeExtensions.cs            // DisposeAsync for ICanOpenNode
+  CanOpenNodeExtensions.cs            // DisposeAsync and controller-overrun acknowledgement for ICanOpenNode
   CanOpenNodeProfile.cs               // the role a node is opened as (device or tool)
   CanOpenNode.cs                      // node core: subscription, dispatch, SDO client + server, NMT, heartbeat, EMCY
   CanOpenNode.CommunicationProfile.cs // partial: the CiA 301 objects, their validation, power-on values, resets
+  CanOpenNode.OverrunEmcy.cs          // partial: opt-in 8110h latch, acknowledgement and error-frame subscription
   CanOpenNode.DeviceDescription.cs    // partial: applying an EDS/DCF to the dictionary, with its findings
   CanOpenNode.Pdo.cs                  // partial: PDO engine — transmission types, inhibit time, event timer, RTR, mapping
   CanOpenNode.PdoTiming.cs            // partial: SYNC counter, cycle period, synchronous window, PDO deadline indications

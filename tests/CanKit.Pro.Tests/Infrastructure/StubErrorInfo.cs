@@ -13,11 +13,11 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// It exists because CanKit's own <c>ICanErrorInfo</c> implementation is internal to
 /// <c>CanKit.Core</c> and there is nothing public to construct, and because passing <c>null</c>
 /// into an event whose contract says it carries error info would quietly excuse a subscriber that
-/// dereferences it. Every member reports its default: the only CanKit.Pro consumer of this event,
-/// <c>BusStateMonitor</c>, treats an error frame purely as a "the controller may have moved" hint
-/// and reads <c>ICanBus.BusState</c> for the answer instead of trusting the payload. A test that
-/// does care what the frame said should construct its own with the properties it cares about set,
-/// rather than extend this default.
+/// dereferences it. Every member reports its default. <c>BusStateMonitor</c> treats an error
+/// frame purely as a "the controller may have moved" hint and reads <c>ICanBus.BusState</c>;
+/// the optional CANopen overrun producer consumes the controller-status flags themselves.
+/// A test that cares what the frame said constructs its own instance with those properties set
+/// rather than changing this shared default.
 /// </para>
 /// </summary>
 public sealed class StubErrorInfo : ICanErrorInfo
