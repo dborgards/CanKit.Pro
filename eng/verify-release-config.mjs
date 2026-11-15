@@ -1,11 +1,12 @@
-// Fails the build if .releaserc.json references a plugin or changelog preset that the pinned
-// tooling in package.json cannot actually load.
+// Fails the build if the pinned tooling cannot load the configured plugins/presets, preserve
+// release decisions, or render the configured visible/hidden/breaking release-note entries.
 //
 // This is deliberately not a full `semantic-release --dry-run`: that talks to the GitHub API and
 // needs a token with push rights, which a pull-request build (especially from a fork) does not
-// have. The release workflow runs the real dry run on `main`, where the token is right. What this
-// catches is the failure mode a PR *can* introduce: a typo'd plugin name, a plugin dropped from
-// package.json, or a preset/tooling version combination that no longer resolves.
+// have. The release workflow runs the real dry run on `main`, where the token is right. This check
+// invokes only the analyser and notes generator with synthetic commits: no authenticated API,
+// push, tag, prepare, publish or success hooks. Rendering catches incompatible writer/preset
+// combinations that still resolve successfully (for example preset 10 with writer 8, #14).
 
 import { readFileSync } from 'node:fs';
 
@@ -82,6 +83,63 @@ if (analyzerOptions) {
   await expectRelease('build(deps): Bump the repo-tooling-security group with 1 update', null);
   await expectRelease('build(deps): Bump EdsDcfNet from 1.14.0 to 1.15.0', 'patch');
   await expectRelease('chore(deps): Bump the semantic-release group with 3 updates', null);
+}
+
+// Resolution and version analysis alone do not exercise the writer. Use the actual configured
+// generator and preset, including presetConfig, so both a writer incompatibility and changes to
+// hidden commit types fail on the PR that introduces them. Markers are unique subjects rather
+// than a snapshot of formatting, generated dates or heading names.
+const notesEntry = (config.plugins ?? [])
+  .map((entry) => Array.isArray(entry) ? entry : [entry, {}])
+  .find(([name]) => name === '@semantic-release/release-notes-generator');
+
+if (!notesEntry) {
+  problems.push('the configured release-notes generator is missing');
+} else {
+  const fixtures = [
+    ['feat', 'release-check-visible-feature', true],
+    ['fix', 'release-check-visible-fix', true],
+    ['perf', 'release-check-visible-performance', true],
+    ['revert', 'release-check-visible-revert', true],
+    ['build', 'release-check-visible-build', true],
+    ['docs', 'release-check-visible-documentation', true],
+    ['refactor', 'release-check-visible-refactoring', true],
+    ['test', 'release-check-hidden-test', false],
+    ['ci', 'release-check-hidden-ci', false],
+    ['chore', 'release-check-hidden-chore', false],
+    ['style', 'release-check-hidden-style', false],
+    ['chore!', 'release-check-breaking-header', true],
+    ['test', 'release-check-breaking-hidden-type', true, '\n\nBREAKING CHANGE: release-check-breaking-footer'],
+  ];
+  const commits = fixtures.map(([type, marker, , footer = ''], index) => ({
+    message: `${type}: ${marker}${footer}`,
+    subject: `${type}: ${marker}`,
+    hash: String(index + 1).padStart(40, '0'),
+  }));
+  try {
+    const { generateNotes } = await import('@semantic-release/release-notes-generator');
+    const notes = await generateNotes(notesEntry[1], {
+      cwd: process.cwd(),
+      env: {},
+      commits,
+      logger: { log() {} },
+      options: { repositoryUrl: 'https://github.com/dborgards/CanKit.Pro' },
+      lastRelease: { version: '1.3.0', gitTag: 'v1.3.0' },
+      nextRelease: { version: '1.4.0', gitTag: 'v1.4.0' },
+    });
+    for (const [, marker, visible] of fixtures) {
+      if (notes.includes(marker) !== visible) {
+        problems.push(`release notes must ${visible ? 'include' : 'hide'} ${marker}`);
+      } else {
+        console.log(`ok       release notes ${visible ? 'include' : 'hide'} ${marker}`);
+      }
+    }
+    if (!notes.includes('release-check-breaking-footer')) {
+      problems.push('release notes lost the BREAKING CHANGE footer');
+    }
+  } catch (error) {
+    problems.push(`release notes cannot be rendered: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // The temporary breaking -> minor override, and the guards that make it temporary.
@@ -170,4 +228,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log('\n.releaserc.json is loadable with the pinned tooling.');
+console.log('\n.releaserc.json loads, analyses commits and renders release notes with the pinned tooling.');

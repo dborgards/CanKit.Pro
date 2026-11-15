@@ -370,10 +370,17 @@ version a release would pick, on any branch:
 node eng/next-release-version.mjs   # prints nothing when there is no release to make
 ```
 
-CI also runs `node eng/verify-release-config.mjs` on every pull request. That is not a dry run —
-it loads `.releaserc.json` and resolves every plugin and preset against the pinned tooling, which
-catches the failures a PR can actually introduce (a typo'd plugin, a dependency dropped from
-`package.json`, an incompatible version pair) without needing a token that a fork PR cannot have.
+CI also runs `node eng/verify-release-config.mjs` on every pull request. It resolves every plugin
+and preset, checks the dependency commit release rules, and invokes the configured notes
+generator on synthetic commits. Visible types, hidden types and breaking changes (both `!` and
+the footer, including on a hidden type) must actually render correctly. Thus a preset that
+resolves but cannot run with the installed writer fails before merge; the preset-10/writer-8
+combination from #14 is one such case. Both Dependabot and Renovate retain the preset below 10
+until the release plugins/writer and `hidden`/`effect` configuration migrate together.
+
+This is not a full dry run. The check needs no token and invokes no authenticated API, push,
+tag, prepare, publish or success hooks. The full release dry run above remains necessary to
+exercise the authenticated integration.
 
 ## Changing the CanKit version
 
