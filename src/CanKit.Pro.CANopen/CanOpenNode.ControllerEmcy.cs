@@ -77,7 +77,7 @@ internal sealed partial class CanOpenNode
 
     private void OnControllerEmcyStateChanged(object? sender, BusStateChangedEventArgs e)
     {
-        if (ReferenceEquals(sender, _controllerEmcyMonitor) && _disposed == 0)
+        if (ReferenceEquals(sender, _controllerEmcyMonitor))
             ObserveControllerEmcyState(e.Current);
     }
 

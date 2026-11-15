@@ -734,7 +734,7 @@ healthy sample. Existing EMCY inhibit, producer-disable and Stopped coalescing a
 Stopped can retain only the final reset rather than every transient event. The option is
 preserved by all copy methods. This lifetime/sequence is a library choice within CiA 301
 V4.2.0 §7.2.7.1, Table 26/Figure 37, which names `8140h` but does not prescribe that lifetime.
-See [the contract decision](../../docs/reviews/2026-11-14-emcy-recovery-contract.md).
+See [the contract decision](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-14-emcy-recovery-contract.md).
 Overrun (`8110h`) still needs a reliable repair signal or explicit application acknowledgement
 contract; a normal controller sample alone is not evidence that lost objects were repaired.
 
