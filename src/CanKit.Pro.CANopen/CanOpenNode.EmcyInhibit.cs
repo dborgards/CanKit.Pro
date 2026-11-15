@@ -73,12 +73,15 @@ internal sealed partial class CanOpenNode
         if (_state != NmtState.Stopped && remaining <= TimeSpan.Zero) return Task.FromResult(true);
         var waiting = new EmcyInhibitWait();
         _emcyInhibitWait = waiting;
-        waiting.Cancellation = cancellationToken.Register(() => RunOnActor(() =>
+        // Build the actor work once, outside the registration callback. Nesting these lambdas
+        // generates a lazy delegate-cache branch that cannot recur: cancellation runs only once.
+        Action cancel = () =>
         {
             if (!ReferenceEquals(waiting, _emcyInhibitWait)) return;
             ReleaseEmcyInhibitWait();
             waiting.Completion.TrySetCanceled(cancellationToken);
-        }));
+        };
+        waiting.Cancellation = cancellationToken.Register(() => RunOnActor(cancel));
         // Register may have run inline for an already cancelled token.
         if (waiting.Completion.Task.IsCompleted) waiting.Cancellation.Dispose();
         else if (_state != NmtState.Stopped)
