@@ -130,6 +130,22 @@ public sealed class UdsClientOptions
     public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
 
     /// <summary>
+    /// Additional attempts per TransferData block in <see cref="IUdsClient.DownloadAsync"/>
+    /// after a P2 or P2* application timeout. Defaults to zero (no block retry).
+    /// The identical block and sequence counter are sent again, as described in
+    /// ISO 14229-1:2026 §14.4.2, Table 451. Negative responses (including NRC 0x73),
+    /// transport errors, malformed responses and cancellation are not retried by this option.
+    /// </summary>
+    /// <remarks>
+    /// Each attempt has fresh P2/P2*, response-pending and NRC 0x21 budgets. The ordinary
+    /// NRC 0x21 repeats do not consume this timeout-retry count. Late-response quarantine,
+    /// when enabled, also applies between attempts. The download's cancellation token bounds
+    /// the entire operation, including retries and quarantine waits; there is no separate
+    /// overall timeout. Single-step TransferData and Upload are unaffected.
+    /// </remarks>
+    public int MaxTransferDataTimeoutRetries { get; init; }
+
+    /// <summary>
     /// When <c>true</c>, a request that times out (<see cref="UdsTimeoutException"/>) or is
     /// cancelled after it may have reached the bus quarantines its service for the P2* budget in
     /// force, counted from the abort: the next request for that service is not sent until the
@@ -151,7 +167,8 @@ public sealed class UdsClientOptions
     /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that only want to tweak one field of a shared default template. Settings it takes
-    /// no parameter for -- <see cref="QuarantineLateResponses"/> -- are carried over unchanged.
+    /// no parameter for -- <see cref="QuarantineLateResponses"/> and
+    /// <see cref="MaxTransferDataTimeoutRetries"/> -- are carried over unchanged.
     /// </summary>
     public UdsClientOptions With(
         TimeSpan? p2ClientMax = null,
@@ -173,5 +190,6 @@ public sealed class UdsClientOptions
             // Not a parameter: one more optional parameter would change the method's signature,
             // which is a binary break since 1.3.0 (package validation).
             QuarantineLateResponses = QuarantineLateResponses,
+            MaxTransferDataTimeoutRetries = MaxTransferDataTimeoutRetries,
         };
 }

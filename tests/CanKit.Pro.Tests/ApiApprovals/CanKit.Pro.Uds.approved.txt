@@ -42,6 +42,7 @@ namespace CanKit.Pro.Uds
         public bool KeepAliveSuppressPositiveResponse { get; init; }
         public int MaxBusyRepeatRequests { get; init; }
         public int MaxResponsePendingCount { get; init; }
+        public int MaxTransferDataTimeoutRetries { get; init; }
         public System.TimeSpan P2ClientMax { get; init; }
         public System.TimeSpan P2StarClientMax { get; init; }
         public bool QuarantineLateResponses { get; init; }
