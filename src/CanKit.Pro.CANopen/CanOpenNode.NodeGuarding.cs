@@ -334,6 +334,7 @@ internal sealed partial class CanOpenNode
 
     private void RaiseLifeGuardingEvent(LifeGuardingState state)
     {
+        if (state == LifeGuardingState.Occurred) ApplyCommunicationErrorBehavior();
         if (_options.EmitGuardingErrorEmcy)
         {
             if (state == LifeGuardingState.Occurred)

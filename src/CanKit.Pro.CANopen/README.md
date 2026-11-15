@@ -188,9 +188,10 @@ Deliberate omissions, each checked against the norm text:
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
-with such an entry instead of ignoring it. The error behaviour object (`1029h`) remains data-only
-and is reported `NotImplemented`. EMCY inhibit time (`1015h`) is managed when the optional
-`EnableEmcyInhibit` capability below is enabled; otherwise it retains its previous data-only behavior.
+with such an entry instead of ignoring it. Error behavior (`1029h`) and EMCY inhibit time
+(`1015h`) are managed with the optional `EnableErrorBehavior` and `EnableEmcyInhibit`
+capabilities below; otherwise they retain their previous absent/data-only treatment and a
+described object is reported `NotImplemented`.
 
 ## The object dictionary is the configuration
 
@@ -794,6 +795,49 @@ pauses pre-existing queued work; reasons newly triggered during Stopped retain t
 latest-reason coalescing. NMT reset drops pre-reset queued EMCYs, invalidates the old completion
 history and starts a fresh interval history after boot. Disposal releases pending waits.
 See [the inhibit contract](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-15-emcy-inhibit.md).
+
+**Error behavior.** `CanOpenNodeOptions.EnableErrorBehavior = true` implements the
+communication-error entry of optional `1029h` (CiA 301 §7.5.2.32). Sub-index 00h is constant
+1; sub-index 01h is read/write UNSIGNED8, not PDO-mappable. Its default is 0 (Pre-Operational),
+1 leaves the NMT state unchanged, and 2 selects Stopped. Reserved values and manufacturer
+values without a defined implementation are rejected with `0609 0030h`. Profile- and
+manufacturer-specific error classes are not implemented; descriptions report them as omitted.
+EDS/DCF, local writes, SDO and normal parameter storage/restoration configure the same entry.
+A description may make sub-index 01h constant/read-only on SDO, as the norm allows.
+
+The capability reacts to the norm's three mandatory sources: observed CAN bus-off,
+heartbeat-consumer timeout and this node's local life-guarding timeout. Other communication
+errors (including error-passive, overrun, malformed PDO/SYNC and node-guarding-consumer
+notifications) are not classified as serious failures by this capability. Application-written
+error-register bits and application EMCYs do not select an NMT reaction. These are scope
+choices; the norm permits further internal failures. The existing EMCY options, error-register
+and history contracts are independent and are not enabled by this flag.
+
+Reactions apply in Operational. An already observed active failure is checked before an NMT
+Start can arm PDOs/SRDOs, and a changed policy re-evaluates active failures while Operational.
+Heartbeat reception/removal/reconfiguration, a guarding poll/disabling life guarding, or a
+known bus recovery ends the corresponding source. Unknown controller readings do not prove
+recovery; multiple missing heartbeat producers remain independent. Recovery and policy writes
+never resume Operational automatically. Normal state transitions stop PDO/SRDO activity,
+announce the new state when producer heartbeat is enabled, and abort active SDO server
+sessions on Stopped. A completed Segmented/Block download is retired before its OD commit
+when this capability is enabled, so a policy write that enters Stopped receives exactly one
+normal completion response; other unfinished sessions still abort. Local reactions do not
+broadcast NMT commands.
+
+New EMCY reasons in Stopped keep the existing latest-reason hold. With this capability,
+previously queued EMCYs also pause until communication resumes, using the same queue gate
+as optional 1015h without enabling an inhibit interval. NMT reset discards old queued EMCYs,
+clears old timeout observations and refreshes the controller baseline; disposal releases waits
+and detaches the monitor. An in-flight transport attempt retains its existing completion
+contract. Controller observation uses the existing 50 ms poll plus error/fault hints and
+requires readable adapter bus state; it does not promise a physical transition log.
+
+The capability defaults false and all options-copy methods preserve it. This retains the
+legacy NMT behavior and absent/data-only 1029h treatment. CiA 301 calls for autonomous
+Pre-Operational on a serious failure by default; that behavior is available through this
+explicit capability, rather than changing existing 1.x applications automatically.
+See [the error-behavior contract](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-15-error-behavior.md).
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the

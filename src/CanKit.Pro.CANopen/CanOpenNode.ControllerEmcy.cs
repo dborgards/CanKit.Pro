@@ -18,7 +18,7 @@ internal sealed partial class CanOpenNode
 
     private void InitializeControllerErrorMonitor()
     {
-        if (!_options.EmitControllerErrorEmcy && !_options.EmitBusOffRecoveryEmcy) return;
+        if (!_options.EmitControllerErrorEmcy && !_options.EmitBusOffRecoveryEmcy && !_options.EnableErrorBehavior) return;
         _controllerEmcyMonitor = new BusStateMonitor(_service.Bus, _actor);
         _controllerEmcyMonitor.StateChanged += OnControllerEmcyStateChanged;
     }
@@ -85,6 +85,9 @@ internal sealed partial class CanOpenNode
     {
         if (!_controllerEmcyStarted) return;
         if (state == BusState.BusOff) _controllerObservedBusOff = true;
+        // State changes precede optional EMCY reporting, so a transition to Stopped holds
+        // new reasons through the existing pending-EMCY path.
+        if (state == BusState.BusOff) ApplyCommunicationErrorBehavior();
         bool recovered = _controllerObservedBusOff
             && state is BusState.None or BusState.ErrActive or BusState.ErrWarning or BusState.ErrPassive;
         if (recovered)

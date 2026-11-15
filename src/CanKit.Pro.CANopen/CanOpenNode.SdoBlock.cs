@@ -971,6 +971,14 @@ internal sealed partial class CanOpenNode
             }
         }
 
+        // A 1029h write can synchronously enter Stopped and abort unfinished sessions.
+        // Retire this completed reception before that callback, preserving one end response.
+        if (_options.EnableErrorBehavior)
+        {
+            _sdoBlockServer = null;
+            // Initiation arms this deadline before any segment/end request can be handled.
+            session.Deadline!.Dispose();
+        }
         if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort))
         {
             _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
