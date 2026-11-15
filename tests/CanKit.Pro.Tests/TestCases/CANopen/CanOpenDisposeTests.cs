@@ -628,31 +628,42 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var rawBus = resources.Add(Open(session, 5));
         var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
 
+        // Keep every protocol deadline frozen (#519). Waiting for the guarding reply or for
+        // another node's disposal must not turn an open SDO session into a timed-out one.
+        var clock = new ManualTimeSource();
         var busOfClassicServer = resources.Add(Open(session, 1));
-        using var classicServer = CanOpen.OpenNode(busOfClassicServer, nodeId: 0x01);
+        using var classicServer = new CanOpenNode(new CanBusService(busOfClassicServer), 0x01,
+            new CanOpenNodeOptions(), ownsService: true, clock);
         var busOfBlockServer = resources.Add(Open(session, 2));
-        using var blockServer = CanOpen.OpenNode(busOfBlockServer, nodeId: 0x02);
+        using var blockServer = new CanOpenNode(new CanBusService(busOfBlockServer), 0x02,
+            new CanOpenNodeOptions(), ownsService: true, clock);
         var busOfClient = resources.Add(Open(session, 3));
-        using var client = CanOpen.OpenNode(busOfClient, nodeId: 0x03);
+        using var client = new CanOpenNode(new CanBusService(busOfClient), 0x03,
+            new CanOpenNodeOptions(), ownsService: true, clock);
         foreach (var node in new[] { classicServer, blockServer, client })
             node.BackgroundExceptionOccurred += (_, ex) => reports.Enqueue(ex);
         classicServer.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);
         blockServer.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);
 
-        var classicTap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x01));
-        var blockTap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+        using var classicTap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x01));
+        using var blockTap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
         rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x01)),
             SdoFrames.BuildDownloadInit(0x2100, 0x00, new byte[20]), isExtendedFrame: false));
-        classicTap.Next(ShortTimeout);
+        classicTap.Next(ShortTimeout).Should().Equal(new byte[] { 0x60, 0x00, 0x21, 0x00, 0, 0, 0, 0 });
         rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
             SdoBlockFrames.BuildBlockDownloadInit(0x2100, 0x00, clientCrcSupported: false, sizeIndicated: true, totalSize: 20),
             isExtendedFrame: false));
-        blockTap.Next(ShortTimeout);
+        blockTap.Next(ShortTimeout).Should().Equal(SdoBlockFrames.BuildBlockDownloadInitResponse(
+            0x2100, 0x00, serverCrcSupported: true, blockSize: 127));
 
         PeerSdoLaboratory.Bind(client, 0x11);
         PeerSdoLaboratory.Bind(client, 0x12);
+        using var classicRequestTap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+        using var blockRequestTap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x12));
         var classicUpload = client.SdoUploadAsync(0x11, 0x2100, 0x00);
         var blockUpload = client.SdoUploadAsync(0x12, 0x2100, 0x00, SdoTransferMode.Block);
+        classicRequestTap.Next(ShortTimeout); // both client sessions have sent their initiate
+        blockRequestTap.Next(ShortTimeout);
         var replied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         client.NodeGuardingReceived += (_, e) =>
         {
@@ -666,6 +677,8 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
 
         classicServer.Dispose();
         blockServer.Dispose();
+        classicUpload.IsCompleted.Should().BeFalse("the classic session is still open when disposal begins");
+        blockUpload.IsCompleted.Should().BeFalse("the block session is still open when disposal begins");
         client.Dispose();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => classicUpload.WithTimeoutAsync(ShortTimeout));
