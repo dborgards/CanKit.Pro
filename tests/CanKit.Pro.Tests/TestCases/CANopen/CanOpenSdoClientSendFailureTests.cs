@@ -551,26 +551,46 @@ public class CanOpenSdoClientSendFailureTests
         // arrives after the session is gone -- with no transfer to that server, or with the next
         // one already running -- and must fail neither.
         //
-        // Nobody answers server 0x11, so the only way the next transfer can end on its own is
-        // its SDO timeout. A loaded host once took the 30 s this test used to allow and the
-        // assertion below read that timeout as the stale outcome's doing (#311); the timeout is
-        // now beyond any stall, and the transfer is cancelled at the end regardless.
+        // Wait until the first initiate actually reaches the service before cancelling it.
+        // Sends run on the pool: cancelling earlier can prevent that initiate entirely, or
+        // let the next transfer's initiate overtake it. Holding the first observed initiate
+        // would then inject this failure into the next transfer itself (#505).
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-stale-{Guid.NewGuid():N}");
         using var inner = new CanBusService(bus);
         var service = new HeldConfirmationService(inner);
-        using var client = CanOpen.OpenNode(service, 0x7F,
-            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMinutes(10) }, leaveOpen: true);
+        using var client = new CanOpenNode(service, 0x7F,
+            new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
         var firstInitConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var firstInitSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var nextInitConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var nextInitSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var outcomeHandled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
         var inits = 0;
         service.Hold = frame =>
         {
             if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
-            if ((frame.Data.Span[0] & 0xE3) != SdoBlockFrames.CcsBlockUploadInitBase) return null;
-            return Interlocked.Increment(ref inits) == 1 ? firstInitConfirmation.Task : null;
+            var cs = frame.Data.Span[0];
+            if ((cs & 0xE3) == SdoBlockFrames.CcsBlockUploadInitBase)
+            {
+                if (Interlocked.Increment(ref inits) == 1)
+                {
+                    firstInitSent.TrySetResult(true);
+                    return firstInitConfirmation.Task;
+                }
+                nextInitSent.TrySetResult(true);
+                return nextInitConfirmation.Task;
+            }
+            if (cs == SdoBlockFrames.CcsBlockUploadStart)
+                Answer(bus, server, SdoBlockFrames.BuildSegment(1, true, new byte[] { 1, 2, 3, 4 }));
+            else if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck)
+                Answer(bus, server, SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase, 3, 0));
+            return null;
         };
 
         using var cancel = new CancellationTokenSource();
         var first = client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block, cancel.Token);
+        await firstInitSent.Task.WithTimeoutAsync(ShortTimeout);
         cancel.Cancel();
         await FluentActions.Awaiting(() => first.WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<OperationCanceledException>();
@@ -579,6 +599,10 @@ public class CanOpenSdoClientSendFailureTests
         var next = nextTransferStarted
             ? client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block, cancelNext.Token)
             : Task.FromResult(Array.Empty<byte>());
+        if (nextTransferStarted) await nextInitSent.Task.WithTimeoutAsync(ShortTimeout);
+        // Both initiates are held: only the old send can now post a send outcome. Observing
+        // its actor reaction avoids assuming that SetResult ran every await continuation inline.
+        client.AfterSdoClientSendOutcomeForTests = () => outcomeHandled.TrySetResult(true);
         firstInitConfirmation.SetResult(new TxConfirmation
         {
             Confirmed = false,
@@ -586,11 +610,18 @@ public class CanOpenSdoClientSendFailureTests
             Timestamp = DateTime.UtcNow,
         });
 
-        // The node answers its own SDO server only after everything posted before, the stale
-        // outcome included, so an answer means that outcome has been handled.
-        var probe = client.SdoUploadAsync(0x7F, 0x1000, 0x00);
-        await FluentActions.Awaiting(() => probe.WithTimeoutAsync(ShortTimeout)).Should().NotThrowAsync();
+        await outcomeHandled.Task.WithTimeoutAsync(ShortTimeout);
+        client.AfterSdoClientSendOutcomeForTests = null;
         next.IsCompleted.Should().Be(!nextTransferStarted, "the stale outcome did not fail the next transfer");
+        if (nextTransferStarted)
+        {
+            // A stale reaction must not silently remove the next session either. Its request
+            // is still unconfirmed, but an answer proves delivery and lets it complete normally.
+            bus.RaiseObserved(CanFrame.Classic(server, SdoBlockFrames.BuildBlockUploadInitResponse(
+                0x1000, 0x00, false, true, 4)), isEcho: false);
+            (await next.WithTimeoutAsync(ShortTimeout)).Should().Equal(1, 2, 3, 4);
+            nextInitConfirmation.SetResult(new TxConfirmation { Confirmed = true });
+        }
         cancelNext.Cancel();
     }
 
