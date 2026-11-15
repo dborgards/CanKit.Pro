@@ -589,6 +589,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // read when it is transmitted, so it is the part of the last application EMCY before it
         // on this chain (#379). msg.ErrorRegister is not used.
         byte nodeBits = CommunicationErrorBits;
+        object inhibitEpoch = _emcyInhibitEpoch;
         _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
         // the previous send can retarget the dictionary before this queued emergency starts.
@@ -605,9 +606,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 return Task.CompletedTask;
             }
             NoteTransmittedEmcy(frame, applicationErrorRegister, nodeBits);
-            return SendControlFrame(cobId, frame, cancellationToken);
+            var send = SendControlFrame(cobId, frame, cancellationToken);
+            return _options.EnableEmcyInhibit ? RecordEmcyCompletionAsync(send, inhibitEpoch) : send;
         };
-        return AppendToEmcyChain(transmit);
+        return AppendToEmcyChain(() => _options.EnableEmcyInhibit
+            ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
     }
 
     /// <summary>Appends one step to the EMCY chain; it runs on the actor once the steps before it
@@ -946,6 +949,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <summary>Stops the producers and consumers and fails every open transfer. Actor-only.</summary>
     private void CleanUpOnActor()
     {
+        ResetEmcyInhibit();
         DisposeControllerOverrunMonitor();
         DisposeControllerErrorMonitor();
         _heartbeatProducer.Dispose();

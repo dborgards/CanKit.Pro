@@ -100,6 +100,7 @@ namespace CanKit.Pro.CANopen
         public bool EmitGuardingErrorEmcy { get; init; }
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
+        public bool EnableEmcyInhibit { get; init; }
         public int ErrorHistoryCapacity { get; init; }
         public int EventQueueCapacity { get; init; }
         public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }

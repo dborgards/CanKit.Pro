@@ -59,6 +59,7 @@ internal sealed partial class CanOpenNode
         public const ushort StoreParameters = 0x1010;
         public const ushort RestoreDefaults = 0x1011;
         public const ushort EmcyCobId = 0x1014;
+        public const ushort EmcyInhibitTime = 0x1015;
         public const ushort ConsumerHeartbeat = 0x1016;
         public const ushort ProducerHeartbeat = 0x1017;
         public const ushort Identity = 0x1018;
@@ -148,6 +149,7 @@ internal sealed partial class CanOpenNode
 
         // §7.5.2.17: EMCY COB-ID, default 80h + node-id, valid.
         _od.AddU32(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(_nodeId), rw, nm);
+        if (_options.EnableEmcyInhibit) _od.AddU16(Co.EmcyInhibitTime, 0x00, 0, rw, nm);
 
         // §7.5.2.19 / §7.5.2.20: heartbeat. One consumer slot to begin with; AddHeartbeatConsumer
         // grows the array. Sub0 is const on the bus.
@@ -260,6 +262,7 @@ internal sealed partial class CanOpenNode
     /// rather than re-declares.</summary>
     private bool IsManagedCommunicationObject(ushort index) => index switch
     {
+        Co.EmcyInhibitTime => _options.EnableEmcyInhibit,
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.SyncWindow or Co.SyncCounterOverflow or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
             or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
@@ -644,6 +647,7 @@ internal sealed partial class CanOpenNode
         ApplySyncConfiguration();
         ApplySyncTimingConfiguration();
         ApplyEmcyConfiguration();
+        ApplyEmcyInhibitConfiguration();
         ApplyHeartbeatProducerConfiguration();
         RebuildHeartbeatConsumers();
         ApplyLifeGuardingConfiguration();
@@ -675,6 +679,9 @@ internal sealed partial class CanOpenNode
                 return;
             case Co.EmcyCobId:
                 ApplyEmcyConfiguration();
+                return;
+            case Co.EmcyInhibitTime:
+                ApplyEmcyInhibitConfiguration();
                 return;
             case Co.ConsumerHeartbeat:
                 RebuildHeartbeatConsumers();
@@ -744,6 +751,7 @@ internal sealed partial class CanOpenNode
         ReportActiveGuardingErrors();
         ReportActiveControllerOverrun();
         ReportActiveControllerError();
+        WakeEmcyInhibitWait();
     }
 
     // §7.5.2.20: "The value 0 shall disable the producer heartbeat." The producer module follows
@@ -818,6 +826,7 @@ internal sealed partial class CanOpenNode
             }
         }
 
+        WakeEmcyInhibitWait();
         if (target == NmtState.Stopped)
         {
             // §7.3.2.2.4: "forced to stop the communication altogether (except node guarding and
@@ -848,6 +857,7 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void PerformNmtReset(bool communicationOnly)
     {
+        ResetEmcyInhibit();
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
         _pendingEmcy = null;
         _pendingEmcyIsApplications = false;

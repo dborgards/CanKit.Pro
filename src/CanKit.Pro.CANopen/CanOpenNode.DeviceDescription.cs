@@ -401,6 +401,8 @@ internal sealed partial class CanOpenNode
 
         switch (index)
         {
+            case Co.EmcyInhibitTime when _options.EnableEmcyInhibit:
+                return ApplyManagedVariable(index, entries, findings);
             case Co.SdoServer:
                 return ApplyFixedRecord(index, entries, findings,
                     "the default SDO server is fixed at 600h/580h + node-id (1200h is const); the described value is not applied");
