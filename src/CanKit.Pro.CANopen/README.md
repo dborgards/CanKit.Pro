@@ -720,8 +720,23 @@ cannot abort reset echo bookkeeping or an LSS configuration reply. Every reset i
 older queued baseline jobs and retries, including when LSS restores the unconfigured node ID;
 only the latest active boot may consume a new error event. Teardown also cancels this retry. Disposal (including failed
 construction) removes the monitor's handlers and timer. Existing option-copy methods retain
-this setting. Overrun (`8110h`) clear semantics and recovered-from-bus-off (`8140h`) sequencing
-remain separate scope decisions in #423; this option does not emit either code.
+this setting. This option does not enable overrun or recovery EMCYs.
+
+`CanOpenNodeOptions.EmitBusOffRecoveryEmcy = true` independently enables optional `8140h`
+(default false). A bus-off sample followed by error-active, error-warning, error-passive or
+no-error is one recovery; unknown samples neither prove recovery nor forget the bus-off.
+The fresh reset baseline starts a new history and old-monitor notifications are ignored.
+The recovery is represented as a transient communication-error event: `8140h` carries bits
+4/0, then the transient cause is cleared. `0000h` follows only when no other node
+communication cause remains; application bits survive. For example, a passive cause that
+survives bus-off keeps `1001h` active after recovery into passive and defers `0000h` until a
+healthy sample. Existing EMCY inhibit, producer-disable and Stopped coalescing apply, so
+Stopped can retain only the final reset rather than every transient event. The option is
+preserved by all copy methods. This lifetime/sequence is a library choice within CiA 301
+V4.2.0 §7.2.7.1, Table 26/Figure 37, which names `8140h` but does not prescribe that lifetime.
+See [the contract decision](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-14-emcy-recovery-contract.md).
+Overrun (`8110h`) still needs a reliable repair signal or explicit application acknowledgement
+contract; a normal controller sample alone is not evidence that lost objects were repaired.
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
