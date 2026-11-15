@@ -49,10 +49,27 @@ public sealed class CanOpenNodeOptions
     /// carries bits 4/0, followed by <c>0000h</c> only if no other node communication error
     /// remains. Application error bits are preserved. This sequence is this library's
     /// opt-in contract; CiA 301 Table 26 names the code without prescribing its lifetime.
-    /// The existing EMCY producer-disable, inhibit and Stopped-state rules apply.
+    /// The existing EMCY producer-disable and Stopped-state rules apply.
     /// Does not enable <c>8120h</c> or overrun EMCYs. Existing copy methods preserve it.
     /// </remarks>
     public bool EmitBusOffRecoveryEmcy { get; init; }
+
+    /// <summary>
+    /// Emit optional <c>8110h</c> for adapter error-frame notifications whose controller status
+    /// contains RxOverflow or TxOverflow. Defaults to <see langword="false"/>. Both directions
+    /// form one latched communication-error cause, reported once until
+    /// <see cref="CanOpenNodeExtensions.AcknowledgeControllerOverrun(ICanOpenNode)"/> or NMT reset.
+    /// A healthy controller sample does not clear lost objects. Existing copy methods preserve it.
+    /// </summary>
+    /// <remarks>
+    /// Requires adapter error notifications; it neither enables error-frame capture in the
+    /// adapter nor polls for overruns. A rejected subscription fails opening the opted-in node.
+    /// Notifications are accepted after entry to Pre-Operational, including while Stopped;
+    /// reset discards queued pre-reset observations. Producer-disable and Stopped
+    /// coalescing rules apply. Independent of the controller-passive and bus-off recovery options.
+    /// The acknowledged lifetime is a library contract, not a repair signal supplied by CiA 301.
+    /// </remarks>
+    public bool EmitControllerOverrunEmcy { get; init; }
 
     /// <summary>Client-side SDO transfer timeout, applied to every request (initiate as well as
     /// each segment ack). In a block download it also restarts at every confirmed segment of a
@@ -378,6 +395,7 @@ public sealed class CanOpenNodeOptions
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,
             EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,
+            EmitControllerOverrunEmcy = EmitControllerOverrunEmcy,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

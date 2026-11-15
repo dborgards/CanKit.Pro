@@ -22,7 +22,7 @@ communication/generic bits, retaining application bits. Reconcile passive state,
 then end the transient cause. When another communication cause is still active,
 no 0000h is emitted. When the transient is the last cause, queue 0000h with the
 remaining application bits. The existing EMCY chain snapshots node bits when an
-event is decided and preserves frame order. Existing producer-disable, inhibit,
+event is decided and preserves frame order. Existing producer-disable,
 NMT Stopped coalescing and reset/disposal rules continue to apply. In particular,
 Stopped retains the most recent event rather than guaranteeing all transient
 events, and a disabled producer does not replay an already-ended recovery.
@@ -44,3 +44,10 @@ Tests in `CanOpenControllerEmcyTests.cs` exercise recovery observation, optional
 enablement, repeated events, unknown readings, reset history, monitor teardown,
 copy methods and aggregation with a passive cause and application bits. The
 existing controller tests cover the monitor's reset/retry machinery.
+
+## Correction on 2026-11-15
+
+The earlier reference to existing EMCY inhibit rules was inaccurate: 1015h is
+data-only and reported NotImplemented by the device-description loader; the node
+does not enforce EMCY inhibit timing. The recovery feature adds no such timing.
+The producer-disable and Stopped rules above remain the implemented contract.

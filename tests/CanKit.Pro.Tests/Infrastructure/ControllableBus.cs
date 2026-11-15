@@ -211,14 +211,23 @@ public sealed class ControllableBus : ICanBus
     /// a test at volume rather than one at a time.
     /// </summary>
     public void RaiseErrorFrame(ICanErrorInfo? info = null)
-        => ErrorFrameReceived?.Invoke(this, info ?? StubErrorInfo.Instance);
+        => Volatile.Read(ref _errorFrameReceived)?.Invoke(this, info ?? StubErrorInfo.Instance);
+
+    /// <summary>A snapshot of the callbacks, for testing delivery already captured before teardown.</summary>
+    public EventHandler<ICanErrorInfo>? CaptureErrorFrameHandlers() => Volatile.Read(ref _errorFrameReceived);
+
+    /// <summary>When set, an attempted error-frame subscription throws this error.</summary>
+    public Exception? ErrorFrameSubscriptionFailure { get; set; }
+
+    /// <summary>When set, detaching an error-frame handler throws after removing it.</summary>
+    public Exception? ErrorFrameUnsubscriptionFailure { get; set; }
 
     /// <summary>
     /// How many handlers <see cref="ErrorFrameReceived"/> has. A component that unsubscribes on
     /// dispose usually also ignores a late event, so raising one after dispose cannot tell a
     /// detached handler from an attached one; the count can.
     /// </summary>
-    public int ErrorFrameSubscriberCount => ErrorFrameReceived?.GetInvocationList().Length ?? 0;
+    public int ErrorFrameSubscriberCount => Volatile.Read(ref _errorFrameReceived)?.GetInvocationList().Length ?? 0;
 
     /// <summary>As <see cref="ErrorFrameSubscriberCount"/>, for <see cref="FaultOccurred"/>.</summary>
     public int FaultSubscriberCount => FaultOccurred?.GetInvocationList().Length ?? 0;
@@ -347,7 +356,22 @@ public sealed class ControllableBus : ICanBus
 
     // Raised by RaiseErrorFrame: BusStateMonitor subscribes to this as a low-latency hint that the
     // controller's BusState may have moved, so it is not in the never-raised group above.
-    public event EventHandler<ICanErrorInfo>? ErrorFrameReceived;
+    private readonly object _errorFrameGate = new();
+    private EventHandler<ICanErrorInfo>? _errorFrameReceived;
+
+    public event EventHandler<ICanErrorInfo>? ErrorFrameReceived
+    {
+        add
+        {
+            if (ErrorFrameSubscriptionFailure is { } error) throw error;
+            lock (_errorFrameGate) _errorFrameReceived += value;
+        }
+        remove
+        {
+            lock (_errorFrameGate) _errorFrameReceived -= value;
+            if (ErrorFrameUnsubscriptionFailure is { } error) throw error;
+        }
+    }
 
     public event EventHandler<CanReceiveDataView>? FrameObserved;
 
