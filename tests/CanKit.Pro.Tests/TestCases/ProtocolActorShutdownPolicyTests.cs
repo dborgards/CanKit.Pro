@@ -25,7 +25,10 @@ public class ProtocolActorShutdownPolicyTests
         ActorExecutionMode mode, ActorShutdownPolicy? policy)
     {
         var context = ContextFor(mode);
-        using var actor = policy.HasValue ? new ProtocolActor(mode, context, policy.Value) : new ProtocolActor(mode, context);
+        var time = new ManualTimeSource();
+        using var actor = policy.HasValue
+            ? new ProtocolActor(mode, context, time, null, shutdownPolicy: policy.Value)
+            : new ProtocolActor(mode, context, time, null);
         var seen = new List<string>();
         var errors = new List<Exception>();
         actor.BackgroundExceptionOccurred += (_, ex) => errors.Add(ex);
@@ -33,6 +36,11 @@ public class ProtocolActorShutdownPolicyTests
         using var cancelled = await actor.PostAsync(() =>
         {
             queued = actor.PostAsync(() => seen.Add("accepted"));
+            // The ordering guarantee is strict: mailbox work posted BEFORE a timer's due
+            // instant runs first. Equal clock readings permit the timer to run first (#509).
+            // Model distinct instants explicitly; real clock resolution and host load cannot
+            // change their relationship.
+            time.Advance(TimeSpan.FromTicks(1));
             actor.Schedule(TimeSpan.Zero, () =>
             {
                 seen.Add("due");

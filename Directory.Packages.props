@@ -32,13 +32,13 @@
   </ItemGroup>
 
   <ItemGroup Label="netstandard2.0 polyfills">
-    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.14" />
+    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="11.0.0" />
     <PackageVersion Include="System.Memory" Version="4.6.3" />
-    <PackageVersion Include="System.Threading.Channels" Version="10.0.14" />
+    <PackageVersion Include="System.Threading.Channels" Version="11.0.0" />
   </ItemGroup>
 
   <ItemGroup Label="Test">
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
     <!--
       xunit.v3.mtp-off, not xunit.v3: from 4.0 the plain package turns on Microsoft Testing Platform
       v2, which refuses the VSTest target on the .NET 10 SDK. CI's trx logger, coverlet.collector and

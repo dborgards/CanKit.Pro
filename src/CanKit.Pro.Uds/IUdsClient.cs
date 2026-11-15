@@ -329,16 +329,15 @@ public interface IUdsClient : IDisposable
     /// their lengths are not compared.
     /// </summary>
     /// <remarks>
-    /// No block is retried. Beyond the repeat after NRC 0x21 (busyRepeatRequest) that every
-    /// request gets (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>), the first failure of
-    /// a TransferData -- a negative response such as NRC 0x73 (wrongBlockSequenceCounter), a
-    /// timeout, a transport error -- ends the call with that exception, and no
-    /// RequestTransferExit follows, so the server's download is
-    /// left where the failed block left it. ISO 14229-1:2026 §14.4 lets a client repeat a block
-    /// with the same counter after a lost response; this convenience method does not (#426). A
-    /// caller that wants to repeat blocks drives
-    /// <see cref="RequestDownloadAsync"/>, <see cref="TransferDataAsync"/> and
-    /// <see cref="RequestTransferExitAsync"/> itself.
+    /// By default no block is retried beyond the NRC 0x21 repeats every request gets
+    /// (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>). With
+    /// <see cref="UdsClientOptions.MaxTransferDataTimeoutRetries"/>, a P2/P2* application
+    /// timeout repeats the identical block and sequence counter a bounded number of times
+    /// (ISO 14229-1:2026 §14.4.2, Table 451). Negative responses such as NRC 0x73,
+    /// transport errors, malformed responses and cancellation are not retried by that option.
+    /// Every attempt uses the normal timing and NRC 0x21 budgets; cancellation bounds the
+    /// whole download. A final failure ends the call with its exception and sends no
+    /// RequestTransferExit, leaving the server where the failed block left it.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="dataFormatIdentifier"/> is
     /// <c>0x00</c> and <paramref name="memorySize"/> does not decode to the length of
