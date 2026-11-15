@@ -17,6 +17,17 @@ namespace CanKit.Pro.CANopen;
 public sealed class CanOpenNodeOptions
 {
     /// <summary>
+    /// Manage optional <c>1015h</c> (UNSIGNED16, 100 microsecond units) and enforce the EMCY
+    /// minimum interval. Default false preserves the existing data-only treatment of 1015h.
+    /// When enabled the object exists with default 0 (no inhibit); dictionary/SDO writes and
+    /// EDS/DCF values configure it. Existing copy methods preserve this capability.
+    /// </summary>
+    /// <remarks>The interval is counted conservatively from send completion. Queued messages
+    /// retain their order; producer disable, cancellation, NMT reset and disposal release waits.
+    /// Stopped pauses a queued transmission until communication resumes.</remarks>
+    public bool EnableEmcyInhibit { get; init; }
+
+    /// <summary>
     /// Emit optional <c>8130h</c> EMCYs for heartbeat-consumer timeouts and this node's life-
     /// guarding timeout. Defaults to <see langword="false"/>; timeout events remain available
     /// regardless. Enabled errors contribute bits 4 and 0 to <c>1001h</c> until reception,
@@ -396,6 +407,7 @@ public sealed class CanOpenNodeOptions
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,
             EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,
             EmitControllerOverrunEmcy = EmitControllerOverrunEmcy,
+            EnableEmcyInhibit = EnableEmcyInhibit,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

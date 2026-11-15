@@ -188,9 +188,9 @@ Deliberate omissions, each checked against the norm text:
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
-with such an entry instead of ignoring it. The same holds for the EMCY inhibit time (`1015h`) and
-the error behaviour object (`1029h`): the node neither maintains nor reads them, and a description
-that declares one gets it created as data and reported `NotImplemented`.
+with such an entry instead of ignoring it. The error behaviour object (`1029h`) remains data-only
+and is reported `NotImplemented`. EMCY inhibit time (`1015h`) is managed when the optional
+`EnableEmcyInhibit` capability below is enabled; otherwise it retains its previous data-only behavior.
 
 ## The object dictionary is the configuration
 
@@ -765,9 +765,35 @@ reporting once on re-enable; acknowledging while disabled prevents that replay a
 a previously reported register. All options-copy methods preserve this opt-in. The extension
 leaves `ICanOpenNode` unchanged: null is rejected, a disposed local node throws
 `ObjectDisposedException`, and a third-party node implementation throws `NotSupportedException`.
-EMCY inhibit time (`1015h`) remains unimplemented as described above; this feature adds no
-inhibit timing. This acknowledged lifetime is a library choice; CiA 301 names `8110h` without
+Optional EMCY inhibit time (`1015h`) applies to these messages when `EnableEmcyInhibit` is
+enabled. This acknowledged lifetime is a library choice; CiA 301 names `8110h` without
 supplying an adapter repair signal. See [the overrun contract decision](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-15-emcy-overrun-contract.md).
+
+`CanOpenNodeOptions.EnableEmcyInhibit = true` enables optional `1015h` (CiA 301
+§4.4.1, §7.2.7.2.1 and §7.5.2.18). It creates a read/write UNSIGNED16, non-PDO-mappable
+object at sub-index 00h with default 0. Values are multiples of 100 µs (maximum 6.5535 s);
+0 disables the interval. Local dictionary writes and SDO downloads use the same configuration;
+EDS/DCF values are applied, and 1010h/1011h plus NMT reset use the normal stored/default values.
+The capability defaults to false and is preserved by options-copy methods, so existing nodes
+and descriptions retain the earlier absent/data-only object treatment until explicitly opted in.
+
+All application and node-generated EMCYs, including error resets, share the existing FIFO send
+chain and the minimum interval. The first attempt has no inhibit delay. The host actor uses
+its monotonic clock and conservatively starts the next interval when the previous send attempt
+completes, including a failed attempt. Driver acceptance or echo confirmation can therefore
+lengthen the interval. This limits transmission-service invocations; it does not guarantee CAN
+wire timestamps, latency or driver queue behavior. The error register and history update at the
+send step, not while an EMCY is waiting for its interval.
+
+Changing 1015h re-evaluates a waiting head against the latest value and previous completion;
+setting 0 releases the gap. Cancelling a waiting call removes it without reserving another slot.
+Disabling the producer releases waits. With the producer disabled at the send step, application
+messages are discarded without changing application bits, and node messages still apply their
+existing register-only update. Stopped
+pauses pre-existing queued work; reasons newly triggered during Stopped retain the existing
+latest-reason coalescing. NMT reset drops pre-reset queued EMCYs, invalidates the old completion
+history and starts a fresh interval history after boot. Disposal releases pending waits.
+See [the inhibit contract](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-15-emcy-inhibit.md).
 
 **Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
 this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
