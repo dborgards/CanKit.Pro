@@ -185,6 +185,9 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         if (options.MaxBusyRepeatRequests < 0)
             throw new ArgumentOutOfRangeException(nameof(options),
                 "MaxBusyRepeatRequests must be >= 0 (0 disables the repeat).");
+        if (options.MaxTransferDataTimeoutRetries < 0)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                "MaxTransferDataTimeoutRetries must be >= 0 (0 disables the retry).");
         if (options.BusyRepeatRequestDelay < TimeSpan.Zero || options.BusyRepeatRequestDelay > MaxTimerSpan)
             throw new ArgumentOutOfRangeException(nameof(options),
                 "BusyRepeatRequestDelay must not be negative, and must be within a timer's reach (about 49 days).");
@@ -1038,14 +1041,21 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     /// Assumes <see cref="_requestLock"/> is already held. Sends one 0x36 request and validates
     /// the echoed block-sequence counter.
     /// </summary>
-    private async Task<byte[]> TransferDataCoreAsync(byte blockSequenceCounter,
+    private Task<byte[]> TransferDataCoreAsync(byte blockSequenceCounter,
         ReadOnlyMemory<byte> data, CancellationToken linkedToken)
+        => TransferDataRequestCoreAsync(BuildTransferDataRequest(blockSequenceCounter, data), linkedToken);
+
+    private static byte[] BuildTransferDataRequest(byte blockSequenceCounter, ReadOnlyMemory<byte> data)
     {
         var request = new byte[2 + data.Length];
         request[0] = (byte)UdsServiceId.TransferData;
         request[1] = blockSequenceCounter;
         if (data.Length > 0) data.Span.CopyTo(request.AsSpan(2));
+        return request;
+    }
 
+    private async Task<byte[]> TransferDataRequestCoreAsync(byte[] request, CancellationToken linkedToken)
+    {
         var response = await ExecuteCoreAsync(UdsServiceId.TransferData, request,
             linkedToken).ConfigureAwait(false);
 
@@ -1173,7 +1183,24 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 int remaining = data.Length - offset;
                 int take = remaining < chunkSize ? remaining : chunkSize;
                 var chunk = data.Slice(offset, take);
-                _ = await TransferDataCoreAsync(bsc, chunk, linkedToken).ConfigureAwait(false);
+                var request = BuildTransferDataRequest(bsc, chunk);
+                // ISO 14229-1:2026 §14.4.2, Table 451: a lost request and a lost positive
+                // response are recovered by repeating the identical block and counter.
+                // A negative response or transport failure is a different outcome and escapes.
+                for (int retries = 0; ; retries++)
+                {
+                    linkedToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        _ = await TransferDataRequestCoreAsync(request, linkedToken).ConfigureAwait(false);
+                        break;
+                    }
+                    catch (UdsTimeoutException ex) when (ex.RequestedService == UdsServiceId.TransferData
+                        && retries < _options.MaxTransferDataTimeoutRetries)
+                    {
+                        // No counter or offset advance until a positive response is accepted.
+                    }
+                }
                 offset += take;
                 unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … as required by ISO 14229-1:2026 §14.4.2.
             }
