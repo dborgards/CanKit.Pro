@@ -51,6 +51,9 @@ for the latch, not an event counter. Each NMT reset invalidates the observation
 history and clears the latch without an error-reset EMCY. Queued old observations
 cannot relatch it after reset. New notifications after re-entry may report again.
 Disposal and failed construction remove the handler and invalidate observations.
+Non-fatal detach failures are reported through BackgroundExceptionOccurred while
+the remaining cleanup continues. OutOfMemoryException, StackOverflowException
+and AccessViolationException are not swallowed, consistent with the LSS reader.
 
 Producer-disable retains the latch for one report on re-enable unless acknowledged
 in the meantime. Acknowledging while disabled still clears a previously reported

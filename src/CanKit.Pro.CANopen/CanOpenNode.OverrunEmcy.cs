@@ -84,6 +84,12 @@ internal sealed partial class CanOpenNode
         if (_controllerOverrunBus is not { } bus) return;
         _controllerOverrunBus = null;
         try { bus.ErrorFrameReceived -= OnControllerOverrun; }
-        catch { /* The adapter may already be tearing down, as with BusStateMonitor. */ }
+        catch (Exception error) when (error is not OutOfMemoryException
+            and not StackOverflowException and not AccessViolationException)
+        {
+            // Keep normal adapter teardown failures from abandoning the remaining node cleanup,
+            // but report them and let fatal failures propagate (as in the LSS reader).
+            RaiseBackgroundException(error);
+        }
     }
 }

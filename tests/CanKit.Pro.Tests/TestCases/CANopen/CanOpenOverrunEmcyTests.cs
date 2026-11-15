@@ -288,12 +288,16 @@ public partial class CanOpenPdoEngineTests
     }
 
     [Fact]
-    public void Overrun_Emcy_Removes_Handlers_On_Disposal_And_Failed_Construction()
+    public async Task Overrun_Emcy_Removes_Handlers_On_Disposal_And_Failed_Construction()
     {
         using var rig = new ControllerEmcyRig(enabled: false, overrunEnabled: true);
         var captured = rig.Bus.CaptureErrorFrameHandlers()!;
-        rig.Bus.ErrorFrameUnsubscriptionFailure = new InvalidOperationException("driver teardown");
+        var failure = new InvalidOperationException("driver teardown");
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BackgroundExceptionOccurred += (_, error) => reported.TrySetResult(error);
+        rig.Bus.ErrorFrameUnsubscriptionFailure = failure;
         rig.Node.Dispose();
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(failure);
         rig.Bus.ErrorFrameUnsubscriptionFailure = null;
         rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
         rig.Bus.FaultSubscriberCount.Should().Be(rig.BaselineFaults);
@@ -310,7 +314,7 @@ public partial class CanOpenPdoEngineTests
     }
 
     [Fact]
-    public void Overrun_Emcy_Does_Not_Throw_Into_The_Driver_When_Disposal_Wins_The_Post_Race()
+    public async Task Overrun_Emcy_Does_Not_Throw_Into_The_Driver_When_Disposal_Wins_The_Post_Race()
     {
         using var rig = new ControllerEmcyRig(enabled: false, overrunEnabled: true);
         var node = (CanOpenNode)rig.Node;
@@ -319,18 +323,12 @@ public partial class CanOpenPdoEngineTests
         var pending = observation.GetType().GetField("Pending", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var postGate = typeof(ProtocolActor).GetField("_disposeGate", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(node.ActorForTests)!;
-        Exception? callbackError = null;
-        var callback = new Thread(() =>
-        {
-            try { rig.Bus.RaiseErrorFrame(RxOverrun); }
-            catch (Exception error) { callbackError = error; }
-        })
-        { IsBackground = true };
+        Task callback = Task.CompletedTask;
         try
         {
             lock (postGate)
             {
-                callback.Start();
+                callback = Task.Run(() => rig.Bus.RaiseErrorFrame(RxOverrun));
                 // Hold the actor's actual posting/disposal lock. Once the callback claims its
                 // observation it cannot post until this thread disposes the node and releases
                 // the lock. No scheduling delay decides which operation wins this race.
@@ -340,9 +338,34 @@ public partial class CanOpenPdoEngineTests
         }
         finally
         {
-            callback.Join(ShortTimeout).Should().BeTrue();
+            await FluentActions.Awaiting(() => callback.WaitAsync(ShortTimeout))
+                .Should().NotThrowAsync("a normal teardown race must not fault the adapter's receive loop");
         }
-        callbackError.Should().BeNull("a normal teardown race must not fault the adapter's receive loop");
+        rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
+    }
+
+    [Theory]
+    [InlineData("OutOfMemory")]
+    [InlineData("StackOverflow")]
+    [InlineData("AccessViolation")]
+    public async Task Overrun_Emcy_Does_Not_Swallow_Fatal_Detach_Failures(string kind)
+    {
+        using var rig = new ControllerEmcyRig(enabled: false, overrunEnabled: true);
+        Exception failure = kind switch
+        {
+            "OutOfMemory" => new OutOfMemoryException("simulated fatal detach failure"),
+            "StackOverflow" => new StackOverflowException("simulated fatal detach failure"),
+            _ => new AccessViolationException("simulated fatal detach failure"),
+        };
+        rig.Bus.ErrorFrameUnsubscriptionFailure = failure;
+        // Invoke only the component's teardown, so a simulated fatal failure does not strand
+        // the enclosing node mid-Dispose. The ordinary using still releases its other resources.
+        var teardown = (Action)typeof(CanOpenNode).GetMethod("DisposeControllerOverrunMonitor", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .CreateDelegate(typeof(Action), rig.Node);
+        var outcome = ((CanOpenNode)rig.Node).PostToActorAsync(teardown);
+        await FluentActions.Awaiting(() => outcome.WaitAsync(ShortTimeout)).Should().ThrowAsync<Exception>()
+            .Where(error => ReferenceEquals(error, failure));
+        rig.Bus.ErrorFrameUnsubscriptionFailure = null;
         rig.Bus.ErrorFrameSubscriberCount.Should().Be(rig.BaselineErrors);
     }
 
