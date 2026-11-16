@@ -53,7 +53,7 @@
       expression). Do not add FluentAssertions back.
     -->
     <PackageVersion Include="AwesomeAssertions" Version="9.6.0" />
-    <PackageVersion Include="coverlet.collector" Version="10.1.0" />
+    <PackageVersion Include="coverlet.collector" Version="10.1.1" />
     <!--
       Polyfill supplies the BCL APIs the test suite uses but netstandard2.0/net48 lack:
       the non-generic TaskCompletionSource and Task.WaitAsync among them. It is a source-only package
