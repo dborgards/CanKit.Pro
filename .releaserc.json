@@ -56,7 +56,9 @@
     }],
 
     ["@semantic-release/github", {
+      "releaseBodyTemplate": "<%= nextRelease.notes.length <= 120000 ? nextRelease.notes : 'The full release notes exceed the GitHub release-body limit. Read the [complete changelog for ' + nextRelease.gitTag + '](https://github.com/dborgards/CanKit.Pro/blob/' + nextRelease.gitTag + '/CHANGELOG.md), also attached as CHANGELOG.md. No entries have been removed from the changelog.' %>",
       "assets": [
+        { "path": "CHANGELOG.md", "label": "Complete changelog" },
         { "path": "artifacts/nuget/*.nupkg", "label": "NuGet packages" },
         { "path": "artifacts/sbom/*.cdx.json", "label": "SBOM (CycloneDX 1.6)" }
       ],
