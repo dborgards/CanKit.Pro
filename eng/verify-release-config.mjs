@@ -4,9 +4,9 @@
 // This is deliberately not a full `semantic-release --dry-run`: that talks to the GitHub API and
 // needs a token with push rights, which a pull-request build (especially from a fork) does not
 // have. The release workflow runs the real dry run on `main`, where the token is right. This check
-// invokes only the analyser and notes generator with synthetic commits: no authenticated API,
-// push, tag, prepare, publish or success hooks. Rendering catches incompatible writer/preset
-// combinations that still resolve successfully (for example preset 10 with writer 8, #14).
+// invokes the analyser and notes generator with synthetic commits, and the GitHub publisher
+// with an injected API stub: no network, push, tag or publication. Rendering catches incompatible
+// writer/preset combinations that still resolve successfully (for example preset 10 with writer 8, #14).
 
 import { readFileSync } from 'node:fs';
 
@@ -139,6 +139,64 @@ if (!notesEntry) {
     }
   } catch (error) {
     problems.push(`release notes cannot be rendered: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// A successful dry run still skips GitHub publication. Exercise the pinned publisher's actual
+// template rendering against a stub API before any NuGet push can happen (#346). Keep normal
+// notes intact, and link to the complete, tagged changelog when GitHub's 125000-character body
+// limit would be at risk. The full notes must remain available to the changelog/git plugins.
+const githubOptions = (config.plugins ?? [])
+  .filter(Array.isArray)
+  .find(([name]) => name === '@semantic-release/github')?.[1];
+
+if (!githubOptions) {
+  problems.push('the configured GitHub release publisher is missing');
+} else {
+  try {
+    const { publish } = await import('@semantic-release/github');
+    const changelogAsset = githubOptions.assets?.some((asset) => asset?.path === 'CHANGELOG.md');
+    if (!changelogAsset) problems.push('GitHub release assets must include the complete CHANGELOG.md');
+    for (const size of [0, 120000, 120001, 125000, 125001, 250000]) {
+      const notes = 'x'.repeat(size);
+      let request;
+      class OfflineOctokit {
+        async request(route, parameters) {
+          if (route === 'GET /repos/{owner}/{repo}') {
+            return { data: {
+              permissions: { push: true },
+              clone_url: 'https://github.com/dborgards/CanKit.Pro.git',
+            } };
+          }
+          if (route !== 'POST /repos/{owner}/{repo}/releases') {
+            throw new Error(`unexpected GitHub operation: ${route}`);
+          }
+          request = parameters;
+          return { data: { id: 1, html_url: 'https://example.invalid/release' } };
+        }
+      }
+      const nextRelease = { version: '9.8.7', gitTag: 'v9.8.7', notes };
+      await publish({ ...githubOptions, assets: [] }, {
+        cwd: process.cwd(),
+        env: { GITHUB_TOKEN: 'offline-placeholder' },
+        options: { repositoryUrl: 'https://github.com/dborgards/CanKit.Pro' },
+        branch: { name: 'main', type: 'release', main: true },
+        nextRelease,
+        logger: { log() {} },
+      }, { Octokit: OfflineOctokit });
+      if (typeof request?.body !== 'string' || request.body.length > 125000) {
+        problems.push(`GitHub release body exceeds its limit for ${size} characters of notes`);
+      } else if (size <= 120000 ? request.body !== notes
+        : !request.body.includes('https://github.com/dborgards/CanKit.Pro/blob/v9.8.7/CHANGELOG.md')) {
+        problems.push(`GitHub release body must preserve notes or link to their tagged changelog (${size})`);
+      } else if (nextRelease.notes !== notes) {
+        problems.push('GitHub release rendering must not shorten the full changelog notes');
+      } else {
+        console.log(`ok       GitHub release body fits for ${size} characters of notes`);
+      }
+    }
+  } catch (error) {
+    problems.push(`GitHub release body cannot be rendered: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

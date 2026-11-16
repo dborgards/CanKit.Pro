@@ -131,5 +131,19 @@ The attestations are made by the `attest` job, **after** the release, with its o
 fails to publish would vouch for something nobody can install. If that job fails, *Re-run failed jobs*
 repeats it alone against the retained artifacts; nothing is released twice.
 
+GitHub release bodies have a 125000-character limit. Up to 120000 characters, the body is the
+generated release notes unchanged. Above that, it links to the complete `CHANGELOG.md` at the release
+tag; the changelog is also attached as an asset. The changelog and its release commit retain all
+entries. `eng/verify-release-config.mjs` exercises the pinned GitHub publisher's template with an
+offline API stub, including oversized notes, before publication.
+
+If publication fails **after NuGet or tag creation**, do not start a new release or delete the tag.
+Record the run, version, tag, published packages and missing steps first. Recover the retained
+`nuget-packages` and `sbom` artifacts from that run, verify their archive digests and run the package
+and SBOM checks against the original version. Complete the missing GitHub release/assets using those
+files and the original tag's changelog; do not rebuild or repack the published version. Attestations
+remain a separate required step. A green dry run or a subsequent "no release pending" result does
+not prove that the missing publication or attestations were completed.
+
 `CycloneDX` is pinned in `.config/dotnet-tools.json`. Its version changes the SBOM's content, not the
 packages', so Dependabot groups it with the test tooling and a bump publishes no release.
