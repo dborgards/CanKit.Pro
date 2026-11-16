@@ -401,6 +401,8 @@ internal sealed partial class CanOpenNode
 
         switch (index)
         {
+            case Co.ErrorBehavior when _options.EnableErrorBehavior:
+                return ApplyErrorBehaviorDescription(entries, findings);
             case Co.EmcyInhibitTime when _options.EnableEmcyInhibit:
                 return ApplyManagedVariable(index, entries, findings);
             case Co.SdoServer:
@@ -493,6 +495,30 @@ internal sealed partial class CanOpenNode
             }
         }
         return 0;
+    }
+
+    private int ApplyErrorBehaviorDescription(List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
+    {
+        int loaded = 0;
+        foreach (var entry in entries)
+        {
+            if (entry.Subindex == 0)
+            {
+                if (ParseUnsigned(entry, out _) == 1) loaded++;
+                else findings.Add(new DeviceDescriptionFinding(Co.ErrorBehavior, 0, DeviceDescriptionOutcome.Corrected,
+                    "1029h sub-index 00h is constant 1; only communication-error behavior is implemented", entry.Value));
+            }
+            else if (entry.Subindex == 1)
+            {
+                _od.TryGet(Co.ErrorBehavior, 1, out var current);
+                _od.Declare(Co.ErrorBehavior, 1, OdDataType.Unsigned8, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+                loaded++;
+                ApplyManagedValue(Co.ErrorBehavior, 1, OdDataType.Unsigned8, entry, findings);
+            }
+            else findings.Add(new DeviceDescriptionFinding(Co.ErrorBehavior, entry.Subindex, DeviceDescriptionOutcome.Omitted,
+                "profile- and manufacturer-specific error classes are not implemented", entry.Value));
+        }
+        return loaded;
     }
 
     /// <summary>

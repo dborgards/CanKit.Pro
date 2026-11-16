@@ -609,7 +609,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             var send = SendControlFrame(cobId, frame, cancellationToken);
             return _options.EnableEmcyInhibit ? RecordEmcyCompletionAsync(send, inhibitEpoch) : send;
         };
-        return AppendToEmcyChain(() => _options.EnableEmcyInhibit
+        return AppendToEmcyChain(() => _options.EnableEmcyInhibit || _options.EnableErrorBehavior
             ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
     }
 
@@ -2217,6 +2217,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             }
             var final = new byte[session.Offset];
             Buffer.BlockCopy(session.Buffer, 0, final, 0, session.Offset);
+            // With 1029h enabled, committing configuration can synchronously enter Stopped.
+            // This download has finished receiving: do not abort it as an unfinished session
+            // from inside its own write callback, then send a second terminal response.
+            if (_options.EnableErrorBehavior) ClearSdoServerSession();
             if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort))
             {
                 SendSdoServerAbort(session.Index, session.Subindex, abort ?? SdoAbortCode.General);
@@ -3049,9 +3053,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void RaiseHeartbeatTimeout(byte producer, TimeSpan timeout)
     {
+        if (_options.EmitGuardingErrorEmcy || _options.EnableErrorBehavior)
+            _heartbeatEmcyTimeouts[producer] = timeout;
+        ApplyCommunicationErrorBehavior();
         if (_options.EmitGuardingErrorEmcy)
         {
-            _heartbeatEmcyTimeouts[producer] = timeout;
             RaiseCommunicationError(CommunicationError.HeartbeatTimeout, producer, 0x8130);
         }
         var args = new HeartbeatTimeoutEventArgs(producer, timeout);

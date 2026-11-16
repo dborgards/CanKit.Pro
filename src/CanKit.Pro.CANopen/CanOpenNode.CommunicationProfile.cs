@@ -62,6 +62,7 @@ internal sealed partial class CanOpenNode
         public const ushort EmcyInhibitTime = 0x1015;
         public const ushort ConsumerHeartbeat = 0x1016;
         public const ushort ProducerHeartbeat = 0x1017;
+        public const ushort ErrorBehavior = 0x1029;
         public const ushort Identity = 0x1018;
         public const ushort SdoServer = 0x1200;
         public const ushort NmtStartup = 0x1F80;
@@ -150,6 +151,11 @@ internal sealed partial class CanOpenNode
         // §7.5.2.17: EMCY COB-ID, default 80h + node-id, valid.
         _od.AddU32(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(_nodeId), rw, nm);
         if (_options.EnableEmcyInhibit) _od.AddU16(Co.EmcyInhibitTime, 0x00, 0, rw, nm);
+        if (_options.EnableErrorBehavior)
+        {
+            _od.AddU8(Co.ErrorBehavior, 0, 1, ro, nm);
+            _od.AddU8(Co.ErrorBehavior, 1, 0, rw, nm);
+        }
 
         // §7.5.2.19 / §7.5.2.20: heartbeat. One consumer slot to begin with; AddHeartbeatConsumer
         // grows the array. Sub0 is const on the bus.
@@ -263,6 +269,7 @@ internal sealed partial class CanOpenNode
     private bool IsManagedCommunicationObject(ushort index) => index switch
     {
         Co.EmcyInhibitTime => _options.EnableEmcyInhibit,
+        Co.ErrorBehavior => _options.EnableErrorBehavior,
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.SyncWindow or Co.SyncCounterOverflow or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
             or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
@@ -306,6 +313,8 @@ internal sealed partial class CanOpenNode
         if (IsManagedErrorHistory(index)) return ValidateErrorHistoryWrite(subindex, value);
         switch (index)
         {
+            case Co.ErrorBehavior when _options.EnableErrorBehavior:
+                return ValidateErrorBehaviorWrite(subindex, value);
             case Co.SyncCobId:
                 return ValidateSyncCobIdWrite(value);
             case Co.SyncCounterOverflow:
@@ -648,6 +657,7 @@ internal sealed partial class CanOpenNode
         ApplySyncTimingConfiguration();
         ApplyEmcyConfiguration();
         ApplyEmcyInhibitConfiguration();
+        ApplyErrorBehaviorConfiguration();
         ApplyHeartbeatProducerConfiguration();
         RebuildHeartbeatConsumers();
         ApplyLifeGuardingConfiguration();
@@ -662,6 +672,11 @@ internal sealed partial class CanOpenNode
     private void ApplyCommunicationObject(ushort index, byte subindex)
     {
         if (_disposed != 0) return;
+        if (index == Co.ErrorBehavior)
+        {
+            ApplyErrorBehaviorConfiguration();
+            return;
+        }
         if (Safety.SrdoRecords.SrdoNumberOf(index) is { } srdo)
         {
             _srdo.Rebuild(srdo);
@@ -794,6 +809,9 @@ internal sealed partial class CanOpenNode
     /// and a heartbeat announcing the new state goes out when the producer is active.</summary>
     private void ApplyNmtTransition(NmtState target)
     {
+        // Resolve before publishing Operational or arming PDOs/SRDOs: an already observed
+        // failure must not produce a transient Operational window on a new NMT Start.
+        target = ResolveErrorBehaviorTarget(target);
         var previous = _state;
         if (target == NmtState.Stopped) _syncProducerGeneration++;
         if (previous == NmtState.Stopped && target is NmtState.PreOperational or NmtState.Operational)

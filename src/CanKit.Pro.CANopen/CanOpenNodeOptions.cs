@@ -17,6 +17,18 @@ namespace CanKit.Pro.CANopen;
 public sealed class CanOpenNodeOptions
 {
     /// <summary>
+    /// Manage optional <c>1029h</c>: constant sub-index 0 = 1 and read/write UNSIGNED8
+    /// communication-error behavior at sub-index 1 (0 = Pre-Operational, 1 = unchanged,
+    /// 2 = Stopped; default 0). Default false preserves existing NMT and data-only behavior.
+    /// </summary>
+    /// <remarks>React to observed bus-off, heartbeat-consumer and local life-guarding timeouts
+    /// while Operational, independently of EMCY options or producer state. Active failures
+    /// are rechecked before entering Operational and when the policy changes. Recovery never
+    /// resumes Operational automatically. Other error classes are not implemented. Requires
+    /// adapter bus-state monitoring. Existing copy methods preserve this capability.</remarks>
+    public bool EnableErrorBehavior { get; init; }
+
+    /// <summary>
     /// Manage optional <c>1015h</c> (UNSIGNED16, 100 microsecond units) and enforce the EMCY
     /// minimum interval. Default false preserves the existing data-only treatment of 1015h.
     /// When enabled the object exists with default 0 (no inhibit); dictionary/SDO writes and
@@ -408,6 +420,7 @@ public sealed class CanOpenNodeOptions
             EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,
             EmitControllerOverrunEmcy = EmitControllerOverrunEmcy,
             EnableEmcyInhibit = EnableEmcyInhibit,
+            EnableErrorBehavior = EnableErrorBehavior,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

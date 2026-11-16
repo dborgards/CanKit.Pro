@@ -67,21 +67,21 @@ internal sealed partial class CanOpenNode
     // The communication errors the node reported and whose cause has not ended. Actor loop only.
     private readonly HashSet<int> _communicationErrors = new();
 
-    // Last timeout of each still-silent watched producer; retained while EMCY is disabled so
-    // enabling the producer can report an error that is still active. Actor loop only.
+    // Last timeout of each still-silent watched producer, also used by optional 1029h.
+    // Retained while EMCY is disabled so re-enable can report an active error. Actor loop only.
     private readonly Dictionary<byte, TimeSpan> _heartbeatEmcyTimeouts = new();
 
     private void NoteHeartbeatForMonitoring(byte producer)
     {
         _heartbeatConsumer.NoteReceived(producer);
-        if (!_options.EmitGuardingErrorEmcy) return;
+        if (!_options.EmitGuardingErrorEmcy && !_options.EnableErrorBehavior) return;
         _heartbeatEmcyTimeouts.Remove(producer);
         EndCommunicationError(CommunicationError.HeartbeatTimeout, producer);
     }
 
     private void ReconcileHeartbeatEmcyWatches(IReadOnlyDictionary<byte, TimeSpan> desired)
     {
-        if (!_options.EmitGuardingErrorEmcy) return;
+        if (!_options.EmitGuardingErrorEmcy && !_options.EnableErrorBehavior) return;
         foreach (var previous in _heartbeatEmcyTimeouts
                      .Where(WatchChanged)
                      .ToList())
