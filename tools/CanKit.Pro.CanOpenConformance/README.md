@@ -12,7 +12,7 @@ It is a diagnostic tool, not part of the packages: it is not packed, and CI only
 - `tests/CanKit.Pro.Tests` is in the solution, and CI runs `dotnet test CanKit.Pro.sln` on Linux,
   Windows and macOS with no CAN hardware. A hardware suite there would be a permanently skipped
   shell. SRS §7 puts hardware-in-the-loop tests outside the standard CI gate (assumption A-5) and
-  names an "HIL sample" as the verification of `FR-CO-001..059`; §9 item 5 records that it has
+  names an "HIL sample" in the verification of the CANopen row (`FR-CO`); §9 item 5 records that it has
   never existed. This is that.
 - `samples/README.md` promises in writing that no sample needs hardware or a second computer.
 - `tools/CanKit.Pro.EchoProbe` already has this shape — vendor adapter references, a markdown and

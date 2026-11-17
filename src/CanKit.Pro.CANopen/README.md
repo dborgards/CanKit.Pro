@@ -106,6 +106,7 @@ maintainer decision does.
 | FR-CO-059 | `SrdoConfigurationCheckInterval`: the same check repeated periodically (§5.3, opt-in); a mismatch in Operational makes every SRDO `ConfigurationInvalid` ([Configuring and committing](#configuring-and-committing)) |
 | FR-CO-057 | SAM/DAM MPDO, scanner/dispatcher blocks and inhibit queue |
 | FR-CO-062 | Pre-defined error field `1003h`, opt-in by `ErrorHistoryCapacity` or a description that declares it ([Error control](#error-control)) |
+| FR-CO-063 | Device type `1000h` split into profile number and additional information, and a peer's logical devices read from `1000h` and `67FFh + x·800h` through the peer-SDO gate ([Device type and logical devices](#device-type-and-logical-devices)) |
 
 ## Not built, and why
 
@@ -490,6 +491,61 @@ already has a transfer with, and neither kind is reported. Any other failure end
 includes a request the bus rejects or does not confirm, which fails with
 `CanOpenTransportException`, so a dead bus does not look like an empty one.
 Opening the client transmits its boot-up, which is one reason the scan is not the default.
+
+### Device type and logical devices
+
+Object `1000h:00` holds the device type, an UNSIGNED32. `CanOpenDeviceType` splits it: the low 16
+bits are the profile number (`ProfileNumber`, for example 401 for `0191h`) and the high 16 bits are
+the additional information, whose meaning the profile defines. `FFFFh` in the additional
+information says that the node has more logical devices than the one this word describes
+(`HasFurtherLogicalDevices`).
+
+A node has up to eight logical devices. Logical device `x` owns the `800h` objects from
+`6000h + x·800h` (CiA 301 §7.4.1, Table 41), and its PDO numbers are `x·64` higher (§7.2.2.1). Its
+device-type object is `67FFh + x·800h`: `67FFh`, `6FFFh` and on to `9FFFh` (§7.5.2.1).
+`CanOpenLogicalDevices` does that arithmetic, and `ReadAsync` reads the chain of a peer with SDO
+uploads from the client:
+
+```csharp
+var peer = await CanOpenLogicalDevices.ReadAsync(client, peerNodeId: 0x10);
+if (peer.End == CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired)
+{
+    client.BindPeerDeviceDescription(0x10, description);   // an EDS/DCF that lists 67FFh, 6FFFh, ...
+    peer = await CanOpenLogicalDevices.ReadAsync(client, peerNodeId: 0x10);
+}
+foreach (var device in peer.Devices)
+    Console.WriteLine($"{device.Index}: {device.DeviceType}, objects from {device.ObjectAreaStart:X4}h");
+```
+
+It reads `1000h:00`. A peer without `FFFFh` is one logical device and nothing else is asked. With
+`FFFFh` it reads `67FFh:00`, `6FFFh:00` and on, until the peer aborts with "object does not exist"
+(`0602 0000h`), the bound peer description does not declare the next object, or eight devices are
+read. `Devices` is never empty: when `67FFh` was not read, the first device carries the type of
+`1000h`. `End` says how the reading ended, one of four ways:
+
+- `Complete`: the peer itself ended the chain, with no `FFFFh` in `1000h`, with the abort "object
+  does not exist", or after eight devices. Every logical device the peer has is in `Devices`.
+- `PeerDescriptionRequired`: `1000h` announces more devices, but `67FFh` is not one of the objects
+  the client may read without a peer description ([SDO client](#sdo-client-and-a-peers-device-description))
+  and none is bound for this node. Nothing is sent for it. Bind a description that lists the
+  objects and read again.
+- `Failed`: a read inside the chain ended in an SDO abort other than "object does not exist", the
+  client's own timeout included, or returned something other than four bytes. `Failure` holds the
+  exception and `Devices` what was read before it.
+- `EndedByPeerDescription`: a peer description is bound and does not declare the next device-type
+  object, so the client refused to ask for it and nothing is sent. The description is the list of
+  objects the client may touch on that peer, so `Devices` is complete as far as the bound
+  description goes, not necessarily as far as the peer goes. When `1000h` announced further devices
+  but the description declares no `67FFh`, the single device is the copy of `1000h`. To read
+  further, bind a description that declares the objects.
+
+The two refusals of the gate, `PeerDescriptionRequired` and `EndedByPeerDescription`, concern
+`67FFh` and the objects after it, and `ReadAsync` does not throw for them. `1000h:00` goes through
+the same gate: a bound description that does not declare `1000h` throws `PeerSdoAccessException`, and
+any other failure of `1000h:00` reaches the caller as its exception too. So does anything inside the
+chain that is not one of the four outcomes above: a transport fault (`CanOpenTransportException`),
+cancellation and an SDO transfer already in flight with that peer (`InvalidOperationException`)
+among them.
 
 ## PDO engine
 
