@@ -104,13 +104,24 @@ public partial class CanOpenApplicationSeamTests
     {
         using var busA = Open(NewSession(), 1);
         using var busB = Open(NewSession(), 1);
+        using var busC = Open(NewSession(), 1);
         using var plain = OpenNode(busA, new CanOpenNodeOptions());
-        var app = new RecordingApplication("silent", CanOpenIndexRange.ForLogicalDevice(0));
+        var silent = new RecordingApplication("silent", CanOpenIndexRange.ForLogicalDevice(0));
+        // The placeholder is 0, which a stray write of 0 would leave unchanged: this one puts
+        // another word there itself, through the dictionary, and never calls SetDeviceType.
+        const uint Own = 0x00070123;
+        var writer = new RecordingApplication("writer", CanOpenIndexRange.ForLogicalDevice(0))
+        {
+            OnAttach = host => host.ObjectDictionary.WriteUnsigned(0x1000, 0x00, Own),
+        };
 
-        using var node = OpenNode(busB, With(app));
+        using var quiet = OpenNode(busB, With(silent));
+        using var written = OpenNode(busC, With(writer));
 
-        DeviceTypeOf(node).Should().Be(DeviceTypeOf(plain));
-        node.ObjectDictionary.ContainsIndex(0x67FF).Should().BeFalse();
+        DeviceTypeOf(quiet).Should().Be(DeviceTypeOf(plain));
+        DeviceTypeOf(written).Should().Be(Own, "what the application wrote is not composed over");
+        quiet.ObjectDictionary.ContainsIndex(0x67FF).Should().BeFalse();
+        written.ObjectDictionary.ContainsIndex(0x67FF).Should().BeFalse();
     }
 
     [Fact]
@@ -137,22 +148,6 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
-    public void A_Double_Setting_That_The_Application_Swallows_Still_Fails_The_Open()
-    {
-        var app = new RecordingApplication("careless", CanOpenIndexRange.ForLogicalDevice(0))
-        {
-            OnAttach = host =>
-            {
-                host.SetDeviceType(0, new CanOpenDeviceType(Profile401));
-                try { host.SetDeviceType(0, new CanOpenDeviceType(Profile408)); }
-                catch (ArgumentException) { }
-            },
-        };
-
-        OptionsRefused(With(app)).Message.Should().Contain("careless");
-    }
-
-    [Fact]
     public void A_Device_Type_Outside_The_Claim_Is_Refused()
     {
         var app = new RecordingApplication("narrow", Claim6000)
@@ -163,6 +158,7 @@ public partial class CanOpenApplicationSeamTests
         var failure = OpenThrows<ArgumentException>(With(app));
 
         failure.GetType().Should().Be<ArgumentException>();
+        failure.ParamName.Should().Be("logicalDevice");
         failure.Message.Should().Contain("narrow").And.Contain("6FFF");
     }
 
@@ -194,7 +190,7 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
-    public async Task The_Device_Type_Survives_Reset_Node()
+    public async Task Reset_Node_Restores_The_Composed_Chain_After_It_Was_Overwritten()
     {
         using var rig = new ResetRig(Typed("two", (0, Profile401), (1, Profile408)));
         await rig.Bootups.First;
@@ -220,6 +216,39 @@ public partial class CanOpenApplicationSeamTests
         await rig.ResetAsync(NmtCommand.ResetNode);
 
         DeviceTypeOf(rig.SlaveNode, 0x6FFF).Should().Be(Profile408, "1011h load returns the chain to what Attach composed");
+    }
+
+    [Fact]
+    public void A_Chain_Object_The_Application_Declared_Itself_Fails_The_Open()
+    {
+        var app = Typed("clash", (0, Profile401), (1, Profile408));
+        var set = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            host.ObjectDictionary.AddU32(0x6FFF, 0x00, 0x00000000, OdAccess.ReadOnly);
+            set(host);
+        };
+
+        var failure = OptionsRefused(With(app));
+
+        failure.Message.Should().Contain("6FFF").And.Contain("clash").And.Contain("SetDeviceType");
+    }
+
+    [Fact]
+    public void An_Object_At_67FFh_Is_Left_Alone_When_There_Is_One_Logical_Device()
+    {
+        using var bus = Open(NewSession(), 1);
+        var app = Typed("one", (0, Profile401));
+        var set = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            host.ObjectDictionary.AddU32(0x67FF, 0x00, 0x00000042, OdAccess.ReadOnly);
+            set(host);
+        };
+
+        using var node = OpenNode(bus, With(app));
+
+        DeviceTypeOf(node, 0x67FF).Should().Be(0x42u, "the node declares 67FFh only for a chain");
     }
 
     [Fact]
