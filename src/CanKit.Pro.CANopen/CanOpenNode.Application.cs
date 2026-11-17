@@ -4,6 +4,7 @@ using System.Threading;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
 
 namespace CanKit.Pro.CANopen;
@@ -77,10 +78,12 @@ internal sealed partial class CanOpenNode
                 if (ReferenceEquals(listed[earlier], application))
                     throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.Applications.");
             }
-            slots[i] = new ApplicationSlot(application, new ApplicationHost(this))
+            var host = new ApplicationHost(this);
+            slots[i] = new ApplicationSlot(application, host)
             {
                 Claims = ValidatedClaims(application, slots, i),
             };
+            host.Slot = slots[i];
             ValidateRequirements(application);
         }
 
@@ -239,6 +242,25 @@ internal sealed partial class CanOpenNode
     // =========================================================================================
 
     /// <summary>
+    /// Asks the claimant to decide a write. Writing thread, under the dictionary's write gate: on an
+    /// SDO download or an RPDO that thread is the actor loop, so a throw must not travel through the
+    /// dictionary into the SDO server or the PDO engine. It is reported as a background exception,
+    /// and the write is refused with a general error.
+    /// </summary>
+    private OdWriteDecision ValidateApplicationWrite(ApplicationSlot slot, ushort index, byte subindex, byte[] value)
+    {
+        try
+        {
+            return slot.Application.ValidateWrite(index, subindex, value);
+        }
+        catch (Exception ex)
+        {
+            RaiseBackgroundException(ex);
+            return OdWriteDecision.Reject(SdoAbortCode.General);
+        }
+    }
+
+    /// <summary>
     /// Runs <paramref name="callback"/> against the application of <paramref name="slot"/>: the one
     /// way the node calls into an application on the actor loop (every callback but
     /// <see cref="ICanOpenApplication.Attach"/> and <see cref="ICanOpenApplication.ValidateWrite"/>).
@@ -274,6 +296,11 @@ internal sealed partial class CanOpenNode
 
         internal ApplicationHost(CanOpenNode node) => _node = node;
 
+        // The slot this host belongs to, set right after the slot is built and before the node
+        // calls Attach or anything else on the application. A deadline or a request reads it when
+        // it runs, never earlier.
+        internal ApplicationSlot Slot { get; set; } = null!;
+
         public ObjectDictionary ObjectDictionary => _node._od;
 
         public NmtState State => _node._state;
@@ -289,7 +316,14 @@ internal sealed partial class CanOpenNode
 
         public bool CommunicationFailureActive => throw new NotSupportedException();
 
-        public IDeadline Arm(TimeSpan delay, Action onExpired) => _node._deadlines.Arm(delay, onExpired);
+        // onExpired is the application's code on the actor loop: it goes through the dispatcher like
+        // every other callback, so its own writes are not reported back and its failure is reported
+        // by the node.
+        public IDeadline Arm(TimeSpan delay, Action onExpired)
+        {
+            if (onExpired is null) throw new ArgumentNullException(nameof(onExpired));
+            return _node._deadlines.Arm(delay, () => _node.InvokeApplication(Slot, _ => onExpired()));
+        }
 
         public void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType) => throw new NotSupportedException();
 

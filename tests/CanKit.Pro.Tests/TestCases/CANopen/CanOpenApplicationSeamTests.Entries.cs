@@ -595,4 +595,85 @@ public partial class CanOpenApplicationSeamTests
 
         AssertSingleFrame(rig.Wire.Payloads(Tpdo1), 7);
     }
+
+    // -----------------------------------------------------------------------------------------
+    // A failing application does not take the node's own paths with it.
+    // -----------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_Throwing_Validation_Aborts_The_Write_And_Is_A_Background_Exception()
+    {
+        var app = Entries();
+        app.Validate = (_, _, _) => throw new InvalidOperationException("validation failed");
+        using var rig = new EntryRig(With(app));
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        // The writing thread is the actor loop here: the throw must not travel into the SDO server.
+        var response = await rig.Wire.DownloadU8Async(0x6000, 0x01, 7);
+
+        AbortCode(response).Should().Be((uint)SdoAbortCode.General);
+        rig.Od.ReadUnsigned(0x6000, 0x01).Should().Be(5u, "a write whose validation failed is not stored");
+        var failure = await reported.Task.WithTimeoutAsync(ShortTimeout);
+        failure.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Be("validation failed");
+        var upload = await rig.Wire.UploadAsync(0x6000, 0x01);
+        upload[0].Should().Be(0x4F, "the server still answers");
+        upload[4].Should().Be(5);
+        Written(app).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task An_Applications_Deadline_Write_Is_Not_Reported_Back_To_It()
+    {
+        using var bus = Open(NewSession(), 1);
+        var clock = new ManualTimeSource();
+        // Completed after the write has returned, and so after the node has queued whatever it
+        // queues for it: what the actor is handed afterwards runs behind that.
+        var ran = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var app = Entries();
+        var declare = app.OnAttach!;
+        // Armed in Attach: the constructing thread, before the node has run anything.
+        app.OnAttach = host =>
+        {
+            declare(host);
+            host.Arm(TimeSpan.FromMilliseconds(50), () =>
+            {
+                host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 9);
+                ran.SetResult(true);
+            });
+        };
+        using var node = OpenNode(bus, With(app), clock);
+
+        Advance(clock, node, TimeSpan.FromMilliseconds(50));
+        await ran.Task.WithTimeoutAsync(ShortTimeout);
+        Settle(node);
+
+        node.ObjectDictionary.ReadUnsigned(0x6000, 0x01).Should().Be(9u, "the deadline ran");
+        Written(app).Should().BeEmpty("a write the application makes in its own callback is not news to it");
+    }
+
+    [Fact]
+    public async Task A_Throwing_Deadline_Is_A_Background_Exception_And_The_Node_Keeps_Working()
+    {
+        using var bus = Open(NewSession(), 1);
+        var clock = new ManualTimeSource();
+        var app = Entries();
+        var declare = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            declare(host);
+            host.Arm(TimeSpan.FromMilliseconds(50), () => throw new InvalidOperationException("deadline failed"));
+        };
+        using var node = OpenNode(bus, With(app), clock);
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        Advance(clock, node, TimeSpan.FromMilliseconds(50));
+        node.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 7);
+        Settle(node);
+
+        await WaitUntilAsync(() => { lock (reported) return reported.Count > 0; }, "the background exception");
+        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("deadline failed");
+        Written(app).Should().Equal(new[] { "written 6000:01" }, "the node still tells the application about writes");
+    }
 }
