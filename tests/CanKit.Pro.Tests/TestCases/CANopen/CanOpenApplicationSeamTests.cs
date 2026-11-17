@@ -58,8 +58,11 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         Settle(node);
     }
 
-    /// <summary>A description that declares the record <c>6000h</c>: sub-index 0 and 1, both U8.</summary>
-    private static CanOpenDeviceDescription DescriptionWith6000() => CanOpenDeviceDescription.ParseEds(
+    /// <summary>A description that declares the record <c>6000h</c>: sub-index 0 and 1, both U8. Its
+    /// <c>1000h</c> holds <paramref name="deviceType"/>, and it declares each of
+    /// <paramref name="deviceTypeObjects"/> as a read-only UNSIGNED32 with that value.</summary>
+    private static CanOpenDeviceDescription DescriptionWith6000(uint deviceType = 0,
+        params (ushort Index, uint Word)[] deviceTypeObjects) => CanOpenDeviceDescription.ParseEds(
         "[FileInfo]\n" +
         "FileName=seam.eds\n" +
         "FileVersion=1\n" +
@@ -95,7 +98,7 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         "ObjectType=0x7\n" +
         "DataType=0x0007\n" +
         "AccessType=ro\n" +
-        "DefaultValue=0\n" +
+        $"DefaultValue=0x{deviceType:X8}\n" +
         "PDOMapping=0\n" +
         "[1001]\n" +
         "ParameterName=Error register\n" +
@@ -125,8 +128,9 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         "[OptionalObjects]\n" +
         "SupportedObjects=0\n" +
         "[ManufacturerObjects]\n" +
-        "SupportedObjects=1\n" +
+        $"SupportedObjects={1 + deviceTypeObjects.Length}\n" +
         "1=0x6000\n" +
+        string.Concat(deviceTypeObjects.Select((o, n) => $"{n + 2}=0x{o.Index:X4}\n")) +
         "[6000]\n" +
         "ParameterName=Record\n" +
         "ObjectType=0x9\n" +
@@ -144,7 +148,10 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         "DataType=0x0005\n" +
         "AccessType=rw\n" +
         "DefaultValue=0\n" +
-        "PDOMapping=0\n");
+        "PDOMapping=0\n" +
+        string.Concat(deviceTypeObjects.Select(o =>
+            $"[{o.Index:X4}]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\n" +
+            $"DefaultValue=0x{o.Word:X8}\nPDOMapping=0\n")));
 
     /// <summary>Counts the boot-up messages (heartbeat state 0) of one producer.</summary>
     private sealed class BootupWatch
