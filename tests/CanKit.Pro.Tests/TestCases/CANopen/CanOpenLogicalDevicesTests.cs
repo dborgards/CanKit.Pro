@@ -45,6 +45,13 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public void The_Edges_Of_A_Profile_Area_Are_Accepted()
+    {
+        CanOpenLogicalDevices.ToAbsoluteIndex(0, 0x6000).Should().Be(0x6000);
+        CanOpenLogicalDevices.ToAbsoluteIndex(7, 0x67FF).Should().Be(0x9FFF);
+    }
+
+    [Fact]
     public void A_Logical_Device_Carries_Its_Device_Type_And_Its_Place_In_The_Dictionary()
     {
         var deviceType = new CanOpenDeviceType(0xFFFF0198u);
@@ -62,7 +69,10 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(8)]
     public void There_Are_Eight_Logical_Devices_And_No_More(int index)
     {
-        FluentActions.Invoking(() => CanOpenLogicalDevices.ObjectAreaStart(index)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => CanOpenLogicalDevices.ObjectAreaStart(index)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
+        FluentActions.Invoking(() => CanOpenLogicalDevices.DeviceTypeIndex(index)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
+        FluentActions.Invoking(() => CanOpenLogicalDevices.PdoNumberOffset(index)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
+        FluentActions.Invoking(() => CanOpenLogicalDevices.ToAbsoluteIndex(index, 0x6000)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
         FluentActions.Invoking(() => new CanOpenLogicalDevice(index, default)).Should().Throw<ArgumentOutOfRangeException>();
     }
 
@@ -192,6 +202,23 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         var device = result.Devices.Should().ContainSingle().Subject;
         device.Index.Should().Be(0);
         device.DeviceType.Value.Should().Be(0x000F0191u);
+    }
+
+    [Fact]
+    public async Task A_Failure_At_67FFh_Itself_Fails_The_Chain_With_The_Copy_Of_1000h()
+    {
+        var timeout = new SdoAbortException(0x67FF, 0, (uint)SdoAbortCode.SdoProtocolTimedOut,
+            SdoAbortOrigin.Local, "timed out");
+        var script = Script((0x1000, 0xFFFF0191u), (0x67FF, timeout));
+
+        var result = await CanOpenLogicalDevices.ReadCoreAsync(script.Upload, default);
+
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        result.Failure.Should().BeSameAs(timeout);
+        var device = result.Devices.Should().ContainSingle().Subject;
+        device.Index.Should().Be(0);
+        device.DeviceType.Value.Should().Be(0xFFFF0191u);
+        script.Asked.Should().Equal(0x1000, 0x67FF);
     }
 
     [Fact] // Review Focus 4
