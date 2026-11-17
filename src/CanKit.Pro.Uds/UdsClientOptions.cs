@@ -130,18 +130,26 @@ public sealed class UdsClientOptions
     public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
 
     /// <summary>
-    /// Additional attempts per TransferData block in <see cref="IUdsClient.DownloadAsync"/>
-    /// after a P2 or P2* application timeout. Defaults to zero (no block retry).
-    /// The identical block and sequence counter are sent again, as described in
-    /// ISO 14229-1:2026 §14.4.2, Table 451. Negative responses (including NRC 0x73),
-    /// transport errors, malformed responses and cancellation are not retried by this option.
+    /// Additional attempts per TransferData block in <see cref="IUdsClient.DownloadAsync"/>,
+    /// <see cref="IUdsClient.UploadAsync"/> and a standalone <see cref="IUdsClient.TransferDataAsync"/>
+    /// when the block's answer did not arrive: after a P2 or P2* application timeout, or an
+    /// ISO-TP transport error on the request or the response other than an
+    /// <see cref="IsoTp.IsoTpOverflowException"/> (the server cannot take a request that large,
+    /// so it would only fail again). Defaults to zero (no block retry). The identical block and
+    /// sequence counter are sent again, as described in ISO 14229-1:2026 §14.4.2, Table 451.
+    /// Negative responses (including NRC 0x73), malformed responses, other exceptions and
+    /// cancellation are not retried by this option.
     /// </summary>
     /// <remarks>
     /// Each attempt has fresh P2/P2*, response-pending and NRC 0x21 budgets. The ordinary
     /// NRC 0x21 repeats do not consume this timeout-retry count. Late-response quarantine,
-    /// when enabled, also applies between attempts. The download's cancellation token bounds
+    /// when enabled, also applies between attempts: a retry after a transport error waits out
+    /// the same P2* window a timeout leaves, since the server may still answer the abandoned
+    /// attempt, and a transport error that spends the budget leaves that window for the next
+    /// TransferData, as a timeout does. With this option at zero a transport error opens none. The download's cancellation token bounds
     /// the entire operation, including retries and quarantine waits; there is no separate
-    /// overall timeout. Single-step TransferData and Upload are unaffected.
+    /// overall timeout. An upload appends a repeated block's data once; a standalone
+    /// TransferData returns the answer to the attempt that got one.
     /// </remarks>
     public int MaxTransferDataTimeoutRetries { get; init; }
 
