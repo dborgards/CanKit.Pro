@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Lss;
 
 namespace CanKit.Pro.CANopen;
@@ -298,6 +300,11 @@ public sealed class CanOpenNodeOptions
     /// </summary>
     public LssSlaveOptions? Lss { get; init; }
 
+    /// <summary>The device-profile applications attached to the node when it opens, in the order
+    /// their <c>Attach</c> runs. Not part of the public surface: a profile reaches the node through
+    /// <see cref="WithApplication"/>.</summary>
+    internal IReadOnlyList<ICanOpenApplication> Applications { get; init; } = Array.Empty<ICanOpenApplication>();
+
     /// <summary>Returns a copy of this options record with the provided overrides. The 1.3.0
     /// signature, kept so that callers compiled against it still bind; source callers resolve
     /// to the overload with every parameter optional.</summary>
@@ -386,6 +393,16 @@ public sealed class CanOpenNodeOptions
         => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
             interval);
 
+    /// <summary>Returns a copy with <paramref name="application"/> appended to <see cref="Applications"/>.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="application"/> is <see langword="null"/>.</exception>
+    internal CanOpenNodeOptions WithApplication(ICanOpenApplication application)
+    {
+        if (application is null) throw new ArgumentNullException(nameof(application));
+        var applications = new List<ICanOpenApplication>(Applications) { application };
+        return Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
+            SrdoConfigurationCheckInterval, applications: applications);
+    }
+
     /// <summary>Returns a copy of this options record with <see cref="ErrorHistoryCapacity"/> replaced.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacity"/> is outside 0..254.</exception>
     public CanOpenNodeOptions WithErrorHistoryCapacity(int capacity)
@@ -411,7 +428,8 @@ public sealed class CanOpenNodeOptions
         LssSlaveOptions? lss,
         int? pdoCount,
         TimeSpan? srdoConfigurationCheckInterval,
-        int? errorHistoryCapacity = null)
+        int? errorHistoryCapacity = null,
+        IReadOnlyList<ICanOpenApplication>? applications = null)
     {
         var options = new CanOpenNodeOptions
         {
@@ -440,6 +458,7 @@ public sealed class CanOpenNodeOptions
             Lss = lss,
             SrdoConfigurationCheckInterval = srdoConfigurationCheckInterval,
             ErrorHistoryCapacity = errorHistoryCapacity ?? ErrorHistoryCapacity,
+            Applications = applications ?? Applications,
         };
         options.Validate();
         return options;

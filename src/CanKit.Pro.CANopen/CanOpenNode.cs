@@ -257,6 +257,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // A device description shapes the dictionary on top of that, before the node is on
             // the bus (CanOpenNode.DeviceDescription.cs).
             if (description is not null) ApplyDeviceDescription(description);
+            // Applications come last: they see the description's objects, and what they declare
+            // joins the power-on values (CanOpenNode.Application.cs).
+            AttachApplications();
             InitializeControllerOverrunMonitor();
             InitializeControllerErrorMonitor();
         }
