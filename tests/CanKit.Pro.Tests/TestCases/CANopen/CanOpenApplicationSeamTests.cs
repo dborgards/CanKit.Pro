@@ -218,6 +218,10 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
             lock (_gate) _log.Add(entry);
         }
 
+        /// <summary>Adds a line to the log on behalf of the test, so that what happens elsewhere (an
+        /// event the node raises, say) lands in the same order as the node's calls.</summary>
+        public void Note(string entry) => Record(entry);
+
         public void Attach(ICanOpenApplicationHost host)
         {
             Host = host;

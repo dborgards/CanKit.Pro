@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Nmt;
@@ -142,12 +143,12 @@ public partial class CanOpenApplicationSeamTests
         internal readonly RawWire Wire;
         internal readonly CanOpenNode Node;
 
-        internal EntryRig(CanOpenNodeOptions options)
+        internal EntryRig(CanOpenNodeOptions options, ITimeSource? clock = null)
         {
             var session = NewSession();
             _bus = Open(session, 1);
             Wire = new RawWire(session, 2);
-            Node = OpenNode(_bus, options);
+            Node = OpenNode(_bus, options, clock);
         }
 
         internal ObjectDictionary Od => Node.ObjectDictionary;

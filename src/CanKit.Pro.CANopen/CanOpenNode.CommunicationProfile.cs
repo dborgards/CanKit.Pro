@@ -864,6 +864,8 @@ internal sealed partial class CanOpenNode
             EmitPendingEmcy(pending);
         }
 
+        NotifyNmtStateChanged(previous);
+
         // A state-change heartbeat is an early heartbeat, so it belongs to the heartbeat protocol
         // and goes out only while that protocol is in use (1017h ≠ 0). With the producer off the
         // node is in the configuration node guarding runs in, and an unsolicited data frame on
@@ -899,12 +901,14 @@ internal sealed partial class CanOpenNode
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
         SuspendFlyingMasterForReset();
+        var stateBeforeReset = _state;
         if (_state == NmtState.Operational)
         {
             OnLeaveOperational();
             LeaveSrdoOperational();
         }
         _state = NmtState.Initializing;
+        NotifyNmtStateChanged(stateBeforeReset);
 
         if (_restoreDefaultsOnReset)
         {
@@ -964,7 +968,9 @@ internal sealed partial class CanOpenNode
         // node announces itself, so a master reacting to the boot-up never reads a value the
         // reset had not reached. With a description the node restored the described ones above;
         // the hook lets the application restore what the description does not hold.
-        RaiseApplicationReset(communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode);
+        var resetCommand = communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode;
+        NotifyApplicationsOfReset(resetCommand);
+        RaiseApplicationReset(resetCommand);
 
         // A subscriber may have disposed the node; its timers are gone and nothing is announced.
         if (Volatile.Read(ref _disposed) != 0) return;
@@ -984,6 +990,7 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void EnterPreOperationalFromReset()
     {
+        var previous = _state;
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
@@ -996,6 +1003,7 @@ internal sealed partial class CanOpenNode
         if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
         StartControllerOverrunMonitoring();
         StartControllerErrorMonitoring();
+        NotifyNmtStateChanged(previous);
     }
 
     private void AbortServerSessions(SdoAbortCode code)

@@ -359,6 +359,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             _ = EmitHeartbeat(0x00);
             StartControllerOverrunMonitoring();
             StartControllerErrorMonitoring();
+            NotifyNmtStateChanged(NmtState.Initializing);
         });
 
         _readerTask = Task.Run(RunReaderAsync);

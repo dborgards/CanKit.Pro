@@ -288,6 +288,75 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    // =========================================================================================
+    // NMT state and reset.
+    // =========================================================================================
+
+    // The state changes not yet told to the applications, oldest first, and whether a round of
+    // telling is running. Actor-confined. A callback may ask for a state (RequestNmtState), which
+    // makes the node change state while it is still telling the applications about the last change:
+    // the new change is queued behind it rather than delivered inside it, so each application sees
+    // the changes in the order they happened, and the stack stays as deep as one callback however
+    // many an application asks for. Nothing bounds an application that asks for a different state
+    // on every notification, forever; that loops as any callback that never returns does.
+    private readonly Queue<(NmtState Previous, NmtState Current)> _nmtNotifications = new();
+    private bool _nmtNotifying;
+
+    /// <summary>
+    /// Tells every application that the node's NMT state changed from <paramref name="previous"/>
+    /// to the state it is in now: a no-op when it did not change, or when no application is
+    /// attached. Actor loop, after the change is made and outside <c>_od.Transaction</c>, in
+    /// attach order. The state reached is read here, not when the application is called.
+    /// </summary>
+    private void NotifyNmtStateChanged(NmtState previous)
+    {
+        var current = _state;
+        if (_applications.Length == 0 || previous == current) return;
+
+        _nmtNotifications.Enqueue((previous, current));
+        // A callback of the round that is running changed the state again: that round delivers it.
+        if (_nmtNotifying) return;
+
+        _nmtNotifying = true;
+        try
+        {
+            while (_nmtNotifications.Count > 0)
+            {
+                var (from, to) = _nmtNotifications.Dequeue();
+                foreach (var slot in _applications)
+                {
+                    // One that disposed the node ends the round: the rest are not called on a node
+                    // that is gone.
+                    if (Volatile.Read(ref _disposed) != 0)
+                    {
+                        _nmtNotifications.Clear();
+                        return;
+                    }
+                    InvokeApplication(slot, application => application.OnNmtStateChanged(from, to));
+                }
+            }
+        }
+        finally
+        {
+            _nmtNotifying = false;
+        }
+    }
+
+    /// <summary>
+    /// Tells every application that the node is being reset, in attach order. Actor loop, in
+    /// Initialisation, after the restore of the objects and immediately before
+    /// <see cref="ICanOpenNode.ApplicationReset"/>: the application's own handler then finds the
+    /// profile already in its power-on state.
+    /// </summary>
+    private void NotifyApplicationsOfReset(NmtCommand command)
+    {
+        foreach (var slot in _applications)
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            InvokeApplication(slot, application => application.OnReset(command));
+        }
+    }
+
     /// <summary>What one application is given of the node. Members other than the dictionary, the
     /// state, the clock and the deadlines arrive with the callbacks that need them.</summary>
     private sealed class ApplicationHost : ICanOpenApplicationHost
@@ -360,6 +429,28 @@ internal sealed partial class CanOpenNode
 
         public void ClearError(ushort errorCode) => throw new NotSupportedException();
 
-        public void RequestNmtState(NmtState target) => throw new NotSupportedException();
+        // Leaving Operational, or a state a profile's own fault calls for. Never Operational: only
+        // the master's NMT Start puts the node there.
+        public void RequestNmtState(NmtState target)
+        {
+            if (target is not (NmtState.PreOperational or NmtState.Stopped))
+            {
+                throw new ArgumentOutOfRangeException(nameof(target), target,
+                    "An application may ask for Pre-Operational or Stopped: it does not start its own node.");
+            }
+            if (!_node._actor.IsOnCurrentActor)
+            {
+                throw new InvalidOperationException(
+                    "RequestNmtState runs on the node's actor loop: call it from a callback of the application.");
+            }
+
+            // Initializing is the node's own: a reset or a boot that has not finished, which ends in
+            // Pre-Operational by itself.
+            var state = _node._state;
+            if (state == target || state == NmtState.Initializing) return;
+
+            // Tells every application about the change, this one included.
+            _node.ApplyNmtTransition(target);
+        }
     }
 }
