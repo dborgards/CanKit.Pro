@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
@@ -123,6 +124,40 @@ public partial class CanOpenApplicationSeamTests
 
         app.Log.Skip(mark).Should().Equal(
             "nmt PreOperational>Initializing", "reset ResetNode", "nmt Initializing>PreOperational");
+    }
+
+    [Fact]
+    public async Task A_Node_Disposed_As_A_Reset_Begins_Goes_No_Further()
+    {
+        var app = Entries();
+        CanOpenNode? node = null;
+        app.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Initializing) node!.Dispose();
+        };
+        bool applicationReset = false;
+        var reported = new List<Exception>();
+        using var rig = new EntryRig(With(app));
+        node = rig.Node;
+        rig.Node.ApplicationReset += (_, _) => applicationReset = true;
+        rig.Node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            lock (reported) reported.Add(ex);
+        };
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        rig.Od.WriteUnsigned(0x6000, 0x01, 9);
+        Settle(rig.Node);
+
+        // The whole reset is one actor job: the task completes once it has run, disposed node or not.
+        await rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
+            .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false }));
+
+        rig.Od.ReadUnsigned(0x6000, 0x01).Should().Be(9u, "the reset ends where the node was disposed: nothing is restored");
+        app.Log.Should().NotContain("reset ResetNode");
+        applicationReset.Should().BeFalse();
+        rig.Wire.Count(SlaveHeartbeat).Should().Be(1, "a disposed node announces nothing");
+        lock (reported) reported.Should().BeEmpty();
     }
 
     // -----------------------------------------------------------------------------------------

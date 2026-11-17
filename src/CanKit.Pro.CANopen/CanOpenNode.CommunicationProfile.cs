@@ -924,6 +924,9 @@ internal sealed partial class CanOpenNode
         }
         _state = NmtState.Initializing;
         NotifyNmtStateChanged(stateBeforeReset);
+        // An application may have disposed the node from that notification: the drain, the restore
+        // and the reset's other callbacks have no node left to act for.
+        if (Volatile.Read(ref _disposed) != 0) return;
 
         if (_restoreDefaultsOnReset)
         {
