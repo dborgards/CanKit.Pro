@@ -171,8 +171,9 @@ public static class CanOpenLogicalDevices
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A peer without <c>FFFFh</c> is one logical device. With it, the chain ends at the first
-    /// device-type object the peer reports as non-existent, or after eight devices.
+    /// A peer without <c>FFFFh</c> is one logical device. With it, the chain is read until the
+    /// peer reports a device-type object as non-existent, until eight devices are read, or until
+    /// one of the cases below ends it earlier.
     /// </para>
     /// <para>
     /// <c>67FFh</c> is not one of the objects the SDO client may read without a peer description.
