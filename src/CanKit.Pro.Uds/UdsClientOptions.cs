@@ -145,7 +145,8 @@ public sealed class UdsClientOptions
     /// NRC 0x21 repeats do not consume this timeout-retry count. Late-response quarantine,
     /// when enabled, also applies between attempts: a retry after a transport error waits out
     /// the same P2* window a timeout leaves, since the server may still answer the abandoned
-    /// attempt. The download's cancellation token bounds
+    /// attempt, and a transport error that spends the budget leaves that window for the next
+    /// TransferData, as a timeout does. With this option at zero a transport error opens none. The download's cancellation token bounds
     /// the entire operation, including retries and quarantine waits; there is no separate
     /// overall timeout. An upload appends a repeated block's data once; a standalone
     /// TransferData returns the answer to the attempt that got one.

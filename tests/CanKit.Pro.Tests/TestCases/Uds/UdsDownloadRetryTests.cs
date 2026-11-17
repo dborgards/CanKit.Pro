@@ -220,6 +220,46 @@ public class UdsDownloadRetryTests
         (await client.ReadDataByIdentifierAsync(0xF190).WaitAsync(Guard)).Should().Equal(0x01);
     }
 
+    // A transport error that spends the retry budget leaves the quarantine window for the next
+    // TransferData, as a timeout does. With retries disabled a transport error opens none.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task A_Final_Transport_Error_Quarantines_Only_When_Retries_Are_Enabled(int retries)
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var channel = new ScriptedChannel(actor, request => request[0] == 0x36 && request[1] == 1
+            ? throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout")
+            : Positive(request));
+        using var client = new UdsClientImpl(channel, new UdsClientOptions
+        {
+            P2ClientMax = P2,
+            P2StarClientMax = P2Star,
+            MaxTransferDataTimeoutRetries = retries,
+            QuarantineLateResponses = true,
+        }, false, actor);
+
+        var failed = client.TransferDataAsync(1, new byte[] { 0xAB });
+        if (retries > 0)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, P2Star, Guard);
+            await clock.AdvanceAsync(P2Star);
+        }
+        await FluentActions.Awaiting(() => failed.WaitAsync(Guard)).Should().ThrowAsync<IsoTpTimeoutException>();
+        channel.Snapshot().Should().HaveCount(retries + 1);
+
+        var next = client.TransferDataAsync(2, new byte[] { 0xCD });
+        if (retries > 0)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, P2Star, Guard);
+            channel.Snapshot().Should().HaveCount(retries + 1, "the next TransferData waits out the window");
+            await clock.AdvanceAsync(P2Star);
+        }
+        (await next.WaitAsync(Guard)).Should().BeEmpty();
+        channel.Snapshot().Should().HaveCount(retries + 2);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

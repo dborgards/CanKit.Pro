@@ -1054,16 +1054,20 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             {
                 return await TransferDataRequestCoreAsync(request, linkedToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (retries < _options.MaxTransferDataTimeoutRetries
+            catch (Exception ex) when (_options.MaxTransferDataTimeoutRetries > 0
                 && IsRepeatableTransferFault(ex))
             {
-                // No counter or offset advance until a positive response is accepted.
                 // A timeout has already quarantined the service. A transport error has not, yet
                 // the server may have received the request and still answer it; with
-                // QuarantineLateResponses the repeat waits out the same P2* window, so a late
-                // 0x78 or NRC to the abandoned attempt is not taken for the repeat's answer.
+                // QuarantineLateResponses the repeat -- or, once the budget is spent, the next
+                // TransferData -- waits out the same P2* window, so a late 0x78 or NRC to the
+                // abandoned attempt is not taken for its answer. Without retries enabled a
+                // transport error is left as it always was.
                 if (ex is IsoTpException)
                     QuarantineLateAnswers(UdsServiceId.TransferData);
+                if (retries >= _options.MaxTransferDataTimeoutRetries)
+                    throw;
+                // No counter or offset advance until a positive response is accepted.
             }
         }
     }

@@ -140,7 +140,9 @@ await uds.DownloadAsync(
   and cancellation escape. The normal NRC 0x21 retries retain their independent budget inside
   each attempt. Each retry gets fresh P2/P2* and response-pending budgets, and observes
   `QuarantineLateResponses` if enabled — after a transport error too, so a late 0x78 or NRC to
-  the abandoned attempt is not taken for the retry's answer. The caller's cancellation token bounds the entire
+  the abandoned attempt is not taken for the retry's answer; a transport error that spends the
+  budget leaves the window for the next TransferData, as a timeout does (with the option at 0,
+  a transport error opens none). The caller's cancellation token bounds the entire
   download, including all attempts and waits; there is no separate overall timeout. No
   RequestTransferExit follows a final failure. An upload appends a repeated block's data once.
 * `SecurityAccessAsync` takes any odd `requestSeedLevel` from 0x01 to 0x7D, including the levels
