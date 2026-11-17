@@ -172,7 +172,10 @@ public interface IUdsClient : IDisposable
     /// </list>
     /// <paramref name="requestSeedLevel"/> must be an odd byte in <c>0x01..0x7D</c> and
     /// <c>sendKeyLevel = requestSeedLevel + 1</c> is derived automatically, so at most
-    /// <c>0x7E</c>. A seed of all zeroes -- of any length, including none -- means "already
+    /// <c>0x7E</c>. The levels ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves for future
+    /// definition, <c>0x43..0x5D</c>, are accepted and sent as given, as are the ISO 26021-2
+    /// level <c>0x5F</c> and the system-supplier range: the client does not filter reserved levels, and a
+    /// server that does not support one answers with a negative response such as NRC 0x12. A seed of all zeroes -- of any length, including none -- means "already
     /// unlocked" (ISO 14229-1:2026 §9.4.1) and short-circuits the exchange without invoking
     /// <paramref name="computeKey"/> or sending a key.
     /// </summary>
@@ -291,6 +294,13 @@ public interface IUdsClient : IDisposable
     /// be empty). The client validates that the ECU echoes back the exact
     /// <paramref name="blockSequenceCounter"/>.
     /// </summary>
+    /// <remarks>
+    /// With <see cref="UdsClientOptions.MaxTransferDataTimeoutRetries"/> above zero, a request
+    /// whose answer did not arrive -- a P2/P2* application timeout or an ISO-TP transport error
+    /// other than an overflow -- is sent again with the same counter and bytes, up to that many
+    /// times (ISO 14229-1:2026 §14.4.2, Table 451). Negative responses are never retried this
+    /// way, and NRC 0x21 keeps its own budget.
+    /// </remarks>
     /// <param name="blockSequenceCounter">Per ISO 14229-1:2026 §14.4.2 the counter starts at
     /// <c>0x01</c> for the first TransferData following RequestDownload/Upload, is incremented
     /// on each successful transfer, and wraps from <c>0xFF</c> back to <c>0x00</c>.</param>
@@ -332,9 +342,10 @@ public interface IUdsClient : IDisposable
     /// By default no block is retried beyond the NRC 0x21 repeats every request gets
     /// (<see cref="UdsClientOptions.MaxBusyRepeatRequests"/>). With
     /// <see cref="UdsClientOptions.MaxTransferDataTimeoutRetries"/>, a P2/P2* application
-    /// timeout repeats the identical block and sequence counter a bounded number of times
-    /// (ISO 14229-1:2026 §14.4.2, Table 451). Negative responses such as NRC 0x73,
-    /// transport errors, malformed responses and cancellation are not retried by that option.
+    /// timeout or an ISO-TP transport error other than an overflow repeats the identical block
+    /// and sequence counter a bounded number of times (ISO 14229-1:2026 §14.4.2, Table 451).
+    /// Negative responses such as NRC 0x73, malformed responses and cancellation are not
+    /// retried by that option.
     /// Every attempt uses the normal timing and NRC 0x21 budgets; cancellation bounds the
     /// whole download. A final failure ends the call with its exception and sends no
     /// RequestTransferExit, leaving the server where the failed block left it.
@@ -365,6 +376,12 @@ public interface IUdsClient : IDisposable
     /// <paramref name="memorySize"/> bytes were read, and finally calls
     /// <see cref="RequestTransferExitAsync"/>.
     /// </summary>
+    /// <remarks>
+    /// Blocks are retried under <see cref="UdsClientOptions.MaxTransferDataTimeoutRetries"/>
+    /// with the same rules as in <see cref="DownloadAsync"/>: the same counter is asked for again,
+    /// the server sends the same data, and it is appended once. A final failure sends no
+    /// RequestTransferExit.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="memorySize"/> has nonzero
     /// high-order bytes beyond what a <see cref="ulong"/> can represent; nothing is sent.</exception>
     /// <exception cref="UdsProtocolException">The ECU delivered an empty TransferData payload

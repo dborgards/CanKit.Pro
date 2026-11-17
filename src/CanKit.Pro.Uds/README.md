@@ -29,7 +29,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 | FR-UDS-007 | 0x3E TesterPresent + keep-alive | Yes — `TesterPresentAsync(bool)` + `StartTesterPresentKeepAlive(TimeSpan?)` |
 | FR-UDS-008 | P2 / P2* timing | Yes — configurable `UdsClientOptions.P2ClientMax` / `P2StarClientMax`; `UdsTimeoutException` on expiry |
 | FR-UDS-009 | NRC 0x78 responsePending | Yes — client stays inside P2* while the ECU keeps replying 0x78, bounded by `MaxResponsePendingCount` |
-| FR-UDS-010 | Structured NRC | Yes — `UdsNegativeResponseException` carries requested SID + raw NRC byte + named enum |
+| FR-UDS-010 | Structured NRC | Yes — `UdsNegativeResponseException` carries requested SID + raw NRC byte + named enum (`UdsNegativeResponseCode` names every code of ISO 14229-1:2026 Table A.1) |
 | FR-UDS-011 | Multi-DID `0x22` | Yes (SHOULD) — `ReadDataByIdentifierAsync(IReadOnlyList<ushort>, IReadOnlyDictionary<ushort, int>)` (caller supplies per-DID `dataRecord` lengths per ISO 14229-1:2026 §10.2.3) |
 | FR-UDS-012 | 0x34 / 0x35 / 0x36 / 0x37 upload/download | Yes (COULD) — `RequestDownloadAsync` / `RequestUploadAsync` / `TransferDataAsync(byte bsc, ReadOnlyMemory<byte>)` / `RequestTransferExitAsync(ReadOnlyMemory<byte>)`, plus one-shot `DownloadAsync` that negotiates `maxNumberOfBlockLength`, chunks the payload and walks the BSC with `0xFF → 0x00` wrap |
 
@@ -130,18 +130,25 @@ await uds.DownloadAsync(
   ISO 14229-3) and gives no value, so the client defaults to zero; set `BusyRepeatRequestDelay`
   from the ECU's specification. `MaxBusyRepeatRequests = 0` surfaces the first 0x21 instead of
   repeating, which opts out of the standard's "client shall repeat" (#354).
-* `DownloadAsync` defaults to no TransferData block retries beyond NRC 0x21. Opt in with
-  `UdsClientOptions.MaxTransferDataTimeoutRetries` (default 0): after a P2/P2* application
-  timeout it repeats the identical request bytes, including the block sequence counter, up to
-  that many additional times **per block**. ISO 14229-1:2026 §14.4.2, Table 451 describes this
+* `DownloadAsync`, `UploadAsync` and a standalone `TransferDataAsync` default to no TransferData
+  block retries beyond NRC 0x21. Opt in with `UdsClientOptions.MaxTransferDataTimeoutRetries`
+  (default 0): after a P2/P2* application timeout, or an ISO-TP transport error other than an
+  overflow on the request, they repeat the identical request bytes, including the block sequence
+  counter, up to that many additional times **per block**. ISO 14229-1:2026 §14.4.2, Table 451 describes this
   recovery for a lost request or positive response. NRC 0x73 is a sequence error (Table 454),
-  not an instruction to retry: it, other final NRCs, transport failures, malformed responses
+  not an instruction to retry: it, other final NRCs, an ISO-TP overflow, malformed responses
   and cancellation escape. The normal NRC 0x21 retries retain their independent budget inside
-  each attempt. Each timeout retry gets fresh P2/P2* and response-pending budgets, and observes
-  `QuarantineLateResponses` if enabled. The caller's cancellation token bounds the entire
+  each attempt. Each retry gets fresh P2/P2* and response-pending budgets, and observes
+  `QuarantineLateResponses` if enabled — after a transport error too, so a late 0x78 or NRC to
+  the abandoned attempt is not taken for the retry's answer; a transport error that spends the
+  budget leaves the window for the next TransferData, as a timeout does (with the option at 0,
+  a transport error opens none). The caller's cancellation token bounds the entire
   download, including all attempts and waits; there is no separate overall timeout. No
-  RequestTransferExit follows a final failure. Single-step `TransferDataAsync` and `UploadAsync`
-  retain their existing behavior.
+  RequestTransferExit follows a final failure. An upload appends a repeated block's data once.
+* `SecurityAccessAsync` takes any odd `requestSeedLevel` from 0x01 to 0x7D, including the levels
+  ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves for future definition (0x43–0x5D): the client does
+  not filter reserved levels, and a server that does not support one says so with a negative
+  response.
 * `SecurityAccessAsync` holds the request lock from the seed request to the key's answer, so no
   other request comes between seed and key. Only the keep-alive's TesterPresent still goes out
   while `computeKey` runs, always with the suppressPosRspMsgIndicationBit: the seed stays valid

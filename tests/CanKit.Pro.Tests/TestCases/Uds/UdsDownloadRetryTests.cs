@@ -101,24 +101,48 @@ public class UdsDownloadRetryTests
         channel.Snapshot().Select(r => r[0]).Should().Equal(0x34, 0x36);
     }
 
+    // An ISO-TP transport error is a lost request or answer as well and is retried; an overflow
+    // on the request is not (the server cannot take it), nor a malformed response or an
+    // exception from outside ISO-TP.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Transport_And_Malformed_Response_Failures_Are_Not_Retried(bool transport)
+    [InlineData("transport", true)]
+    [InlineData("reception", true)]
+    [InlineData("overflow", false)]
+    [InlineData("malformed", false)]
+    [InlineData("other", false)]
+    public async Task Transport_Errors_Are_Retried_Unless_Overflow_And_Malformed_Responses_Are_Not(string kind, bool retried)
     {
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
+        var attempts = 0;
         using var channel = new ScriptedChannel(actor, request =>
         {
-            if (request[0] != 0x36) return Positive(request);
-            if (transport) throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout");
-            return new byte[] { 0x76 };
+            if (request[0] != 0x36 || ++attempts > 1) return Positive(request);
+            return kind switch
+            {
+                "transport" => throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout"),
+                "reception" => throw new IsoTpWrongSequenceNumberException(2, 3),
+                "overflow" => throw new IsoTpOverflowException("injected overflow"),
+                "malformed" => new byte[] { 0x76 },
+                _ => throw new InvalidOperationException("injected driver failure"),
+            };
         });
         using var client = new UdsClientImpl(channel, Options(2), false, actor);
-        if (transport)
-            await FluentActions.Awaiting(() => Download(client).WaitAsync(Guard)).Should().ThrowAsync<IsoTpTimeoutException>();
-        else
-            await FluentActions.Awaiting(() => Download(client).WaitAsync(Guard)).Should().ThrowAsync<UdsProtocolException>();
+        Func<Task> download = () => Download(client).WaitAsync(Guard);
+        if (retried)
+        {
+            await download.Should().NotThrowAsync();
+            channel.Snapshot().Select(r => r[0]).Should().Equal(0x34, 0x36, 0x36, 0x37);
+            channel.Snapshot()[2].Should().Equal(channel.Snapshot()[1]);
+            return;
+        }
+        var failure = (await download.Should().ThrowAsync<Exception>()).Which;
+        failure.Should().BeOfType(kind switch
+        {
+            "overflow" => typeof(IsoTpOverflowException),
+            "malformed" => typeof(UdsProtocolException),
+            _ => typeof(InvalidOperationException),
+        });
         channel.Snapshot().Select(r => r[0]).Should().Equal(0x34, 0x36);
     }
 
@@ -158,6 +182,84 @@ public class UdsDownloadRetryTests
         attempts.Should().Be(4);
     }
 
+    // A retry after an ISO-TP transport error waits out the same quarantine window a timeout
+    // leaves: the server may have received the abandoned request and still answer it. Without
+    // QuarantineLateResponses the retry goes out at once. Other services are not held up.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Transport_Error_Retry_Observes_Quarantine(bool quarantine)
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        var attempts = 0;
+        using var channel = new ScriptedChannel(actor, request =>
+        {
+            if (request[0] == 0x36 && ++attempts == 1)
+                throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout");
+            return request[0] == 0x22 ? new byte[] { 0x62, request[1], request[2], 0x01 } : Positive(request);
+        });
+        using var client = new UdsClientImpl(channel, new UdsClientOptions
+        {
+            P2ClientMax = P2,
+            P2StarClientMax = P2Star,
+            MaxTransferDataTimeoutRetries = 1,
+            QuarantineLateResponses = quarantine,
+        }, false, actor);
+        var transfer = client.TransferDataAsync(1, new byte[] { 0xAB });
+        if (quarantine)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, P2Star, Guard);
+            channel.Snapshot().Select(r => r[0]).Should().Equal(0x36);
+            await clock.AdvanceAsync(P2Star);
+        }
+        (await transfer.WaitAsync(Guard)).Should().BeEmpty();
+        channel.Snapshot().Select(r => r[0]).Should().Equal(0x36, 0x36);
+
+        // The window is the TransferData service's only: another service is not held up.
+        (await client.ReadDataByIdentifierAsync(0xF190).WaitAsync(Guard)).Should().Equal(0x01);
+    }
+
+    // A transport error that spends the retry budget leaves the quarantine window for the next
+    // TransferData, as a timeout does. With retries disabled a transport error opens none.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task A_Final_Transport_Error_Quarantines_Only_When_Retries_Are_Enabled(int retries)
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var channel = new ScriptedChannel(actor, request => request[0] == 0x36 && request[1] == 1
+            ? throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout")
+            : Positive(request));
+        using var client = new UdsClientImpl(channel, new UdsClientOptions
+        {
+            P2ClientMax = P2,
+            P2StarClientMax = P2Star,
+            MaxTransferDataTimeoutRetries = retries,
+            QuarantineLateResponses = true,
+        }, false, actor);
+
+        var failed = client.TransferDataAsync(1, new byte[] { 0xAB });
+        if (retries > 0)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, P2Star, Guard);
+            await clock.AdvanceAsync(P2Star);
+        }
+        await FluentActions.Awaiting(() => failed.WaitAsync(Guard)).Should().ThrowAsync<IsoTpTimeoutException>();
+        channel.Snapshot().Should().HaveCount(retries + 1);
+
+        var next = client.TransferDataAsync(2, new byte[] { 0xCD });
+        if (retries > 0)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, P2Star, Guard);
+            channel.Snapshot().Should().HaveCount(retries + 1, "the next TransferData waits out the window");
+            await clock.AdvanceAsync(P2Star);
+        }
+        (await next.WaitAsync(Guard)).Should().BeEmpty();
+        channel.Snapshot().Should().HaveCount(retries + 2);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -195,23 +297,54 @@ public class UdsDownloadRetryTests
         }
     }
 
+    // The option covers UploadAsync and a standalone TransferDataAsync too: a block whose
+    // answer was lost is asked for again with the same counter and bytes, an upload appends the
+    // repeated block once, and with the default of 0 nothing is retried.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task OptIn_Does_Not_Retry_SingleStep_TransferData_Or_Upload(bool upload)
+    [InlineData(false, 0)]
+    [InlineData(false, 1)]
+    [InlineData(true, 0)]
+    [InlineData(true, 1)]
+    public async Task Upload_And_SingleStep_TransferData_Follow_The_OptIn(bool upload, int retries)
     {
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
-        using var channel = new ScriptedChannel(actor, request => request[0] == 0x36 ? null : Positive(request));
-        using var client = new UdsClientImpl(channel, Options(2), false, actor);
+        var attempts = 0;
+        using var channel = new ScriptedChannel(actor, request => request[0] == 0x36
+            ? (++attempts == 1 ? null : new byte[] { 0x76, request[1], 0x5A })
+            : Positive(request));
+        using var client = new UdsClientImpl(channel, Options(retries), false, actor);
         var operation = upload
             ? client.UploadAsync(0, 0x11, new byte[] { 0 }, new byte[] { 1 })
             : client.TransferDataAsync(1, new byte[] { 0xAB });
         await channel.WaitForRequests(upload ? 2 : 1);
         await Expire(clock, actor, P2);
-        await FluentActions.Awaiting(() => operation.WaitAsync(Guard)).Should().ThrowAsync<UdsTimeoutException>();
-        channel.Snapshot().Count(r => r[0] == 0x36).Should().Be(1);
-        channel.Snapshot().Count(r => r[0] == 0x37).Should().Be(0);
+        var blocks = () => channel.Snapshot().Where(r => r[0] == 0x36).ToArray();
+        if (retries == 0)
+        {
+            await FluentActions.Awaiting(() => operation.WaitAsync(Guard)).Should().ThrowAsync<UdsTimeoutException>();
+            blocks().Should().HaveCount(1);
+            channel.Snapshot().Count(r => r[0] == 0x37).Should().Be(0);
+            return;
+        }
+        (await operation.WaitAsync(Guard)).Should().Equal(0x5A);
+        blocks().Should().HaveCount(2);
+        blocks()[1].Should().Equal(blocks()[0]);
+        blocks()[0].Should().Equal(upload ? new byte[] { 0x36, 1 } : new byte[] { 0x36, 1, 0xAB });
+        channel.Snapshot().Count(r => r[0] == 0x37).Should().Be(upload ? 1 : 0);
+    }
+
+    // A standalone TransferDataAsync never repeats a negative response.
+    [Fact]
+    public async Task SingleStep_TransferData_Does_Not_Retry_A_Negative_Response()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var channel = new ScriptedChannel(actor, request => new byte[] { 0x7F, 0x36, 0x73 });
+        using var client = new UdsClientImpl(channel, Options(2), false, actor);
+        (await FluentActions.Awaiting(() => client.TransferDataAsync(1, new byte[] { 0xAB }).WaitAsync(Guard))
+            .Should().ThrowAsync<UdsNegativeResponseException>()).Which.Code.Should().Be(0x73);
+        channel.Snapshot().Should().HaveCount(1);
     }
 
     [Fact]

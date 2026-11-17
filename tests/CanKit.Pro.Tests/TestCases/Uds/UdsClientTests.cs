@@ -861,6 +861,27 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         pair.Ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x27, 0x7D });
     }
 
+    // ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves 0x43..0x5E for future definition; the
+    // client does not filter them. A reserved odd level goes out as given, and its sendKey is
+    // the level + 1, as for any other level.
+    [Theory]
+    [InlineData(0x43)]
+    [InlineData(0x51)]
+    [InlineData(0x5D)]
+    public async Task SecurityAccess_Sends_A_Reserved_Seed_Level_As_Given(byte level)
+    {
+        var levels = new List<byte>();
+        using var pair = new ClockPair(e => e.On(0x27, req =>
+        {
+            lock (levels) levels.Add(req[1]);
+            return (req[1] & 0x01) == 1 ? new byte[] { req[1], 0x12, 0x34 } : new byte[] { req[1] };
+        }));
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.SecurityAccessAsync(level, seed => seed.Reverse().ToArray(), cts.Token));
+        lock (levels) levels.Should().Equal(level, (byte)(level + 1));
+        pair.Ecu.LastRequest.Should().Equal(0x27, (byte)(level + 1), 0x34, 0x12);
+    }
+
     // The same repeat without an injected clock, where the delay is a real Task.Delay: the
     // request goes out again and succeeds. No timing is asserted -- how long the delay lasts is
     // what the clock test below proves; this only runs the wall-clock path end to end.
