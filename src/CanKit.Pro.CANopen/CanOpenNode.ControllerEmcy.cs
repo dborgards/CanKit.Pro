@@ -27,6 +27,7 @@ internal sealed partial class CanOpenNode
     {
         _controllerEmcyStarted = false;
         _controllerObservedBusOff = false;
+        PublishCommunicationFailure();
         _controllerBaselineGeneration++;
         _controllerBaselineRetry?.Dispose();
         _controllerBaselineRetry = null;
@@ -71,6 +72,7 @@ internal sealed partial class CanOpenNode
         _controllerEmcyMonitor = fresh;
         _controllerErrorPassive = false;
         _controllerObservedBusOff = false;
+        PublishCommunicationFailure();
         _controllerEmcyStarted = true;
         ObserveControllerEmcyState(fresh.CurrentState);
     }
@@ -84,7 +86,11 @@ internal sealed partial class CanOpenNode
     private void ObserveControllerEmcyState(BusState state)
     {
         if (!_controllerEmcyStarted) return;
-        if (state == BusState.BusOff) _controllerObservedBusOff = true;
+        if (state == BusState.BusOff)
+        {
+            _controllerObservedBusOff = true;
+            PublishCommunicationFailure();
+        }
         // State changes precede optional EMCY reporting, so a transition to Stopped holds
         // new reasons through the existing pending-EMCY path.
         if (state == BusState.BusOff) ApplyCommunicationErrorBehavior();
@@ -93,6 +99,7 @@ internal sealed partial class CanOpenNode
         if (recovered)
         {
             _controllerObservedBusOff = false;
+            PublishCommunicationFailure();
             if (_options.EmitBusOffRecoveryEmcy)
                 RaiseCommunicationError(CommunicationError.ControllerRecovery, 0, 0x8140);
         }

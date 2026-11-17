@@ -27,7 +27,19 @@ namespace CanKit.Pro.CANopen;
 // transmitted SendEmcyAsync passed (a cancelled or discarded one changes nothing), or a value it
 // wrote to 1001h through the dictionary since; the node ORs its own in and never clears what the
 // application set.
-// A reset (transition 5, then 0) ends every communication error without an EMCY.
+// An attached device profile (CanOpenNode.Application.cs) reports errors of its own through the
+// host: those are the node's part of 1001h too, not the application's, and are kept beside the
+// communication errors (NodeErrorBits). A profile error is recorded even while the EMCY is
+// switched off, because the register must show it; it ends when the profile clears it, and its
+// EMCY and its 0000h go out through the same chain and the same Stopped rule as the rest.
+// A reset (transition 5, then 0) ends every communication error and every profile error without
+// an EMCY.
+//
+// The condition the error behaviour of 1029h reacts to — bus-off, heartbeat timeout, life guarding
+// — is also what an application that asks for it is told about (PublishCommunicationFailure).
+// The operands of that condition are mutated in several files; each mutation is followed by that
+// call, ahead of anything that reacts to it, so a profile hears of the failure before the node
+// leaves Operational because of it.
 internal sealed partial class CanOpenNode
 {
     private const byte GenericErrorBit = 0x01;
@@ -76,6 +88,7 @@ internal sealed partial class CanOpenNode
         _heartbeatConsumer.NoteReceived(producer);
         if (!_options.EmitGuardingErrorEmcy && !_options.EnableErrorBehavior) return;
         _heartbeatEmcyTimeouts.Remove(producer);
+        PublishCommunicationFailure();
         EndCommunicationError(CommunicationError.HeartbeatTimeout, producer);
     }
 
@@ -87,6 +100,7 @@ internal sealed partial class CanOpenNode
                      .ToList())
         {
             _heartbeatEmcyTimeouts.Remove(previous.Key);
+            PublishCommunicationFailure();
             EndCommunicationError(CommunicationError.HeartbeatTimeout, previous.Key);
         }
 
@@ -146,10 +160,10 @@ internal sealed partial class CanOpenNode
     // does not keep reading an error that has ended.
     private void EmitErrorReset() => EmitNodeEmcy(ErrorResetCode);
 
-    private void EmitNodeEmcy(ushort errorCode)
+    private void EmitNodeEmcy(ushort errorCode, byte[]? manufacturerSpecific = null)
     {
         // The register byte is filled in when the frame is transmitted (EmitEmcy).
-        var msg = new EmcyMessage(_nodeId, errorCode, 0);
+        var msg = new EmcyMessage(_nodeId, errorCode, 0, manufacturerSpecific);
         if (_state == NmtState.Stopped)
         {
             // §7.3.2.2.4, as for the application's EMCY: held, the most recent one goes out after
@@ -181,7 +195,7 @@ internal sealed partial class CanOpenNode
         // A held node EMCY that the application's replaced still updates 1001h, ahead of it on
         // the chain: with the EMCY switched off meanwhile, the application's sends nothing and
         // writes nothing, and an error that ended in Stopped would be read on (Codex on #417).
-        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(CommunicationErrorBits);
+        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(NodeErrorBits);
         _heldNodeEmcy = false;
         _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
@@ -192,7 +206,9 @@ internal sealed partial class CanOpenNode
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
+        EndProfileErrorsForReset();
         _heartbeatEmcyTimeouts.Clear();
+        PublishCommunicationFailure();
         InvalidateControllerOverrunMonitoring();
         InvalidateControllerErrorBaseline();
         _heldNodeEmcy = false;

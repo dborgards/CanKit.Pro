@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Application;
+using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
@@ -37,6 +38,9 @@ internal sealed partial class CanOpenNode
         // Copied when the node opens: the claims are read once, so a list the application changes
         // later cannot move what the node enforces.
         internal CanOpenIndexRange[] Claims { get; init; } = Array.Empty<CanOpenIndexRange>();
+
+        // Read once with the claims, for the same reason.
+        internal bool MonitorsCommunicationFailure { get; init; }
     }
 
     /// <summary>Whether an attached application claims <paramref name="index"/>.</summary>
@@ -82,6 +86,7 @@ internal sealed partial class CanOpenNode
             slots[i] = new ApplicationSlot(application, host)
             {
                 Claims = ValidatedClaims(application, slots, i),
+                MonitorsCommunicationFailure = application.Requirements.CommunicationFailureMonitoring,
             };
             host.Slot = slots[i];
             ValidateRequirements(application);
@@ -357,6 +362,109 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    // =========================================================================================
+    // Errors of a profile, and the communication failure.
+    // =========================================================================================
+
+    // The errors the applications reported and have not cleared, with the register bits each one
+    // set. They are the node's part of 1001h (NodeErrorBits), not the application's: the
+    // application's part stays what SendEmcyAsync and a write to 1001h made it. Actor loop only.
+    private readonly Dictionary<(ApplicationSlot Slot, ushort Code), byte> _profileErrors = new();
+
+    /// <summary>The node's part of the register: the bits of the communication errors, of every
+    /// profile error that is active, and bit 0 while any profile error is (§7.5.2.2: the generic
+    /// error "shall be signaled at any error situation"). An EMCY carries it ORed with the
+    /// application's part. Equal to <see cref="CommunicationErrorBits"/> on a node without
+    /// applications.</summary>
+    private byte NodeErrorBits
+    {
+        get
+        {
+            byte bits = CommunicationErrorBits;
+            if (_profileErrors.Count == 0) return bits;
+            bits |= GenericErrorBit;
+            foreach (var profile in _profileErrors.Values) bits |= profile;
+            return bits;
+        }
+    }
+
+    /// <summary>Records an error of <paramref name="slot"/>'s application and orders its EMCY: once per
+    /// error event, so an error that is active already does nothing (CiA 301 §7.2.7.1). Unlike a
+    /// communication error it is recorded while the EMCY is switched off too, since the register has
+    /// to show it; the EMCY is then written to the register without a frame, as in Stopped it is held.</summary>
+    private void RaiseProfileError(ApplicationSlot slot, ushort errorCode, byte errorRegisterBits,
+        ReadOnlySpan<byte> manufacturerSpecific)
+    {
+        if (errorCode == ErrorResetCode)
+        {
+            throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode,
+                "0000h is the error reset: ClearError sends it.");
+        }
+        if (manufacturerSpecific.Length > EmcyMessage.ManufacturerFieldLength)
+        {
+            throw new ArgumentException(
+                $"The manufacturer-specific field is at most {EmcyMessage.ManufacturerFieldLength} bytes.",
+                nameof(manufacturerSpecific));
+        }
+        RequireActor(nameof(ApplicationHost.RaiseError));
+
+        var key = (slot, errorCode);
+        if (_profileErrors.ContainsKey(key)) return;
+        _profileErrors[key] = errorRegisterBits;
+        EmitNodeEmcy(errorCode, manufacturerSpecific.ToArray());
+    }
+
+    /// <summary>Ends an error of <paramref name="slot"/>'s application: nothing when it is not active,
+    /// else one <c>0000h</c> that carries what the register still holds (§7.2.7.1: an error reset
+    /// "may be transmitted together with the remaining errors").</summary>
+    private void ClearProfileError(ApplicationSlot slot, ushort errorCode)
+    {
+        RequireActor(nameof(ApplicationHost.ClearError));
+        if (!_profileErrors.Remove((slot, errorCode))) return;
+        EmitErrorReset();
+    }
+
+    /// <summary>NMT reset: the profile errors end with the communication errors, without an EMCY. A
+    /// profile whose cause persists raises its error again from <c>OnReset</c>.</summary>
+    private void EndProfileErrorsForReset() => _profileErrors.Clear();
+
+    private void RequireActor(string member)
+    {
+        if (_actor.IsOnCurrentActor) return;
+        throw new InvalidOperationException(
+            $"{member} runs on the node's actor loop: call it from a callback of the application.");
+    }
+
+    /// <summary>Whether a communication failure is active: the condition error behaviour acts on
+    /// (<c>1029h</c>, <see cref="ResolveErrorBehaviorTarget"/>). Actor loop.</summary>
+    private bool CommunicationFailure
+        => _controllerObservedBusOff || _heartbeatEmcyTimeouts.Count > 0 || _lifeGuardingOccurred;
+
+    // What the applications were last told. Actor loop only.
+    private bool _communicationFailurePublished;
+
+    /// <summary>
+    /// Tells the applications that asked for it that the communication failure began or ended, when
+    /// it differs from what they were last told. Called after every mutation of the operands of
+    /// <see cref="CommunicationFailure"/>, and before whatever reacts to the change
+    /// (<see cref="ApplyCommunicationErrorBehavior"/>), so a profile sets its outputs to the fault
+    /// value before the node leaves Operational. Actor loop.
+    /// </summary>
+    private void PublishCommunicationFailure()
+    {
+        if (_applications.Length == 0) return;
+        bool active = CommunicationFailure;
+        if (active == _communicationFailurePublished) return;
+        _communicationFailurePublished = active;
+
+        foreach (var slot in _applications)
+        {
+            if (!slot.MonitorsCommunicationFailure) continue;
+            if (Volatile.Read(ref _disposed) != 0) return;
+            InvokeApplication(slot, application => application.OnCommunicationFailureChanged(active));
+        }
+    }
+
     /// <summary>What one application is given of the node. Members other than the dictionary, the
     /// state, the clock and the deadlines arrive with the callbacks that need them.</summary>
     private sealed class ApplicationHost : ICanOpenApplicationHost
@@ -383,7 +491,7 @@ internal sealed partial class CanOpenNode
             }
         }
 
-        public bool CommunicationFailureActive => throw new NotSupportedException();
+        public bool CommunicationFailureActive => _node.CommunicationFailure;
 
         // onExpired is the application's code on the actor loop: it goes through the dispatcher like
         // every other callback, so its own writes are not reported back and its failure is reported
@@ -425,9 +533,9 @@ internal sealed partial class CanOpenNode
         }
 
         public void RaiseError(ushort errorCode, byte errorRegisterBits, ReadOnlySpan<byte> manufacturerSpecific = default)
-            => throw new NotSupportedException();
+            => _node.RaiseProfileError(Slot, errorCode, errorRegisterBits, manufacturerSpecific);
 
-        public void ClearError(ushort errorCode) => throw new NotSupportedException();
+        public void ClearError(ushort errorCode) => _node.ClearProfileError(Slot, errorCode);
 
         // Leaving Operational, or a state a profile's own fault calls for. Never Operational: only
         // the master's NMT Start puts the node there.

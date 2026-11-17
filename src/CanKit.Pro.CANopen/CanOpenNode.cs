@@ -595,7 +595,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // The node's bits are those of the moment the EMCY is decided; the application's part is
         // read when it is transmitted, so it is the part of the last application EMCY before it
         // on this chain (#379). msg.ErrorRegister is not used.
-        byte nodeBits = CommunicationErrorBits;
+        byte nodeBits = NodeErrorBits;
         object inhibitEpoch = _emcyInhibitEpoch;
         _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
@@ -3062,6 +3062,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         if (_options.EmitGuardingErrorEmcy || _options.EnableErrorBehavior)
             _heartbeatEmcyTimeouts[producer] = timeout;
+        PublishCommunicationFailure();
         ApplyCommunicationErrorBehavior();
         if (_options.EmitGuardingErrorEmcy)
         {

@@ -286,6 +286,7 @@ internal sealed partial class CanOpenNode
         if (_lifeGuardingOccurred)
         {
             _lifeGuardingOccurred = false;
+            PublishCommunicationFailure();
             RaiseLifeGuardingEvent(LifeGuardingState.Resolved);
         }
     }
@@ -296,6 +297,7 @@ internal sealed partial class CanOpenNode
         // One indication per lapse: the event is resolved by the next poll, not repeated by the
         // clock. A master that never returns produces exactly one "occurred".
         _lifeGuardingOccurred = true;
+        PublishCommunicationFailure();
         RaiseLifeGuardingEvent(LifeGuardingState.Occurred);
     }
 
@@ -328,6 +330,7 @@ internal sealed partial class CanOpenNode
         _lifeGuardingDeadline?.Dispose();
         _lifeGuardingDeadline = null;
         _lifeGuardingOccurred = false;
+        PublishCommunicationFailure();
         if (_options.EmitGuardingErrorEmcy)
             EndCommunicationError(CommunicationError.LifeGuardingTimeout);
     }
