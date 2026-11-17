@@ -177,8 +177,10 @@ public partial class CanOpenApplicationSeamTests
 
         rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
         await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(rig.Node);
 
         rig.Wire.Payloads(SlaveEmcy)[0].Should().Equal(Emcy(0x5000, 0x05));
+        ErrorRegister(rig.Node).Should().Be(0x05, "the released EMCY wrote the register it carried");
     }
 
     [Fact]
@@ -339,10 +341,19 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Watcher();
         using var watch = new ProducerWatchRig(app);
+        int timeouts = 0;
+        watch.Rig.Node.HeartbeatTimeout += (_, e) =>
+        {
+            if (e.ProducerNodeId == ProducerNode) Interlocked.Increment(ref timeouts);
+        };
         await watch.BeatAsync();
 
         watch.Silence();
+        await WaitUntilAsync(() => Volatile.Read(ref timeouts) == 1, "the first timeout");
+        // A watch is re-armed when it times out, so a producer that stays silent times out again:
+        // the condition is reported a second time, and is still the same.
         watch.Silence();
+        await WaitUntilAsync(() => Volatile.Read(ref timeouts) == 2, "the second timeout of the silent producer");
 
         Failures(app).Should().Equal("failure True");
     }
@@ -514,7 +525,11 @@ public partial class CanOpenApplicationSeamTests
             .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.ResetNode, Slave }, false }));
         Settle(rig.Node);
 
-        app.Log.Skip(mark).Should().ContainInOrder("failure False", "reset ResetNode");
+        // The controller is still bus-off: the sample the node takes afresh after the boot-up
+        // (RefreshControllerErrorBaseline, an actor job queued by the reset) reports it again.
+        app.Log.Skip(mark).Should().Equal(
+            "nmt PreOperational>Initializing", "failure False", "reset ResetNode", "nmt Initializing>PreOperational",
+            "failure True");
     }
 
     [Fact]
@@ -556,6 +571,7 @@ public partial class CanOpenApplicationSeamTests
 
         await ResetFromWireAsync(watch.Rig, NmtCommand.ResetNode);
 
-        app.Log.Skip(mark).Should().ContainInOrder("failure False", "reset ResetNode");
+        app.Log.Skip(mark).Should().Equal(
+            "nmt PreOperational>Initializing", "failure False", "reset ResetNode", "nmt Initializing>PreOperational");
     }
 }
