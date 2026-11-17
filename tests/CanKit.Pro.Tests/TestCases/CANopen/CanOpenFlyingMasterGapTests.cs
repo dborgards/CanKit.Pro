@@ -810,8 +810,7 @@ public partial class CanOpenFlyingMasterTests
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
             "that reset is the warm boot, so the election delay starts from it");
 
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
         resets.Should().Be(1,
             "the broadcast cleared the pending reset, so the confirmation does not apply it again");
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
@@ -1178,8 +1177,7 @@ public partial class CanOpenFlyingMasterTests
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
             "the warm election waits until Reset Communication is confirmed");
 
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
             "the confirmed reset applies locally and starts the warm election");
     }
@@ -1216,8 +1214,7 @@ public partial class CanOpenFlyingMasterTests
             "the detect cycle is cancelled while Reset Communication is still held");
         log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim).Should().Be(claims);
 
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
     }
 
@@ -1244,8 +1241,7 @@ public partial class CanOpenFlyingMasterTests
 
         node.StopFlyingMaster();
         await QuiesceAsync(witness, null);
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
 
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
             "stop clears the pending reset, so the later confirmation does not start the election");
@@ -1277,8 +1273,7 @@ public partial class CanOpenFlyingMasterTests
 
         node.StopFlyingMaster();
         await QuiesceAsync(witness, null);
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
 
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
             "stop clears the pending reset, so the later confirmation does not apply it");
@@ -1311,8 +1306,7 @@ public partial class CanOpenFlyingMasterTests
         int triggers = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
 
         gate.RejectOnRelease = true;
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
         await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
 
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
@@ -1561,8 +1555,7 @@ public partial class CanOpenFlyingMasterTests
             "recording the slave does not start it behind the held reset");
 
         gate.RejectOnRelease = true;
-        gate.Release();
-        await QuiesceAsync(witness, null);
+        await ReleaseHeldResetAsync(gate, node, witness);
         log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.Start, slave),
             "the slave that checked in during the hold is started once the send has failed");
         int resets = log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetNode, slave));
@@ -1703,6 +1696,27 @@ public partial class CanOpenFlyingMasterTests
     private static void InvokeActor(CanOpenNode node, string name) =>
         typeof(CanOpenNode).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(node, null);
+
+    /// <summary>
+    /// Releases the Reset Communication <paramref name="gate"/> holds and settles the node behind
+    /// it. The held send resumes on the thread pool; until it has come back from the driver, the
+    /// node still counts it as held by the test, and <see cref="FlyingMasterRig.QuiesceAsync"/>
+    /// does not wait for the reset outcome queued behind a held send. Waiting for that hand-back
+    /// first makes the outcome in-flight work the settle waits for, instead of a race against the
+    /// thread pool.
+    /// </summary>
+    private static async Task ReleaseHeldResetAsync(ColdResetGate gate, CanOpenNode node, ActorWitness witness)
+    {
+        gate.Release();
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (node.HasTransmitsHeldByDriverForTests)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"The released Reset Communication did not leave the driver within {ShortTimeout}.");
+            await Task.Delay(1);
+        }
+        await QuiesceAsync(witness, null);
+    }
 
     /// <summary>Holds the cold Reset Communication so a test can use the window before it completes,
     /// or cancels that one send.</summary>
