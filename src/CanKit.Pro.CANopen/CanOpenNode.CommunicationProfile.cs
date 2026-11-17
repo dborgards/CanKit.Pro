@@ -36,10 +36,16 @@ namespace CanKit.Pro.CANopen;
 /// Power-on values (CiA 301 §7.3.2.2.1): an NMT reset restores the managed objects to the values
 /// last stored through <c>1010h:01</c> / <see cref="StoreParameters"/>, or to the defaults the node
 /// was created with if nothing was stored or <c>1011h:01</c> / <see cref="RestoreDefaultParameters"/>
-/// preceded the reset. Reset Node and Reset Communication restore the same set here: without a
-/// device description there is no source for the application objects' power-on values, so
-/// the application restores those itself from <see cref="ICanOpenNode.ApplicationReset"/>,
-/// which runs before the boot-up goes out.
+/// preceded the reset. Reset Communication restores what lies in the communication profile area
+/// (<c>1000h</c>–<c>1FFFh</c>); Reset Node restores that and the restorable objects above it
+/// (<see cref="IsRestorableObject"/>). Which objects above it are restorable depends on how the
+/// node was opened. With neither a device description nor an attached application there are none:
+/// every managed object lies in the communication profile area, so both commands restore the same
+/// set, and the application restores its own objects from
+/// <see cref="ICanOpenNode.ApplicationReset"/>, which runs before the boot-up goes out. A device
+/// description makes every object it declares restorable, and an attached application every index
+/// it claims, its power-on value being what it declared in <c>Attach</c>; Reset Node returns those
+/// to their power-on values, Reset Communication leaves the ones above <c>1FFFh</c> alone.
 /// </para>
 /// </remarks>
 internal sealed partial class CanOpenNode
@@ -287,12 +293,11 @@ internal sealed partial class CanOpenNode
     /// The objects an NMT reset restores: the managed communication objects — except status
     /// (1001h, 1003h) and the constant records (1010h/1011h capabilities, 1200h) — and every object a
     /// device description declared, the placeholders 1000h/1018h and the application objects
-    /// among them. Without a description the node has no power-on source for those: what the
-    /// application put into 1000h, 1018h or its own objects stays across a reset, as FR-CO-019
-    /// and the README say. Reset Communication restores the communication
-    /// profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1). Every
-    /// index an attached application claims is restorable too: its power-on value is what it declared
-    /// in <c>Attach</c>.
+    /// among them, and every index an attached application claims, whose power-on value is what it
+    /// declared in <c>Attach</c>. Outside those the node has no power-on source: what the
+    /// application put into 1000h, 1018h or an object neither described nor claimed stays across a
+    /// reset, as FR-CO-019 and the README say. Reset Communication restores the communication
+    /// profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
     /// </summary>
     private bool IsRestorableObject(ushort index)
         => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index) || IsClaimed(index))
@@ -877,8 +882,8 @@ internal sealed partial class CanOpenNode
     /// <summary>
     /// NMT Reset Node / Reset Communication (CiA 301 §7.3.2.2.1): the communication-profile
     /// objects return to their power-on values, the node passes NMT state Initialisation, sends
-    /// boot-up and settles in Pre-Operational. See the class remarks for why both commands
-    /// restore the same set here.
+    /// boot-up and settles in Pre-Operational. Reset Node also returns the described and claimed
+    /// objects above <c>1FFFh</c> to theirs; see the class remarks for what each command restores.
     /// </summary>
     private void PerformNmtReset(bool communicationOnly)
     {

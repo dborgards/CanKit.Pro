@@ -22,10 +22,12 @@ internal interface ICanOpenApplicationHost
     /// <summary>Whether a communication failure is active: bus-off, a heartbeat timeout or life
     /// guarding, the condition <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/> reports.
     /// Actor loop.</summary>
-    /// <remarks>Every part of the condition is tracked only on a node opened with
+    /// <remarks>The whole condition is tracked only on a node opened with
     /// <see cref="CanOpenNodeOptions.EnableErrorBehavior"/>, which
-    /// <see cref="CanOpenApplicationRequirements.CommunicationFailureMonitoring"/> requires; on
-    /// another node this can read <see langword="false"/> through a failure.</remarks>
+    /// <see cref="CanOpenApplicationRequirements.CommunicationFailureMonitoring"/> requires. On another
+    /// node only the parts that other options need are tracked (heartbeat timeouts with
+    /// <see cref="CanOpenNodeOptions.EmitGuardingErrorEmcy"/>, for one), so this can read
+    /// <see langword="false"/> through a failure.</remarks>
     bool CommunicationFailureActive { get; }
 
     /// <summary>Arms a one-shot deadline on the node's clock (<see cref="Now"/>);
@@ -112,9 +114,13 @@ internal interface ICanOpenApplicationHost
     /// itself) and nothing when the node is in <paramref name="target"/> already. Otherwise every
     /// application, this one included, is told through
     /// <see cref="ICanOpenApplication.OnNmtStateChanged"/>. Asked from that callback, the change is
-    /// queued and told after the callback returns. Asked from any other callback, it is told at once:
-    /// this application's <see cref="ICanOpenApplication.OnNmtStateChanged"/> runs before this call
-    /// returns.
+    /// queued and told after the callback returns. Asked from any other callback while no round of
+    /// <see cref="ICanOpenApplication.OnNmtStateChanged"/> is in progress, it is told at once: this
+    /// application's <see cref="ICanOpenApplication.OnNmtStateChanged"/> runs before this call
+    /// returns. Asked from a callback that itself runs inside such a round (an
+    /// <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/> reported inside a write made
+    /// from <see cref="ICanOpenApplication.OnNmtStateChanged"/>, say), it is queued like one asked
+    /// from that callback.
     /// </para>
     /// <para>
     /// With the heartbeat producer running (<c>1017h</c> ≠ 0), a request from inside

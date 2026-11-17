@@ -469,7 +469,9 @@ internal sealed partial class CanOpenNode
     /// <summary>NMT reset: the profile errors end with the communication errors, without an EMCY, and
     /// an EMCY still held from an earlier Initialisation is dropped with them. A profile whose cause
     /// persists raises its error again from <c>OnReset</c>; in Initialisation, its EMCY then follows
-    /// the boot-up.</summary>
+    /// the boot-up. Held means not yet released: an EMCY that <see cref="ReleaseProfileEmcysAfterBootUp"/>
+    /// has already put on the EMCY chain behind a boot-up is no longer in the list, and a later reset
+    /// does not drop it through the list.</summary>
     private void EndProfileErrorsForReset()
     {
         _profileErrors.Clear();

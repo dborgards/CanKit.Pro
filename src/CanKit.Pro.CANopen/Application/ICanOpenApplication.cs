@@ -98,7 +98,10 @@ internal interface ICanOpenApplication
     /// </para>
     /// <para>
     /// The rule for its own writes goes by thread and moment, not by origin: every write on the actor
-    /// loop while one of this application's callbacks runs counts as its own. A profile that raises a
+    /// loop while one of this application's callbacks is the innermost callback running counts as its
+    /// own. A callback of another application that runs nested inside one of this application's (its
+    /// <see cref="OnNmtStateChanged"/>, run by a <see cref="ICanOpenApplicationHost.RequestNmtState"/>
+    /// this application made) is the innermost one then, and what it writes here is reported. A profile that raises a
     /// .NET event synchronously from a callback, and whose subscriber sets a value through the
     /// profile's API, has that write suppressed as well.
     /// </para>
@@ -138,7 +141,16 @@ internal interface ICanOpenApplication
     /// <see cref="OnCommunicationFailureChanged"/>(<see langword="false"/>) to an application that
     /// was last told a failure, this call, <see cref="ICanOpenNode.ApplicationReset"/>, and
     /// <see cref="OnNmtStateChanged"/> from Initializing to PreOperational once the boot-up has been
-    /// ordered — for an LSS slave left without a node-id, only once it has been given one.
+    /// ordered — for an LSS slave left without a node-id, only once it has been given one. The first
+    /// <see cref="OnNmtStateChanged"/> of that list is not made when the node was in Initialisation
+    /// already: a reset taken while an LSS slave waits for its node-id.
+    /// </para>
+    /// <para>
+    /// When a cause of the communication failure persists, <see cref="OnCommunicationFailureChanged"/>
+    /// (<see langword="true"/>) can follow once the node detects it anew (see there): for bus-off at
+    /// the earliest right after the notification from Initializing to PreOperational; on an LSS slave
+    /// left without a node-id, a heartbeat timeout can report it while the node still waits in
+    /// Initialisation.
     /// </para>
     /// </remarks>
     void OnReset(NmtCommand command);
@@ -151,8 +163,15 @@ internal interface ICanOpenApplication
     /// Told before the node acts on the failure, so outputs can go to their fault value before the
     /// node leaves Operational. The failure is a level: each application is told when the condition
     /// differs from what it was last told, so it hears each change once, and never a state that was
-    /// withdrawn before its turn came. An NMT reset ends the failure as part of its clearing and tells
-    /// it once that is done, before <see cref="OnReset"/>.
+    /// withdrawn before its turn came.
+    /// </para>
+    /// <para>
+    /// An NMT reset ends the failure as part of its clearing and tells that once the clearing is
+    /// done, before <see cref="OnReset"/>. A cause that persists is reported again once the node
+    /// detects it anew: a controller still bus-off when the node samples it afresh, right after the
+    /// boot-up; a silent heartbeat producer when its watch next times out, at the latest one consumer
+    /// heartbeat time later; life guarding when the master has polled again, which starts guarding
+    /// anew, and the node life time then lapses without a poll.
     /// </para>
     /// <para>
     /// A write from this callback that changes the condition (<c>1016h</c>, <c>100Ch</c>,
