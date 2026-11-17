@@ -70,6 +70,18 @@ namespace CanKit.Pro.CANopen
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription ParseDcf(string content) { }
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription ParseEds(string content) { }
     }
+    public readonly struct CanOpenDeviceType : System.IEquatable<CanKit.Pro.CANopen.CanOpenDeviceType>
+    {
+        public const ushort FurtherLogicalDevices = 65535;
+        public CanOpenDeviceType(uint Value) { }
+        public ushort AdditionalInformation { get; }
+        public bool FollowsStandardizedProfile { get; }
+        public bool HasFurtherLogicalDevices { get; }
+        public ushort ProfileNumber { get; }
+        public uint Value { get; init; }
+        public override string ToString() { }
+        public static bool TryParse(System.ReadOnlySpan<byte> littleEndian, out CanKit.Pro.CANopen.CanOpenDeviceType deviceType) { }
+    }
     public sealed class CanOpenDiscoveredNode
     {
         public CanOpenDiscoveredNode(byte nodeId, CanKit.Pro.CANopen.CanOpenPresenceEvidence evidence, CanKit.Pro.CANopen.Nmt.NmtState? heartbeatState, uint? deviceType) { }
@@ -84,6 +96,36 @@ namespace CanKit.Pro.CANopen
         public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ListenAsync(CanKit.Abstractions.API.Can.ICanBus bus, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ListenAsync(CanKit.Pro.RawCan.ICanBusService service, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ScanAsync(CanKit.Pro.CANopen.ICanOpenNode client, System.Collections.Generic.IEnumerable<byte>? skipNodeIds = null, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class CanOpenLogicalDevice
+    {
+        public CanOpenLogicalDevice(int index, CanKit.Pro.CANopen.CanOpenDeviceType deviceType) { }
+        public CanKit.Pro.CANopen.CanOpenDeviceType DeviceType { get; }
+        public int Index { get; }
+        public ushort ObjectAreaStart { get; }
+        public int PdoNumberOffset { get; }
+    }
+    public enum CanOpenLogicalDeviceReadEnd
+    {
+        Complete = 0,
+        PeerDescriptionRequired = 1,
+        Failed = 2,
+    }
+    public sealed class CanOpenLogicalDeviceReadResult
+    {
+        public CanKit.Pro.CANopen.CanOpenDeviceType DeviceType { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenLogicalDevice> Devices { get; }
+        public CanKit.Pro.CANopen.CanOpenLogicalDeviceReadEnd End { get; }
+        public System.Exception? Failure { get; }
+    }
+    public static class CanOpenLogicalDevices
+    {
+        public const int MaxCount = 8;
+        public static ushort DeviceTypeIndex(int index) { }
+        public static ushort ObjectAreaStart(int index) { }
+        public static int PdoNumberOffset(int index) { }
+        public static System.Threading.Tasks.Task<CanKit.Pro.CANopen.CanOpenLogicalDeviceReadResult> ReadAsync(CanKit.Pro.CANopen.ICanOpenNode client, byte peerNodeId, System.Threading.CancellationToken cancellationToken = default) { }
+        public static ushort ToAbsoluteIndex(int index, ushort profileIndex) { }
     }
     public static class CanOpenNodeExtensions
     {

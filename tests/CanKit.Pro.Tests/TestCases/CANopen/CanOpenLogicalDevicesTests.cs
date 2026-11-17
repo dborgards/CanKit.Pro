@@ -21,7 +21,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// A node holds up to eight logical devices. Each owns an 800h-wide window of the object
 /// dictionary starting at 6000h, and its PDO numbers are 64 apart.
 /// </summary>
-public class CanOpenLogicalDevicesTests
+public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
 {
     [Theory]
     [InlineData(0, 0x6000, 0x67FF, 0)]
@@ -257,6 +257,32 @@ public class CanOpenLogicalDevicesTests
         result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
         result.DeviceType.Value.Should().Be(0x000F0191u);
         result.Devices.Should().ContainSingle().Which.Index.Should().Be(0);
+    }
+
+    [Fact] // FR-CO-063
+    public async Task Over_The_Bus_The_Gate_Decides_How_Far_The_Chain_Is_Read()
+    {
+        var session = $"canopen-logical-devices-{Guid.NewGuid():N}";
+        using var peerBus = Open(session, 0);
+        using var clientBus = Open(session, 1);
+        using var server = CanOpen.OpenNode(peerBus, 0x10);
+        using var client = CanOpen.OpenNode(clientBus, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        server.ObjectDictionary.WriteUnsigned(0x1000, 0, 0xFFFF0191u);
+        server.ObjectDictionary.AddU32(0x67FF, 0, 0x000F0191u, OdAccess.ReadOnly);
+        server.ObjectDictionary.AddU32(0x6FFF, 0, 0x00010198u, OdAccess.ReadOnly);
+        await WaitForPreOperationalAsync(server);
+
+        // no description bound
+        var unbound = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
+        unbound.End.Should().Be(CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired);
+        unbound.Devices.Should().ContainSingle();
+
+        // description lists 1000h, 67FFh, 6FFFh
+        client.BindPeerDeviceDescription(0x10, PeerSdoLaboratory.Variables(0x1000, 0x67FF, 0x6FFF));
+        var bound = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
+        bound.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+        bound.Devices.Select(d => d.DeviceType.ProfileNumber).Should().Equal((ushort)401, (ushort)408);
     }
 
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
