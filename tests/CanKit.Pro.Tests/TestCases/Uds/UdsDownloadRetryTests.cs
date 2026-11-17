@@ -101,24 +101,48 @@ public class UdsDownloadRetryTests
         channel.Snapshot().Select(r => r[0]).Should().Equal(0x34, 0x36);
     }
 
+    // An ISO-TP transport error is a lost request or answer as well and is retried; an overflow
+    // on the request is not (the server cannot take it), nor a malformed response or an
+    // exception from outside ISO-TP.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Transport_And_Malformed_Response_Failures_Are_Not_Retried(bool transport)
+    [InlineData("transport", true)]
+    [InlineData("reception", true)]
+    [InlineData("overflow", false)]
+    [InlineData("malformed", false)]
+    [InlineData("other", false)]
+    public async Task Transport_Errors_Are_Retried_Unless_Overflow_And_Malformed_Responses_Are_Not(string kind, bool retried)
     {
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
+        var attempts = 0;
         using var channel = new ScriptedChannel(actor, request =>
         {
-            if (request[0] != 0x36) return Positive(request);
-            if (transport) throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout");
-            return new byte[] { 0x76 };
+            if (request[0] != 0x36 || ++attempts > 1) return Positive(request);
+            return kind switch
+            {
+                "transport" => throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout"),
+                "reception" => throw new IsoTpWrongSequenceNumberException(2, 3),
+                "overflow" => throw new IsoTpOverflowException("injected overflow"),
+                "malformed" => new byte[] { 0x76 },
+                _ => throw new InvalidOperationException("injected driver failure"),
+            };
         });
         using var client = new UdsClientImpl(channel, Options(2), false, actor);
-        if (transport)
-            await FluentActions.Awaiting(() => Download(client).WaitAsync(Guard)).Should().ThrowAsync<IsoTpTimeoutException>();
-        else
-            await FluentActions.Awaiting(() => Download(client).WaitAsync(Guard)).Should().ThrowAsync<UdsProtocolException>();
+        Func<Task> download = () => Download(client).WaitAsync(Guard);
+        if (retried)
+        {
+            await download.Should().NotThrowAsync();
+            channel.Snapshot().Select(r => r[0]).Should().Equal(0x34, 0x36, 0x36, 0x37);
+            channel.Snapshot()[2].Should().Equal(channel.Snapshot()[1]);
+            return;
+        }
+        var failure = (await download.Should().ThrowAsync<Exception>()).Which;
+        failure.Should().BeOfType(kind switch
+        {
+            "overflow" => typeof(IsoTpOverflowException),
+            "malformed" => typeof(UdsProtocolException),
+            _ => typeof(InvalidOperationException),
+        });
         channel.Snapshot().Select(r => r[0]).Should().Equal(0x34, 0x36);
     }
 
@@ -195,23 +219,54 @@ public class UdsDownloadRetryTests
         }
     }
 
+    // The option covers UploadAsync and a standalone TransferDataAsync too: a block whose
+    // answer was lost is asked for again with the same counter and bytes, an upload appends the
+    // repeated block once, and with the default of 0 nothing is retried.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task OptIn_Does_Not_Retry_SingleStep_TransferData_Or_Upload(bool upload)
+    [InlineData(false, 0)]
+    [InlineData(false, 1)]
+    [InlineData(true, 0)]
+    [InlineData(true, 1)]
+    public async Task Upload_And_SingleStep_TransferData_Follow_The_OptIn(bool upload, int retries)
     {
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
-        using var channel = new ScriptedChannel(actor, request => request[0] == 0x36 ? null : Positive(request));
-        using var client = new UdsClientImpl(channel, Options(2), false, actor);
+        var attempts = 0;
+        using var channel = new ScriptedChannel(actor, request => request[0] == 0x36
+            ? (++attempts == 1 ? null : new byte[] { 0x76, request[1], 0x5A })
+            : Positive(request));
+        using var client = new UdsClientImpl(channel, Options(retries), false, actor);
         var operation = upload
             ? client.UploadAsync(0, 0x11, new byte[] { 0 }, new byte[] { 1 })
             : client.TransferDataAsync(1, new byte[] { 0xAB });
         await channel.WaitForRequests(upload ? 2 : 1);
         await Expire(clock, actor, P2);
-        await FluentActions.Awaiting(() => operation.WaitAsync(Guard)).Should().ThrowAsync<UdsTimeoutException>();
-        channel.Snapshot().Count(r => r[0] == 0x36).Should().Be(1);
-        channel.Snapshot().Count(r => r[0] == 0x37).Should().Be(0);
+        var blocks = () => channel.Snapshot().Where(r => r[0] == 0x36).ToArray();
+        if (retries == 0)
+        {
+            await FluentActions.Awaiting(() => operation.WaitAsync(Guard)).Should().ThrowAsync<UdsTimeoutException>();
+            blocks().Should().HaveCount(1);
+            channel.Snapshot().Count(r => r[0] == 0x37).Should().Be(0);
+            return;
+        }
+        (await operation.WaitAsync(Guard)).Should().Equal(0x5A);
+        blocks().Should().HaveCount(2);
+        blocks()[1].Should().Equal(blocks()[0]);
+        blocks()[0].Should().Equal(upload ? new byte[] { 0x36, 1 } : new byte[] { 0x36, 1, 0xAB });
+        channel.Snapshot().Count(r => r[0] == 0x37).Should().Be(upload ? 1 : 0);
+    }
+
+    // A standalone TransferDataAsync never repeats a negative response.
+    [Fact]
+    public async Task SingleStep_TransferData_Does_Not_Retry_A_Negative_Response()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var channel = new ScriptedChannel(actor, request => new byte[] { 0x7F, 0x36, 0x73 });
+        using var client = new UdsClientImpl(channel, Options(2), false, actor);
+        (await FluentActions.Awaiting(() => client.TransferDataAsync(1, new byte[] { 0xAB }).WaitAsync(Guard))
+            .Should().ThrowAsync<UdsNegativeResponseException>()).Which.Code.Should().Be(0x73);
+        channel.Snapshot().Should().HaveCount(1);
     }
 
     [Fact]

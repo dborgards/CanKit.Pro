@@ -1028,8 +1028,8 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
-            return await TransferDataCoreAsync(blockSequenceCounter, data, linkedToken)
-                .ConfigureAwait(false);
+            return await TransferDataRepeatingAsync(BuildTransferDataRequest(blockSequenceCounter, data),
+                linkedToken).ConfigureAwait(false);
         }
         finally
         {
@@ -1038,12 +1038,36 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     }
 
     /// <summary>
-    /// Assumes <see cref="_requestLock"/> is already held. Sends one 0x36 request and validates
-    /// the echoed block-sequence counter.
+    /// Assumes <see cref="_requestLock"/> is already held. Sends one 0x36 request and repeats it,
+    /// byte for byte, up to <see cref="UdsClientOptions.MaxTransferDataTimeoutRetries"/> times
+    /// when its answer did not arrive (ISO 14229-1:2026 §14.4.2, Table 451): after a P2/P2*
+    /// application timeout, or an ISO-TP transport error other than an overflow on the request.
+    /// A negative response, a malformed response and cancellation escape at once. Shared by
+    /// <see cref="DownloadAsync"/>, <see cref="UploadAsync"/> and <see cref="TransferDataAsync"/>.
     /// </summary>
-    private Task<byte[]> TransferDataCoreAsync(byte blockSequenceCounter,
-        ReadOnlyMemory<byte> data, CancellationToken linkedToken)
-        => TransferDataRequestCoreAsync(BuildTransferDataRequest(blockSequenceCounter, data), linkedToken);
+    private async Task<byte[]> TransferDataRepeatingAsync(byte[] request, CancellationToken linkedToken)
+    {
+        for (int retries = 0; ; retries++)
+        {
+            linkedToken.ThrowIfCancellationRequested();
+            try
+            {
+                return await TransferDataRequestCoreAsync(request, linkedToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (retries < _options.MaxTransferDataTimeoutRetries
+                && IsRepeatableTransferFault(ex))
+            {
+                // No counter or offset advance until a positive response is accepted.
+            }
+        }
+    }
+
+    // A TransferData whose answer did not arrive: P2/P2* ran out, or the transport failed on the
+    // request or the response. An overflow on the request is not: the server cannot take a
+    // request that large, and the same request would only fail again.
+    private static bool IsRepeatableTransferFault(Exception ex)
+        => ex is UdsTimeoutException
+            || (ex is IsoTpException && ex is not IsoTpOverflowException);
 
     private static byte[] BuildTransferDataRequest(byte blockSequenceCounter, ReadOnlyMemory<byte> data)
     {
@@ -1183,24 +1207,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 int remaining = data.Length - offset;
                 int take = remaining < chunkSize ? remaining : chunkSize;
                 var chunk = data.Slice(offset, take);
-                var request = BuildTransferDataRequest(bsc, chunk);
                 // ISO 14229-1:2026 §14.4.2, Table 451: a lost request and a lost positive
                 // response are recovered by repeating the identical block and counter.
-                // A negative response or transport failure is a different outcome and escapes.
-                for (int retries = 0; ; retries++)
-                {
-                    linkedToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        _ = await TransferDataRequestCoreAsync(request, linkedToken).ConfigureAwait(false);
-                        break;
-                    }
-                    catch (UdsTimeoutException ex) when (ex.RequestedService == UdsServiceId.TransferData
-                        && retries < _options.MaxTransferDataTimeoutRetries)
-                    {
-                        // No counter or offset advance until a positive response is accepted.
-                    }
-                }
+                _ = await TransferDataRepeatingAsync(BuildTransferDataRequest(bsc, chunk), linkedToken)
+                    .ConfigureAwait(false);
                 offset += take;
                 unchecked { bsc++; } // Wraps 0xFF → 0x00 → 0x01 … as required by ISO 14229-1:2026 §14.4.2.
             }
@@ -1252,8 +1262,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             byte bsc = 0x01; // ISO 14229-1:2026 §14.4.2: first TransferData uses BSC=0x01.
             while ((ulong)result.Count < totalBytes)
             {
-                var chunk = await TransferDataCoreAsync(bsc, ReadOnlyMemory<byte>.Empty,
-                    linkedToken).ConfigureAwait(false);
+                // A repeated block is asked for with the same counter; the server sends the same
+                // data again, and only the answer that arrived is appended.
+                var chunk = await TransferDataRepeatingAsync(
+                    BuildTransferDataRequest(bsc, ReadOnlyMemory<byte>.Empty), linkedToken).ConfigureAwait(false);
                 if (chunk.Length == 0)
                     throw new UdsProtocolException(
                         "ECU returned an empty TransferData payload before the declared memorySize was reached.");

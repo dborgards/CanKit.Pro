@@ -130,18 +130,18 @@ await uds.DownloadAsync(
   ISO 14229-3) and gives no value, so the client defaults to zero; set `BusyRepeatRequestDelay`
   from the ECU's specification. `MaxBusyRepeatRequests = 0` surfaces the first 0x21 instead of
   repeating, which opts out of the standard's "client shall repeat" (#354).
-* `DownloadAsync` defaults to no TransferData block retries beyond NRC 0x21. Opt in with
-  `UdsClientOptions.MaxTransferDataTimeoutRetries` (default 0): after a P2/P2* application
-  timeout it repeats the identical request bytes, including the block sequence counter, up to
-  that many additional times **per block**. ISO 14229-1:2026 §14.4.2, Table 451 describes this
+* `DownloadAsync`, `UploadAsync` and a standalone `TransferDataAsync` default to no TransferData
+  block retries beyond NRC 0x21. Opt in with `UdsClientOptions.MaxTransferDataTimeoutRetries`
+  (default 0): after a P2/P2* application timeout, or an ISO-TP transport error other than an
+  overflow on the request, they repeat the identical request bytes, including the block sequence
+  counter, up to that many additional times **per block**. ISO 14229-1:2026 §14.4.2, Table 451 describes this
   recovery for a lost request or positive response. NRC 0x73 is a sequence error (Table 454),
-  not an instruction to retry: it, other final NRCs, transport failures, malformed responses
+  not an instruction to retry: it, other final NRCs, an ISO-TP overflow, malformed responses
   and cancellation escape. The normal NRC 0x21 retries retain their independent budget inside
   each attempt. Each timeout retry gets fresh P2/P2* and response-pending budgets, and observes
   `QuarantineLateResponses` if enabled. The caller's cancellation token bounds the entire
   download, including all attempts and waits; there is no separate overall timeout. No
-  RequestTransferExit follows a final failure. Single-step `TransferDataAsync` and `UploadAsync`
-  retain their existing behavior.
+  RequestTransferExit follows a final failure. An upload appends a repeated block's data once.
 * `SecurityAccessAsync` takes any odd `requestSeedLevel` from 0x01 to 0x7D, including the levels
   ISO 14229-1:2026 §9.4.2.2 (Table 41) reserves for future definition (0x43–0x5D): the client does
   not filter reserved levels, and a server that does not support one says so with a negative
