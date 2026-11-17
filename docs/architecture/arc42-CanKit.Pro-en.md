@@ -1290,6 +1290,9 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   `SrdoConfigurationCheckInterval`, start-up comparison) as FR-CO-058..059 (#329, 2026-10-20). Not
   built: clauses 7/8 (safety application layer of the profiles), diverse redundancy and the safe
   state (README § "Not built, and why"); reconciliation against EN 50325-5 is outstanding (#289).
+- **Added (2026-11-17):** The decision stands for safety. Its argument against a public extension
+  interface ("that nobody else uses") no longer holds for device profiles and is superseded there
+  by ADR-14.
 
 ### ADR-13 (implemented): Master/tool role, flying master and LSS in the CANopen package
 - **Context:** After the device role (FR-CO-013..028) came capabilities a tool or an NMT master
@@ -1314,6 +1317,33 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   commissioning, CiA 801; #304, #305, #306, #309, #331). Not built: bit-rate detection as an LSS
   command (index 9 is rejected by the slave), switching the open channel's bit rate without an
   adapter callback (README § "Not built, and why").
+
+### ADR-14 (decided, not implemented): Application seam in the core, device profiles as packages of their own
+- **Context:** Device profiles (CiA 401, CiA 408) sit above the communication profile and each
+  describe one logical device; a CANopen device has one to eight of them (CiA 301 §4.1, §7.5.2.1).
+  They are to be usable on both sides: the tool reads and controls a foreign device through typed
+  access, and the node can be one itself, for simulation for instance. The object dictionary is
+  public; what a profile needs for *behaviour* — validating writes, reacting to written entries,
+  deadlines on the node's time source, requesting the node's own NMT state — is internal. ADR-12
+  and ADR-13 declined a public interface for that while there were only communication services,
+  which need the node from the inside.
+- **Decision:** A narrow application seam in the package `CanKit.Pro.CANopen`; `ICanOpenNode` is
+  not widened. One package per profile
+  (`CanKit.Pro.CANopen.Cia401`, `CanKit.Pro.CANopen.Cia408`), depending only on the seam and on
+  `ICanOpenNode` and made of an object catalogue, the device side and the tool side. A profile is
+  handed to the node when it is opened, with the number of the logical device, and is attached
+  before the node starts up on the bus. The seam stays `internal` until two
+  profiles have been built against it and is published only then. CiA 302 stays in the core
+  package per ADR-13. Rejected: profiles in the core package (each further one enlarges the
+  largest package, and a device application of one's own still cannot hook in behaviour) and one
+  collective package for all profiles (one release cadence for all, splitting it later would be a
+  breaking change). Decision record with design and sequence:
+  `docs/reviews/2026-11-17-canopen-device-profiles-scope.md`.
+- **Consequences:** + a further profile is a new package, the core stays closed; the seam is the
+  same one a manufacturer-specific device application needs; no major release. − the seam is
+  frozen from publication on (SemVer); − until then the profile packages are not packed and see
+  the seam through `InternalsVisibleTo`; − more packages to maintain.
+- **Status:** Decided on 2026-11-17. None of it is built.
 
 ---
 

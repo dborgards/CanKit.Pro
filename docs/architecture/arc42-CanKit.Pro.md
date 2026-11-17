@@ -1289,6 +1289,9 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   per `SrdoConfigurationCheckInterval`, Start-up-Vergleich) als FR-CO-058..059 (#329, 20.10.2026).
   Nicht gebaut: Clause 7/8 (Safety Application Layer der Profile), diverse Redundanz und sicherer
   Zustand (README § „Not built, and why"); Abgleich gegen EN 50325-5 steht aus (#289).
+- **Nachgetragen (17.11.2026):** Die Entscheidung gilt für Safety weiter. Ihr Argument gegen eine
+  öffentliche Erweiterungsschnittstelle („die sonst niemand nutzt") trägt für Geräteprofile nicht
+  mehr und ist dort durch ADR-14 abgelöst.
 
 ### ADR-13 (umgesetzt): Master-/Tool-Rolle, Flying Master und LSS im CANopen-Paket
 - **Kontext:** Nach der Geräterolle (FR-CO-013..028) kamen Fähigkeiten hinzu, die ein Werkzeug
@@ -1314,6 +1317,33 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   Inbetriebnahme, CiA 801; #304, #305, #306, #309, #331). Nicht gebaut: Bitratenerkennung als LSS-Kommando (Index 9
   wird vom Slave abgelehnt), Umschalten der Bitrate des offenen Kanals ohne Adapter-Callback
   (README § „Not built, and why").
+
+### ADR-14 (entschieden, nicht umgesetzt): Anwendungsnaht im Kern, Geräteprofile als eigene Pakete
+- **Kontext:** Geräteprofile (CiA 401, CiA 408) liegen oberhalb des Kommunikationsprofils und
+  beschreiben je ein logisches Gerät; ein CANopen-Gerät hat eins bis acht davon (CiA 301 §4.1,
+  §7.5.2.1). Sie sollen auf beiden Seiten nutzbar sein: das Werkzeug liest und steuert ein fremdes
+  Gerät typisiert, und der Knoten kann selbst eines sein, etwa für Simulation. Das Objektverzeichnis
+  ist öffentlich; was ein Profil für *Verhalten* braucht — Schreibzugriffe prüfen, auf geschriebene
+  Einträge reagieren, Fristen auf der Zeitquelle des Knotens, den eigenen NMT-Zustand anfordern —
+  ist intern. ADR-12 und ADR-13 haben eine öffentliche Schnittstelle dafür abgelehnt, solange es
+  nur Kommunikationsdienste gab, die den Knoten von innen brauchen.
+- **Entscheidung:** Eine schmale Anwendungsnaht im Paket `CanKit.Pro.CANopen`; `ICanOpenNode`
+  wird nicht verbreitert. Je Profil ein eigenes Paket
+  (`CanKit.Pro.CANopen.Cia401`, `CanKit.Pro.CANopen.Cia408`), das nur an der Naht und an
+  `ICanOpenNode` hängt und aus einem Objektkatalog, der Geräteseite und der Tool-Seite besteht. Ein
+  Profil wird dem Knoten beim Öffnen mitgegeben, mit der Nummer des logischen Geräts, und ist
+  angehängt, bevor der Knoten am Bus anläuft. Die Naht bleibt
+  `internal`, bis zwei Profile gegen sie gebaut sind, und wird erst dann veröffentlicht. CiA 302
+  bleibt nach ADR-13 im Kernpaket. Verworfen: Profile im Kernpaket (jedes weitere vergrößert das
+  größte Paket, und eine eigene Geräteanwendung kann weiter kein Verhalten einhängen) und ein
+  Sammelpaket für alle Profile (ein Release-Takt für alle, späteres Aufteilen wäre ein Breaking
+  Change). Entscheidungsakte mit Design und Reihenfolge:
+  `docs/reviews/2026-11-17-canopen-device-profiles-scope.md`.
+- **Konsequenzen:** + ein weiteres Profil ist ein neues Paket, der Kern bleibt geschlossen; die
+  Naht ist dieselbe, die eine herstellerspezifische Geräteanwendung braucht; kein Major-Release.
+  − die Naht ist ab Veröffentlichung eingefroren (SemVer); − bis dahin sind die Profilpakete nicht
+  paketiert und sehen die Naht über `InternalsVisibleTo`; − mehr Pakete zu pflegen.
+- **Status:** Entschieden am 17.11.2026. Nichts davon ist gebaut.
 
 ---
 
