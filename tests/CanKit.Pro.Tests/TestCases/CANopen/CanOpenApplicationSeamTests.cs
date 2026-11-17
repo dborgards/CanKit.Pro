@@ -27,7 +27,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// is process-wide and only means something when no other test creates or ends one.
 /// </remarks>
 [Collection(ActorLoopCountCollection.Name)]
-public class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterFixture>
+public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Nmt;
@@ -141,6 +142,130 @@ internal sealed partial class CanOpenNode
 
     private static ArgumentException OptionsError(string message) => new(message, "options");
 
+    // =========================================================================================
+    // Written entries: what the claimant is told, and when.
+    // =========================================================================================
+
+    // The entries written since the claimant was last told, as CosKey values, under
+    // _applicationGate; and whether an evaluation of them is already queued. Same mechanism as
+    // the change-of-state filter (_cosDirty): the actor's mailbox is unbounded, so a writer that
+    // writes in a loop must not post per write.
+    private readonly object _applicationGate = new();
+    private HashSet<uint>? _applicationDirty;
+    private bool _applicationEvaluationPosted;
+
+    // The application whose callback the actor loop is running right now, or null. Actor-confined:
+    // set and cleared by InvokeApplication, read only after IsOnCurrentActor has said so.
+    private ApplicationSlot? _applicationInCallback;
+
+    /// <summary>
+    /// EntryWritten, on the writing thread and under the dictionary's write gate: a stored write to
+    /// an entry an application claims. Records the entry and queues one evaluation, which tells the
+    /// claimant on the actor loop (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for
+    /// what the claimant writes from inside its own callback, and not for a restore of values in
+    /// a reset: neither is news to it.
+    /// </summary>
+    private void OnOdEntryWrittenForApplications(ushort index, byte subindex)
+    {
+        if (_applications.Length == 0) return;
+        // RestoreValues sets this under the write gate, which this write holds too: it is true for
+        // the restore's own writes and for nobody else's.
+        if (_restoringValues) return;
+        var claimant = ClaimantOf(index);
+        if (claimant is null) return;
+        // The claimant's own write from inside one of its callbacks. IsOnCurrentActor first: the
+        // field belongs to the actor loop, and a write from another thread is never that.
+        if (_actor.IsOnCurrentActor && ReferenceEquals(_applicationInCallback, claimant)) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        lock (_applicationGate)
+        {
+            (_applicationDirty ??= new HashSet<uint>()).Add(CosKey(index, subindex));
+            if (_applicationEvaluationPosted) return;
+            _applicationEvaluationPosted = true;
+        }
+
+        try
+        {
+            _actor.Post(EvaluateApplicationEntriesOnActor);
+        }
+        catch (ObjectDisposedException)
+        {
+            lock (_applicationGate)
+            {
+                _applicationEvaluationPosted = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Tells each claimant the entries written since it was last told: sorted by index, then
+    /// sub-index, each once. Actor loop. Writes landing while this runs re-arm the dirty set and
+    /// queue the next evaluation, so none is lost; one claimant that throws does not keep the next
+    /// from being told (<see cref="InvokeApplication"/>).
+    /// </summary>
+    private void EvaluateApplicationEntriesOnActor()
+    {
+        HashSet<uint>? dirty;
+        lock (_applicationGate)
+        {
+            dirty = _applicationDirty;
+            _applicationDirty = null;
+            _applicationEvaluationPosted = false;
+        }
+        if (dirty is null || dirty.Count == 0 || Volatile.Read(ref _disposed) != 0) return;
+
+        var keys = new uint[dirty.Count];
+        dirty.CopyTo(keys);
+        Array.Sort(keys); // CosKey is index << 8 | sub-index: its order is index, then sub-index
+
+        foreach (var slot in _applications)
+        {
+            List<CanOpenObjectAddress>? entries = null;
+            foreach (var key in keys)
+            {
+                var index = (ushort)(key >> 8);
+                if (!ReferenceEquals(ClaimantOf(index), slot)) continue;
+                (entries ??= new List<CanOpenObjectAddress>()).Add(new CanOpenObjectAddress(index, (byte)(key & 0xFF)));
+            }
+            if (entries is null) continue;
+            var written = entries.ToArray();
+            InvokeApplication(slot, application => application.OnEntriesWritten(written));
+        }
+    }
+
+    // =========================================================================================
+    // Callbacks into an application.
+    // =========================================================================================
+
+    /// <summary>
+    /// Runs <paramref name="callback"/> against the application of <paramref name="slot"/>: the one
+    /// way the node calls into an application on the actor loop (every callback but
+    /// <see cref="ICanOpenApplication.Attach"/> and <see cref="ICanOpenApplication.ValidateWrite"/>).
+    /// Marks the application as being in a callback, so that what it writes there is not reported
+    /// back to it, and reports anything it throws as a background exception: one application's
+    /// failure stops neither the node nor the application after it.
+    /// </summary>
+    private void InvokeApplication(ApplicationSlot slot, Action<ICanOpenApplication> callback)
+    {
+        // Restored rather than cleared: a callback that makes the node run another one (a state
+        // request, say) leaves the outer one still in progress.
+        var outer = _applicationInCallback;
+        _applicationInCallback = slot;
+        try
+        {
+            callback(slot.Application);
+        }
+        catch (Exception ex)
+        {
+            RaiseBackgroundException(ex);
+        }
+        finally
+        {
+            _applicationInCallback = outer;
+        }
+    }
+
     /// <summary>What one application is given of the node. Members other than the dictionary, the
     /// state, the clock and the deadlines arrive with the callbacks that need them.</summary>
     private sealed class ApplicationHost : ICanOpenApplicationHost
@@ -168,7 +293,33 @@ internal sealed partial class CanOpenNode
 
         public void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType) => throw new NotSupportedException();
 
-        public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries) => throw new NotSupportedException();
+        public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries)
+        {
+            if (entries is null) throw new ArgumentNullException(nameof(entries));
+            if (!_node._actor.IsOnCurrentActor)
+            {
+                throw new InvalidOperationException(
+                    "RequestTransmission runs on the node's actor loop: call it from a callback of the application.");
+            }
+
+            // All of them before any: a list with one foreign entry transmits nothing.
+            var dirty = new HashSet<uint>();
+            foreach (var entry in entries)
+            {
+                if (!ReferenceEquals(_node.ClaimantOf(entry.Index)?.Host, this))
+                {
+                    throw new ArgumentException(
+                        $"Entry {entry.Index:X4}:{entry.Subindex:X2} is not claimed by the application that asked for its transmission.",
+                        nameof(entries));
+                }
+                dirty.Add(CosKey(entry.Index, entry.Subindex));
+            }
+            if (dirty.Count == 0) return;
+
+            // Both kinds, whatever EnableChangeOfStateTpdo and EnableChangeOfStateSrdo say: those
+            // switch the automatism off, and this is a request, not the automatism.
+            _node.TriggerChangeOfState(dirty);
+        }
 
         public void RaiseError(ushort errorCode, byte errorRegisterBits, ReadOnlySpan<byte> manufacturerSpecific = default)
             => throw new NotSupportedException();

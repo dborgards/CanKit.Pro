@@ -818,6 +818,10 @@ internal sealed partial class CanOpenNode
     private void OnOdEntryWrittenForCoS(ushort index, byte subindex)
     {
         if (!_options.EnableChangeOfStateTpdo && !_options.EnableChangeOfStateSrdo) return;
+        // Who claims decides: a write to an entry an application claims never triggers a TPDO or an
+        // SRDO by itself. The claimant asks for it with ICanOpenApplicationHost.RequestTransmission,
+        // once its own rules (a lock, a mode, a hysteresis) allow it (OnOdEntryWrittenForApplications).
+        if (IsClaimed(index)) return;
         if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (see remarks)
         if (Volatile.Read(ref _disposed) != 0) return;
 
@@ -856,11 +860,25 @@ internal sealed partial class CanOpenNode
             _cosPosted = false;
         }
         if (dirty is null || dirty.Count == 0) return;
-        if (_disposed != 0 || _state != NmtState.Operational) return;
 
         // Each kind only on its own option: an entry mapped in both a TPDO and an SRDO is dirty
         // for the SRDO's sake even when change-of-state TPDOs are off.
-        if (_options.EnableChangeOfStateTpdo)
+        TriggerChangeOfState(dirty, _options.EnableChangeOfStateTpdo, _options.EnableChangeOfStateSrdo);
+    }
+
+    /// <summary>
+    /// What an application write to <paramref name="dirty"/> entries causes: the event-driven TPDOs
+    /// that map one of them transmit (subject to their inhibit time), the synchronous-acyclic ones
+    /// latch for the next SYNC, the transmit SRDOs trigger. Nothing happens outside Operational.
+    /// Actor loop. Takes the two kinds as arguments because the automatism's switches
+    /// (<see cref="CanOpenNodeOptions.EnableChangeOfStateTpdo"/>, <see cref="CanOpenNodeOptions.EnableChangeOfStateSrdo"/>)
+    /// are the caller's to apply: an application that asks for a transmission is not the automatism.
+    /// </summary>
+    private void TriggerChangeOfState(HashSet<uint> dirty, bool tpdos = true, bool srdos = true)
+    {
+        if (_disposed != 0 || _state != NmtState.Operational) return;
+
+        if (tpdos)
         {
             for (int n = 1; n <= _pdoCount; n++)
             {
@@ -886,7 +904,7 @@ internal sealed partial class CanOpenNode
             }
         }
 
-        if (_options.EnableChangeOfStateSrdo)
+        if (srdos)
         {
             for (int n = 1; n <= _srdoCount; n++)
             {

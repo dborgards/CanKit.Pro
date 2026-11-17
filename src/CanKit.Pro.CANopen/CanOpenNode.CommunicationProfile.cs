@@ -347,6 +347,9 @@ internal sealed partial class CanOpenNode
             return ValidatePdoMappingWrite(index, subindex, value, isTpdo: false);
         if (index is >= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount)
             return ValidatePdoMappingWrite(index, subindex, value, isTpdo: true);
+        // Last, so that every object the node manages keeps its own rules: an application claims
+        // indices from 2000h up, and nothing the node validates above lies there.
+        if (ClaimantOf(index) is { } slot) return slot.Application.ValidateWrite(index, subindex, value);
         return OdWriteDecision.Accept;
     }
 

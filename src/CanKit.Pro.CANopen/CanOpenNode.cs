@@ -275,6 +275,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // event-driven TPDOs whose mapping contains the written entry.
         _od.EntryWritten += OnOdEntryWrittenForCoS;
 
+        // After the attach phase: what an application writes while it attaches is not news to it.
+        _od.EntryWritten += OnOdEntryWrittenForApplications;
+
         // The pump has to be running before the subscription exists: a frame can be dispatched
         // as soon as Subscribe returns, and construction failure below signals the pump to
         // exit so it does not outlive a node that never finished opening.
