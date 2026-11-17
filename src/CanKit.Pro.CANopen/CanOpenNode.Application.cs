@@ -41,6 +41,11 @@ internal sealed partial class CanOpenNode
 
         // Read once with the claims, for the same reason.
         internal bool MonitorsCommunicationFailure { get; init; }
+
+        // What this application was last told about the communication failure. Per application,
+        // not per node: a callback of one application can change the condition before the next
+        // one's turn, and each is told what is true when its turn comes. Actor loop only.
+        internal bool FailureTold { get; set; }
     }
 
     /// <summary>Whether an attached application claims <paramref name="index"/>.</summary>
@@ -440,29 +445,70 @@ internal sealed partial class CanOpenNode
     private bool CommunicationFailure
         => _controllerObservedBusOff || _heartbeatEmcyTimeouts.Count > 0 || _lifeGuardingOccurred;
 
-    // What the applications were last told. Actor loop only.
-    private bool _communicationFailurePublished;
+    // Whether PublishCommunicationFailure is telling the applications right now, and whether an NMT
+    // reset holds the telling back until its clearing is done. Actor loop only.
+    private bool _publishingFailure;
+    private bool _failurePublishDeferred;
 
     /// <summary>
-    /// Tells the applications that asked for it that the communication failure began or ended, when
-    /// it differs from what they were last told. Called after every mutation of the operands of
-    /// <see cref="CommunicationFailure"/>, and before whatever reacts to the change
+    /// Tells the applications that asked for it that the communication failure began or ended, each
+    /// one when what it was last told differs from the condition. Called after every mutation of the
+    /// operands of <see cref="CommunicationFailure"/>, and before whatever reacts to the change
     /// (<see cref="ApplyCommunicationErrorBehavior"/>), so a profile sets its outputs to the fault
     /// value before the node leaves Operational. Actor loop.
     /// </summary>
+    /// <remarks>
+    /// An application's callback can change the operands (it owns the dictionary: a write to
+    /// <c>1016h</c> or <c>100Dh</c> ends a watch), which calls this again from inside the round. That
+    /// call returns at once; the round that is running re-reads the condition before every
+    /// application and goes round again until nobody is behind. So every application ends on the
+    /// truth and is never told a state that was withdrawn before its turn. The failure is a level,
+    /// not an event: unlike the NMT changes it is not queued for everyone in order, as an
+    /// application that was told <see langword="true"/> after the failure was over would drive its
+    /// outputs to the fault value for nothing.
+    /// </remarks>
     private void PublishCommunicationFailure()
     {
-        if (_applications.Length == 0) return;
-        bool active = CommunicationFailure;
-        if (active == _communicationFailurePublished) return;
-        _communicationFailurePublished = active;
+        if (_applications.Length == 0 || _publishingFailure || _failurePublishDeferred) return;
 
-        foreach (var slot in _applications)
+        _publishingFailure = true;
+        try
         {
-            if (!slot.MonitorsCommunicationFailure) continue;
-            if (Volatile.Read(ref _disposed) != 0) return;
-            InvokeApplication(slot, application => application.OnCommunicationFailureChanged(active));
+            bool told;
+            do
+            {
+                told = false;
+                foreach (var slot in _applications)
+                {
+                    if (!slot.MonitorsCommunicationFailure) continue;
+                    if (Volatile.Read(ref _disposed) != 0) return;
+                    bool active = CommunicationFailure;
+                    if (slot.FailureTold == active) continue;
+                    slot.FailureTold = active;
+                    told = true;
+                    InvokeApplication(slot, application => application.OnCommunicationFailureChanged(active));
+                }
+            }
+            while (told);
         }
+        finally
+        {
+            _publishingFailure = false;
+        }
+    }
+
+    /// <summary>An NMT reset ends the communication failure as part of its clearing. Nothing is
+    /// published until the clearing is done (<see cref="ResumeFailurePublishAfterReset"/>): an
+    /// application called between two steps of it would raise an error that the next step then
+    /// wipes from <c>1001h</c> while the node still holds it as active.</summary>
+    private void DeferFailurePublishForReset() => _failurePublishDeferred = true;
+
+    /// <summary>The reset's clearing is done: tells the applications what became of the failure, in
+    /// Initialisation, immediately before <see cref="NotifyApplicationsOfReset"/>.</summary>
+    private void ResumeFailurePublishAfterReset()
+    {
+        _failurePublishDeferred = false;
+        PublishCommunicationFailure();
     }
 
     /// <summary>What one application is given of the node. Members other than the dictionary, the

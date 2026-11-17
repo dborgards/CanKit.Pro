@@ -882,6 +882,21 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void PerformNmtReset(bool communicationOnly)
     {
+        // The applications hear of the failure ending when the clearing is done, not from inside it.
+        DeferFailurePublishForReset();
+        try
+        {
+            PerformNmtResetCore(communicationOnly);
+        }
+        finally
+        {
+            // Also when the reset ends early (a disposed node) or throws.
+            _failurePublishDeferred = false;
+        }
+    }
+
+    private void PerformNmtResetCore(bool communicationOnly)
+    {
         ResetEmcyInhibit();
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
         _pendingEmcy = null;
@@ -969,6 +984,7 @@ internal sealed partial class CanOpenNode
         // reset had not reached. With a description the node restored the described ones above;
         // the hook lets the application restore what the description does not hold.
         var resetCommand = communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode;
+        ResumeFailurePublishAfterReset();
         NotifyApplicationsOfReset(resetCommand);
         RaiseApplicationReset(resetCommand);
 

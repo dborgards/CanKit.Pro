@@ -39,7 +39,8 @@ namespace CanKit.Pro.CANopen;
 // — is also what an application that asks for it is told about (PublishCommunicationFailure).
 // The operands of that condition are mutated in several files; each mutation is followed by that
 // call, ahead of anything that reacts to it, so a profile hears of the failure before the node
-// leaves Operational because of it.
+// leaves Operational because of it. An NMT reset is the exception: it publishes once, after its
+// whole clearing (CanOpenNode.Application.cs, DeferFailurePublishForReset).
 internal sealed partial class CanOpenNode
 {
     private const byte GenericErrorBit = 0x01;
@@ -208,7 +209,6 @@ internal sealed partial class CanOpenNode
         _communicationErrors.Clear();
         EndProfileErrorsForReset();
         _heartbeatEmcyTimeouts.Clear();
-        PublishCommunicationFailure();
         InvalidateControllerOverrunMonitoring();
         InvalidateControllerErrorBaseline();
         _heldNodeEmcy = false;

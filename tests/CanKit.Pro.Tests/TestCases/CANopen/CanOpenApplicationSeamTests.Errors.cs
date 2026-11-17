@@ -480,6 +480,27 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task An_Error_Raised_When_A_Reset_Ends_The_Failure_Is_Kept()
+    {
+        var app = Watcher();
+        app.WhenFailureChanged = active =>
+        {
+            if (!active) app.Host!.RaiseError(0x5000, 0x04);
+        };
+        using var watch = new ProducerWatchRig(app);
+        await watch.BeatAsync();
+        watch.Silence();
+        Failures(app).Should().Equal("failure True");
+
+        await ResetFromWireAsync(watch.Rig, NmtCommand.ResetNode);
+        await EmcyChainSettledAsync(watch.Rig.Node);
+
+        Failures(app).Should().Equal("failure True", "failure False");
+        ErrorRegister(watch.Rig.Node).Should().Be(0x05, "the reset's clearing is over before the application hears of it");
+        watch.Rig.Wire.Payloads(SlaveEmcy).Should().Contain(frame => frame.SequenceEqual(Emcy(0x5000, 0x05)));
+    }
+
+    [Fact]
     public async Task A_Reset_Ends_A_Bus_Off_Failure_Too()
     {
         var app = Watcher();
@@ -494,6 +515,33 @@ public partial class CanOpenApplicationSeamTests
         Settle(rig.Node);
 
         app.Log.Skip(mark).Should().ContainInOrder("failure False", "reset ResetNode");
+    }
+
+    [Fact]
+    public async Task A_Callback_That_Ends_The_Failure_Leaves_The_Next_Application_With_The_Truth()
+    {
+        // The first watcher drops the watch from inside its callback: the failure it was just told
+        // about is over before the second watcher's turn.
+        var first = Watcher("first");
+        var second = Watcher("second");
+        bool inCallback = false;
+        bool reentered = false;
+        first.WhenFailureChanged = active =>
+        {
+            if (inCallback) reentered = true;
+            inCallback = true;
+            if (active) first.Host!.ObjectDictionary.WriteUnsigned(0x1016, 1, 0);
+            inCallback = false;
+        };
+        using var watch = new ProducerWatchRig(first, second);
+        await watch.BeatAsync();
+
+        watch.Silence();
+
+        Failures(first).Should().Equal("failure True", "failure False");
+        reentered.Should().BeFalse("what the first application did in its callback is not reported into it");
+        Failures(second).Should().BeEmpty("it is told what is true when its turn comes, and a failure that is over is not news");
+        await OnActor(watch.Rig.Node, () => second.Host!.CommunicationFailureActive.Should().BeFalse());
     }
 
     [Fact]
