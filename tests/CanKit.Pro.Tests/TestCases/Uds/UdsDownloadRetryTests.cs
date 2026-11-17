@@ -182,6 +182,44 @@ public class UdsDownloadRetryTests
         attempts.Should().Be(4);
     }
 
+    // A retry after an ISO-TP transport error waits out the same quarantine window a timeout
+    // leaves: the server may have received the abandoned request and still answer it. Without
+    // QuarantineLateResponses the retry goes out at once. Other services are not held up.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Transport_Error_Retry_Observes_Quarantine(bool quarantine)
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        var attempts = 0;
+        using var channel = new ScriptedChannel(actor, request =>
+        {
+            if (request[0] == 0x36 && ++attempts == 1)
+                throw new IsoTpTimeoutException(IsoTpTimer.NAs, "injected transport timeout");
+            return request[0] == 0x22 ? new byte[] { 0x62, request[1], request[2], 0x01 } : Positive(request);
+        });
+        using var client = new UdsClientImpl(channel, new UdsClientOptions
+        {
+            P2ClientMax = P2,
+            P2StarClientMax = P2Star,
+            MaxTransferDataTimeoutRetries = 1,
+            QuarantineLateResponses = quarantine,
+        }, false, actor);
+        var transfer = client.TransferDataAsync(1, new byte[] { 0xAB });
+        if (quarantine)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, P2Star, Guard);
+            channel.Snapshot().Select(r => r[0]).Should().Equal(0x36);
+            await clock.AdvanceAsync(P2Star);
+        }
+        (await transfer.WaitAsync(Guard)).Should().BeEmpty();
+        channel.Snapshot().Select(r => r[0]).Should().Equal(0x36, 0x36);
+
+        // The window is the TransferData service's only: another service is not held up.
+        (await client.ReadDataByIdentifierAsync(0xF190).WaitAsync(Guard)).Should().Equal(0x01);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

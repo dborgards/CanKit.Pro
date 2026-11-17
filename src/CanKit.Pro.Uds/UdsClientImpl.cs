@@ -1058,6 +1058,12 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 && IsRepeatableTransferFault(ex))
             {
                 // No counter or offset advance until a positive response is accepted.
+                // A timeout has already quarantined the service. A transport error has not, yet
+                // the server may have received the request and still answer it; with
+                // QuarantineLateResponses the repeat waits out the same P2* window, so a late
+                // 0x78 or NRC to the abandoned attempt is not taken for the repeat's answer.
+                if (ex is IsoTpException)
+                    QuarantineLateAnswers(UdsServiceId.TransferData);
             }
         }
     }
