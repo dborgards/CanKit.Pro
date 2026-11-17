@@ -208,6 +208,20 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         localResult.Failure.Should().BeSameAs(local);
     }
 
+    [Fact] // FR-CO-063
+    public async Task A_Transport_Fault_Inside_The_Chain_Reaches_The_Caller()
+    {
+        var fault = new CanOpenTransportException("bus off");
+        var script = Script(
+            (0x1000, 0xFFFF0191u),
+            (0x67FF, 0x000F0191u),
+            (0x6FFF, fault));
+
+        await FluentActions.Awaiting(() => CanOpenLogicalDevices.ReadCoreAsync(script.Upload, default))
+            .Should().ThrowAsync<CanOpenTransportException>();
+        script.Asked.Should().Equal(0x1000, 0x67FF, 0x6FFF);
+    }
+
     [Fact] // Review Focus 5
     public async Task Cancellation_And_A_Failing_1000h_Reach_The_Caller()
     {
