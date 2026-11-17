@@ -145,7 +145,7 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task A_Bound_Description_That_Omits_The_Object_Ends_The_Chain_As_Complete()
+    public async Task A_Bound_Description_That_Omits_The_Object_Ends_The_Chain_By_The_Description()
     {
         var script = Script(
             (0x1000, 0xFFFF0191u),
@@ -154,10 +154,27 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
 
         var result = await CanOpenLogicalDevices.ReadCoreAsync(script.Upload, default);
 
-        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.EndedByPeerDescription);
         result.Failure.Should().BeNull();
         result.Devices.Should().ContainSingle().Which.DeviceType.Value.Should().Be(0x000F0191u);
         script.Asked.Should().Equal(0x1000, 0x67FF, 0x6FFF);
+    }
+
+    [Fact]
+    public async Task FFFFh_With_A_Bound_Description_Without_67FFh_Is_Ended_By_The_Description_With_The_Copy_Of_1000h()
+    {
+        var script = Script(
+            (0x1000, 0xFFFF0191u),
+            (0x67FF, new PeerSdoAccessException(1, 0x67FF, 0, peerDescriptionLoaded: true, "not in the file")));
+
+        var result = await CanOpenLogicalDevices.ReadCoreAsync(script.Upload, default);
+
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.EndedByPeerDescription);
+        result.Failure.Should().BeNull();
+        var device = result.Devices.Should().ContainSingle().Subject;
+        device.Index.Should().Be(0);
+        device.DeviceType.Value.Should().Be(0xFFFF0191u);
+        script.Asked.Should().Equal(0x1000, 0x67FF);
     }
 
     [Fact] // Review Focus 3
@@ -292,11 +309,17 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         unbound.End.Should().Be(CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired);
         unbound.Devices.Should().ContainSingle();
 
-        // description lists 1000h, 67FFh, 6FFFh
+        // description lists 1000h, 67FFh, 6FFFh: it does not declare 77FFh, so the description ends the chain
         client.BindPeerDeviceDescription(0x10, PeerSdoLaboratory.Variables(0x1000, 0x67FF, 0x6FFF));
         var bound = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
-        bound.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+        bound.End.Should().Be(CanOpenLogicalDeviceReadEnd.EndedByPeerDescription);
         bound.Devices.Select(d => d.DeviceType.ProfileNumber).Should().Equal((ushort)401, (ushort)408);
+
+        // description also declares 77FFh, the server holds none: the peer's own "object does not exist"
+        client.BindPeerDeviceDescription(0x10, PeerSdoLaboratory.Variables(0x1000, 0x67FF, 0x6FFF, 0x77FF));
+        var declared = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
+        declared.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+        declared.Devices.Select(d => d.DeviceType.ProfileNumber).Should().Equal((ushort)401, (ushort)408);
     }
 
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);

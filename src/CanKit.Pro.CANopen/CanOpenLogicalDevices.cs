@@ -44,7 +44,9 @@ public sealed class CanOpenLogicalDevice
 /// <summary>How reading the logical-device chain of a peer ended.</summary>
 public enum CanOpenLogicalDeviceReadEnd
 {
-    /// <summary>Every logical device the peer has is in the list.</summary>
+    /// <summary>The peer itself ended the chain: <c>1000h</c> does not carry <c>FFFFh</c>, the peer
+    /// aborted a device-type object with "object does not exist", or eight devices were read.
+    /// Every logical device the peer has is in the list.</summary>
     Complete = 0,
 
     /// <summary><c>1000h</c> says more logical devices follow, but the SDO client refused to read
@@ -57,6 +59,13 @@ public enum CanOpenLogicalDeviceReadEnd
     /// <see cref="CanOpenLogicalDeviceReadResult.Failure"/> says which, and the list holds the
     /// devices read before it.</summary>
     Failed = 2,
+
+    /// <summary>The bound peer description does not declare the next device-type object, so the
+    /// SDO client refused to ask for it. The description is the list of objects the client may
+    /// touch on that peer: the list is complete as far as the bound description goes, not
+    /// necessarily as far as the peer goes. When <c>1000h</c> announced further devices but the
+    /// description declares no <c>67FFh</c>, the only device is the copy of <c>1000h</c>.</summary>
+    EndedByPeerDescription = 3,
 }
 
 /// <summary>The logical devices of a peer as <see cref="CanOpenLogicalDevices.ReadAsync"/> found
@@ -64,10 +73,10 @@ public enum CanOpenLogicalDeviceReadEnd
 public sealed class CanOpenLogicalDeviceReadResult
 {
     internal CanOpenLogicalDeviceReadResult(CanOpenDeviceType deviceType,
-        IReadOnlyList<CanOpenLogicalDevice> devices, CanOpenLogicalDeviceReadEnd end, Exception? failure)
+        List<CanOpenLogicalDevice> devices, CanOpenLogicalDeviceReadEnd end, Exception? failure)
     {
         DeviceType = deviceType;
-        Devices = devices;
+        Devices = devices.ToArray();
         End = end;
         Failure = failure;
     }
@@ -99,59 +108,60 @@ public static class CanOpenLogicalDevices
     /// <summary>The number of logical devices a node can hold.</summary>
     public const int MaxCount = 8;
 
+    private const ushort DeviceTypeObject = 0x1000;
     private const ushort FirstArea = 0x6000;
     private const int AreaSize = 0x800;
     private const int PdosPerLogicalDevice = 64;
 
-    /// <summary>The first object index of a logical device, <c>6000h + index·800h</c>.</summary>
-    /// <param name="index">The logical device, <c>0</c> to <c>7</c>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside
+    /// <summary>The first object index of a logical device, <c>6000h + logicalDevice·800h</c>.</summary>
+    /// <param name="logicalDevice">The logical device, <c>0</c> to <c>7</c>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
     /// <c>0</c> to <c>7</c>.</exception>
-    public static ushort ObjectAreaStart(int index)
+    public static ushort ObjectAreaStart(int logicalDevice)
     {
-        Validate(index);
-        return (ushort)(FirstArea + (index * AreaSize));
+        Validate(logicalDevice);
+        return (ushort)(FirstArea + (logicalDevice * AreaSize));
     }
 
     /// <summary>The index of the object that holds a logical device's device type,
-    /// <c>67FFh + index·800h</c>.</summary>
-    /// <param name="index">The logical device, <c>0</c> to <c>7</c>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside
+    /// <c>67FFh + logicalDevice·800h</c>.</summary>
+    /// <param name="logicalDevice">The logical device, <c>0</c> to <c>7</c>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
     /// <c>0</c> to <c>7</c>.</exception>
-    public static ushort DeviceTypeIndex(int index)
+    public static ushort DeviceTypeIndex(int logicalDevice)
     {
-        Validate(index);
-        return (ushort)(FirstArea + AreaSize - 1 + (index * AreaSize));
+        Validate(logicalDevice);
+        return (ushort)(FirstArea + AreaSize - 1 + (logicalDevice * AreaSize));
     }
 
-    /// <summary>The offset of a logical device's PDO numbers, <c>index·64</c>.</summary>
-    /// <param name="index">The logical device, <c>0</c> to <c>7</c>.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside
+    /// <summary>The offset of a logical device's PDO numbers, <c>logicalDevice·64</c>.</summary>
+    /// <param name="logicalDevice">The logical device, <c>0</c> to <c>7</c>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
     /// <c>0</c> to <c>7</c>.</exception>
-    public static int PdoNumberOffset(int index)
+    public static int PdoNumberOffset(int logicalDevice)
     {
-        Validate(index);
-        return index * PdosPerLogicalDevice;
+        Validate(logicalDevice);
+        return logicalDevice * PdosPerLogicalDevice;
     }
 
     /// <summary>Moves an object index that a profile defines in <c>6000h</c> to <c>67FFh</c> to
     /// where the given logical device holds it.</summary>
-    /// <param name="index">The logical device, <c>0</c> to <c>7</c>.</param>
+    /// <param name="logicalDevice">The logical device, <c>0</c> to <c>7</c>.</param>
     /// <param name="profileIndex">The object index as the profile defines it.</param>
-    /// <returns><paramref name="profileIndex"/> plus <c>index·800h</c>.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is outside
+    /// <returns><paramref name="profileIndex"/> plus <c>logicalDevice·800h</c>.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
     /// <c>0</c> to <c>7</c>, or <paramref name="profileIndex"/> is outside <c>6000h</c> to
     /// <c>67FFh</c>.</exception>
-    public static ushort ToAbsoluteIndex(int index, ushort profileIndex)
+    public static ushort ToAbsoluteIndex(int logicalDevice, ushort profileIndex)
     {
-        Validate(index);
+        Validate(logicalDevice);
         if (profileIndex < FirstArea || profileIndex >= FirstArea + AreaSize)
         {
             throw new ArgumentOutOfRangeException(nameof(profileIndex), profileIndex,
                 "A profile object index lies in 6000h to 67FFh.");
         }
 
-        return (ushort)(profileIndex + (index * AreaSize));
+        return (ushort)(profileIndex + (logicalDevice * AreaSize));
     }
 
     /// <summary>
@@ -166,13 +176,16 @@ public static class CanOpenLogicalDevices
     /// <para>
     /// <c>67FFh</c> is not one of the objects the SDO client may read without a peer description.
     /// With none bound the result says <see cref="CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired"/>
-    /// instead of throwing. With one bound, an object the file does not declare ends the chain as
-    /// <see cref="CanOpenLogicalDeviceReadEnd.Complete"/>: the file is the list of what exists.
+    /// instead of throwing. With one bound, a device-type object the file does not declare ends the
+    /// chain as <see cref="CanOpenLogicalDeviceReadEnd.EndedByPeerDescription"/>: the description
+    /// is the list of objects the client may touch on that peer, so the list is complete as far as
+    /// the description goes. Neither case throws; both concern <c>67FFh</c> and the objects after it.
     /// </para>
     /// <para>
-    /// A failure of <c>1000h</c> propagates, as does cancellation. Inside the chain, an SDO abort
-    /// other than the peer's "object does not exist", the client's own timeout included, and a
-    /// value that is not four bytes end it as <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>
+    /// A failure of <c>1000h</c> propagates, a bound description that does not declare
+    /// <c>1000h</c> (<see cref="PeerSdoAccessException"/>) included, as does cancellation. Inside
+    /// the chain, an SDO abort other than the peer's "object does not exist", the client's own
+    /// timeout included, and a value that is not four bytes end it as <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>
     /// with the devices read so far. Anything else, a transport fault
     /// (<see cref="CanOpenTransportException"/>) among it, reaches the caller as its exception,
     /// as it does for <c>1000h</c>.
@@ -185,6 +198,18 @@ public static class CanOpenLogicalDevices
     /// <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside
     /// <c>1</c> to <c>127</c>.</exception>
+    /// <exception cref="PeerSdoAccessException">A peer description is bound for the peer and does
+    /// not declare <c>1000h</c>. The same refusal of a later object does not throw, see the
+    /// remarks.</exception>
+    /// <exception cref="SdoAbortException">Reading <c>1000h</c> ended in an SDO abort, the
+    /// client's own timeout included.</exception>
+    /// <exception cref="InvalidDataException"><c>1000h</c> did not return four bytes.</exception>
+    /// <exception cref="CanOpenTransportException">A request did not reach the bus, for
+    /// <c>1000h</c> or inside the chain.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
+    /// cancelled.</exception>
+    /// <exception cref="InvalidOperationException">An SDO transfer with that peer is already in
+    /// flight.</exception>
     public static async Task<CanOpenLogicalDeviceReadResult> ReadAsync(
         ICanOpenNode client, byte peerNodeId, CancellationToken cancellationToken = default)
     {
@@ -194,8 +219,6 @@ public static class CanOpenLogicalDevices
             (index, token) => client.SdoUploadAsync(peerNodeId, index, 0x00, token),
             cancellationToken).ConfigureAwait(false);
     }
-
-    private const ushort DeviceTypeObject = 0x1000;
 
     /// <summary>
     /// The read. <paramref name="uploadSubindexZero"/> reads sub-index 0 of one object of the
@@ -212,13 +235,13 @@ public static class CanOpenLogicalDevices
 
         if (first.HasFurtherLogicalDevices)
         {
-            for (var index = 0; index < MaxCount; index++)
+            for (var logicalDevice = 0; logicalDevice < MaxCount; logicalDevice++)
             {
                 try
                 {
-                    var type = await ReadDeviceTypeAsync(uploadSubindexZero, DeviceTypeIndex(index), cancellationToken)
+                    var type = await ReadDeviceTypeAsync(uploadSubindexZero, DeviceTypeIndex(logicalDevice), cancellationToken)
                         .ConfigureAwait(false);
-                    devices.Add(new CanOpenLogicalDevice(index, type));
+                    devices.Add(new CanOpenLogicalDevice(logicalDevice, type));
                 }
                 catch (SdoAbortException abort)
                     when (abort.Origin == SdoAbortOrigin.Peer && abort.AbortCode == (uint)SdoAbortCode.ObjectDoesNotExist)
@@ -227,9 +250,12 @@ public static class CanOpenLogicalDevices
                 }
                 catch (PeerSdoAccessException refused)
                 {
-                    // A bound file lists what exists, so what it omits is not there. With no file
-                    // bound the answer is unknown, and the caller can supply one.
-                    if (!refused.PeerDescriptionLoaded) end = CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired;
+                    // The client refused before sending anything, so the peer did not end the chain.
+                    // With no file bound the caller can supply one; with one bound, it is the
+                    // description that ends the chain.
+                    end = refused.PeerDescriptionLoaded
+                        ? CanOpenLogicalDeviceReadEnd.EndedByPeerDescription
+                        : CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired;
                     break;
                 }
                 catch (Exception ex) when (ex is SdoAbortException or InvalidDataException)
@@ -261,11 +287,11 @@ public static class CanOpenLogicalDevices
         return type;
     }
 
-    private static void Validate(int index)
+    private static void Validate(int logicalDevice)
     {
-        if (index < 0 || index >= MaxCount)
+        if (logicalDevice < 0 || logicalDevice >= MaxCount)
         {
-            throw new ArgumentOutOfRangeException(nameof(index), index,
+            throw new ArgumentOutOfRangeException(nameof(logicalDevice), logicalDevice,
                 "A node has logical devices 0 to 7.");
         }
     }

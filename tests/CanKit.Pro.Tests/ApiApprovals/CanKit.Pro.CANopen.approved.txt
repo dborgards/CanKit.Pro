@@ -110,6 +110,7 @@ namespace CanKit.Pro.CANopen
         Complete = 0,
         PeerDescriptionRequired = 1,
         Failed = 2,
+        EndedByPeerDescription = 3,
     }
     public sealed class CanOpenLogicalDeviceReadResult
     {
@@ -121,11 +122,11 @@ namespace CanKit.Pro.CANopen
     public static class CanOpenLogicalDevices
     {
         public const int MaxCount = 8;
-        public static ushort DeviceTypeIndex(int index) { }
-        public static ushort ObjectAreaStart(int index) { }
-        public static int PdoNumberOffset(int index) { }
+        public static ushort DeviceTypeIndex(int logicalDevice) { }
+        public static ushort ObjectAreaStart(int logicalDevice) { }
+        public static int PdoNumberOffset(int logicalDevice) { }
         public static System.Threading.Tasks.Task<CanKit.Pro.CANopen.CanOpenLogicalDeviceReadResult> ReadAsync(CanKit.Pro.CANopen.ICanOpenNode client, byte peerNodeId, System.Threading.CancellationToken cancellationToken = default) { }
-        public static ushort ToAbsoluteIndex(int index, ushort profileIndex) { }
+        public static ushort ToAbsoluteIndex(int logicalDevice, ushort profileIndex) { }
     }
     public static class CanOpenNodeExtensions
     {
