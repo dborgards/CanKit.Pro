@@ -1327,11 +1327,12 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   deadlines on the node's time source, requesting the node's own NMT state — is internal. ADR-12
   and ADR-13 declined a public interface for that while there were only communication services,
   which need the node from the inside.
-- **Decision:** A narrow application seam in the package `CanKit.Pro.CANopen`, reached like safety
-  through an extension method and not through `ICanOpenNode`. One package per profile
+- **Decision:** A narrow application seam in the package `CanKit.Pro.CANopen`; `ICanOpenNode` is
+  not widened. One package per profile
   (`CanKit.Pro.CANopen.Cia401`, `CanKit.Pro.CANopen.Cia408`), depending only on the seam and on
   `ICanOpenNode` and made of an object catalogue, the device side and the tool side. A profile is
-  attached to a node, with the number of the logical device. The seam stays `internal` until two
+  handed to the node when it is opened, with the number of the logical device, and is attached
+  before the node starts up on the bus. The seam stays `internal` until two
   profiles have been built against it and is published only then. CiA 302 stays in the core
   package per ADR-13. Rejected: profiles in the core package (each further one enlarges the
   largest package, and a device application of one's own still cannot hook in behaviour) and one

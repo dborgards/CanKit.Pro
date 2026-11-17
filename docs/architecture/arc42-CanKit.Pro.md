@@ -1327,11 +1327,12 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   Einträge reagieren, Fristen auf der Zeitquelle des Knotens, den eigenen NMT-Zustand anfordern —
   ist intern. ADR-12 und ADR-13 haben eine öffentliche Schnittstelle dafür abgelehnt, solange es
   nur Kommunikationsdienste gab, die den Knoten von innen brauchen.
-- **Entscheidung:** Eine schmale Anwendungsnaht im Paket `CanKit.Pro.CANopen`, erreicht wie Safety
-  über eine Erweiterungsmethode und nicht über `ICanOpenNode`. Je Profil ein eigenes Paket
+- **Entscheidung:** Eine schmale Anwendungsnaht im Paket `CanKit.Pro.CANopen`; `ICanOpenNode`
+  wird nicht verbreitert. Je Profil ein eigenes Paket
   (`CanKit.Pro.CANopen.Cia401`, `CanKit.Pro.CANopen.Cia408`), das nur an der Naht und an
   `ICanOpenNode` hängt und aus einem Objektkatalog, der Geräteseite und der Tool-Seite besteht. Ein
-  Profil wird an einen Knoten angehängt, mit der Nummer des logischen Geräts. Die Naht bleibt
+  Profil wird dem Knoten beim Öffnen mitgegeben, mit der Nummer des logischen Geräts, und ist
+  angehängt, bevor der Knoten am Bus anläuft. Die Naht bleibt
   `internal`, bis zwei Profile gegen sie gebaut sind, und wird erst dann veröffentlicht. CiA 302
   bleibt nach ADR-13 im Kernpaket. Verworfen: Profile im Kernpaket (jedes weitere vergrößert das
   größte Paket, und eine eigene Geräteanwendung kann weiter kein Verhalten einhängen) und ein

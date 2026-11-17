@@ -76,6 +76,10 @@ Knoten *angehängt* wird, mit einer Nummer 0..7 für das logische Gerät.
   `1010h` nicht gespeichert.
 - `PdoCount` (Vorgabe 4) und `EnableErrorBehavior` (`1029h`, nur Sub-Index `01h`) stehen beim
   Öffnen des Knotens fest. PDOs oberhalb von 4 haben keine Default-COB-ID.
+- Der Konstruktor von `CanOpenNode` reiht den Anlauf selbst ein — Kommunikationsobjekte anwenden,
+  Pre-operational, Boot-up-Nachricht — und startet danach den Leser (`CanOpenNode.cs`, Ende des
+  Konstruktors). Wenn `CanOpen.OpenNode` zurückkehrt, kann der Knoten schon am Bus sichtbar sein.
+  Einen Zeitpunkt „nach dem Öffnen, vor dem Anlauf" gibt es für den Aufrufer nicht.
 - Öffentlich vorhanden und für Profile nutzbar: `State`, `SendEmcyAsync`, `ConfigureTpdo` /
   `ConfigureRpdo`, `TriggerTpdoAsync`, `RpdoReceived`, `NmtCommandReceived`, `ApplicationReset`;
   das Fehlerverhalten `1029h` (`CanOpenNode.ErrorBehavior.cs`).
@@ -143,15 +147,18 @@ Von drei Wegen ist B gewählt:
 
 ### Die Anwendungsnaht (Kernpaket)
 
-Namensraum `CanKit.Pro.CANopen.Application`. Erreicht wie Safety über eine Erweiterungsmethode
-(`node.Application()`), nicht über `ICanOpenNode`.
+Namensraum `CanKit.Pro.CANopen.Application`. Ein Profil wird dem Knoten **beim Öffnen**
+mitgegeben, über `CanOpenNodeOptions`, nicht über `ICanOpenNode` und nicht nachträglich. Der
+Konstruktor hängt es an, bevor er den Anlauf einreiht: die Objekte des Profils stehen im
+Verzeichnis, bevor die Boot-up-Nachricht hinausgeht und bevor der erste empfangene Frame
+verarbeitet wird. Ein Master, der den Knoten sieht, sieht ihn mit seinem Profil.
 
 Was die Naht dem Profil gibt (`ICanOpenApplicationHost`):
 
 | Fähigkeit | Wozu, mit Normbeleg | Heute |
 |---|---|---|
 | Objektverzeichnis, NMT-Zustand | Grundlage | öffentlich |
-| Profil anhängen / abhängen (`Attach` → `IDisposable`) | Lebensdauer | neu |
+| Profil beim Öffnen übergeben (Liste in `CanOpenNodeOptions`); es lebt so lange wie der Knoten | Lebensdauer; der Knoten ist nie ohne sein Profil am Bus | neu |
 | Frist auf der Zeitquelle des Knotens | Filter, Zeitüberwachung; ein virtueller Takt in Tests (CLAUDE.md § „Before claiming something is true", Uhr-Regel) | intern |
 | Bestimmen, ob eine Änderung sendet | Interrupt-Masken `6005h`–`6008h`, `6421h`–`6428h` (CiA 401-1 §8.2, §8.6). Das Profil braucht beides: von der Anwendung gesetzte Werte, die *nicht* senden, und Werte, die es selbst auf der Aktor-Schleife setzt und die senden | Automatik nur für Schreibzugriffe außerhalb des Aktors, nur knotenweit abschaltbar; `TriggerTpdoAsync` öffentlich |
 | Fehler melden und zurücknehmen (EMCY-Code, Bit im Fehlerregister) | CiA 401-1 §5, CiA 408 §6 | `SendEmcyAsync` öffentlich; Kopplung an `1001h`/`1003h` prüfen |
@@ -163,7 +170,7 @@ Was das Profil der Naht gibt (`ICanOpenApplication`):
 
 | Rückruf | Läuft auf | Wozu |
 |---|---|---|
-| Beanspruchte Indexbereiche | — | Zuständigkeit; zwei Profile mit überlappendem Anspruch werden beim Anhängen abgelehnt |
+| Beanspruchte Indexbereiche | — | Zuständigkeit; zwei Profile mit überlappendem Anspruch lassen das Öffnen scheitern |
 | Schreibzugriff prüfen → speichern / ablehnen (Abort-Code) / als Kommando annehmen | schreibender Thread, wie `WriteValidator` heute | Wertebereich, „nicht in diesem Zustand" |
 | Eintrag wurde geschrieben | Aktor-Schleife, zusammengefasst | Ausgang nachführen, Steuerwort auswerten |
 | Reset (Anwendung / Kommunikation) | Aktor-Schleife | Zustandsautomat und flüchtige Zustände zurücksetzen; die Werte stellt der Knoten wieder her |
@@ -185,16 +192,19 @@ Regeln der Naht:
   zu posten das Postfach unbegrenzt wachsen lässt. Folge: das Profil erfährt, *dass* ein Eintrag
   sich geändert hat, nicht jede Zwischenstufe. Eine Ausnahme im Rückruf geht nach
   `BackgroundExceptionOccurred`.
-- **Festlegung des Autors — Anhängen und die Optionen des Knotens.** Was ein Profil vom Knoten
-  braucht, steht beim Öffnen fest (`PdoCount`, `EnableErrorBehavior`). Das Profil liefert deshalb
-  eine Hilfe, die `CanOpenNodeOptions` um seinen Bedarf ergänzt, und `Attach` lehnt mit einer
-  Meldung ab, die den fehlenden Punkt nennt, statt still weniger zu tun. Angehängt wird, bevor der
-  Knoten die Initialisierung verlässt; später ist es ein Fehler.
+- **Festlegung des Autors — Anhängen nur beim Öffnen.** Ein nachträgliches `Attach` am geöffneten
+  Knoten gibt es nicht: der Anlauf ist dann schon eingereiht (siehe „Was schon da ist"), das
+  Anhängen liefe gegen ihn um die Wette, und ein Master könnte den Knoten ohne seine Profilobjekte
+  sehen. Dass ein Profil mit dem Knoten endet und nicht vorher abgehängt werden kann, ist die
+  Folge. Was ein Profil vom Knoten braucht, steht ebenfalls beim Öffnen fest (`PdoCount`,
+  `EnableErrorBehavior`): das Profil liefert eine Hilfe, die `CanOpenNodeOptions` um sich selbst
+  und um seinen Bedarf ergänzt, und das Öffnen scheitert mit einer Meldung, die den fehlenden
+  Punkt nennt, statt still weniger zu tun.
 - **Festlegung des Autors — Profil an einem Knoten aus EDS/DCF.** Die Datei gewinnt. Ein Profil
   hat zwei Wege, zu seinen Objekten zu kommen: aus einer `Configuration` (es legt sie an) oder aus
   dem vorhandenen Verzeichnis (es übernimmt, was die Datei deklariert hat, und leitet daraus ab,
   welche Funktionsblöcke es bedient). Ein Objekt des Katalogs, das die Datei mit anderem Typ
-  deklariert, ist ein Fehler beim Anhängen. So bleibt eine echte EDS — die sagt, welche optionalen
+  deklariert, lässt das Öffnen scheitern. So bleibt eine echte EDS — die sagt, welche optionalen
   Objekte *dieses* Gerät hat — die Quelle für die Simulation genau dieses Geräts.
 - **Festlegung des Autors — Reset und Speichern.** Gehört dazu. Objekte, die ein Profil anlegt,
   werden wie beschriebene Objekte behandelt: Reset Node stellt sie wieder her, `1010h`/`1011h`
@@ -244,8 +254,8 @@ Zuordnung zu SOLID, damit sie prüfbar ist:
 - **Eine Verantwortung:** Katalog kennt Objekte, Device kennt Verhalten, Peer kennt Fernzugriff.
   Keiner kennt den Bus.
 - **Offen/geschlossen:** ein neues Profil ist ein neues Paket und ein neuer Beschreiber.
-- **Ersetzbarkeit:** jedes `ICanOpenApplication` ist an jeden Knoten anhängbar; Tests hängen eine
-  aufzeichnende Attrappe an (wie `ISrdoEngineHost`).
+- **Ersetzbarkeit:** jedes `ICanOpenApplication` kann jedem Knoten mitgegeben werden; Tests geben ihm eine
+  aufzeichnende Attrappe mit (wie `ISrdoEngineHost`).
 - **Getrennte Schnittstellen:** ein 401-Gerät hat eine Teilmenge der vier Funktionsblöcke
   (Digital-Ein, Digital-Aus, Analog-Ein, Analog-Aus; CiA 401-1 §7.2). Jeder Block ist eine eigene
   Schnittstelle; `Cia401Peer` bietet nur die an, die der Gerätetyp ausweist (§6.2.1). Bei 408:
