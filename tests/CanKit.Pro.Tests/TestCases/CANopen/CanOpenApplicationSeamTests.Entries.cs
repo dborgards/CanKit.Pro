@@ -74,6 +74,7 @@ public partial class CanOpenApplicationSeamTests
         private readonly ICanBus _bus;
         private readonly object _gate = new();
         private readonly Dictionary<uint, List<byte[]>> _frames = new();
+        private readonly List<(uint CobId, byte[] Data)> _sequence = new();
 
         internal RawWire(string session, int channel)
         {
@@ -87,8 +88,18 @@ public partial class CanOpenApplicationSeamTests
                 {
                     if (!_frames.TryGetValue((uint)frame.ID, out var list)) _frames[(uint)frame.ID] = list = new List<byte[]>();
                     list.Add(data);
+                    _sequence.Add(((uint)frame.ID, data));
                 }
             };
+        }
+
+        /// <summary>Every data frame seen, across all COB-IDs, in the order the wire carried them.</summary>
+        internal (uint CobId, byte[] Data)[] Sequence
+        {
+            get
+            {
+                lock (_gate) return _sequence.ToArray();
+            }
         }
 
         internal int Count(uint cobId)
@@ -143,12 +154,12 @@ public partial class CanOpenApplicationSeamTests
         internal readonly RawWire Wire;
         internal readonly CanOpenNode Node;
 
-        internal EntryRig(CanOpenNodeOptions options, ITimeSource? clock = null)
+        internal EntryRig(CanOpenNodeOptions options, ITimeSource? clock = null, byte nodeId = Slave)
         {
             var session = NewSession();
             _bus = Open(session, 1);
             Wire = new RawWire(session, 2);
-            Node = OpenNode(_bus, options, clock);
+            Node = OpenNode(_bus, options, clock, nodeId: nodeId);
         }
 
         internal ObjectDictionary Od => Node.ObjectDictionary;

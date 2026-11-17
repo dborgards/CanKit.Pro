@@ -1015,8 +1015,11 @@ internal sealed partial class CanOpenNode
         // Re-armed before the frames are ordered, for the same reason the guarding reply arms
         // its life time first (#141): a frame on the wire implies the timer behind it is set.
         _heartbeatProducer.RestartCycle();
-        _ = EmitHeartbeat(0x00);
+        var bootUp = EmitHeartbeat(0x00);
         if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
+        // What a profile raised in Initialisation, from a reset's callbacks or while an LSS slave
+        // waited for its node-id: ahead of anything the monitoring started below reports.
+        ReleaseProfileEmcysAfterBootUp(bootUp);
         StartControllerOverrunMonitoring();
         StartControllerErrorMonitoring();
         NotifyNmtStateChanged(previous);

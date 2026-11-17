@@ -31,9 +31,17 @@ namespace CanKit.Pro.CANopen;
 // host: those are the node's part of 1001h too, not the application's, and are kept beside the
 // communication errors (NodeErrorBits). A profile error is recorded even while the EMCY is
 // switched off, because the register must show it; it ends when the profile clears it, and its
-// EMCY and its 0000h go out through the same chain and the same Stopped rule as the rest.
+// EMCY and its 0000h go out through the same chain and the same Stopped rule as the rest. A profile
+// error raised in Initialisation — from a reset's callbacks, or while an LSS slave waits for its
+// node-id — is recorded at once, but its EMCY is held until the boot-up is ordered and then goes
+// out behind it, with the register of that moment (CanOpenNode.Application.cs,
+// ReleaseProfileEmcysAfterBootUp): in Initialisation only the boot-up object exists (§7.3.2.2.1).
+// The register shows it from that EMCY on, as it shows an EMCY held in Stopped from its release.
+// An error the profile clears while its EMCY is still held leaves nothing on the bus. The node's
+// communication errors are not held this way, so a node without applications holds nothing in
+// Initialisation.
 // A reset (transition 5, then 0) ends every communication error and every profile error without
-// an EMCY.
+// an EMCY, and drops a profile EMCY still held.
 //
 // The condition the error behaviour of 1029h reacts to — bus-off, heartbeat timeout, life guarding
 // — is also what an application that asks for it is told about (PublishCommunicationFailure).

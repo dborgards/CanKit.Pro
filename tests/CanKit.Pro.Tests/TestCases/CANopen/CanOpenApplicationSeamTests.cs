@@ -39,8 +39,8 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
     private static ICanBus Open(string session, int channel) => VirtualAdapterFixture.Open(session, channel);
 
     private static CanOpenNode OpenNode(ICanBus bus, CanOpenNodeOptions options, ITimeSource? clock = null,
-        CanOpenDeviceDescription? description = null)
-        => new(new CanBusService(bus), Slave, options, ownsService: true, clock, description);
+        CanOpenDeviceDescription? description = null, byte nodeId = Slave)
+        => new(new CanBusService(bus), nodeId, options, ownsService: true, clock, description);
 
     private static CanOpenNodeOptions With(params ICanOpenApplication[] applications)
         => applications.Aggregate(new CanOpenNodeOptions(), (options, application) => options.WithApplication(application));

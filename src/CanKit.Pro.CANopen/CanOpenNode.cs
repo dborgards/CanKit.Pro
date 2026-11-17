@@ -356,7 +356,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
             if (LayerSettingsBlockBoot()) return;
             _state = NmtState.PreOperational;
-            _ = EmitHeartbeat(0x00);
+            // A deadline an application armed in Attach can run before this job, in
+            // Initialisation; an error it raised there follows the boot-up.
+            ReleaseProfileEmcysAfterBootUp(EmitHeartbeat(0x00));
             StartControllerOverrunMonitoring();
             StartControllerErrorMonitoring();
             NotifyNmtStateChanged(NmtState.Initializing);

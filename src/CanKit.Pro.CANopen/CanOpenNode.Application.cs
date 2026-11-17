@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Emcy;
@@ -405,10 +406,21 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    // The EMCYs of profile errors raised in Initialisation, oldest first, not yet ordered: in that
+    // state only the boot-up object exists (CiA 301 §7.3.2.2.1, Table 37), so they wait for it
+    // (ReleaseProfileEmcysAfterBootUp). It holds exactly the errors active in Initialisation, as
+    // every one of those was raised in it: a reset ends all profile errors and drops this list
+    // before it enters the state, and nothing calls a profile before the start-up's Initialisation.
+    // So an error cleared before the boot-up leaves its entry and nothing else, and the list is
+    // bounded by the errors active at once however long an LSS slave waits for its node-id. Null
+    // when empty. Actor loop only.
+    private List<(ApplicationSlot Slot, ushort Code, byte[] ManufacturerSpecific)>? _heldProfileEmcys;
+
     /// <summary>Records an error of <paramref name="slot"/>'s application and orders its EMCY: once per
     /// error event, so an error that is active already does nothing (CiA 301 §7.2.7.1). Unlike a
     /// communication error it is recorded while the EMCY is switched off too, since the register has
-    /// to show it; the EMCY is then written to the register without a frame, as in Stopped it is held.</summary>
+    /// to show it; the EMCY is then written to the register without a frame, as in Stopped it is held.
+    /// In Initialisation the EMCY is held until the boot-up has been ordered.</summary>
     private void RaiseProfileError(ApplicationSlot slot, ushort errorCode, byte errorRegisterBits,
         ReadOnlySpan<byte> manufacturerSpecific)
     {
@@ -428,22 +440,72 @@ internal sealed partial class CanOpenNode
         var key = (slot, errorCode);
         if (_profileErrors.ContainsKey(key)) return;
         _profileErrors[key] = errorRegisterBits;
-        EmitNodeEmcy(errorCode, manufacturerSpecific.ToArray());
+        var manufacturer = manufacturerSpecific.ToArray();
+        if (_state == NmtState.Initializing)
+        {
+            (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer));
+            return;
+        }
+        EmitNodeEmcy(errorCode, manufacturer);
     }
 
     /// <summary>Ends an error of <paramref name="slot"/>'s application: nothing when it is not active,
     /// else one <c>0000h</c> that carries what the register still holds (§7.2.7.1: an error reset
-    /// "may be transmitted together with the remaining errors").</summary>
+    /// "may be transmitted together with the remaining errors"). In Initialisation the error's EMCY
+    /// is still held, so there is nothing on the bus to reset: the held EMCY is dropped instead,
+    /// and nothing is sent.</summary>
     private void ClearProfileError(ApplicationSlot slot, ushort errorCode)
     {
         RequireActor(nameof(ApplicationHost.ClearError));
         if (!_profileErrors.Remove((slot, errorCode))) return;
+        if (_state == NmtState.Initializing)
+        {
+            _heldProfileEmcys?.RemoveAll(held => ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
+            return;
+        }
         EmitErrorReset();
     }
 
-    /// <summary>NMT reset: the profile errors end with the communication errors, without an EMCY. A
-    /// profile whose cause persists raises its error again from <c>OnReset</c>.</summary>
-    private void EndProfileErrorsForReset() => _profileErrors.Clear();
+    /// <summary>NMT reset: the profile errors end with the communication errors, without an EMCY, and
+    /// an EMCY still held from an earlier Initialisation is dropped with them. A profile whose cause
+    /// persists raises its error again from <c>OnReset</c>; in Initialisation, its EMCY then follows
+    /// the boot-up.</summary>
+    private void EndProfileErrorsForReset()
+    {
+        _profileErrors.Clear();
+        _heldProfileEmcys = null;
+    }
+
+    /// <summary>
+    /// The boot-up (<paramref name="bootUp"/>) is ordered and the node has left Initialisation: the
+    /// profile EMCYs held there go out behind it, in the order they were raised, each with the
+    /// register of the moment it is released, as a held EMCY in Stopped does. A no-op when nothing
+    /// is held, which is always so on a node without applications. Actor loop.
+    /// </summary>
+    /// <remarks>
+    /// The boot-up travels on the heartbeat chain and the EMCY on its own, so ordering one before the
+    /// other on the actor does not order them on the bus. The EMCY chain therefore waits for the
+    /// boot-up's send first: that task completes once the driver has confirmed the frame
+    /// (SendControlFrame), or once it was dropped, failed or cancelled, which ends the wait too.
+    /// </remarks>
+    private void ReleaseProfileEmcysAfterBootUp(Task bootUp)
+    {
+        var held = _heldProfileEmcys;
+        if (held is not { Count: > 0 }) return;
+        _heldProfileEmcys = null;
+        _ = AppendToEmcyChain(() =>
+        {
+            HeldEmcysWaitForBootUpForTests?.Invoke();
+            return bootUp.ContinueWith(static sent => { _ = sent.Exception; },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        });
+        foreach (var (_, code, manufacturer) in held)
+            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer));
+    }
+
+    /// <summary>Test seam: runs on the actor when the EMCY chain starts waiting for the boot-up
+    /// before it sends the profile EMCYs held in Initialisation.</summary>
+    internal Action? HeldEmcysWaitForBootUpForTests { get; set; }
 
     private void RequireActor(string member)
     {
