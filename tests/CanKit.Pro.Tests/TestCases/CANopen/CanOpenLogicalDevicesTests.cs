@@ -73,7 +73,7 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         FluentActions.Invoking(() => CanOpenLogicalDevices.DeviceTypeIndex(index)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
         FluentActions.Invoking(() => CanOpenLogicalDevices.PdoNumberOffset(index)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
         FluentActions.Invoking(() => CanOpenLogicalDevices.ToAbsoluteIndex(index, 0x6000)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("logicalDevice");
-        FluentActions.Invoking(() => new CanOpenLogicalDevice(index, default)).Should().Throw<ArgumentOutOfRangeException>();
+        FluentActions.Invoking(() => new CanOpenLogicalDevice(index, default)).Should().Throw<ArgumentOutOfRangeException>().WithParameterName("index");
     }
 
     [Fact] // FR-CO-063

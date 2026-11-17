@@ -20,7 +20,8 @@ public sealed class CanOpenLogicalDevice
     /// <c>0</c> to <c>7</c>.</exception>
     public CanOpenLogicalDevice(int index, CanOpenDeviceType deviceType)
     {
-        // The static helper validates the index, so the range is defined in one place.
+        // The range is defined once, in Validate; the constructor names its own parameter.
+        CanOpenLogicalDevices.Validate(index, nameof(index));
         ObjectAreaStart = CanOpenLogicalDevices.ObjectAreaStart(index);
         Index = index;
         DeviceType = deviceType;
@@ -287,11 +288,11 @@ public static class CanOpenLogicalDevices
         return type;
     }
 
-    private static void Validate(int logicalDevice)
+    internal static void Validate(int logicalDevice, string paramName = "logicalDevice")
     {
         if (logicalDevice < 0 || logicalDevice >= MaxCount)
         {
-            throw new ArgumentOutOfRangeException(nameof(logicalDevice), logicalDevice,
+            throw new ArgumentOutOfRangeException(paramName, logicalDevice,
                 "A node has logical devices 0 to 7.");
         }
     }
