@@ -77,13 +77,14 @@ public partial class CanOpenApplicationSeamTests
     {
         using var release = new ManualResetEventSlim();
         NmtState? stateWhenRaised = null;
+        bool released = false;
         var app = Profile();
         // A deadline armed in Attach and due at once runs ahead of the start-up job: the actor does
         // not let later mailbox work overtake a timer that was due before it was posted. It waits
         // for the test, so the boot-up cannot have left before the hold is in place.
         app.OnAttach = host => host.Arm(TimeSpan.Zero, () =>
         {
-            release.Wait(ShortTimeout);
+            released = release.Wait(ShortTimeout);
             stateWhenRaised = host.State;
             host.RaiseError(0x5000, 0x04);
         });
@@ -95,6 +96,9 @@ public partial class CanOpenApplicationSeamTests
         await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
         await EmcyChainSettledAsync(rig.Node);
 
+        // Asserted here, not in the callback: a throw on the actor loop is a background exception,
+        // not a test failure.
+        released.Should().BeTrue("the deadline waited for the test, so the hold was in place before the boot-up");
         stateWhenRaised.Should().Be(NmtState.Initializing, "the error is raised before the node has booted");
         ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire), Emcy(0x5000, 0x05));
         ErrorRegister(rig.Node).Should().Be(0x05);
