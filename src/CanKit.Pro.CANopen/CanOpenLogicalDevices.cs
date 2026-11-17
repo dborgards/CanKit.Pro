@@ -52,8 +52,10 @@ public enum CanOpenLogicalDeviceReadEnd
     /// <see cref="ICanOpenNode.BindPeerDeviceDescription"/> and read again.</summary>
     PeerDescriptionRequired = 1,
 
-    /// <summary>A read inside the chain failed. <see cref="CanOpenLogicalDeviceReadResult.Failure"/>
-    /// says how, and the list holds the devices read before it.</summary>
+    /// <summary>A read inside the chain ended in an SDO abort other than the peer's "object does
+    /// not exist", the client's own timeout included, or returned a value that is not four bytes.
+    /// <see cref="CanOpenLogicalDeviceReadResult.Failure"/> says which, and the list holds the
+    /// devices read before it.</summary>
     Failed = 2,
 }
 
@@ -168,9 +170,12 @@ public static class CanOpenLogicalDevices
     /// <see cref="CanOpenLogicalDeviceReadEnd.Complete"/>: the file is the list of what exists.
     /// </para>
     /// <para>
-    /// A failure of <c>1000h</c> propagates, as does cancellation. Any other failure inside the
-    /// chain, including the client's own timeout, ends it as
-    /// <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> with the devices read so far.
+    /// A failure of <c>1000h</c> propagates, as does cancellation. Inside the chain, an SDO abort
+    /// other than the peer's "object does not exist", the client's own timeout included, and a
+    /// value that is not four bytes end it as <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>
+    /// with the devices read so far. Anything else, a transport fault
+    /// (<see cref="CanOpenTransportException"/>) among it, reaches the caller as its exception,
+    /// as it does for <c>1000h</c>.
     /// </para>
     /// </remarks>
     /// <param name="client">An opened node whose SDO client does the reads.</param>

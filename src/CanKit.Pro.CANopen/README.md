@@ -503,7 +503,7 @@ information says that the node has more logical devices than the one this word d
 A node has up to eight logical devices. Logical device `x` owns the `800h` objects from
 `6000h + x·800h`, and its device-type object is `67FFh + x·800h`: `67FFh`, `6FFFh` and on to `9FFFh`
 (CiA 301 §7.5.2.1). `CanOpenLogicalDevices` does that arithmetic, and `ReadAsync` reads the chain
-of a peer through the client's SDO client:
+of a peer with SDO uploads from the client:
 
 ```csharp
 var peer = await CanOpenLogicalDevices.ReadAsync(client, peerNodeId: 0x10);
@@ -524,10 +524,13 @@ the first device carries the type of `1000h`. `End` says how the reading ended:
   the client may read without a peer description ([SDO client](#sdo-client-and-a-peers-device-description))
   and none is bound for this node. Nothing is sent for it, and `ReadAsync` does not throw. Bind a
   description that lists the objects and read again.
-- `Failed`: a read inside the chain failed, or returned something other than four bytes.
-  `Failure` holds the exception and `Devices` what was read before it.
+- `Failed`: a read inside the chain ended in an SDO abort other than "object does not exist", the
+  client's own timeout included, or returned something other than four bytes. `Failure` holds the
+  exception and `Devices` what was read before it.
 
-A failure of `1000h:00` itself, and cancellation, propagate to the caller.
+A failure of `1000h:00` itself reaches the caller as its exception. So does anything inside the
+chain that is not one of the two cases above, a transport fault (`CanOpenTransportException`) and
+cancellation among it.
 
 ## PDO engine
 
