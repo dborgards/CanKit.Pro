@@ -641,9 +641,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // turn can come long after its release (the boot-up's send is waited for first), in a state
         // the node has entered since, and the gate holds it while the node is Stopped (CiA 301 v4.2.0
         // §7.3.2.2.4, Table 37) and drops it on a reset (the epoch). Without inhibit time the gate
-        // waits for nothing else (#549). So does a profile EMCY raised while the boot-up's send is still
-        // pending, which waits for it likewise (gate, #561). Every other EMCY keeps the path its options
-        // give it.
+        // waits for nothing else (#549). So does every other EMCY of a profile, raise and clear (gate):
+        // one raised while the boot-up's send is still pending waits for it likewise (#561), and one
+        // queued behind a profile EMCY that waits must not outlive a reset that drops that one. Every
+        // other EMCY keeps the path its options give it.
         bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null || gate;
         return AppendToEmcyChain(() => gated
             ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());

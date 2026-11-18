@@ -251,11 +251,12 @@ internal interface ICanOpenApplicationHost
     /// Stopped and goes out then, whatever the options (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY
     /// in Stopped).
     /// </para>
-    /// <para>An NMT reset ends every error without an EMCY, and <c>1001h</c> loses its bits. An EMCY
-    /// held in Initialisation that has not been transmitted when the reset comes is dropped with its
-    /// error, frame and <c>1001h</c> write alike: one still held, and one already released behind the
-    /// boot-up but still waiting for its turn (a master that resets the node as soon as it sees the
-    /// boot-up), in Stopped included.</para>
+    /// <para>An NMT reset ends every error without an EMCY, and <c>1001h</c> loses its bits. An EMCY of
+    /// the application, raise or <see cref="ClearError"/>, that has not been transmitted when the reset
+    /// comes is dropped, frame and <c>1001h</c> write alike: one held in Initialisation, one already
+    /// released behind the boot-up but still waiting for its turn (a master that resets the node as
+    /// soon as it sees the boot-up), one waiting for the node to leave Stopped or for its inhibit time,
+    /// and one queued behind any of these.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>,
     /// the error reset, which <see cref="ClearError"/> sends; or <paramref name="errorRegisterBits"/>

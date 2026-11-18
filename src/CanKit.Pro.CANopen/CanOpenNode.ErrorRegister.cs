@@ -173,9 +173,10 @@ internal sealed partial class CanOpenNode
     // does not keep reading an error that has ended.
     private void EmitErrorReset() => EmitNodeEmcy(ErrorResetCode);
 
-    // behindBootUp: a profile EMCY that waits for the boot-up's send on the chain (#561); it takes the
-    // gated path, so that the turn it gets after that wait is decided in the state the node is in then.
-    private void EmitNodeEmcy(ushort errorCode, byte[]? manufacturerSpecific = null, bool behindBootUp = false)
+    // profile: an EMCY of an attached profile, raise or clear. It takes the gated path of the chain
+    // (EmitEmcy), so that its turn is decided in the state the node is in then: it waits in Stopped,
+    // and a reset drops it, whatever it waited behind (#549, #561).
+    private void EmitNodeEmcy(ushort errorCode, byte[]? manufacturerSpecific = null, bool profile = false)
     {
         // The register byte is filled in when the frame is transmitted (EmitEmcy).
         var msg = new EmcyMessage(_nodeId, errorCode, 0, manufacturerSpecific);
@@ -188,7 +189,7 @@ internal sealed partial class CanOpenNode
             _heldNodeEmcy = true;
             return;
         }
-        _ = EmitEmcy(msg, gate: behindBootUp);
+        _ = EmitEmcy(msg, gate: profile);
     }
 
     // Whether _pendingEmcy came from SendEmcyAsync: its register is then the application's part,

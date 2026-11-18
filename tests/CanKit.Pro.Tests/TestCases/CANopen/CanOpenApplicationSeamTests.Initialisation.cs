@@ -347,6 +347,56 @@ public partial class CanOpenApplicationSeamTests
         ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
     }
 
+    [Fact] // #549, #561
+    public async Task A_Reset_Drops_A_Profiles_Error_Reset_Queued_Behind_An_Emcy_That_Waits_In_Stopped()
+    {
+        // A post from Attach raises an error and clears it while the boot-up is kept from the wire: the
+        // raise's EMCY waits for the boot-up, the 0000h behind it. The master stops the node, the
+        // boot-up is let go, the raise's EMCY waits for Stopped to end; then the master resets the node.
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new RawWire(session, 2);
+        var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bootUpMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int posts = 0;
+        var app = Profile();
+        app.OnAttach = host =>
+        {
+            var node = NodeOf(host);
+            node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat ? bootUpMayLeave.Task : Task.CompletedTask;
+            host.Post(() =>
+            {
+                if (Interlocked.Increment(ref posts) != 1) return;
+                host.RaiseError(0x5000, 0x04);
+                host.ClearError(0x5000);
+            });
+        };
+        using var slave = OpenNode(bus, With(app), new ManualTimeSource());
+        await chainWaits.Task.WithTimeoutAsync(ShortTimeout);
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => slave.State == NmtState.Stopped, "Stopped");
+        Settle(slave);
+        bootUpMayLeave.SetResult(true);
+        await wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (wire.Count(SlaveEmcy) == 0 && !await EmcyParkedAsync(slave))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The EMCY never took its turn.");
+            await Task.Delay(1);
+        }
+        await CanOpenTransmitBarrier.DrainAsync(slave);
+        wire.Count(SlaveEmcy).Should().Be(0, "no EMCY in Stopped");
+
+        int bootUps = wire.Count(SlaveHeartbeat);
+        wire.Transmit(0x000, ResetCommand(NmtCommand.ResetNode));
+        await wire.WaitForCountAsync(SlaveHeartbeat, bootUps + 1);
+        await EmcyChainSettledAsync(slave);
+
+        wire.Count(SlaveEmcy).Should().Be(0, "the reset ended the error, and the reset of it that was still queued with it");
+        ErrorRegister(slave).Should().Be(0);
+    }
+
     [Fact] // #549
     public async Task A_Reset_While_A_Released_Emcy_Waits_In_Stopped_Drops_It()
     {

@@ -641,7 +641,8 @@ internal sealed partial class CanOpenNode
             (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer));
             return;
         }
-        EmitNodeEmcy(errorCode, manufacturer, behindBootUp: _state != NmtState.Stopped && EmcyChainWaitsForBootUp());
+        if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
+        EmitNodeEmcy(errorCode, manufacturer, profile: true);
     }
 
     /// <summary>Ends an error of <paramref name="slot"/>'s application: nothing when it is not active,
@@ -659,7 +660,7 @@ internal sealed partial class CanOpenNode
             _heldProfileEmcys?.RemoveAll(held => ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
             return;
         }
-        EmitErrorReset();
+        EmitNodeEmcy(ErrorResetCode, profile: true);
     }
 
     // Counts the NMT resets that ended the profile errors. A profile EMCY released behind a boot-up
@@ -725,14 +726,12 @@ internal sealed partial class CanOpenNode
     /// still pending waits for it on the EMCY chain, as the EMCYs held in Initialisation do: the
     /// work of a profile that was held behind the start-up job (a post or a deadline from
     /// <c>Attach</c>, #561) runs right after the boot-up has been ordered, and its EMCY must not
-    /// overtake the boot-up on the bus. Nothing once the boot-up is out. Returns whether it put a
-    /// wait on the chain; the EMCY then takes the gated path (<see cref="EmitEmcy"/>), as a released
-    /// one does, so that a Stop or a reset during the wait is honoured (#549). Actor loop.</summary>
-    private bool EmcyChainWaitsForBootUp()
+    /// overtake the boot-up on the bus. Nothing once the boot-up is out. Like every profile EMCY it
+    /// takes the gated path (<see cref="EmitEmcy"/>), so a Stop or a reset during the wait is
+    /// honoured (#549). Actor loop.</summary>
+    private void EmcyChainWaitsForBootUp()
     {
-        if (_bootUpSend.IsCompleted) return false;
-        AppendBootUpWait(_bootUpSend);
-        return true;
+        if (!_bootUpSend.IsCompleted) AppendBootUpWait(_bootUpSend);
     }
 
     /// <summary>Puts a wait for <paramref name="bootUp"/>'s send on the EMCY chain. Actor loop.</summary>
