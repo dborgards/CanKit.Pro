@@ -280,6 +280,9 @@ internal sealed partial class CanOpenNode
         {
             return slot.Application.ValidateWrite(index, subindex, value);
         }
+        // Everything, deliberately: this is the application's code, and whatever it throws must not
+        // reach the dictionary's writer, which on an SDO download or a PDO is the node's own actor
+        // loop. It goes to BackgroundExceptionOccurred, and the write is refused.
         catch (Exception ex)
         {
             RaiseBackgroundException(ex);
@@ -305,6 +308,9 @@ internal sealed partial class CanOpenNode
         {
             callback(slot.Application);
         }
+        // Everything, deliberately: this is the application's code running on the node's actor loop,
+        // and nothing it throws may end that loop or keep the next application from its turn. It
+        // goes to BackgroundExceptionOccurred.
         catch (Exception ex)
         {
             RaiseBackgroundException(ex);
