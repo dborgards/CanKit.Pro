@@ -21,9 +21,10 @@ internal sealed partial class Cia401Device
     /// <para>
     /// <c>6000h</c> shows the level XOR the polarity bit of <c>6002h</c> (§8.2.1, §8.2.2). When that
     /// changes it, the change is an interrupt for the bit when <c>6005h</c> is TRUE and <c>6006h</c>
-    /// has the bit, or the logical edge is rising and <c>6007h</c> has it, or falling and
-    /// <c>6008h</c> has it (§7.2.2 Figure 4, §8.2.4 to §8.2.7): the edges are those of the logical
-    /// value, so with the input inverted a physical falling edge is a rising one (§8.2.6, §8.2.7). An
+    /// has the bit (§8.2.5), or the logical edge is rising (0 to 1) and <c>6007h</c> has it (§8.2.6),
+    /// or falling (1 to 0) and <c>6008h</c> has it (§8.2.7), the masks in an OR connection and
+    /// <c>6005h</c> over all of them (§8.2.4 to §8.2.7). The edges are those of the logical value, so
+    /// with the input inverted a physical falling edge is a rising one (§8.2.6, §8.2.7). An
     /// interrupt asks the node to transmit the changed sub-index of <c>6000h</c>, which sends the
     /// TPDOs that map it, in Operational only. Without one, <c>6000h</c> changes and nothing is sent.
     /// </para>
@@ -148,9 +149,14 @@ internal sealed partial class Cia401Device
         send.Add(new CanOpenObjectAddress(block.Read, sub));
     }
 
-    /// <summary>Whether a change raises an interrupt: <c>6005h</c> TRUE, and a changed bit in
-    /// <c>6006h</c>, or a rising one in <c>6007h</c>, or a falling one in <c>6008h</c>, the masks in
-    /// an OR connection (CiA 401-1 §7.2.2 Figure 4, §8.2.4 to §8.2.7).</summary>
+    /// <summary>Whether a change raises an interrupt: <c>6005h</c> TRUE (§8.2.4), and a changed bit in
+    /// <c>6006h</c> (§8.2.5), or a rising one, logical 0 to 1, in <c>6007h</c> (§8.2.6), or a falling
+    /// one, logical 1 to 0, in <c>6008h</c> (§8.2.7), the masks in an OR connection (§8.2.6, §8.2.7).</summary>
+    /// <remarks>The directions are the clauses' and the object names' (CiA 401-1 v3.1.0 §8.2.6, §8.2.7).
+    /// Figure 4 of §7.2.2, looked at in the PDF, labels them the other way round: <c>6007h</c>
+    /// "High-to-Low" with a falling-edge symbol and <c>6008h</c> "Low-to-High" with a rising one. The
+    /// figure is taken for the wiring only (the polarity before <c>6000h</c>, the masks in an OR, and
+    /// <c>6005h</c> closing the transmission), not for the directions.</remarks>
     private static bool DigitalInterrupt(ICanOpenApplicationHost host, DigitalInputBlock block, byte sub,
         byte changed, byte rising, byte falling)
     {

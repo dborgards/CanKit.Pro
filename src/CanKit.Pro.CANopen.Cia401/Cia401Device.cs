@@ -152,14 +152,18 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <summary>Refuses a write to an entry the device declared read-only, with the abort code an SDO
     /// download gets for it (<c>06010002h</c>, CiA 301 v4.2.0 Table 22): the SDO server refuses such a
     /// download before the device is asked, but a local write through the dictionary asks the device.
-    /// The device's own writes pass. Every other write is accepted.</summary>
+    /// Refuses a value other than 0 and 1 for a BOOLEAN entry (<c>6005h</c>), which is TRUE or FALSE
+    /// and nothing else (CiA 301 v4.2.0 §7.1.4.3), with <c>06090030h</c>, "invalid value for
+    /// parameter" (Table 22). The device's own writes pass. Every other write is accepted.</summary>
     public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
     {
         // Nobody writes a claimed entry before Attach has declared it.
         var host = Volatile.Read(ref _host);
         if (host is null || IsOwnWrite) return OdWriteDecision.Accept;
-        if (host.ObjectDictionary.TryGet(index, subindex, out var entry) && (entry.Access & OdAccess.WriteOnly) == 0)
-            return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
+        if (!host.ObjectDictionary.TryGet(index, subindex, out var entry)) return OdWriteDecision.Accept;
+        if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
+        if (entry.DataType == OdDataType.Boolean && value.Length == 1 && value[0] > 1)
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
         return OdWriteDecision.Accept;
     }
 

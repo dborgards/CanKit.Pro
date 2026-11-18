@@ -18,7 +18,6 @@ public partial class CanOpenApplicationSeamTests
 {
     private const byte Node22 = 0x22;
     private const uint Tpdo1Of22 = 0x1A2;
-    private const uint Tpdo2Of22 = 0x2A2;
     private const uint Rpdo1Of22 = 0x222;
     private const uint BootUpOf22 = 0x722;
 
@@ -46,15 +45,6 @@ public partial class CanOpenApplicationSeamTests
         await WaitUntilAsync(() => rig.Node.State == NmtState.Operational, "Operational");
     }
 
-    /// <summary>TPDO 2 of node <see cref="Node22"/> on the unclaimed <c>2101h</c>, triggered: its frame
-    /// says that everything the actor was handed before it has been handled.</summary>
-    private static async Task WitnessOf22Async(EntryRig rig)
-    {
-        int before = rig.Wire.Count(Tpdo2Of22);
-        await rig.Node.TriggerTpdoAsync(2);
-        await rig.Wire.WaitForCountAsync(Tpdo2Of22, before + 1);
-    }
-
     [Fact]
     public async Task A_Default_Tpdo_Holds_The_Profile_Values_And_Goes_Out_On_Request()
     {
@@ -71,7 +61,7 @@ public partial class CanOpenApplicationSeamTests
         await StartAnyAsync(rig);
         rig.Od.WriteUnsigned(0x6000, 0x01, 7);
         await rig.Wire.WaitForCountAsync(Tpdo1Of22, 1);
-        await WitnessOf22Async(rig);
+        await rig.WitnessAsync();
 
         AssertSingleFrame(rig.Wire.Payloads(Tpdo1Of22), 7);
     }
@@ -90,7 +80,7 @@ public partial class CanOpenApplicationSeamTests
         await StartAnyAsync(rig);
         rig.Od.WriteUnsigned(0x6000, 0x01, 7);
         await WaitUntilAsync(() => app.Log.Contains("written 6000:01"), "the claimant to be told");
-        await WitnessOf22Async(rig);
+        await rig.WitnessAsync();
 
         rig.Wire.Count(Tpdo1Of22).Should().Be(0, "a PDO that does not exist is not sent");
     }
@@ -395,7 +385,7 @@ public partial class CanOpenApplicationSeamTests
         await WaitUntilAsync(() => rig.Od.ReadUnsigned(0x6000, 0x02) == 9, "RPDO 4 to land in 6000h:02");
         rig.Od.WriteUnsigned(0x6000, 0x01, 7);
         await rig.Wire.WaitForCountAsync(Tpdo1Of22, 1);
-        await WitnessOf22Async(rig);
+        await rig.WitnessAsync();
 
         AssertSingleFrame(rig.Wire.Payloads(Tpdo1Of22), 7);
     }

@@ -164,15 +164,22 @@ public partial class CanOpenApplicationSeamTests
 
         internal ObjectDictionary Od => Node.ObjectDictionary;
 
-        /// <summary>TPDO 2 on the unclaimed <c>2101h</c>: a frame whose arrival says that everything
-        /// the actor was handed before it has been handled, TPDO 1 included.</summary>
+        /// <summary>TPDO 2 on the unclaimed <c>2101h</c>, the witness: a frame the node is still
+        /// transmitting when <see cref="WitnessAsync"/> runs.</summary>
         internal void ConfigureWitness() => Node.ConfigureTpdo(2, new PdoMapping().Add(0x2101, 0x00, 8));
 
+        /// <summary>Triggers the witness and waits for its frame, then for the barrier
+        /// (<see cref="CanOpenTransmitBarrier"/>): the witness frame alone does not order the frames
+        /// before it on the wire, as each takes its own trip through the thread pool; the barrier
+        /// does, for what the actor decided before this call.</summary>
         internal async Task WitnessAsync()
         {
-            int before = Wire.Count(Tpdo2);
+            // The COB-ID TPDO 2 has now: an LSS slave moves it to the node-id it is given.
+            var witnessCobId = Od.ReadUnsigned(0x1801, 0x01) & 0x1FFFFFFFu;
+            int before = Wire.Count(witnessCobId);
             await Node.TriggerTpdoAsync(2);
-            await Wire.WaitForCountAsync(Tpdo2, before + 1);
+            await Wire.WaitForCountAsync(witnessCobId, before + 1);
+            await CanOpenTransmitBarrier.DrainAsync(Node);
         }
 
         internal async Task StartAsync()

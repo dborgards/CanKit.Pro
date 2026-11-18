@@ -8,7 +8,6 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Cia401;
 using CanKit.Pro.CANopen.Nmt;
-using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 
@@ -26,10 +25,10 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Cia401;
 /// description for, and the description of a CiA 401 device is what the tool side and the EDS
 /// variant build later. Raw expedited transfers reach every object and show the abort codes as
 /// they are on the wire.</para>
-/// <para>Nothing here waits on a wall clock for a result. "Nothing was sent" is proven with the
-/// witness (<see cref="WitnessAsync"/>): a TPDO on an entry nobody claims, triggered through the
-/// actor, whose frame arrives after everything the actor was handed before it. The timeouts are
-/// hang guards only.</para>
+/// <para>Nothing here waits on a wall clock for a result. "Nothing was sent" and "exactly so many
+/// frames" are asserted after <see cref="DrainAsync"/>, which says what it guarantees
+/// (<see cref="CanOpenTransmitBarrier"/>): every frame the device decided in the actor jobs queued
+/// before the call has been seen by the master's channel. The timeouts are hang guards only.</para>
 /// </remarks>
 internal sealed class Cia401Rig : IDisposable
 {
@@ -41,11 +40,6 @@ internal sealed class Cia401Rig : IDisposable
     internal const uint SdoRequest = 0x600 + DeviceId;
     internal const uint SdoResponse = 0x580 + DeviceId;
 
-    /// <summary>The witness: TPDO <see cref="WitnessPdo"/> on the unclaimed <c>2101h</c>, on a
-    /// COB-ID no default PDO of the device uses.</summary>
-    internal const int WitnessPdo = 8;
-    internal const uint WitnessCobId = 0x1F0;
-
     private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(5);
 
     private readonly ICanBus _masterBus;
@@ -55,9 +49,16 @@ internal sealed class Cia401Rig : IDisposable
     private readonly List<(uint CobId, byte[] Data)> _sequence = new();
 
     /// <summary>Opens the device for <paramref name="configuration"/>. <paramref name="options"/> are
-    /// what the test starts from (by default eight PDOs, room for the witness); the rig hands them to
+    /// what the test starts from (the defaults when null); the rig hands them to
     /// <see cref="Cia401Device.AddTo"/>.</summary>
     internal Cia401Rig(Cia401Configuration configuration, CanOpenNodeOptions? options = null)
+        : this(new[] { configuration }, options)
+    {
+    }
+
+    /// <summary>Opens one node with a device for each of <paramref name="configurations"/>, attached
+    /// in that order: several logical devices of one node.</summary>
+    internal Cia401Rig(IReadOnlyList<Cia401Configuration> configurations, CanOpenNodeOptions? options = null)
     {
         var session = VirtualAdapterFixture.NewSession("cia401");
         _masterBus = VirtualAdapterFixture.Open(session, 0);
@@ -75,16 +76,32 @@ internal sealed class Cia401Rig : IDisposable
         };
         _deviceBus = VirtualAdapterFixture.Open(session, 1);
         Clock = new ManualTimeSource();
-        Device = new Cia401Device(configuration);
-        Node = new CanOpenNode(new CanBusService(_deviceBus), DeviceId,
-            Cia401Device.AddTo(options ?? new CanOpenNodeOptions().With(pdoCount: WitnessPdo), Device),
-            ownsService: true, Clock);
+        var devices = new List<Cia401Device>();
+        var composed = options ?? new CanOpenNodeOptions();
+        foreach (var configuration in configurations)
+        {
+            var device = new Cia401Device(configuration);
+            devices.Add(device);
+            composed = Cia401Device.AddTo(composed, device);
+        }
 
-        Node.ObjectDictionary.AddU8(0x2101, 0x00, 0);
-        Node.ConfigureTpdo(WitnessPdo, new PdoMapping().Add(0x2101, 0x00, 8), cobId: WitnessCobId);
+        Devices = devices;
+        try
+        {
+            Node = new CanOpenNode(new CanBusService(_deviceBus), DeviceId, composed, ownsService: true, Clock);
+        }
+        catch
+        {
+            _deviceBus.Dispose();
+            _masterBus.Dispose();
+            throw;
+        }
     }
 
-    internal Cia401Device Device { get; }
+    /// <summary>The first device, the only one in most tests.</summary>
+    internal Cia401Device Device => Devices[0];
+
+    internal IReadOnlyList<Cia401Device> Devices { get; }
 
     internal CanOpenNode Node { get; }
 
@@ -109,15 +126,9 @@ internal sealed class Cia401Rig : IDisposable
     internal Task WaitForCountAsync(uint cobId, int count)
         => WaitUntilAsync(() => Count(cobId) >= count, $"{count} frame(s) on 0x{cobId:X3}, saw {Count(cobId)}");
 
-    /// <summary>Triggers the witness TPDO and waits for its frame: everything the actor was handed
-    /// before this call has been handled, and what it transmitted is on the wire, once this returns.
-    /// Only in Operational, where PDOs exist.</summary>
-    internal async Task WitnessAsync()
-    {
-        int before = Count(WitnessCobId);
-        await Node.TriggerTpdoAsync(WitnessPdo);
-        await WaitForCountAsync(WitnessCobId, before + 1);
-    }
+    /// <summary>The barrier before asserting what was not sent: see <see cref="CanOpenTransmitBarrier"/>.
+    /// Works in every NMT state.</summary>
+    internal Task DrainAsync() => CanOpenTransmitBarrier.DrainAsync(Node);
 
     /// <summary>Runs two empty jobs through the device node's actor: whatever it was handed before,
     /// and whatever that queued in turn, has run.</summary>
@@ -135,6 +146,10 @@ internal sealed class Cia401Rig : IDisposable
         Transmit(0x000, new[] { (byte)NmtCommand.Start, DeviceId });
         await WaitUntilAsync(() => Node.State == NmtState.Operational, "Operational");
     }
+
+    /// <summary>Waits until the device is in <paramref name="state"/>.</summary>
+    internal Task WaitForStateAsync(NmtState state)
+        => WaitUntilAsync(() => Node.State == state, state.ToString());
 
     /// <summary><see cref="StartAsync"/>, then waits for the TPDO 1 that entering Operational sends
     /// (CiA 401-1 §6.1), so that what a test counts afterwards is its own.</summary>
@@ -179,7 +194,8 @@ internal sealed class Cia401Rig : IDisposable
     internal static uint AbortCode(byte[] response)
     {
         response[0].Should().Be(0x80, "the server aborted the transfer");
-        return BitConverter.ToUInt32(response, 4);
+        // Little-endian on the wire, whatever the host's byte order.
+        return (uint)(response[4] | (response[5] << 8) | (response[6] << 16) | (response[7] << 24));
     }
 
     internal void Transmit(uint cobId, byte[] data) => _masterBus.Transmit(CanFrame.Classic((int)cobId, data));
