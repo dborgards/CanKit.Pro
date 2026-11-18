@@ -295,8 +295,13 @@ public partial class CanOpenApplicationSeamTests
         internal readonly ManualTimeSource Clock = new();
 
         internal ProducerWatchRig(params ICanOpenApplication[] applications)
+            : this(WithErrorBehavior(applications))
         {
-            Rig = new EntryRig(WithErrorBehavior(applications), Clock);
+        }
+
+        internal ProducerWatchRig(CanOpenNodeOptions options)
+        {
+            Rig = new EntryRig(options, Clock);
             Rig.Node.HeartbeatReceived += (_, e) =>
             {
                 if (e.ProducerNodeId == ProducerNode) _seen.Release();

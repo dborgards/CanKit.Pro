@@ -3066,7 +3066,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             _heartbeatEmcyTimeouts[producer] = timeout;
         PublishCommunicationFailure();
         ApplyCommunicationErrorBehavior();
-        if (_options.EmitGuardingErrorEmcy)
+        // Still watched: an application told of the failure, or of the state change it caused, can
+        // have ended the watch from its callback (a write to 1016h). An error raised for a producer
+        // nobody watches any longer would never end.
+        if (_options.EmitGuardingErrorEmcy && _heartbeatEmcyTimeouts.ContainsKey(producer))
         {
             RaiseCommunicationError(CommunicationError.HeartbeatTimeout, producer, 0x8130);
         }

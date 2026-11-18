@@ -341,9 +341,17 @@ internal sealed partial class CanOpenNode
         if (_options.EmitGuardingErrorEmcy)
         {
             if (state == LifeGuardingState.Occurred)
-                RaiseCommunicationError(CommunicationError.LifeGuardingTimeout, 0, 0x8130);
+            {
+                // Still occurred: an application told of the failure, or of the state change it
+                // caused, can have switched life guarding off from its callback (100Ch or 100Dh =
+                // 0). An error raised then would never end, as no poll would come to resolve it.
+                if (_lifeGuardingOccurred)
+                    RaiseCommunicationError(CommunicationError.LifeGuardingTimeout, 0, 0x8130);
+            }
             else
+            {
                 EndCommunicationError(CommunicationError.LifeGuardingTimeout);
+            }
         }
         var args = new LifeGuardingEventArgs(state, _guardTime, _lifeTimeFactor);
         EnqueueEvent(() =>
