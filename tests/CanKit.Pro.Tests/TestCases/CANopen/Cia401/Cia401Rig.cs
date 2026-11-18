@@ -1,0 +1,203 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using AwesomeAssertions;
+using CanKit.Abstractions.API.Can;
+using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Cia401;
+using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
+using CanKit.Pro.RawCan;
+using CanKit.Pro.Tests.Infrastructure;
+
+namespace CanKit.Pro.Tests.TestCases.CANopen.Cia401;
+
+/// <summary>
+/// A CiA 401 device on the virtual bus and the master beside it: the device is a
+/// <see cref="CanOpenNode"/> opened with <see cref="Cia401Device.AddTo"/> on a
+/// <see cref="ManualTimeSource"/>; the master is a raw channel that sends what a master sends (NMT,
+/// SDO requests) and records every data frame it sees, per COB-ID and in wire order.
+/// </summary>
+/// <remarks>
+/// <para>The master is raw rather than a second <see cref="CanOpenNode"/>: a node's SDO client
+/// refuses every object but <c>1000h</c>, <c>1001h</c> and <c>1018h</c> of a server it has no
+/// description for, and the description of a CiA 401 device is what the tool side and the EDS
+/// variant build later. Raw expedited transfers reach every object and show the abort codes as
+/// they are on the wire.</para>
+/// <para>Nothing here waits on a wall clock for a result. "Nothing was sent" is proven with the
+/// witness (<see cref="WitnessAsync"/>): a TPDO on an entry nobody claims, triggered through the
+/// actor, whose frame arrives after everything the actor was handed before it. The timeouts are
+/// hang guards only.</para>
+/// </remarks>
+internal sealed class Cia401Rig : IDisposable
+{
+    internal const byte DeviceId = 0x11;
+
+    /// <summary>TPDO 1 of the device, the default TPDO of its digital inputs (CiA 401-1 §6.2.6).</summary>
+    internal const uint Tpdo1 = 0x180 + DeviceId;
+
+    internal const uint SdoRequest = 0x600 + DeviceId;
+    internal const uint SdoResponse = 0x580 + DeviceId;
+
+    /// <summary>The witness: TPDO <see cref="WitnessPdo"/> on the unclaimed <c>2101h</c>, on a
+    /// COB-ID no default PDO of the device uses.</summary>
+    internal const int WitnessPdo = 8;
+    internal const uint WitnessCobId = 0x1F0;
+
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(5);
+
+    private readonly ICanBus _masterBus;
+    private readonly ICanBus _deviceBus;
+    private readonly object _gate = new();
+    private readonly Dictionary<uint, List<byte[]>> _frames = new();
+    private readonly List<(uint CobId, byte[] Data)> _sequence = new();
+
+    /// <summary>Opens the device for <paramref name="configuration"/>. <paramref name="options"/> are
+    /// what the test starts from (by default eight PDOs, room for the witness); the rig hands them to
+    /// <see cref="Cia401Device.AddTo"/>.</summary>
+    internal Cia401Rig(Cia401Configuration configuration, CanOpenNodeOptions? options = null)
+    {
+        var session = VirtualAdapterFixture.NewSession("cia401");
+        _masterBus = VirtualAdapterFixture.Open(session, 0);
+        _masterBus.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (frame.IsRemoteFrame) return;
+            var data = frame.Data.ToArray();
+            lock (_gate)
+            {
+                if (!_frames.TryGetValue((uint)frame.ID, out var list)) _frames[(uint)frame.ID] = list = new List<byte[]>();
+                list.Add(data);
+                _sequence.Add(((uint)frame.ID, data));
+            }
+        };
+        _deviceBus = VirtualAdapterFixture.Open(session, 1);
+        Clock = new ManualTimeSource();
+        Device = new Cia401Device(configuration);
+        Node = new CanOpenNode(new CanBusService(_deviceBus), DeviceId,
+            Cia401Device.AddTo(options ?? new CanOpenNodeOptions().With(pdoCount: WitnessPdo), Device),
+            ownsService: true, Clock);
+
+        Node.ObjectDictionary.AddU8(0x2101, 0x00, 0);
+        Node.ConfigureTpdo(WitnessPdo, new PdoMapping().Add(0x2101, 0x00, 8), cobId: WitnessCobId);
+    }
+
+    internal Cia401Device Device { get; }
+
+    internal CanOpenNode Node { get; }
+
+    internal ManualTimeSource Clock { get; }
+
+    internal ObjectDictionary Od => Node.ObjectDictionary;
+
+    // ---- frames -------------------------------------------------------------------------------
+
+    internal int Count(uint cobId)
+    {
+        lock (_gate) return _frames.TryGetValue(cobId, out var list) ? list.Count : 0;
+    }
+
+    internal byte[][] Payloads(uint cobId)
+    {
+        lock (_gate) return _frames.TryGetValue(cobId, out var list) ? list.ToArray() : Array.Empty<byte[]>();
+    }
+
+    /// <summary>Waits until at least <paramref name="count"/> frames have been seen on
+    /// <paramref name="cobId"/>. A hang guard bounds the wait; it asserts nothing about time.</summary>
+    internal Task WaitForCountAsync(uint cobId, int count)
+        => WaitUntilAsync(() => Count(cobId) >= count, $"{count} frame(s) on 0x{cobId:X3}, saw {Count(cobId)}");
+
+    /// <summary>Triggers the witness TPDO and waits for its frame: everything the actor was handed
+    /// before this call has been handled, and what it transmitted is on the wire, once this returns.
+    /// Only in Operational, where PDOs exist.</summary>
+    internal async Task WitnessAsync()
+    {
+        int before = Count(WitnessCobId);
+        await Node.TriggerTpdoAsync(WitnessPdo);
+        await WaitForCountAsync(WitnessCobId, before + 1);
+    }
+
+    /// <summary>Runs two empty jobs through the device node's actor: whatever it was handed before,
+    /// and whatever that queued in turn, has run.</summary>
+    internal void Settle()
+    {
+        Node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+        Node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+    }
+
+    // ---- NMT ----------------------------------------------------------------------------------
+
+    /// <summary>NMT Start to the device, and waits until it is Operational.</summary>
+    internal async Task StartAsync()
+    {
+        Transmit(0x000, new[] { (byte)NmtCommand.Start, DeviceId });
+        await WaitUntilAsync(() => Node.State == NmtState.Operational, "Operational");
+    }
+
+    /// <summary><see cref="StartAsync"/>, then waits for the TPDO 1 that entering Operational sends
+    /// (CiA 401-1 §6.1), so that what a test counts afterwards is its own.</summary>
+    internal async Task StartAndTakeFirstTpdoAsync()
+    {
+        int before = Count(Tpdo1);
+        await StartAsync();
+        await WaitForCountAsync(Tpdo1, before + 1);
+    }
+
+    // ---- SDO, expedited, from the master side -----------------------------------------------------
+
+    /// <summary>One SDO request to the device, and its response.</summary>
+    internal async Task<byte[]> SdoAsync(byte[] request)
+    {
+        int before = Count(SdoResponse);
+        Transmit(SdoRequest, request);
+        await WaitForCountAsync(SdoResponse, before + 1);
+        return Payloads(SdoResponse)[before];
+    }
+
+    /// <summary>An expedited one-byte download; the response, an acknowledgement or an abort.</summary>
+    internal Task<byte[]> DownloadU8Async(ushort index, byte subindex, byte value)
+        => SdoAsync(new byte[] { 0x2F, (byte)index, (byte)(index >> 8), subindex, value, 0, 0, 0 });
+
+    /// <summary>An expedited one-byte download that must be acknowledged.</summary>
+    internal async Task WriteU8Async(ushort index, byte subindex, byte value)
+    {
+        var response = await DownloadU8Async(index, subindex, value);
+        response[0].Should().Be(0x60, $"the device acknowledges the download to {index:X4}h:{subindex:X2}h");
+    }
+
+    /// <summary>An upload of a one-byte entry: its value.</summary>
+    internal async Task<byte> ReadU8Async(ushort index, byte subindex)
+    {
+        var response = await SdoAsync(new byte[] { 0x40, (byte)index, (byte)(index >> 8), subindex, 0, 0, 0, 0 });
+        response[0].Should().Be(0x4F, $"the device answers the upload of {index:X4}h:{subindex:X2}h with one byte");
+        return response[4];
+    }
+
+    /// <summary>The abort code of an SDO response that must be an abort.</summary>
+    internal static uint AbortCode(byte[] response)
+    {
+        response[0].Should().Be(0x80, "the server aborted the transfer");
+        return BitConverter.ToUInt32(response, 4);
+    }
+
+    internal void Transmit(uint cobId, byte[] data) => _masterBus.Transmit(CanFrame.Classic((int)cobId, data));
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow + HangGuard;
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException($"Timed out waiting for {what}.");
+            await Task.Delay(2);
+        }
+    }
+
+    public void Dispose()
+    {
+        Node.Dispose();
+        _deviceBus.Dispose();
+        _masterBus.Dispose();
+    }
+}
