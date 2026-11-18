@@ -111,7 +111,9 @@ internal sealed class Cia401Rig : IDisposable
         return devices;
     }
 
-    private Cia401Rig(IReadOnlyList<Cia401Device> devices, CanOpenDeviceDescription? description, CanOpenNodeOptions? options)
+    /// <summary>Opens a node from <paramref name="description"/> (none when null) with
+    /// <paramref name="devices"/> attached in that order, built either way.</summary>
+    internal Cia401Rig(IReadOnlyList<Cia401Device> devices, CanOpenDeviceDescription? description, CanOpenNodeOptions? options)
     {
         var session = VirtualAdapterFixture.NewSession("cia401");
         Session = session;

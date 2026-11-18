@@ -8,6 +8,7 @@ using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Cia401;
 using CanKit.Pro.CANopen.Nmt;
+using EdsDcfNet.Models;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen.Cia401;
@@ -83,7 +84,7 @@ public class Cia401DeviceDescriptionTests
     }
 
     [Fact]
-    public void A_Block_Exists_Only_Where_The_File_Declares_Its_Mandatory_Object()
+    public async Task A_Block_Exists_Only_Where_The_File_Declares_Its_Mandatory_Object()
     {
         // 6443h and 6444h without 6411h: no analog outputs; the two stay as stored objects.
         using var rig = Open(Eds.Of("cia401.eds").Remove(0x6411).Remove(0x1401).Remove(0x1601));
@@ -93,6 +94,225 @@ public class Cia401DeviceDescriptionTests
         rig.Device.SetAnalogInput(2, 7);
         rig.Settle();
         rig.Device.ReadAnalogInput(2).Should().Be(7);
+
+        // A stored object, as its access allows: the reserved values of §8.7.4 are a rule of the
+        // analog output block, which the device does not have.
+        await rig.WriteU8Async(0x6443, 0x01, 0x05);
+        (await rig.ReadU8Async(0x6443, 0x01)).Should().Be(0x05);
+    }
+
+    [Fact]
+    public async Task An_Index_Of_The_Range_The_Catalogue_Does_Not_Know_Is_Stored_As_Its_Access_Allows()
+    {
+        using var rig = Open(Eds.Of("cia401-digital.eds").Add(VariableSection(0x6500, "Manufacturer object", "0x0005", "0x11")));
+
+        (await rig.ReadU8Async(0x6500, 0x00)).Should().Be(0x11);
+        await rig.WriteU8Async(0x6500, 0x00, 0x42);
+        (await rig.ReadU8Async(0x6500, 0x00)).Should().Be(0x42);
+        rig.Device.ReadDigitalInputs(1).Should().Be(0x00, "the object has no behaviour");
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
+    }
+
+    [Fact]
+    public void A_Sub_Index_00h_Above_The_Maximum_Fails_The_Open()
+    {
+        var open = () => Open(Eds.Of("cia401-digital.eds").Set("6000sub0", "DefaultValue", "255"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6000h") && e.Message.Contains("1 to 254"));
+    }
+
+    [Fact]
+    public void A_Parameter_Longer_Than_Its_Block_Has_Its_Surplus_Stored_And_Ignored()
+    {
+        // 6000h has two groups, 6002h three.
+        using var rig = Open(Eds.Of("cia401-digital.eds")
+            .Set("6002", "SubNumber", "4")
+            .Set("6002sub0", "DefaultValue", "3")
+            .Add("[6002sub3]\nParameterName=Polarity digital input 8-bit group 3\nObjectType=0x7\nDataType=0x0005\n"
+                + "AccessType=rw\nDefaultValue=0xFF\nPDOMapping=1\n"));
+
+        rig.Od.ReadRaw(0x6002, 0x03).Should().Equal(new byte[] { 0xFF });
+        rig.Device.ReadDigitalInputs(2).Should().Be(0x00);
+        FluentActions.Invoking(() => rig.Device.ReadDigitalInputs(3))
+            .Should().Throw<ArgumentOutOfRangeException>("the block has the two groups of 6000h");
+    }
+
+    // ---- logical devices -------------------------------------------------------------------------
+
+    [Fact]
+    public void A_Description_Device_Of_Logical_Device_1_Takes_Its_Objects_From_6800h()
+    {
+        var eds = Eds.Of("cia401-digital.eds").Remove(0x1400).Remove(0x1600).Remove(0x1800).Remove(0x1A00);
+        foreach (ushort index in DigitalObjects) eds.Move(index, (ushort)(index + 0x800));
+        var configured = new Cia401Device(new Cia401Configuration { DigitalInputs = 8 });
+        var described = Cia401Device.FromDescription(1);
+        using var rig = new Cia401Rig(new[] { configured, described }, eds.Parse(), options: null);
+
+        rig.Od.ReadUnsigned(0x6FFF, 0x00).Should().Be(0x0003_0191u, "logical device 1 has the blocks of 6800h and 6A00h");
+        described.SetDigitalInput(9, true);
+        rig.Settle();
+        rig.Od.ReadRaw(0x6800, 0x02).Should().Equal(new byte[] { 0x01 });
+        rig.Od.ReadRaw(0x6000, 0x01).Should().Equal(new byte[] { 0x00 }, "logical device 0 is the configured one");
+        described.ReadDigitalOutputs(2).Should().Be(0x00);
+        FluentActions.Invoking(() => configured.ReadDigitalInputs(2)).Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void A_Described_Logical_Device_0_And_A_Configured_Logical_Device_1_Each_See_Their_Own_Range()
+    {
+        var described = Cia401Device.FromDescription(0);
+        var configured = new Cia401Device(new Cia401Configuration { DigitalInputs = 8, LogicalDevice = 1 });
+        using var rig = new Cia401Rig(new[] { described, configured }, Eds.Of("cia401-digital.eds").Parse(), options: null);
+
+        rig.Od.ReadRaw(0x6800, 0x00).Should().Equal(new byte[] { 0x01 }, "the configured device declares one group at 6800h");
+        rig.Od.ReadRaw(0x6806, 0x01).Should().Equal(new byte[] { 0xFF });
+        described.SetDigitalInput(1, true);
+        rig.Settle();
+        rig.Od.ReadRaw(0x6000, 0x01).Should().Equal(new byte[] { 0x01 });
+        rig.Od.ReadRaw(0x6800, 0x01).Should().Equal(new byte[] { 0x00 });
+        configured.SetDigitalInput(2, true);
+        rig.Settle();
+        rig.Od.ReadRaw(0x6800, 0x01).Should().Equal(new byte[] { 0x02 });
+        rig.Od.ReadRaw(0x6000, 0x01).Should().Equal(new byte[] { 0x01 });
+    }
+
+    // ---- resets, stored values, device type, PDOs ---------------------------------------------------
+
+    [Fact]
+    public async Task A_Save_And_Reset_Node_Bring_Back_The_Stored_Values_Of_The_Adopted_Objects()
+    {
+        using var rig = Open(Eds.Of("cia401-digital.eds")
+            .Set("6206sub1", "DefaultValue", "0x0F")
+            .Set("6206sub2", "DefaultValue", "0x0F"));
+
+        await rig.WriteU8Async(0x6200, 0x01, 0x0F);
+        await rig.WriteU8Async(0x6206, 0x01, 0x33);
+        await rig.SaveAsync();
+        await rig.WriteU8Async(0x6200, 0x01, 0xF0);
+        await rig.WriteU8Async(0x6206, 0x01, 0x44);
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0xF0);
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        (await rig.ReadU8Async(0x6206, 0x01)).Should().Be(0x33, "the stored value overwrites the file's (CiA 401-1 §6.2.5 NOTE)");
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x0F, "the output comes up with the stored 6200h");
+    }
+
+    [Fact]
+    public async Task Reset_Communication_Leaves_The_Adopted_Objects_And_The_Outputs_As_They_Are()
+    {
+        // 6208h 0Fh: the device holds 0Fh while 6200h holds FFh.
+        using var rig = Open(Eds.Of("cia401-digital.eds").Set("6208sub1", "DefaultValue", "0x0F"));
+
+        await rig.WriteU8Async(0x6200, 0x01, 0xFF);
+        await rig.WriteU8Async(0x6206, 0x01, 0x33);
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x0F);
+
+        await rig.ResetAsync(NmtCommand.ResetCommunication);
+
+        (await rig.ReadU8Async(0x6206, 0x01)).Should().Be(0x33, "Reset Communication restores 1000h to 1FFFh only");
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x0F, "Reset Communication resets no application");
+    }
+
+    [Fact]
+    public void A_File_Whose_Device_Type_Names_Another_Profile_Fails_The_Open()
+    {
+        var open = () => Open(Eds.Of("cia401-digital.eds").Set("1000", "DefaultValue", "0x00030192"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("profile 402") && e.Message.Contains("profile 401"));
+    }
+
+    [Fact]
+    public async Task A_File_Without_Pdo_Records_Gives_A_Device_Without_Pdos()
+    {
+        using var rig = Open(Eds.Of("cia401-digital.eds").Remove(0x1400).Remove(0x1600).Remove(0x1800).Remove(0x1A00));
+        int reports = 0;
+        rig.Node.BackgroundExceptionOccurred += (_, _) => System.Threading.Interlocked.Increment(ref reports);
+
+        rig.Od.ContainsIndex(0x1400).Should().BeFalse();
+        rig.Od.ContainsIndex(0x1800).Should().BeFalse();
+        await rig.WriteU8Async(0x6200, 0x01, 0x05);
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x05, "the outputs are written over SDO");
+
+        await rig.StartAsync();
+        rig.Device.SetDigitalInput(1, true);
+        await rig.FlushBackgroundReportsAsync();
+        await rig.DrainAsync();
+
+        reports.Should().Be(0);
+        rig.Count(Cia401Rig.Tpdo1).Should().Be(0);
+        (await rig.ReadU8Async(0x6000, 0x01)).Should().Be(0x01);
+    }
+
+    [Fact]
+    public void The_Plant_Model_Is_First_Called_With_The_Files_Output_Levels()
+    {
+        var model = new FirstCall();
+        using var rig = new Cia401Rig(Cia401Device.FromDescription(0, model),
+            Eds.Of("cia401-digital.eds").Set("6200sub1", "DefaultValue", "0x0A").Parse());
+        rig.Settle();
+
+        model.Calls.Should().Be(1);
+        model.FirstLevels.Should().Be(0x0A);
+    }
+
+    // ---- the digital fixture ------------------------------------------------------------------------
+
+    [Fact]
+    public void The_Digital_Fixture_Describes_What_A_Description_Device_Declares()
+    {
+        var description = Eds.Of("cia401-digital.eds").Parse();
+        using var rig = new Cia401Rig(Cia401Device.FromDescription(), description);
+        using var configured = new Cia401Rig(new Cia401Configuration { DigitalInputs = 16, DigitalOutputs = 16 });
+        var od = rig.Od;
+
+        description.Objects.Objects[0x1000].DefaultValue.Should().Be(
+            "0x" + new Cia401Configuration { DigitalInputs = 16, DigitalOutputs = 16 }.DeviceType.Value.ToString("X8", CultureInfo.InvariantCulture));
+
+        int described = 0;
+        foreach (var obj in description.Objects.Objects.Values.Where(o => o.Index is >= 0x6000 and <= 0x67FF))
+        {
+            Cia401Objects.TryGet(obj.Index, out var definition).Should().BeTrue($"{obj.Index:X4}h is a CiA 401 object");
+            var subs = obj.SubObjects.Count == 0
+                ? new[] { (Sub: (byte)0, Type: (ushort?)obj.DataType, Access: obj.AccessType) }
+                : obj.SubObjects.Values.Select(s => (Sub: s.SubIndex, Type: (ushort?)s.DataType, Access: s.AccessType)).ToArray();
+            foreach (var (sub, type, access) in subs)
+            {
+                bool highest = definition.IsArray && sub == 0;
+                type.Should().Be((ushort)(highest ? OdDataType.Unsigned8 : definition.DataType), $"the type of {obj.Index:X4}h:{sub:X2}h");
+                access.Should().Be(highest || definition.Access == OdAccess.ReadOnly ? AccessType.ReadOnly : AccessType.ReadWrite,
+                    $"the access of {obj.Index:X4}h:{sub:X2}h");
+                od.TryGet(obj.Index, sub, out var entry).Should().BeTrue($"the device has {obj.Index:X4}h:{sub:X2}h");
+                entry.DataType.Should().Be(highest ? OdDataType.Unsigned8 : definition.DataType);
+                entry.Access.Should().Be(access == AccessType.ReadOnly ? OdAccess.ReadOnly : OdAccess.ReadWrite);
+                described++;
+            }
+        }
+
+        int declared = 0;
+        foreach (var definition in Cia401Objects.All)
+        {
+            for (int sub = 0; sub <= 0xFF; sub++)
+            {
+                if (!od.TryGet(definition.Index, (byte)sub, out var entry)) continue;
+                description.Contains(definition.Index, (byte)sub).Should().BeTrue($"the fixture describes {definition.Index:X4}h:{sub:X2}h");
+                configured.Od.TryGet(definition.Index, (byte)sub, out var expected).Should()
+                    .BeTrue($"a device configured for 16 DI and 16 DO has {definition.Index:X4}h:{sub:X2}h");
+                entry.DataType.Should().Be(expected.DataType);
+                entry.Access.Should().Be(expected.Access);
+                entry.GetRawValue().Should().Equal(expected.GetRawValue(), $"the fixture's {definition.Index:X4}h:{sub:X2}h is the catalogue's default");
+                declared++;
+            }
+        }
+
+        declared.Should().Be(described, "the fixture and the device have the same entries in 6000h to 67FFh");
+        described.Should().BeGreaterThan(0);
+        configured.Od.SnapshotKeys().Count(k => k >> 8 is >= 0x6000 and <= 0x67FF).Should().Be(declared,
+            "the configured device has no entry the fixture leaves out");
     }
 
     [Fact]
@@ -413,6 +633,26 @@ public class Cia401DeviceDescriptionTests
 
     // ---- helpers -----------------------------------------------------------------------------------
 
+    /// <summary>The objects of <c>cia401-digital.eds</c> in logical device 0.</summary>
+    private static readonly ushort[] DigitalObjects =
+        { 0x6000, 0x6002, 0x6003, 0x6005, 0x6006, 0x6007, 0x6008, 0x6200, 0x6202, 0x6206, 0x6207, 0x6208 };
+
+    /// <summary>A plant model that records its calls and the digital outputs at the first.</summary>
+    private sealed class FirstCall : ICia401Process
+    {
+        private int _calls;
+        private int _first = -1;
+
+        internal int Calls => System.Threading.Volatile.Read(ref _calls);
+
+        internal int FirstLevels => System.Threading.Volatile.Read(ref _first);
+
+        public void OnOutputsChanged(Cia401Device device)
+        {
+            if (System.Threading.Interlocked.Increment(ref _calls) == 1) System.Threading.Volatile.Write(ref _first, device.ReadDigitalOutputs(1));
+        }
+    }
+
     private static Cia401Rig Open(Eds eds) => new(Cia401Device.FromDescription(), eds.Parse());
 
     private static byte[] Upload(ushort index, byte subindex)
@@ -453,6 +693,21 @@ public class Cia401DeviceDescriptionTests
             string name = Hex(index);
             _sections.RemoveAll(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase)
                 || s.Name.StartsWith(name + "sub", StringComparison.OrdinalIgnoreCase));
+            return this;
+        }
+
+        /// <summary>Renames object <paramref name="from"/> with all its sub-index sections to
+        /// <paramref name="to"/>.</summary>
+        internal Eds Move(ushort from, ushort to)
+        {
+            string f = Hex(from), t = Hex(to);
+            for (int i = 0; i < _sections.Count; i++)
+            {
+                var (name, lines) = _sections[i];
+                if (name.Equals(f, StringComparison.OrdinalIgnoreCase)) _sections[i] = (t, lines);
+                else if (name.StartsWith(f + "sub", StringComparison.OrdinalIgnoreCase)) _sections[i] = (t + name.Substring(f.Length), lines);
+            }
+
             return this;
         }
 
