@@ -24,7 +24,7 @@ internal sealed partial class CanOpenNode
     private NmtState ResolveErrorBehaviorTarget(NmtState target)
     {
         if (!_options.EnableErrorBehavior || target != NmtState.Operational) return target;
-        if (!_controllerObservedBusOff && _heartbeatEmcyTimeouts.Count == 0 && !_lifeGuardingOccurred) return target;
+        if (!CommunicationFailure) return target;
         return _communicationErrorBehavior switch
         {
             0 => NmtState.PreOperational,

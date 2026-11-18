@@ -1343,7 +1343,10 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   same one a manufacturer-specific device application needs; no major release. − the seam is
   frozen from publication on (SemVer); − until then the profile packages are not packed and see
   the seam through `InternalsVisibleTo`; − more packages to maintain.
-- **Status:** Decided on 2026-11-17. None of it is built.
+- **Status:** Decided on 2026-11-17. The device type and the logical devices are public
+  (FR-CO-063); the seam, the profile descriptor and the catalogue exist as `internal` types in the
+  namespace `CanKit.Pro.CANopen.Application`. No profile package exists. The ADR stays "decided,
+  not implemented" until the seam is published.
 
 ---
 

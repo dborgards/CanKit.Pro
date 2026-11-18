@@ -1343,7 +1343,10 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   Naht ist dieselbe, die eine herstellerspezifische Geräteanwendung braucht; kein Major-Release.
   − die Naht ist ab Veröffentlichung eingefroren (SemVer); − bis dahin sind die Profilpakete nicht
   paketiert und sehen die Naht über `InternalsVisibleTo`; − mehr Pakete zu pflegen.
-- **Status:** Entschieden am 17.11.2026. Nichts davon ist gebaut.
+- **Status:** Entschieden am 17.11.2026. Der Gerätetyp und die logischen Geräte sind öffentlich
+  (FR-CO-063); die Naht, der Profilbeschreiber und der Katalog existieren als `internal`-Typen im
+  Namespace `CanKit.Pro.CANopen.Application`. Ein Profilpaket gibt es nicht. Der ADR bleibt
+  „entschieden, nicht umgesetzt", bis die Naht veröffentlicht ist.
 
 ---
 

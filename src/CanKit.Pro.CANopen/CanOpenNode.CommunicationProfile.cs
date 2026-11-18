@@ -36,10 +36,20 @@ namespace CanKit.Pro.CANopen;
 /// Power-on values (CiA 301 §7.3.2.2.1): an NMT reset restores the managed objects to the values
 /// last stored through <c>1010h:01</c> / <see cref="StoreParameters"/>, or to the defaults the node
 /// was created with if nothing was stored or <c>1011h:01</c> / <see cref="RestoreDefaultParameters"/>
-/// preceded the reset. Reset Node and Reset Communication restore the same set here: without a
-/// device description there is no source for the application objects' power-on values, so
-/// the application restores those itself from <see cref="ICanOpenNode.ApplicationReset"/>,
-/// which runs before the boot-up goes out.
+/// preceded the reset. Reset Communication restores what lies in the communication profile area
+/// (<c>1000h</c>–<c>1FFFh</c>); Reset Node restores that and the restorable objects above it
+/// (<see cref="IsRestorableObject"/>). Which objects above it are restorable depends on how the
+/// node was opened. With neither a device description nor an attached application there are none:
+/// every managed object lies in the communication profile area, so both commands restore the same
+/// set, and the application restores its own objects from
+/// <see cref="ICanOpenNode.ApplicationReset"/>, which runs before the boot-up goes out. A device
+/// description makes every object it declares restorable, and an attached application every index
+/// it claims, its power-on value being what it declared in <c>Attach</c>; Reset Node returns those
+/// to their power-on values, Reset Communication leaves the ones above <c>1FFFh</c> alone. When the
+/// node composed <c>1000h</c> itself from the device types the applications set (and no description
+/// declared it), <c>1000h</c> is restorable too, its power-on value the composed word; both commands
+/// restore it, as it lies in the communication profile area. A "save" stores it like any other
+/// restorable object, and a "load" returns it to the composed word.
 /// </para>
 /// </remarks>
 internal sealed partial class CanOpenNode
@@ -287,13 +297,17 @@ internal sealed partial class CanOpenNode
     /// The objects an NMT reset restores: the managed communication objects — except status
     /// (1001h, 1003h) and the constant records (1010h/1011h capabilities, 1200h) — and every object a
     /// device description declared, the placeholders 1000h/1018h and the application objects
-    /// among them. Without a description the node has no power-on source for those: what the
-    /// application put into 1000h, 1018h or its own objects stays across a reset, as FR-CO-019
-    /// and the README say. Reset Communication restores the communication
-    /// profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
+    /// among them, and every index an attached application claims, whose power-on value is what it
+    /// declared in <c>Attach</c>, and 1000h when the node composed it from what the applications set
+    /// with <c>SetDeviceType</c> (no description declared it), its power-on value being the composed
+    /// word. Outside those the node has no power-on source: what the application put into 1000h
+    /// itself, 1018h or an object neither described nor claimed stays across a reset, as FR-CO-019
+    /// and the README say. Reset Communication restores the communication profile area
+    /// (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
     /// </summary>
     private bool IsRestorableObject(ushort index)
-        => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index))
+        => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index) || IsClaimed(index)
+               || (index == Co.DeviceType && _composedDeviceType))
            && index is not (Co.ErrorRegister or Co.ErrorHistory or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
 
     // The objects a device description declared and the loader created or took over; empty
@@ -345,6 +359,9 @@ internal sealed partial class CanOpenNode
             return ValidatePdoMappingWrite(index, subindex, value, isTpdo: false);
         if (index is >= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount)
             return ValidatePdoMappingWrite(index, subindex, value, isTpdo: true);
+        // Last, so that every object the node manages keeps its own rules: an application claims
+        // indices from 2000h up, and nothing the node validates above lies there.
+        if (ClaimantOf(index) is { } slot) return ValidateApplicationWrite(slot, index, subindex, value);
         return OdWriteDecision.Accept;
     }
 
@@ -796,8 +813,12 @@ internal sealed partial class CanOpenNode
             desired[nodeId] = TimeSpan.FromMilliseconds(ms);
         }
 
-        ReconcileHeartbeatEmcyWatches(desired);
+        // The watches first, the timeouts they end second: ending a timeout publishes the failure,
+        // and a profile told of it can write 1016h again. That write rebuilds the watches inline,
+        // so it has to find this rebuild finished rather than have it reinstall, afterwards, a
+        // watch the write removed (Codex on #546).
         _heartbeatConsumer.Replace(desired);
+        ReconcileHeartbeatEmcyWatches(desired);
     }
 
     // =========================================================================================
@@ -865,15 +886,35 @@ internal sealed partial class CanOpenNode
         // 0x700 + id is indistinguishable from a toggle-0 guarding reply (#43).
         if (_heartbeatProducer.Interval > TimeSpan.Zero)
             _ = EmitHeartbeat((byte)_state);
+
+        // Last, once the transition is complete, announcement included: a profile told of it can
+        // ask for another state, which runs a whole transition inline, and this one must not then
+        // finish behind it and announce the state that one reached a second time, in place of its own.
+        NotifyNmtStateChanged(previous);
     }
 
     /// <summary>
     /// NMT Reset Node / Reset Communication (CiA 301 §7.3.2.2.1): the communication-profile
     /// objects return to their power-on values, the node passes NMT state Initialisation, sends
-    /// boot-up and settles in Pre-Operational. See the class remarks for why both commands
-    /// restore the same set here.
+    /// boot-up and settles in Pre-Operational. Reset Node also returns the described and claimed
+    /// objects above <c>1FFFh</c> to theirs; see the class remarks for what each command restores.
     /// </summary>
     private void PerformNmtReset(bool communicationOnly)
+    {
+        // The applications hear of the failure ending when the clearing is done, not from inside it.
+        DeferFailurePublishForReset();
+        try
+        {
+            PerformNmtResetCore(communicationOnly);
+        }
+        finally
+        {
+            // Also when the reset ends early (a disposed node) or throws.
+            _failurePublishDeferred = false;
+        }
+    }
+
+    private void PerformNmtResetCore(bool communicationOnly)
     {
         ResetEmcyInhibit();
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
@@ -894,12 +935,17 @@ internal sealed partial class CanOpenNode
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
         SuspendFlyingMasterForReset();
+        var stateBeforeReset = _state;
         if (_state == NmtState.Operational)
         {
             OnLeaveOperational();
             LeaveSrdoOperational();
         }
         _state = NmtState.Initializing;
+        NotifyNmtStateChanged(stateBeforeReset);
+        // An application may have disposed the node from that notification: the drain, the restore
+        // and the reset's other callbacks have no node left to act for.
+        if (Volatile.Read(ref _disposed) != 0) return;
 
         if (_restoreDefaultsOnReset)
         {
@@ -959,7 +1005,10 @@ internal sealed partial class CanOpenNode
         // node announces itself, so a master reacting to the boot-up never reads a value the
         // reset had not reached. With a description the node restored the described ones above;
         // the hook lets the application restore what the description does not hold.
-        RaiseApplicationReset(communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode);
+        var resetCommand = communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode;
+        ResumeFailurePublishAfterReset();
+        NotifyApplicationsOfReset(resetCommand);
+        RaiseApplicationReset(resetCommand);
 
         // A subscriber may have disposed the node; its timers are gone and nothing is announced.
         if (Volatile.Read(ref _disposed) != 0) return;
@@ -979,6 +1028,7 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void EnterPreOperationalFromReset()
     {
+        var previous = _state;
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
@@ -987,10 +1037,14 @@ internal sealed partial class CanOpenNode
         // Re-armed before the frames are ordered, for the same reason the guarding reply arms
         // its life time first (#141): a frame on the wire implies the timer behind it is set.
         _heartbeatProducer.RestartCycle();
-        _ = EmitHeartbeat(0x00);
+        var bootUp = EmitHeartbeat(0x00);
         if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
+        // What a profile raised in Initialisation, from a reset's callbacks or while an LSS slave
+        // waited for its node-id: ahead of anything the monitoring started below reports.
+        ReleaseProfileEmcysAfterBootUp(bootUp);
         StartControllerOverrunMonitoring();
         StartControllerErrorMonitoring();
+        NotifyNmtStateChanged(previous);
     }
 
     private void AbortServerSessions(SdoAbortCode code)

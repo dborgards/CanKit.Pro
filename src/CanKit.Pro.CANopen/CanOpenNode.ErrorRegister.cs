@@ -27,7 +27,29 @@ namespace CanKit.Pro.CANopen;
 // transmitted SendEmcyAsync passed (a cancelled or discarded one changes nothing), or a value it
 // wrote to 1001h through the dictionary since; the node ORs its own in and never clears what the
 // application set.
-// A reset (transition 5, then 0) ends every communication error without an EMCY.
+// An attached device profile (CanOpenNode.Application.cs) reports errors of its own through the
+// host: those are the node's part of 1001h too, not the application's, and are kept beside the
+// communication errors (NodeErrorBits). A profile error is recorded even while the EMCY is
+// switched off, because the register must show it; it ends when the profile clears it, and its
+// EMCY and its 0000h go out through the same chain and the same Stopped rule as the rest. A profile
+// error raised in Initialisation — from a reset's callbacks, or while an LSS slave waits for its
+// node-id — is recorded at once, but its EMCY is held until the boot-up is ordered and then goes
+// out behind it, with the register of that moment (CanOpenNode.Application.cs,
+// ReleaseProfileEmcysAfterBootUp): in Initialisation only the boot-up object exists (§7.3.2.2.1).
+// The register shows it from that EMCY on, as it shows an EMCY held in Stopped from its release.
+// An error the profile clears while its EMCY is still held leaves nothing on the bus. The node's
+// communication errors are not held this way, so a node without applications holds nothing in
+// Initialisation.
+// A reset (transition 5, then 0) ends every communication error and every profile error without
+// an EMCY, and drops a profile EMCY that has not gone out: one still held, and one already released
+// behind a boot-up but not yet transmitted (a master that resets the node on seeing its boot-up).
+//
+// The condition the error behaviour of 1029h reacts to — bus-off, heartbeat timeout, life guarding
+// — is also what an application that asks for it is told about (PublishCommunicationFailure).
+// The operands of that condition are mutated in several files; each mutation is followed by that
+// call, ahead of anything that reacts to it, so a profile hears of the failure before the node
+// leaves Operational because of it. An NMT reset is the exception: it publishes once, after its
+// whole clearing (CanOpenNode.Application.cs, DeferFailurePublishForReset).
 internal sealed partial class CanOpenNode
 {
     private const byte GenericErrorBit = 0x01;
@@ -76,6 +98,7 @@ internal sealed partial class CanOpenNode
         _heartbeatConsumer.NoteReceived(producer);
         if (!_options.EmitGuardingErrorEmcy && !_options.EnableErrorBehavior) return;
         _heartbeatEmcyTimeouts.Remove(producer);
+        PublishCommunicationFailure();
         EndCommunicationError(CommunicationError.HeartbeatTimeout, producer);
     }
 
@@ -87,6 +110,7 @@ internal sealed partial class CanOpenNode
                      .ToList())
         {
             _heartbeatEmcyTimeouts.Remove(previous.Key);
+            PublishCommunicationFailure();
             EndCommunicationError(CommunicationError.HeartbeatTimeout, previous.Key);
         }
 
@@ -146,10 +170,10 @@ internal sealed partial class CanOpenNode
     // does not keep reading an error that has ended.
     private void EmitErrorReset() => EmitNodeEmcy(ErrorResetCode);
 
-    private void EmitNodeEmcy(ushort errorCode)
+    private void EmitNodeEmcy(ushort errorCode, byte[]? manufacturerSpecific = null)
     {
         // The register byte is filled in when the frame is transmitted (EmitEmcy).
-        var msg = new EmcyMessage(_nodeId, errorCode, 0);
+        var msg = new EmcyMessage(_nodeId, errorCode, 0, manufacturerSpecific);
         if (_state == NmtState.Stopped)
         {
             // §7.3.2.2.4, as for the application's EMCY: held, the most recent one goes out after
@@ -181,7 +205,7 @@ internal sealed partial class CanOpenNode
         // A held node EMCY that the application's replaced still updates 1001h, ahead of it on
         // the chain: with the EMCY switched off meanwhile, the application's sends nothing and
         // writes nothing, and an error that ended in Stopped would be read on (Codex on #417).
-        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(CommunicationErrorBits);
+        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(NodeErrorBits);
         _heldNodeEmcy = false;
         _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
@@ -192,6 +216,7 @@ internal sealed partial class CanOpenNode
     private void EndCommunicationErrorsForReset()
     {
         _communicationErrors.Clear();
+        EndProfileErrorsForReset();
         _heartbeatEmcyTimeouts.Clear();
         InvalidateControllerOverrunMonitoring();
         InvalidateControllerErrorBaseline();

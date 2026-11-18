@@ -257,6 +257,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // A device description shapes the dictionary on top of that, before the node is on
             // the bus (CanOpenNode.DeviceDescription.cs).
             if (description is not null) ApplyDeviceDescription(description);
+            // Applications come last: they see the description's objects, and what they declare
+            // joins the power-on values (CanOpenNode.Application.cs).
+            AttachApplications();
             InitializeControllerOverrunMonitor();
             InitializeControllerErrorMonitor();
         }
@@ -271,6 +274,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // Change-of-state TPDOs (FR-CO-006): application-originated OD writes trigger
         // event-driven TPDOs whose mapping contains the written entry.
         _od.EntryWritten += OnOdEntryWrittenForCoS;
+
+        // After the attach phase: what an application writes while it attaches is not news to it.
+        _od.EntryWritten += OnOdEntryWrittenForApplications;
 
         // The pump has to be running before the subscription exists: a frame can be dispatched
         // as soon as Subscribe returns, and construction failure below signals the pump to
@@ -350,9 +356,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
             if (LayerSettingsBlockBoot()) return;
             _state = NmtState.PreOperational;
-            _ = EmitHeartbeat(0x00);
+            // A deadline an application armed in Attach can run before this job, in
+            // Initialisation; an error it raised there follows the boot-up.
+            ReleaseProfileEmcysAfterBootUp(EmitHeartbeat(0x00));
             StartControllerOverrunMonitoring();
             StartControllerErrorMonitoring();
+            NotifyNmtStateChanged(NmtState.Initializing);
         });
 
         _readerTask = Task.Run(RunReaderAsync);
@@ -580,15 +589,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         return link;
     }
 
+    // profileResetGeneration: set for a profile EMCY released behind a boot-up, the reset generation
+    // of its release. A reset handled before the turn that would transmit it drops it, frame and
+    // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Null for
+    // every other EMCY, which therefore behaves as it did before profiles existed.
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
-        byte? applicationErrorRegister = null)
+        byte? applicationErrorRegister = null, int? profileResetGeneration = null)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
         // The node's bits are those of the moment the EMCY is decided; the application's part is
         // read when it is transmitted, so it is the part of the last application EMCY before it
         // on this chain (#379). msg.ErrorRegister is not used.
-        byte nodeBits = CommunicationErrorBits;
+        byte nodeBits = NodeErrorBits;
         object inhibitEpoch = _emcyInhibitEpoch;
         _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
@@ -596,6 +609,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         Func<Task> transmit = () =>
         {
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+            // Here, on the actor in the turn that transmits, after every wait ahead of it on the chain.
+            if (profileResetGeneration is { } released && released != _profileResetGeneration) return Task.CompletedTask;
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid)
             {
@@ -3055,8 +3070,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         if (_options.EmitGuardingErrorEmcy || _options.EnableErrorBehavior)
             _heartbeatEmcyTimeouts[producer] = timeout;
+        PublishCommunicationFailure();
         ApplyCommunicationErrorBehavior();
-        if (_options.EmitGuardingErrorEmcy)
+        // Still watched: an application told of the failure, or of the state change it caused, can
+        // have ended the watch from its callback (a write to 1016h). An error raised for a producer
+        // nobody watches any longer would never end.
+        if (_options.EmitGuardingErrorEmcy && _heartbeatEmcyTimeouts.ContainsKey(producer))
         {
             RaiseCommunicationError(CommunicationError.HeartbeatTimeout, producer, 0x8130);
         }
