@@ -115,14 +115,15 @@ internal sealed partial class CanOpenNode
         return Volatile.Read(ref _disposed) == 0;
     }
 
-    /// <summary>An NMT reset drops the command writes still queued, before the applications are told
-    /// of the reset. Actor loop. Nothing on a node without applications.</summary>
+    /// <summary>An NMT reset drops the command writes and the RPDO receptions still queued, before the
+    /// applications are told of the reset. Actor loop. Nothing on a node without applications.</summary>
     private void DropQueuedCommandWritesForReset()
     {
         if (_applications.Length == 0) return;
         lock (_applicationGate)
         {
             _queuedCommands = null;
+            _queuedReceptions = null;
         }
     }
 }

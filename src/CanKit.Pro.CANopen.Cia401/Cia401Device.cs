@@ -448,6 +448,12 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     {
     }
 
+    /// <summary>Nothing: CiA 401-1 ties no transmission to the reception of an RPDO; the device acts
+    /// on what the RPDO wrote (<see cref="OnEntriesWritten"/>).</summary>
+    public void OnRpdoReceived(int pdoNumber)
+    {
+    }
+
     /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).
     /// Entering Operational sends every TPDO of transmission type <c>FFh</c> (§6.1) that maps an
     /// entry of the device: the analog inputs first start their interrupt state afresh

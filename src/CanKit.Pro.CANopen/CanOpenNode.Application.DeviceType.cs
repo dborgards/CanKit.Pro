@@ -94,6 +94,8 @@ internal sealed partial class CanOpenNode
         }
 
         RequireValidWords(types, setters, count);
+        // Whose RPDOs and TPDOs a PDO number names (OnRpdoReceived, RequestTransmissionOfTpdo).
+        _logicalDeviceOwners = setters;
 
         if (_describedObjects.Contains(Co.DeviceType))
         {

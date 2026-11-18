@@ -268,8 +268,8 @@ internal sealed partial class CanOpenNode
 
     /// <summary>
     /// Tells each claimant its command writes, in commit order (<see cref="DeliverCommandWrites"/>),
-    /// then the entries written since it was last told: sorted by index, then sub-index, each once.
-    /// Actor loop. Writes landing while this runs re-arm the queue and the dirty set and queue the
+    /// then the entries written since it was last told: sorted by index, then sub-index, each once;
+    /// then the RPDOs taken since (<see cref="DeliverReceptions"/>). Actor loop. Writes landing while this runs re-arm the queue and the dirty set and queue the
     /// next evaluation, so none is lost; one claimant that throws does not keep the next from being
     /// told (<see cref="InvokeApplication"/>), one that disposes the node does.
     /// </summary>
@@ -277,18 +277,28 @@ internal sealed partial class CanOpenNode
     {
         HashSet<uint>? dirty;
         List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value)>? commands;
+        List<(ApplicationSlot Slot, int PdoNumber)>? receptions;
         lock (_applicationGate)
         {
             dirty = _applicationDirty;
             _applicationDirty = null;
             commands = _queuedCommands;
             _queuedCommands = null;
+            receptions = _queuedReceptions;
+            _queuedReceptions = null;
             _applicationEvaluationPosted = false;
         }
         if (Volatile.Read(ref _disposed) != 0) return;
         if (commands is not null && !DeliverCommandWrites(commands)) return;
-        if (dirty is null || dirty.Count == 0) return;
+        if (dirty is { Count: > 0 } && !DeliverWrittenEntries(dirty)) return;
+        // Last: an application hears of an RPDO once it has been told what the RPDO wrote.
+        if (receptions is not null) DeliverReceptions(receptions);
+    }
 
+    /// <summary>Tells each claimant its entries of <paramref name="dirty"/>, sorted and each once.
+    /// Returns <see langword="false"/> when a callback disposed the node, which ends the round.</summary>
+    private bool DeliverWrittenEntries(HashSet<uint> dirty)
+    {
         var keys = new uint[dirty.Count];
         dirty.CopyTo(keys);
         Array.Sort(keys); // CosKey is index << 8 | sub-index: its order is index, then sub-index
@@ -297,7 +307,7 @@ internal sealed partial class CanOpenNode
         {
             // One that disposed the node ends the round: the rest are not called on a node that is
             // gone, as in the other rounds (NotifyNmtStateChanged, PublishCommunicationFailure).
-            if (Volatile.Read(ref _disposed) != 0) return;
+            if (Volatile.Read(ref _disposed) != 0) return false;
             List<CanOpenObjectAddress>? entries = null;
             foreach (var key in keys)
             {
@@ -309,6 +319,7 @@ internal sealed partial class CanOpenNode
             var written = entries.ToArray();
             InvokeApplication(slot, application => application.OnEntriesWritten(written));
         }
+        return Volatile.Read(ref _disposed) == 0;
     }
 
     // =========================================================================================
@@ -993,6 +1004,16 @@ internal sealed partial class CanOpenNode
             // Both kinds, whatever EnableChangeOfStateTpdo and EnableChangeOfStateSrdo say: those
             // switch the automatism off, and this is a request, not the automatism.
             _node.TriggerChangeOfState(dirty);
+        }
+
+        public void RequestTransmissionOfTpdo(int pdoNumber)
+        {
+            if (!_node._actor.IsOnCurrentActor)
+            {
+                throw new InvalidOperationException(
+                    "RequestTransmissionOfTpdo runs on the node's actor loop: call it from a callback of the application.");
+            }
+            _node.TransmitApplicationTpdo(Slot, pdoNumber);
         }
 
         public void RaiseError(ushort errorCode, byte errorRegisterBits, ReadOnlySpan<byte> manufacturerSpecific = default)

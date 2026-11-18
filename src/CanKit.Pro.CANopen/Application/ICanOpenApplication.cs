@@ -154,8 +154,9 @@ internal interface ICanOpenApplication
     /// <para>
     /// The calls come on the actor loop, one actor job after the writes, in the job that tells
     /// <see cref="OnEntriesWritten"/> too: first every command write committed since the last such
-    /// job, in commit order, then the coalesced <see cref="OnEntriesWritten"/>. A command entry is
-    /// never reported through <see cref="OnEntriesWritten"/> for a written value. A call that throws
+    /// job, in commit order, then the coalesced <see cref="OnEntriesWritten"/>, then
+    /// <see cref="OnRpdoReceived"/>. A command entry is never reported through
+    /// <see cref="OnEntriesWritten"/> for a written value. A call that throws
     /// is reported on
     /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, and the next write is still told.
     /// </para>
@@ -180,6 +181,43 @@ internal interface ICanOpenApplication
     /// </para>
     /// </remarks>
     void OnCommandWritten(CanOpenObjectAddress entry, byte[] value);
+
+    /// <summary>RPDO <paramref name="pdoNumber"/> was received and its data written: once per frame
+    /// the node took, also when it carried the data of the last one.</summary>
+    /// <remarks>
+    /// <para>
+    /// Told for the RPDOs of the logical devices the application set a device type for
+    /// (<see cref="ICanOpenApplicationHost.SetDeviceType"/>): logical device <c>n</c> uses the PDO
+    /// numbers <c>n·64 + 1</c> to <c>n·64 + 64</c> (CiA 301 v4.2.0 §7.2.2.1, Table 3;
+    /// <see cref="CanOpenLogicalDeviceAddressing.PdoNumber"/>). An RPDO outside every such range
+    /// tells no application. A profile answers a received RPDO with this, as CiA 408 v2.2.0 §8.4.1
+    /// asks of its TPDOs: "A TPDO with transmission type 255 shall be transmitted immediately after
+    /// receiving the corresponding RPDO"; it sends the answer with
+    /// <see cref="ICanOpenApplicationHost.RequestTransmissionOfTpdo"/>.
+    /// </para>
+    /// <para>
+    /// A frame counts when the node takes it: the RPDO exists (valid COB-ID), the node is
+    /// Operational (CiA 301 v4.2.0 §7.3.2.2.5, Table 37), and the frame carries at least the mapped
+    /// length (§7.5.2.36). An entry of the mapping that the dictionary or the application refused is
+    /// still part of a frame the node took. An SDO download or a local write of the same entries is
+    /// no reception and tells nothing here, whatever values it writes; neither does an MPDO, which
+    /// is addressed by its object, not by an RPDO of the application's.
+    /// </para>
+    /// <para>
+    /// A synchronous RPDO (transmission type <c>00h</c> to <c>F0h</c>) passes its data to the
+    /// application with the SYNC that follows it (§7.2.2.2), and is told then, once for the frame
+    /// whose data the SYNC applied: the node keeps the last frame received before the SYNC, so a frame
+    /// that a later one replaced before the SYNC is not told.
+    /// </para>
+    /// <para>
+    /// Actor loop, one actor job after the frame, in the job that tells the writes: after
+    /// <see cref="OnCommandWritten"/> and <see cref="OnEntriesWritten"/>, so the application has been
+    /// told the RPDO's own writes when it hears of the RPDO. Several RPDOs taken before that job are
+    /// told in the order taken, after every write of the job, including writes committed between the
+    /// frames. An NMT reset drops the receptions not yet told, with the queued command writes.
+    /// </para>
+    /// </remarks>
+    void OnRpdoReceived(int pdoNumber);
 
     /// <summary>The node's NMT state changed from <paramref name="previous"/> to
     /// <paramref name="current"/>.</summary>

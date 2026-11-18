@@ -217,6 +217,8 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public Action<CanOpenObjectAddress, byte[]>? WhenCommand { get; set; }
 
+        public Action<int>? WhenRpdo { get; set; }
+
         /// <summary>What the node called, in order; a copy, so the actor can keep appending.</summary>
         public IReadOnlyList<string> Log
         {
@@ -257,6 +259,12 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         {
             Record($"command {entry.Index:X4}:{entry.Subindex:X2}={string.Concat(value.Select(b => b.ToString("X2")))}");
             WhenCommand?.Invoke(entry, value);
+        }
+
+        public void OnRpdoReceived(int pdoNumber)
+        {
+            Record($"rpdo {pdoNumber}");
+            WhenRpdo?.Invoke(pdoNumber);
         }
 
         public void OnNmtStateChanged(NmtState previous, NmtState current)

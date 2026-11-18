@@ -232,6 +232,40 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="ArgumentException">An entry is not claimed by this application.</exception>
     void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries);
 
+    /// <summary>Asks the node to send TPDO <paramref name="pdoNumber"/> once, an event of the
+    /// application's for an event-driven TPDO. Actor loop.</summary>
+    /// <remarks>
+    /// <para>
+    /// The answer to a received RPDO (<see cref="ICanOpenApplication.OnRpdoReceived"/>) where the
+    /// profile names the TPDO by its number rather than by what it maps, as CiA 408 v2.2.0 §8.4.1
+    /// does. The number lies in the PDO range of a logical device the application set a device type
+    /// for (<see cref="SetDeviceType"/>; logical device <c>n</c> uses <c>n·64 + 1</c> to
+    /// <c>n·64 + 64</c>, CiA 301 v4.2.0 §7.2.2.1, Table 3).
+    /// </para>
+    /// <para>
+    /// The TPDO is sent as the node sends an event-driven TPDO for any event: only in Operational,
+    /// only when it exists (valid COB-ID, a TPDO the node has), and only for the transmission types
+    /// that an event triggers, <c>FEh</c> and <c>FFh</c> (CiA 301 v4.2.0 §7.5.2.37, Table 72). For
+    /// every other type, and in every other state, nothing happens and nothing is kept for later: a
+    /// synchronous TPDO (<c>00h</c> to <c>F0h</c>) goes with the SYNC, the acyclic <c>00h</c>
+    /// included, which this does not latch; an RTR-only one (<c>FCh</c>, <c>FDh</c>) answers an RTR;
+    /// a TPDO configured as an MPDO (<c>FEh</c> or <c>FFh</c> in sub-index 00h of its mapping) sends
+    /// what its own rules say and is left alone. The inhibit time of <c>1800h + n − 1</c>,
+    /// sub-index 03h, spaces it as any transmission of the TPDO (§7.5.2.37): asked within it, the
+    /// TPDO goes out once when it has elapsed, and further requests until then add nothing to that
+    /// one transmission. So two RPDOs answered within one inhibit time produce two TPDOs only when
+    /// the inhibit time is 0.
+    /// </para>
+    /// <para>
+    /// The frame takes the node's path for every TPDO, the one <see cref="RequestTransmission"/>
+    /// takes, and carries what the mapping reads from the dictionary when the frame is built.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>
+    /// <exception cref="ArgumentException"><paramref name="pdoNumber"/> lies in no PDO range of a
+    /// logical device the application set a device type for.</exception>
+    void RequestTransmissionOfTpdo(int pdoNumber);
+
     /// <summary>Raises an error of the application: records <paramref name="errorRegisterBits"/> and
     /// the generic bit (bit 0) as part of the node's share of <c>1001h</c>, and orders the EMCY.
     /// Actor loop; not from <see cref="ICanOpenApplication.Attach"/>.</summary>
