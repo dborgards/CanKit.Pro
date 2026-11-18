@@ -134,6 +134,51 @@ public class Cia401DeviceDescriptionTests
     }
 
     [Fact]
+    public async Task Without_6206h_To_6208h_The_Outputs_Behave_As_Their_Defaults()
+    {
+        // 6208h FFh lets every bit through (§8.3.5); 6206h FFh puts every bit to 6207h, 0 (§8.3.3, §8.3.4).
+        using var rig = Open(Eds.Of("cia401-digital.eds").Remove(0x6206).Remove(0x6207).Remove(0x6208));
+
+        await rig.StartAsync();
+        await rig.SendRpdo1Async(0xA5, 0x00);
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0xA5);
+
+        await rig.StopAsync();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
+    }
+
+    [Fact]
+    public async Task Without_6443h_An_Analog_Output_Takes_Its_Error_Value_In_The_Error_State()
+    {
+        // 6443h defaults to 1h, "error value" (§8.7.4); 6444h is left adjusted (Figure 7).
+        using var rig = Open(Eds.Of("cia401.eds").Remove(0x6443).Set("6444sub1", "DefaultValue", "0x12340000"));
+
+        await rig.WriteI16Async(0x6411, 0x01, 100);
+        rig.Device.ReadAnalogOutput(1).Should().Be(100);
+
+        await rig.StopAsync();
+        rig.Device.ReadAnalogOutput(1).Should().Be(0x1234);
+    }
+
+    [Fact]
+    public async Task Without_6422h_The_Device_Keeps_No_Interrupt_Source()
+    {
+        using var rig = Open(Eds.Of("cia401.eds").Remove(0x6422));
+        int reports = 0;
+        rig.Node.BackgroundExceptionOccurred += (_, _) => System.Threading.Interlocked.Increment(ref reports);
+
+        // The write clears the interrupt source; with the defaults (07h, limits and deltas 0) the set
+        // interrupts, which sets it.
+        await rig.WriteU8Async(0x6423, 0x00, 1);
+        rig.Device.SetAnalogInput(1, 500);
+        await rig.FlushBackgroundReportsAsync();
+
+        reports.Should().Be(0, "neither the clear nor the set touches an object the file leaves out");
+        rig.Device.ReadAnalogInput(1).Should().Be(500);
+        Cia401Rig.AbortCode(await rig.SdoAsync(Upload(0x6422, 0x01))).Should().Be(ObjectDoesNotExist);
+    }
+
+    [Fact]
     public async Task The_Files_Default_Beats_The_Catalogues_6206h_0Fh_Is_The_Error_Mode()
     {
         using var rig = Open(Eds.Of("cia401-digital.eds")
