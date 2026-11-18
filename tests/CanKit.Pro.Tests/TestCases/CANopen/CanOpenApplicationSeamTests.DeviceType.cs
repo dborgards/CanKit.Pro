@@ -577,6 +577,22 @@ public partial class CanOpenApplicationSeamTests
         failure.Message.Should().Contain("0x67FF").And.Contain("read-only").And.Contain("io");
     }
 
+    [Fact] // #553
+    public void A_Described_Device_Type_Object_Without_Sub_Index_0_Fails_The_Open()
+    {
+        // 67FFh described as a RECORD whose only entry is sub-index 1: there is no device type to read.
+        var eds = EdsWith6000(0xFFFF0191, (0x67FF, Profile401));
+        const string Declared = "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191\nPDOMapping=0\n";
+        eds.Should().Contain(Declared);
+        var description = CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
+            "[67FF]\nParameterName=Device type\nObjectType=0x9\nSubNumber=1\n" +
+            "[67FFsub1]\nParameterName=Word\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191\nPDOMapping=0\n"));
+
+        var failure = OptionsRefused(TwoDevices(), description);
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32 at sub-index 0").And.Contain("io");
+    }
+
     [Theory] // #553
     [InlineData("ro")]
     [InlineData("const")]
