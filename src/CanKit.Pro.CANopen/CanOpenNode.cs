@@ -250,6 +250,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // to leave the thread behind (#357 C-10).
         try
         {
+            // What the applications require is read first: a layout of 1029h one of them asks for
+            // shapes the communication profile below (CanOpenNode.Application.cs).
+            ReadApplicationRequirements();
             // The communication-profile objects at their CiA 301 defaults, plus the OD hooks
             // that validate writes to them and carry accepted values into the runtime
             // (CanOpenNode.CommunicationProfile.cs).

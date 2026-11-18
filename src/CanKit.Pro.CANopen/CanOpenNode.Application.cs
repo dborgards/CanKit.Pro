@@ -87,6 +87,37 @@ internal sealed partial class CanOpenNode
     /// </summary>
     /// <exception cref="ArgumentException">A claim or requirement cannot be met; the parameter is
     /// <c>options</c> and the message names the application.</exception>
+    // The requirements of each listed application, read once, before the dictionary is built
+    // (ReadApplicationRequirements), index by index with CanOpenNodeOptions.Applications; null for a
+    // node without applications. Constructing thread only.
+    private CanOpenApplicationRequirements?[]? _applicationRequirements;
+
+    /// <summary>
+    /// Reads the requirements of <see cref="CanOpenNodeOptions.Applications"/>, once, before the
+    /// communication profile is populated: the error behaviour layout one of them asks for shapes
+    /// <c>1029h</c> as it is declared and as a device description is loaded against it
+    /// (<see cref="TakeErrorBehaviorLayout"/>). An entry that is null or listed a second time is
+    /// skipped here and refused by <see cref="AttachApplications"/>, which takes the requirements
+    /// read here. Nothing on a node without applications.
+    /// </summary>
+    private void ReadApplicationRequirements()
+    {
+        var listed = _options.Applications;
+        if (listed.Count == 0) return;
+        var read = new CanOpenApplicationRequirements?[listed.Count];
+        for (int i = 0; i < read.Length; i++)
+        {
+            if (listed[i] is not { } application) continue;
+            bool listedBefore = false;
+            for (int earlier = 0; earlier < i; earlier++) listedBefore |= ReferenceEquals(listed[earlier], application);
+            if (listedBefore) continue;
+            var requirements = application.Requirements;
+            read[i] = requirements;
+            if (requirements?.ErrorBehavior is { } layout) TakeErrorBehaviorLayout(application, layout);
+        }
+        _applicationRequirements = read;
+    }
+
     private void AttachApplications()
     {
         var listed = _options.Applications;
@@ -102,7 +133,8 @@ internal sealed partial class CanOpenNode
                     throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.Applications.");
             }
             var host = new ApplicationHost(this);
-            var requirements = application.Requirements;
+            // Read before the dictionary was built (ReadApplicationRequirements), not again here.
+            var requirements = _applicationRequirements![i]!;
             slots[i] = new ApplicationSlot(application, host)
             {
                 Claims = ValidatedClaims(application, slots, i),
@@ -187,6 +219,11 @@ internal sealed partial class CanOpenNode
         {
             throw OptionsError($"Application '{application.Name}' monitors communication failures: " +
                 "set CanOpenNodeOptions.EnableErrorBehavior to true.");
+        }
+        if (requirements.ErrorBehavior is not null && !_options.EnableErrorBehavior)
+        {
+            throw OptionsError($"Application '{application.Name}' lays out the error behaviour record 1029h, which the node " +
+                "has only with error behaviour: set CanOpenNodeOptions.EnableErrorBehavior to true.");
         }
     }
 
@@ -1004,6 +1041,21 @@ internal sealed partial class CanOpenNode
             // Both kinds, whatever EnableChangeOfStateTpdo and EnableChangeOfStateSrdo say: those
             // switch the automatism off, and this is a request, not the automatism.
             _node.TriggerChangeOfState(dirty);
+        }
+
+        public NmtState? ErrorBehaviorTarget(byte subindex)
+        {
+            if (subindex == 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(subindex), subindex,
+                    "1029h sub-index 00h is the highest sub-index supported, not an error class.");
+            }
+            if (!_node._actor.IsOnCurrentActor)
+            {
+                throw new InvalidOperationException(
+                    "ErrorBehaviorTarget runs on the node's actor loop: call it from a callback of the application.");
+            }
+            return _node.ErrorBehaviorTargetOf(subindex);
         }
 
         public void RequestTransmissionOfTpdo(int pdoNumber)

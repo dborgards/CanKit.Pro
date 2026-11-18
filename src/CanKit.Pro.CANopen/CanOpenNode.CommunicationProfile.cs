@@ -161,11 +161,7 @@ internal sealed partial class CanOpenNode
         // §7.5.2.17: EMCY COB-ID, default 80h + node-id, valid.
         _od.AddU32(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(_nodeId), rw, nm);
         if (_options.EnableEmcyInhibit) _od.AddU16(Co.EmcyInhibitTime, 0x00, 0, rw, nm);
-        if (_options.EnableErrorBehavior)
-        {
-            _od.AddU8(Co.ErrorBehavior, 0, 1, ro, nm);
-            _od.AddU8(Co.ErrorBehavior, 1, 0, rw, nm);
-        }
+        if (_options.EnableErrorBehavior) PopulateErrorBehavior(ro, rw, nm);
 
         // §7.5.2.19 / §7.5.2.20: heartbeat. One consumer slot to begin with; AddHeartbeatConsumer
         // grows the array. Sub0 is const on the bus.

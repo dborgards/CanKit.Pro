@@ -17,6 +17,40 @@ internal sealed class CanOpenApplicationRequirements
     /// <summary>The application wants <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/>.
     /// Needs <see cref="CanOpenNodeOptions.EnableErrorBehavior"/>.</summary>
     public bool CommunicationFailureMonitoring { get; init; }
+
+    /// <summary>The error behaviour record <c>1029h</c> the application's profile defines;
+    /// <see langword="null"/> for the node's generic record (sub-index 00h = 01h, the communication
+    /// error at 01h with default 00h). Needs <see cref="CanOpenNodeOptions.EnableErrorBehavior"/>,
+    /// without which the node has no <c>1029h</c>.</summary>
+    /// <remarks>
+    /// <para>
+    /// Read with the rest of the requirements, before the node builds its dictionary, so the record
+    /// exists as laid out from the first frame and a device description is loaded against it.
+    /// Values outside <c>00h</c> to <c>02h</c>, more than 253 additional classes, two applications
+    /// asking for layouts that differ in any value, and a layout without
+    /// <see cref="CanOpenNodeOptions.EnableErrorBehavior"/> fail the open with an
+    /// <see cref="System.ArgumentException"/> for <c>options</c>. Two applications asking for the
+    /// same layout share the record.
+    /// </para>
+    /// <para>
+    /// A device description that declares <c>1029h</c> wins, as for every object it declares: the
+    /// node keeps the access it gives each sub-index and the values it gives them, also where they
+    /// differ from the layout's defaults, and corrects a value outside <c>00h</c> to <c>02h</c> to
+    /// the default, as it does for its own record. The file must declare every sub-index the layout
+    /// names, or the open fails naming those it lacks; sub-index 00h stays the constant the layout
+    /// gives, and a sub-index above the layout's is not created, as without a layout. A description
+    /// that does not declare <c>1029h</c> leaves the record as laid out.
+    /// </para>
+    /// <para>
+    /// The node acts on the communication error, sub-index 01h, as it does with its generic record
+    /// (CiA 301 v4.2.0 §7.5.2.32): only from Operational, whatever the value. The further classes are
+    /// the profile's to act on; <see cref="ICanOpenApplicationHost.ErrorBehaviorTarget"/> says what
+    /// one of them asks for in the present state. Reset Node and Reset Communication restore the
+    /// record to its power-on values, <c>1010h</c> stores it and <c>1011h</c> returns it to the
+    /// layout's defaults (or the file's), as for the generic record.
+    /// </para>
+    /// </remarks>
+    public CanOpenErrorBehaviorLayout? ErrorBehavior { get; init; }
 }
 
 /// <summary>

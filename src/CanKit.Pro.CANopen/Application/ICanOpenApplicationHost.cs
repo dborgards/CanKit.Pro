@@ -364,6 +364,35 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>
     void SendWarning(ushort errorCode, ReadOnlySpan<byte> manufacturerSpecific = default);
 
+    /// <summary>The NMT state the error class at <c>1029h:<paramref name="subindex"/></c> asks for
+    /// in the present state, for an error of the application's that the class covers:
+    /// Pre-Operational, Stopped, or <see langword="null"/> for no change. Actor loop.</summary>
+    /// <remarks>
+    /// <para>
+    /// The rule of CiA 301 v4.2.0 §7.5.2.32, Table 63, applied to the value the sub-index holds now
+    /// and to the node's state now: <c>00h</c> asks for Pre-Operational, "only if currently in NMT
+    /// state Operational"; <c>01h</c> asks for no change; <c>02h</c> asks for Stopped, from any state
+    /// — so from Pre-Operational as from Operational, and <see langword="null"/> where the node is
+    /// Stopped already or in Initialisation, where it takes no request
+    /// (<see cref="RequestNmtState"/>). Any other value, and a sub-index or a record that does not
+    /// exist, asks for nothing. The answer goes to <see cref="RequestNmtState"/>; the profile
+    /// decides when its error class applies (CiA 408 v2.2.0 §8.6.8: the internal device error "shall
+    /// be valid when the device is in error state", sub-index 02h; CiA 401-1 v3.1.0 §6.2.4: a device
+    /// failure, sub-index 01h).
+    /// </para>
+    /// <para>
+    /// The node's own reaction to a communication error, which sub-index 01h configures, is not
+    /// this: the node acts on it only from Operational, <c>02h</c> included (see
+    /// <see cref="CanOpenApplicationRequirements.ErrorBehavior"/>). The record is read as the
+    /// dictionary holds it, also one a device description declared on a node without
+    /// <see cref="CanOpenNodeOptions.EnableErrorBehavior"/>, which the node itself does not act on.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="subindex"/> is <c>00h</c>, the
+    /// highest sub-index supported, which is no error class.</exception>
+    /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>
+    NmtState? ErrorBehaviorTarget(byte subindex);
+
     /// <summary>Asks the node to enter Pre-Operational or Stopped: to leave Operational, or to go
     /// where the application's own fault calls for. Only the master starts the node. Actor loop.</summary>
     /// <remarks>
