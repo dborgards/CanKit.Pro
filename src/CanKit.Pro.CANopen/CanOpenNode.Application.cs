@@ -443,10 +443,13 @@ internal sealed partial class CanOpenNode
     /// callback is held; a <c>Dispose</c> then is too late to stop it, as for any expired deadline.</remarks>
     private void RunApplicationDeadline(ApplicationSlot slot, Action onExpired)
     {
+        // Built once, outside work: nested in it, the lambda would get a lazily cached delegate whose
+        // second use never comes, as each callback runs once.
+        Action<ICanOpenApplication> callback = _ => onExpired();
         Action work = () =>
         {
             if (Volatile.Read(ref _disposed) != 0) return;
-            InvokeApplication(slot, _ => onExpired());
+            InvokeApplication(slot, callback);
         };
         lock (_applicationPostGate)
         {
