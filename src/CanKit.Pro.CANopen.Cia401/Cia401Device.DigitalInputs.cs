@@ -128,7 +128,8 @@ internal sealed partial class Cia401Device
     /// polarity of <c>6002h</c> as the node restored it, for the value the node restored to
     /// <c>6000h</c>, a default or what <c>1010h</c> stored, is not what the sensors deliver. No
     /// interrupt is evaluated: in Initialisation nothing is sent, and entering Operational sends
-    /// every group (§6.1). Actor loop.</summary>
+    /// every TPDO of type <c>FFh</c> that maps a group (§6.1, see <see cref="OnNmtStateChanged"/>).
+    /// Actor loop.</summary>
     private void DigitalInputsReset(ICanOpenApplicationHost host)
     {
         var block = _digitalInputs;
@@ -139,14 +140,6 @@ internal sealed partial class Cia401Device
             var logical = (byte)(block.Physical[g] ^ block.Polarity.ReadByte(host.ObjectDictionary, sub));
             if (logical != ReadByte(host, block.Read.Index, sub)) WriteOwn(host, block.Read.Index, sub, logical);
         }
-    }
-
-    /// <summary>Every sub-index of <c>6000h</c>, for the transmission on entering Operational.</summary>
-    private void DigitalInputsToSendOnStart(List<CanOpenObjectAddress> send)
-    {
-        var block = _digitalInputs;
-        if (block is null) return;
-        for (int sub = 1; sub <= block.Groups; sub++) send.Add(new CanOpenObjectAddress(block.Read.Index, (byte)sub));
     }
 
     /// <summary>

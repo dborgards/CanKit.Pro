@@ -130,11 +130,12 @@ internal sealed partial class Cia401Device
     /// entry with <c>6423h</c> FALSE. A reset ends it without an EMCY, as it ends every error.
     /// </para>
     /// <para>
-    /// <b>Entering Operational</b> asks for every channel's <c>6401h</c>, in the same request as the
-    /// digital inputs, whatever <c>6423h</c> says: §6.1 sends every TPDO of transmission type 255
-    /// then, and <c>6423h</c> governs interrupts only (§8.6.4). TPDOs 2 to 4 are disabled by default
-    /// (<see cref="Cia401Configuration.DefaultPdos"/>), so the request reaches the bus only once a
-    /// master has created them.
+    /// <b>Entering Operational</b> sends every TPDO of transmission type 255 that maps an entry of
+    /// the device, every channel's <c>6401h</c> among them, whatever <c>6423h</c> says: §6.1 sends
+    /// every such TPDO then, and <c>6423h</c> governs interrupts only (§8.6.4); the request is the
+    /// device's one for all its entries (see <see cref="OnNmtStateChanged"/>). TPDOs 2 to 4 are
+    /// disabled by default (<see cref="Cia401Configuration.DefaultPdos"/>), so the analog inputs
+    /// reach the bus then only once a master has created them.
     /// </para>
     /// <para>
     /// Not built in this slice: the 8-bit, 32-bit, float and manufacturer-specific inputs
@@ -309,16 +310,16 @@ internal sealed partial class Cia401Device
     }
 
     /// <summary>Entering Operational: the interrupt state starts afresh (the last communicated
-    /// values are the current ones, <c>6422h</c> is cleared), every channel's <c>6401h</c> joins the
-    /// request of §6.1, and with <c>6423h</c> FALSE the warning of §5.3 is raised. Actor loop.</summary>
-    private void AnalogInputsEnterOperational(ICanOpenApplicationHost host, List<CanOpenObjectAddress> send)
+    /// values are the current ones, <c>6422h</c> is cleared, before the request of §6.1 that
+    /// <see cref="OnNmtStateChanged"/> makes next), and with <c>6423h</c> FALSE the warning of §5.3
+    /// is raised. Actor loop.</summary>
+    private void AnalogInputsEnterOperational(ICanOpenApplicationHost host)
     {
         var block = _analogInputs;
         if (block is null) return;
 
         TakeCurrentAsLastCommunicated(host, block);
         ClearInterruptSource(host, block);
-        for (int c = 1; c <= block.Channels; c++) send.Add(new CanOpenObjectAddress(block.Read.Index, (byte)c));
         if (block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) == 0) host.RaiseError(AnalogInputsDisabledWarning, 0);
     }
 

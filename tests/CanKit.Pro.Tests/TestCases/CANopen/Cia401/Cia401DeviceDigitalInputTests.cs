@@ -382,6 +382,31 @@ public class Cia401DeviceDigitalInputTests
             .Which.Should().Equal(0xA5, 0x5A, 0x0F);
     }
 
+    [Fact] // §6.1 names every TPDO of transmission type FFh, not the TPDOs that map an input
+    public async Task Entering_Operational_Sends_A_Tpdo_The_Master_Remapped_To_A_Parameter()
+    {
+        using var rig = new Cia401Rig(Inputs(8), Cia401Rig.WritablePdoRecords);
+        // CiA 301 v4.2.0 §7.5.2.38: disable the PDO, clear the mapping, write the entry, set the
+        // count, enable the PDO again. TPDO 1 keeps transmission type FFh.
+        uint cobId = await rig.ReadU32Async(0x1800, 0x01);
+        await rig.WriteU32Async(0x1800, 0x01, cobId | 0x8000_0000u);
+        await rig.WriteU8Async(0x1A00, 0x00, 0);
+        await rig.WriteU32Async(0x1A00, 0x01, 0x6002_0108);
+        await rig.WriteU8Async(0x1A00, 0x00, 1);
+        await rig.WriteU32Async(0x1800, 0x01, cobId);
+        await rig.WriteU8Async(0x6002, 0x01, 0x5A);
+        rig.Device.SetDigitalInputs(1, 0x0F);
+        (await rig.ReadU8Async(0x6000, 0x01)).Should().Be(0x55, "6000h shows 0Fh under the polarity 5Ah, which tells it apart from 6002h");
+        (await rig.ReadU8Async(0x1800, 0x02)).Should().Be(0xFF);
+
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo1, 1);
+        await rig.DrainAsync();
+
+        rig.Payloads(Cia401Rig.Tpdo1).Should().ContainSingle("entering Operational sends every TPDO of type FFh once (CiA 401-1 §6.1)")
+            .Which.Should().Equal(new byte[] { 0x5A }, "TPDO 1 now carries the polarity 6002h:01");
+    }
+
     [Fact]
     public async Task Twenty_Inputs_Are_Three_Bytes_And_Channel_17_Is_The_Low_Bit_Of_The_Third()
     {

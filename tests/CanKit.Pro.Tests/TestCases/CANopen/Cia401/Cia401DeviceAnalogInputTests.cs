@@ -162,6 +162,25 @@ public class Cia401DeviceAnalogInputTests
         }
     }
 
+    [Fact] // entering Operational asks for every entry the device owns; a TPDO that is not valid stays silent
+    public async Task Entering_Operational_With_6423h_False_Sends_No_Disabled_Analog_Tpdo()
+    {
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 12 });
+        rig.Device.SetAnalogInput(1, 77);
+        (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0x00, "FALSE by default (§8.6.4)");
+
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo1, 1);
+        await rig.DrainAsync();
+
+        rig.Count(Cia401Rig.Tpdo1).Should().Be(1, "TPDO 1, the digital inputs, is valid by default (§6.2.6)");
+        for (int pdo = 2; pdo <= 4; pdo++)
+        {
+            rig.Count((uint)(0x80 + (pdo * 0x100)) + Cia401Rig.DeviceId).Should().Be(0,
+                $"TPDO {pdo} is disabled by default (§6.2.8 and the scope record)");
+        }
+    }
+
     // ---- §5.3, the analog input disable warning ------------------------------------------------------
 
     [Fact]
