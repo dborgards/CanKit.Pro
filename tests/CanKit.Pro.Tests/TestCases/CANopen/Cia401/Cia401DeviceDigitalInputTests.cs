@@ -544,6 +544,17 @@ public class Cia401DeviceDigitalInputTests
     }
 
     [Fact]
+    public void A_Node_Callback_Before_Attach_Is_Refused()
+    {
+        var device = new Cia401Device(Inputs(8));
+
+        // The node calls the actor-loop callbacks only once Attach has returned; a caller that does
+        // not is told so rather than acting on a device without a host.
+        FluentActions.Invoking(() => device.OnNmtStateChanged(NmtState.PreOperational, NmtState.Operational))
+            .Should().ThrowExactly<InvalidOperationException>().WithMessage("*called before it was attached*");
+    }
+
+    [Fact]
     public void After_The_Node_Is_Disposed_A_Set_Does_Nothing_And_The_Reader_Shows_The_Last_Value()
     {
         Cia401Device device;

@@ -250,6 +250,38 @@ public class Cia401DeviceDigitalOutputTests
     }
 
     [Fact]
+    public async Task A_Handler_That_Moves_The_Outputs_Away_And_Back_Raises_Nothing_For_It()
+    {
+        // In Pre-operational, where 1029h:01 = 00h asks for no state change.
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalOutputs = 8, AnalogOutputs = 1 });
+        await rig.WriteI16Async(0x6411, 0x01, 100);
+        var events = new List<(Cia401FunctionBlock Block, byte Digital, short Analog)>();
+        rig.Device.OutputsChanged += (_, e) =>
+        {
+            events.Add((e.Block, e.Levels[0], e.AnalogLevels[0]));
+            if (events.Count > 1) return;
+
+            // Inside the handler every call applies at once. The error state takes both outputs to
+            // their error values, 00h and 0; leaving it moves nothing; with the error values now
+            // where the outputs were, entering it again brings both back.
+            rig.Device.ReportDeviceFailure(true);
+            rig.Device.ReportDeviceFailure(false);
+            rig.Od.WriteRaw(0x6207, 0x01, new byte[] { 0x0E });
+            rig.Od.WriteRaw(0x6444, 0x01, new byte[] { 0x00, 0x00, 0x64, 0x00 }); // 100 left adjusted, 0064_0000h
+            rig.Device.ReportDeviceFailure(true);
+        };
+
+        await rig.WriteU8Async(0x6200, 0x01, 0x0E);
+        await rig.FenceAsync();
+
+        events.Should().Equal(new[] { (Cia401FunctionBlock.DigitalOutput, (byte)0x0E, (short)100) },
+            "the write raised its event; the handler's round ended where it began and raised none");
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x0E);
+        rig.Device.ReadAnalogOutput(1).Should().Be(100);
+    }
+
+    [Fact]
     public async Task A_Throwing_Subscriber_Keeps_No_Other_Subscriber_From_The_Event()
     {
         using var rig = new Cia401Rig(Outputs(8));
