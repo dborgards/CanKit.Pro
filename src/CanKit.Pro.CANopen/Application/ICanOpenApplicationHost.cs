@@ -245,7 +245,10 @@ internal interface ICanOpenApplicationHost
     /// boot-up), in Stopped included.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>,
-    /// the error reset, which <see cref="ClearError"/> sends.</exception>
+    /// the error reset, which <see cref="ClearError"/> sends; or <paramref name="errorRegisterBits"/>
+    /// sets bit 6, which is reserved and always 0 (CiA 301 v4.2.0 §7.5.2.2, Table 54). Nothing is
+    /// recorded then. Every other bit is the profile's to set: the categories (bits 1 to 5), the
+    /// manufacturer-specific bit 7, and bit 0, which the node sets with any error anyway.</exception>
     /// <exception cref="ArgumentException"><paramref name="manufacturerSpecific"/> is longer than
     /// five bytes.</exception>
     /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>

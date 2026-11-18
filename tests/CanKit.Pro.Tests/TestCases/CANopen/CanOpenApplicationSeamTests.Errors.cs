@@ -97,7 +97,8 @@ public partial class CanOpenApplicationSeamTests
 
         await RaiseAsync(rig.Node, app, 0x5000, 0x04);
         await RaiseAsync(rig.Node, app, 0x5000, 0x04);
-        await RaiseAsync(rig.Node, app, 0x5000, 0x40, new byte[] { 9 });
+        // Other bits than the first raise's (bit 6, which an earlier version used here, is reserved, #554).
+        await RaiseAsync(rig.Node, app, 0x5000, 0x20, new byte[] { 9 });
 
         rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(1, "one EMCY per error event (§7.2.7.1)");
         ErrorRegister(rig.Node).Should().Be(0x05, "the second raise changed nothing");
@@ -256,6 +257,43 @@ public partial class CanOpenApplicationSeamTests
         Settle(rig.Node);
         rig.Wire.Count(SlaveEmcy).Should().Be(0);
         ErrorRegister(rig.Node).Should().Be(0, "a refused raise records nothing");
+    }
+
+    [Theory] // #554
+    [InlineData(0x40)]
+    [InlineData(0x44)]
+    [InlineData(0xFF)]
+    public async Task A_Raise_With_The_Reserved_Bit_6_Is_Refused(int bits)
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        Exception? refused = null;
+
+        await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.RaiseError(0x5000, (byte)bits)));
+        await EmcyChainSettledAsync(rig.Node);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+
+        refused.Should().BeOfType<ArgumentOutOfRangeException>("bit 6 of the error register is reserved, always 0b (CiA 301 v4.2.0 §7.5.2.2, Table 54)")
+            .Which.ParamName.Should().Be("errorRegisterBits");
+        rig.Wire.Count(SlaveEmcy).Should().Be(0);
+        ErrorRegister(rig.Node).Should().Be(0, "a refused raise records nothing");
+
+        // Nothing was recorded either: the same code raised with valid bits is a new error event.
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy(0x5000, 0x05));
+    }
+
+    [Fact] // #554
+    public async Task Every_Bit_But_Bit_6_Reaches_1001h_And_The_Emcy()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await RaiseAsync(rig.Node, app, 0x5000, 0xBE);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy(0x5000, 0xBF),
+            "the categories, the manufacturer bit and the generic bit, which comes with any error");
+        ErrorRegister(rig.Node).Should().Be(0xBF);
     }
 
     [Fact]

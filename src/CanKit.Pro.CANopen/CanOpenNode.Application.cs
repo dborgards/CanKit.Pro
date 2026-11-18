@@ -22,6 +22,9 @@ internal sealed partial class CanOpenNode
     // reserved areas, which belong to the node.
     private const ushort FirstClaimableIndex = 0x2000;
 
+    // Bit 6 of 1001h: reserved, always 0b (CiA 301 v4.2.0 §7.5.2.2, Table 54). A profile may not set it.
+    private const byte ReservedErrorRegisterBit = 0x40;
+
     // One per attached application, in attach order. Written once, on the constructing thread,
     // before the node's actor runs anything; empty for a node opened without applications.
     private ApplicationSlot[] _applications = Array.Empty<ApplicationSlot>();
@@ -560,6 +563,13 @@ internal sealed partial class CanOpenNode
         {
             throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode,
                 "0000h is the error reset: ClearError sends it.");
+        }
+        if ((errorRegisterBits & ReservedErrorRegisterBit) != 0)
+        {
+            // Refused rather than masked: a profile that sets it has a bug, and dropping the bit would
+            // record an error the profile did not describe (#554).
+            throw new ArgumentOutOfRangeException(nameof(errorRegisterBits), errorRegisterBits,
+                "Bit 6 of the error register is reserved and always 0 (CiA 301 v4.2.0 §7.5.2.2, Table 54).");
         }
         if (manufacturerSpecific.Length > EmcyMessage.ManufacturerFieldLength)
         {
