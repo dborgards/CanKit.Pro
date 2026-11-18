@@ -44,9 +44,8 @@ internal sealed partial class CanOpenNode
 
         // A copy: a mapping the application changes after the call moves nothing.
         var entries = mapping.ToArray();
-        foreach (var entry in entries)
+        foreach (var entry in entries.Where(entry => !entry.IsDummy && !slot.Claims.Any(range => range.Contains(entry.Index))))
         {
-            if (entry.IsDummy || slot.Claims.Any(range => range.Contains(entry.Index))) continue;
             throw new ArgumentException(
                 $"Application '{name}' maps {entry.Index:X4}:{entry.Subindex:X2} into {PdoKind(isTpdo)} {pdoNumber}, " +
                 "which lies in no range it claims: a profile maps the objects it owns.", nameof(mapping));

@@ -174,6 +174,21 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public void A_Dummy_Entry_Needs_No_Claim()
+    {
+        // A dummy entry names a data type, 0005h UNSIGNED8 here, not an object (CiA 301 v4.2.0
+        // §7.5.2.36): it lies in no range, and the default RPDO takes it to skip a byte.
+        using var bus = Open(NewSession(), 1);
+        var app = Defaults(host => host.SetDefaultRpdo(1, new PdoMapping().Add(0x0005, 0x00, 8).Add(0x6000, 0x02, 8)));
+
+        using var node = OpenNode(bus, With(app));
+
+        node.ObjectDictionary.ReadUnsigned(0x1600, 0x00).Should().Be(2u);
+        node.ObjectDictionary.ReadUnsigned(0x1600, 0x01).Should().Be(0x00050008u, "the dummy entry, kept");
+        node.ObjectDictionary.ReadUnsigned(0x1600, 0x02).Should().Be(0x60000208u);
+    }
+
+    [Fact]
     public void A_Described_Pdo_Keeps_What_The_Description_Says()
     {
         using var bus = Open(NewSession(), 1);
