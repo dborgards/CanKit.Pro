@@ -172,7 +172,9 @@ internal sealed partial class CanOpenNode
     /// the node has (CiA 301 v4.2.0 §7.5.2.1): <c>FFFFh</c> in its upper half when there are several, or
     /// a reader of <c>1000h</c> stops at the first and never sees the rest; and with <c>FFFFh</c>, a
     /// <c>67FFh</c> for a reader to find, declared by the file or the application, or the reader takes
-    /// the word of <c>1000h</c> for the only device's.
+    /// the word of <c>1000h</c> for the only device's. A <c>67FFh</c> the application declared is
+    /// checked here like a described one (<see cref="RequireDescribedProfile"/>): with one logical
+    /// device nothing else refuses or checks it.
     /// </summary>
     private void RequireDescribedTopology(CanOpenDeviceType[] types, ApplicationSlot?[] setters, int count)
     {
@@ -193,6 +195,12 @@ internal sealed partial class CanOpenNode
                 $"logical devices, but neither the file nor application '{setters[0]!.Application.Name}' declares 0x67FF, " +
                 "where a reader looks for the first of them (CiA 301 v4.2.0 §7.5.2.1).");
         }
+        // Then the reader takes 67FFh for the device's type. A described one is checked with the chain
+        // (ComposeDeviceTypes); one the application declared itself is checked here, by the same rules:
+        // with one logical device the node leaves it alone and checks nothing else about it.
+        var first = DeviceTypeObjectOf(0);
+        if (count == 1 && described.HasFurtherLogicalDevices && !_describedObjects.Contains(first))
+            RequireDescribedProfile(first, setters[0]!, types[0], $"Application '{setters[0]!.Application.Name}'");
     }
 
     /// <summary>The device-type object of a logical device: <c>67FFh + x·800h</c>, x the logical device
@@ -204,8 +212,11 @@ internal sealed partial class CanOpenNode
     /// <summary>The device description is the node's identity and wins over the application: it
     /// stays as it is, and the profile number it holds in <paramref name="index"/> must be the one
     /// the application set, or the file describes another device than the one attached. The file
-    /// must declare the object as the read-only UNSIGNED32 a device type is (#553).</summary>
-    private void RequireDescribedProfile(ushort index, ApplicationSlot setter, CanOpenDeviceType set)
+    /// must declare the object as the read-only UNSIGNED32 a device type is (#553). The same rules
+    /// check a <c>67FFh</c> that <paramref name="declarer"/>, an application, declared itself where a
+    /// described <c>1000h</c> sends a reader to it (<see cref="RequireDescribedTopology"/>).</summary>
+    private void RequireDescribedProfile(ushort index, ApplicationSlot setter, CanOpenDeviceType set,
+        string declarer = "The device description")
     {
         // The declaration first, then the value: four bytes of an INTEGER32, or a word a master may
         // overwrite, are not a device type (CiA 301 v4.2.0 §7.5.2.1: UNSIGNED32, ro; a chain object has
@@ -213,18 +224,18 @@ internal sealed partial class CanOpenNode
         if (!_od.TryGet(index, 0x00, out var entry) || entry.DataType != OdDataType.Unsigned32
             || !_od.TryReadRaw(index, 0x00, out var raw) || !CanOpenDeviceType.TryParse(raw, out var described))
         {
-            throw OptionsError($"The device description declares object 0x{index:X4}, which is not an UNSIGNED32 " +
+            throw OptionsError($"{declarer} declares object 0x{index:X4}, which is not an UNSIGNED32 " +
                 $"at sub-index 0: application '{setter.Application.Name}' sets the device type {set}.");
         }
         if (entry.Access != OdAccess.ReadOnly)
         {
-            throw OptionsError($"The device description declares object 0x{index:X4} with access {entry.Access}, but a " +
+            throw OptionsError($"{declarer} declares object 0x{index:X4} with access {entry.Access}, but a " +
                 $"device-type object is read-only (CiA 301 v4.2.0 §7.5.2.1): application '{setter.Application.Name}' " +
                 $"sets the device type {set}, and a write over the network must not replace it.");
         }
         if (described.ProfileNumber == set.ProfileNumber) return;
-        throw OptionsError($"The device description's object 0x{index:X4} holds profile {described.ProfileNumber} " +
+        throw OptionsError($"{declarer} declares object 0x{index:X4} holding profile {described.ProfileNumber} " +
             $"(0x{described.ProfileNumber:X4}), but application '{setter.Application.Name}' sets profile " +
-            $"{set.ProfileNumber} (0x{set.ProfileNumber:X4}): the file describes another device than the one attached.");
+            $"{set.ProfileNumber} (0x{set.ProfileNumber:X4}): the object describes another device than the one attached.");
     }
 }

@@ -117,8 +117,10 @@ internal interface ICanOpenApplicationHost
     /// UNSIGNED32 (§7.5.2.1; a type of the same width, or a write access, included), when it holds
     /// another profile number, when the file's <c>1000h</c> does not hold <c>FFFFh</c> in its upper half on a node with several
     /// logical devices (a reader of <c>1000h</c> would stop at the first), or when it holds
-    /// <c>FFFFh</c> on a node with one and no <c>67FFh</c> exists for a reader to find. The message
-    /// names the object and the application.
+    /// <c>FFFFh</c> on a node with one and no <c>67FFh</c> exists for a reader to find. A <c>67FFh</c>
+    /// the application declared itself is then the object a reader takes for the device's type, and
+    /// it is checked as a described one: a read-only UNSIGNED32 with the profile number set. The
+    /// message names the object and the application.
     /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">Called outside the application's own

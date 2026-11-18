@@ -437,6 +437,48 @@ public partial class CanOpenApplicationSeamTests
         DeviceTypeOf(node, 0x67FF).Should().Be(0x00050191u);
     }
 
+    /// <summary>One logical device of profile 401 whose application declares <c>67FFh</c> itself, under a
+    /// described <c>1000h</c> of <c>FFFF0191h</c>: the reader of <c>1000h</c> takes that object for the device's
+    /// type.</summary>
+    private static CanOpenNodeOptions OneDeviceDeclaring67FF(uint word, OdAccess access)
+    {
+        var app = Typed("io", (0, Profile401));
+        var set = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            host.ObjectDictionary.AddU32(0x67FF, 0x00, word, access);
+            set(host);
+        };
+        return With(app);
+    }
+
+    [Fact] // #551, review
+    public void An_Application_Declared_67FFh_Behind_A_Described_Chain_Announcement_Is_Checked_For_Its_Profile()
+    {
+        var failure = OptionsRefused(OneDeviceDeclaring67FF(0x00000192, OdAccess.ReadOnly), DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("402").And.Contain("401").And.Contain("io");
+    }
+
+    [Fact] // #551, review
+    public void An_Application_Declared_67FFh_Behind_A_Described_Chain_Announcement_Must_Be_Read_Only()
+    {
+        var failure = OptionsRefused(OneDeviceDeclaring67FF(Profile401, OdAccess.ReadWrite), DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("read-only").And.Contain("io");
+    }
+
+    [Fact] // #551, review
+    public void A_Valid_Application_Declared_67FFh_Behind_A_Described_Chain_Announcement_Is_Kept()
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, OneDeviceDeclaring67FF(Profile401, OdAccess.ReadOnly),
+            description: DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        DeviceTypeOf(node, 0x67FF).Should().Be(Profile401);
+    }
+
     [Fact] // #551
     public void A_Single_Device_Word_That_Announces_Further_Devices_Fails_The_Open()
     {
