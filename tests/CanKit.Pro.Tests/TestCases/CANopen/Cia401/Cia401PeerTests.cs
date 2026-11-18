@@ -745,7 +745,7 @@ public class Cia401PeerTests
         {
             Cia401Objects.TryGet(obj.Index, out var definition).Should().BeTrue($"{obj.Index:X4}h is a CiA 401 object");
             var subs = obj.SubObjects.Count == 0
-                ? new[] { (Sub: (byte)0, Type: (ushort?)obj.DataType, Access: obj.AccessType) }
+                ? new[] { (Sub: (byte)0, Type: obj.DataType, Access: obj.AccessType) }
                 : obj.SubObjects.Values.Select(s => (Sub: s.SubIndex, Type: (ushort?)s.DataType, Access: s.AccessType)).ToArray();
             foreach (var (sub, type, access) in subs)
             {

@@ -183,9 +183,11 @@ public class Cia401DeviceDigitalInputTests
     {
         var fresh = new CanOpenNodeOptions();
         var compared = 0;
-        foreach (var property in typeof(CanOpenNodeOptions).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        var kept = typeof(CanOpenNodeOptions).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Where(property => property.Name is not (nameof(CanOpenNodeOptions.EnableErrorBehavior) or "Applications")
+                && !except.Contains(property.Name));
+        foreach (var property in kept)
         {
-            if (property.Name is nameof(CanOpenNodeOptions.EnableErrorBehavior) or "Applications" || except.Contains(property.Name)) continue;
             property.GetValue(original).Should().NotBe(property.GetValue(fresh), $"{property.Name} is set away from its default");
             property.GetValue(result).Should().Be(property.GetValue(original), $"{property.Name} is kept");
             compared++;
@@ -514,13 +516,16 @@ public class Cia401DeviceDigitalInputTests
     [Fact]
     public void After_The_Node_Is_Disposed_A_Set_Does_Nothing_And_The_Reader_Shows_The_Last_Value()
     {
-        var rig = new Cia401Rig(Inputs(8));
-        rig.Device.SetDigitalInputs(1, 0x3C);
-        rig.Settle();
-        rig.Dispose();
+        Cia401Device device;
+        using (var rig = new Cia401Rig(Inputs(8)))
+        {
+            rig.Device.SetDigitalInputs(1, 0x3C);
+            rig.Settle();
+            device = rig.Device;
+        }
 
-        FluentActions.Invoking(() => rig.Device.SetDigitalInputs(1, 0xFF)).Should().NotThrow();
-        rig.Device.ReadDigitalInputs(1).Should().Be(0x3C);
+        FluentActions.Invoking(() => device.SetDigitalInputs(1, 0xFF)).Should().NotThrow();
+        device.ReadDigitalInputs(1).Should().Be(0x3C);
     }
 
     // ---- the falling mask, §8.2.7 ---------------------------------------------------------------------

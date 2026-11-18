@@ -336,7 +336,7 @@ public class Cia401DeviceDescriptionTests
         {
             Cia401Objects.TryGet(obj.Index, out var definition).Should().BeTrue($"{obj.Index:X4}h is a CiA 401 object");
             var subs = obj.SubObjects.Count == 0
-                ? new[] { (Sub: (byte)0, Type: (ushort?)obj.DataType, Access: obj.AccessType) }
+                ? new[] { (Sub: (byte)0, Type: obj.DataType, Access: obj.AccessType) }
                 : obj.SubObjects.Values.Select(s => (Sub: s.SubIndex, Type: (ushort?)s.DataType, Access: s.AccessType)).ToArray();
             foreach (var (sub, type, access) in subs)
             {
@@ -906,9 +906,8 @@ public class Cia401DeviceDescriptionTests
         private static List<(string Name, List<string> Lines)> Sections(string text)
         {
             var sections = new List<(string Name, List<string> Lines)> { (string.Empty, new List<string>()) };
-            foreach (var raw in text.Split('\n'))
+            foreach (var line in text.Split('\n').Select(raw => raw.TrimEnd('\r')))
             {
-                var line = raw.TrimEnd('\r');
                 if (line.StartsWith("[", StringComparison.Ordinal) && line.EndsWith("]", StringComparison.Ordinal))
                 {
                     sections.Add((line.Substring(1, line.Length - 2), new List<string>()));

@@ -904,13 +904,16 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public void After_The_Node_Is_Disposed_A_Set_Does_Nothing_And_The_Reader_Shows_The_Last_Value()
     {
-        var rig = new Cia401Rig(Analog(1));
-        rig.Device.SetAnalogInput(1, -1234);
-        rig.Settle();
-        rig.Dispose();
+        Cia401Device device;
+        using (var rig = new Cia401Rig(Analog(1)))
+        {
+            rig.Device.SetAnalogInput(1, -1234);
+            rig.Settle();
+            device = rig.Device;
+        }
 
-        FluentActions.Invoking(() => rig.Device.SetAnalogInput(1, 1)).Should().NotThrow();
-        rig.Device.ReadAnalogInput(1).Should().Be(-1234);
+        FluentActions.Invoking(() => device.SetAnalogInput(1, 1)).Should().NotThrow();
+        device.ReadAnalogInput(1).Should().Be(-1234);
     }
 
     [Fact]

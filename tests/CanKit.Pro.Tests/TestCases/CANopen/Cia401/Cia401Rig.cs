@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -271,16 +272,7 @@ internal sealed class Cia401Rig : IDisposable
 
     /// <summary>The boot-up frames seen so far: <c>00h</c> on <see cref="Heartbeat"/>
     /// (CiA 301 v4.2.0 §7.2.8.3.3).</summary>
-    internal int BootUps()
-    {
-        int count = 0;
-        foreach (var payload in Payloads(Heartbeat))
-        {
-            if (payload.Length == 1 && payload[0] == 0x00) count++;
-        }
-
-        return count;
-    }
+    internal int BootUps() => Payloads(Heartbeat).Count(payload => payload.Length == 1 && payload[0] == 0x00);
 
     /// <summary>RPDO 1 from the master with <paramref name="data"/>, then <see cref="FenceAsync"/>:
     /// the device has handled it when this returns.</summary>

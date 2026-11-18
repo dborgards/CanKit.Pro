@@ -247,9 +247,11 @@ public partial class CanOpenApplicationSeamTests
     {
         using var bus = Open(NewSession(), 1);
         var app = Entries();
-        var node = OpenNode(bus, With(app), new ManualTimeSource());
-        Settle(node);
-        node.Dispose();
+        using (var node = OpenNode(bus, With(app), new ManualTimeSource()))
+        {
+            Settle(node);
+        }
+
         bool ran = false;
 
         FluentActions.Invoking(() => app.Host!.Post(() => ran = true)).Should().NotThrow();

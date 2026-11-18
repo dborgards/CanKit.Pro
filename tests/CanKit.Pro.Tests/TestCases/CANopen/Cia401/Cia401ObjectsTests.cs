@@ -206,9 +206,8 @@ public class Cia401ObjectsTests
     [Fact]
     public void The_Manufacturer_Specific_Analog_Objects_Are_Domains_Without_Default()
     {
-        foreach (ushort index in new ushort[] { 0x6404, 0x6414 })
+        foreach (var d in new ushort[] { 0x6404, 0x6414 }.Select(Get))
         {
-            var d = Get(index);
             d.IsManufacturerSpecific.Should().BeTrue();
             d.DataType.Should().Be(OdDataType.Domain);
             d.IsArray.Should().BeTrue();
@@ -276,9 +275,8 @@ public class Cia401ObjectsTests
         // filter enable +3, then the three interrupt masks (input side) or error mode, error value
         // and filter mask (output side) — each with the width of the family.
         var offsets = read < 0x6200 ? new[] { 0, 2, 3, 6, 7, 8 } : new[] { 0, 2, 6, 7, 8 };
-        foreach (int offset in offsets)
+        foreach (var d in offsets.Select(offset => Get((ushort)(read + offset))))
         {
-            var d = Get((ushort)(read + offset));
             d.BitsPerElement.Should().Be(bits);
             d.DataType.Should().Be(type);
             d.MaxSubindex.Should().Be(0xFE);
