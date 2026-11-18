@@ -265,6 +265,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         catch
         {
+            CloseApplicationPosts();
             DisposeControllerOverrunMonitor();
             DisposeControllerErrorMonitor();
             _actor.Dispose();
@@ -333,6 +334,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         catch
         {
+            CloseApplicationPosts();
             CompleteEventQueue();
             DisposeControllerOverrunMonitor();
             DisposeControllerErrorMonitor();
@@ -363,6 +365,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             StartControllerErrorMonitoring();
             NotifyNmtStateChanged(NmtState.Initializing);
         });
+
+        // What the applications posted while the node was being built runs behind the start-up,
+        // and before the first frame the reader hands the actor.
+        ReleaseApplicationPosts();
 
         _readerTask = Task.Run(RunReaderAsync);
     }

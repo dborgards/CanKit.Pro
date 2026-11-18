@@ -43,6 +43,44 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="ObjectDisposedException">The node's actor has ended.</exception>
     IDeadline Arm(TimeSpan delay, Action onExpired);
 
+    /// <summary>Runs <paramref name="action"/> on the actor loop as a callback of this application:
+    /// what it writes there counts as the application's own (see
+    /// <see cref="ICanOpenApplication.OnEntriesWritten"/>), and the actor-loop members of this host
+    /// can be called from it. Any thread.</summary>
+    /// <remarks>
+    /// <para>
+    /// Called on the actor loop while one of this application's callbacks is the innermost callback
+    /// running (the rule of <see cref="ICanOpenApplication.OnEntriesWritten"/>), the action runs at
+    /// once, before this call returns, and what it throws reaches the caller as from any other call.
+    /// So an application's API that is called from inside its own callback applies in the order it
+    /// is called, with nothing deferred behind work the actor holds.
+    /// </para>
+    /// <para>
+    /// Called anywhere else — another thread, or the actor loop outside this application's
+    /// callbacks (in <see cref="ICanOpenApplication.ValidateWrite"/>, or a callback of another
+    /// application) — the action is queued behind the work the actor has been handed already, and
+    /// runs later as a callback of this application; what it throws is reported on
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>. The actions one thread queues run in
+    /// the order it queued them.
+    /// </para>
+    /// <para>
+    /// Called before the node has opened — from <see cref="ICanOpenApplication.Attach"/>, or from
+    /// another thread while the constructor is still running — the action is held, and queued once
+    /// the node has ordered its start-up, behind it: it runs in Pre-Operational, or for an LSS slave
+    /// still waiting for its node-id in Initialisation, never while the node is still being built.
+    /// When the open fails, a held action is dropped.
+    /// </para>
+    /// <para>
+    /// Once the node is disposed, or after an open that failed, the action is dropped without being
+    /// run, and nothing is thrown: an application's producer thread that races the node's disposal
+    /// has nothing to catch. An action queued before the disposal and not yet started is dropped as
+    /// well. Unlike <see cref="Arm"/>, which throws <see cref="ObjectDisposedException"/>, since a
+    /// deadline is a handle the caller keeps.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="action"/> is null.</exception>
+    void Post(Action action);
+
     /// <summary>Sets the device type (<c>1000h</c>) of a logical device. <see cref="ICanOpenApplication.Attach"/> only.</summary>
     /// <exception cref="InvalidOperationException">Called outside the application's own
     /// <see cref="ICanOpenApplication.Attach"/>.</exception>
