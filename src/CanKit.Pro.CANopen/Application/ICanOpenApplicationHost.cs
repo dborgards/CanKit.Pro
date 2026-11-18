@@ -88,12 +88,35 @@ internal interface ICanOpenApplicationHost
     void Post(Action action);
 
     /// <summary>Sets the device type (<c>1000h</c>) of a logical device. <see cref="ICanOpenApplication.Attach"/> only.</summary>
+    /// <remarks>
+    /// <para>
+    /// Once every application has attached, the node composes what was set (CiA 301 v4.2.0
+    /// §7.5.2.1): one logical device, and its word is <c>1000h</c>; several, numbered from 0 without a
+    /// gap, and <c>1000h</c> holds the profile number of device 0 with <c>FFFFh</c> above it, while
+    /// every device's word is the read-only UNSIGNED32 <c>67FFh + n·800h</c>. The additional
+    /// information is the profile's and is kept as set, with two exceptions that fail the open,
+    /// before the node boots: a word with profile number <c>0000h</c> takes additional information
+    /// <c>0000h</c> or <c>FFFFh</c> only, and the word of a node's only logical device does not carry
+    /// <c>FFFFh</c>, which announces a further logical device (both §7.5.2.1).
+    /// </para>
+    /// <para>
+    /// A device description that declares <c>1000h</c> or a chain object wins: the node writes
+    /// nothing there, and the open fails when the file's object holds another profile number, when
+    /// the file's <c>1000h</c> does not hold <c>FFFFh</c> in its upper half on a node with several
+    /// logical devices (a reader of <c>1000h</c> would stop at the first), or when it holds
+    /// <c>FFFFh</c> on a node with one and no <c>67FFh</c> exists for a reader to find. The message
+    /// names the object and the application.
+    /// </para>
+    /// </remarks>
     /// <exception cref="InvalidOperationException">Called outside the application's own
     /// <see cref="ICanOpenApplication.Attach"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is not a
     /// logical device number.</exception>
     /// <exception cref="ArgumentException">The application does not claim the device-type object of
-    /// <paramref name="logicalDevice"/>.</exception>
+    /// <paramref name="logicalDevice"/>. The checks of the composed words and of a described
+    /// <c>1000h</c> fail the open with an <see cref="ArgumentException"/> for <c>options</c> once every
+    /// application has attached, so that an application that catches the exception cannot keep the
+    /// open from failing.</exception>
     void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType);
 
     /// <summary>Sets the default of TPDO <paramref name="pdoNumber"/>: its mapping, the transmission

@@ -399,6 +399,104 @@ public partial class CanOpenApplicationSeamTests
             .Message.Should().Contain("67FF").And.Contain("402").And.Contain("401");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // The topology 1000h announces, checked before the boot-up (#551, CiA 301 v4.2.0 §7.5.2.1).
+    // -----------------------------------------------------------------------------------------
+
+    [Fact] // #551
+    public void A_Described_Single_Device_1000h_Over_Two_Logical_Devices_Fails_The_Open()
+    {
+        // The file's 1000h says one logical device; the applications attach two. A reader of 1000h
+        // would stop there and never see logical device 1 in 6FFFh.
+        var failure = OptionsRefused(With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408))),
+            DescriptionWith6000(deviceType: Profile401));
+
+        failure.Message.Should().Contain("0x1000").And.Contain("0x000F0191").And.Contain("FFFF")
+            .And.Contain("logical device 1").And.Contain("valve");
+    }
+
+    [Fact] // #551
+    public void A_Described_1000h_That_Announces_A_Chain_The_Node_Does_Not_Have_Fails_The_Open()
+    {
+        // FFFFh above the profile, one logical device and no 67FFh: a reader takes 1000h's word for the
+        // device's own, FFFFh and all.
+        var failure = OptionsRefused(With(Typed("io", (0, Profile401))), DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        failure.Message.Should().Contain("0x1000").And.Contain("0x67FF").And.Contain("io");
+    }
+
+    [Fact] // #551
+    public void A_Described_Chain_Announcement_Over_A_Described_67FFh_Is_Kept_For_One_Device()
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, With(Typed("io", (0, Profile401))),
+            description: DescriptionWith6000(0xFFFF0191, (0x67FF, 0x00050191)));
+
+        DeviceTypeOf(node).Should().Be(0xFFFF0191u, "the file's chain has its 67FFh: a reader finds the device there");
+        DeviceTypeOf(node, 0x67FF).Should().Be(0x00050191u);
+    }
+
+    [Fact] // #551
+    public void A_Single_Device_Word_That_Announces_Further_Devices_Fails_The_Open()
+    {
+        var failure = OptionsRefused(With(Typed("lonely", (0, 0xFFFF0198))));
+
+        failure.Message.Should().Contain("lonely").And.Contain("0xFFFF0198").And.Contain("FFFF");
+    }
+
+    [Theory] // #551
+    [InlineData(0x00010000u)]
+    [InlineData(0x80000000u)]
+    public void An_Unprofiled_Single_Device_With_Additional_Information_Fails_The_Open(uint word)
+    {
+        var failure = OptionsRefused(With(Typed("plain", (0, word))));
+
+        failure.Message.Should().Contain("plain").And.Contain($"0x{word:X8}").And.Contain("0000h");
+    }
+
+    [Fact] // #551
+    public void An_Unprofiled_Logical_Device_In_A_Chain_With_Additional_Information_Fails_The_Open()
+    {
+        var failure = OptionsRefused(With(Typed("two", (0, Profile401), (1, 0x00010000))));
+
+        failure.Message.Should().Contain("two").And.Contain("logical device 1").And.Contain("0x00010000");
+    }
+
+    [Theory] // #551
+    [InlineData(0x00000000u)]
+    [InlineData(0x000F0191u)]
+    [InlineData(0xFF8F0191u)]
+    public void A_Valid_Single_Device_Word_Is_1000h_As_Set(uint word)
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, With(Typed("one", (0, word))));
+
+        DeviceTypeOf(node).Should().Be(word, "the profile's capability bits are its own (§7.5.2.1)");
+    }
+
+    [Fact] // #551
+    public async Task A_Described_Chain_Of_Two_Devices_Reads_Back_Over_The_Bus()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        // 77FFh too, so that the slave itself ends the chain ("object does not exist").
+        master.BindPeerDeviceDescription(Slave, PeerSdoLaboratory.Variables(0x1000, 0x67FF, 0x6FFF, 0x77FF));
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = OpenNode(busB, With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408))),
+            description: DescriptionWith6000(0xFFFF0191, (0x67FF, 0x00050191)));
+        await bootups.First;
+
+        var result = await CanOpenLogicalDevices.ReadAsync(master, Slave).WithTimeoutAsync(ShortTimeout);
+
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+        result.DeviceType.Value.Should().Be(0xFFFF0191u);
+        result.Devices.Select(d => (d.Index, d.DeviceType.Value)).Should().Equal((0, 0x00050191u), (1, Profile408));
+    }
+
     [Fact]
     public void A_Partly_Described_Chain_Declares_The_Rest()
     {

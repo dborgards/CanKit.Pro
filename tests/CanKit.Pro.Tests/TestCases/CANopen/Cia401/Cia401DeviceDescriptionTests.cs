@@ -232,7 +232,9 @@ public class Cia401DeviceDescriptionTests
     [Fact]
     public void A_Description_Device_Of_Logical_Device_1_Takes_Its_Objects_From_6800h()
     {
-        var eds = Eds.Of("cia401-digital.eds").Remove(0x1400).Remove(0x1600).Remove(0x1800).Remove(0x1A00);
+        // Two logical devices: the file's 1000h announces further ones (CiA 301 v4.2.0 §7.5.2.1, #551).
+        var eds = Eds.Of("cia401-digital.eds").Remove(0x1400).Remove(0x1600).Remove(0x1800).Remove(0x1A00)
+            .Set("1000", "DefaultValue", "0xFFFF0191");
         foreach (ushort index in DigitalObjects) eds.Move(index, (ushort)(index + 0x800));
         var configured = new Cia401Device(new Cia401Configuration { DigitalInputs = 8 });
         var described = Cia401Device.FromDescription(1);
@@ -252,7 +254,9 @@ public class Cia401DeviceDescriptionTests
     {
         var described = Cia401Device.FromDescription(0);
         var configured = new Cia401Device(new Cia401Configuration { DigitalInputs = 8, LogicalDevice = 1 });
-        using var rig = new Cia401Rig(new[] { described, configured }, Eds.Of("cia401-digital.eds").Parse(), options: null);
+        // Two logical devices: the file's 1000h announces further ones (CiA 301 v4.2.0 §7.5.2.1, #551).
+        var eds = Eds.Of("cia401-digital.eds").Set("1000", "DefaultValue", "0xFFFF0191");
+        using var rig = new Cia401Rig(new[] { described, configured }, eds.Parse(), options: null);
 
         rig.Od.ReadRaw(0x6800, 0x00).Should().Equal(new byte[] { 0x01 }, "the configured device declares one group at 6800h");
         rig.Od.ReadRaw(0x6806, 0x01).Should().Equal(new byte[] { 0xFF });
