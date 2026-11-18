@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
@@ -573,9 +574,10 @@ internal sealed partial class CanOpenNode
             do
             {
                 told = false;
-                foreach (var slot in _applications)
+                // MonitorsCommunicationFailure is read once, when the node opens; FailureTold below is
+                // what the round changes, so that test stays in the body.
+                foreach (var slot in _applications.Where(monitoring => monitoring.MonitorsCommunicationFailure))
                 {
-                    if (!slot.MonitorsCommunicationFailure) continue;
                     if (Volatile.Read(ref _disposed) != 0) return;
                     bool active = CommunicationFailure;
                     if (slot.FailureTold == active) continue;
