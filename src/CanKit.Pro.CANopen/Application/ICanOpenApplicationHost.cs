@@ -73,7 +73,7 @@ internal interface ICanOpenApplicationHost
     /// When the open fails, a held action is dropped. One exception: a deadline armed before the
     /// node has opened (<see cref="Arm"/> from <see cref="ICanOpenApplication.Attach"/>, say) can fire
     /// on the actor loop while the constructor still runs — an open question of <see cref="Arm"/>,
-    /// recorded with the seam's contract questions — and a Post made from that deadline is made
+    /// issue #561 — and a Post made from that deadline is made
     /// inside a callback of this application, so it runs inline, then.
     /// </para>
     /// <para>
