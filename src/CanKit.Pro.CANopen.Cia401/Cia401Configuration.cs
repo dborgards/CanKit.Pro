@@ -14,7 +14,8 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// TPDOs that carry analog inputs are not (<see cref="Cia401Configuration.DefaultPdos"/>).</param>
 /// <param name="Entries">The mapped entries in mapping order: absolute object index (already
 /// shifted by <c>n·800h</c> for logical device <c>n</c>, CiA 301 v4.2.0 §7.4.1), sub-index and
-/// length in bits. The list compares by reference, as a list does; compare its elements.</param>
+/// length in bits. A read-only view, so the caller cannot change a default; it compares by
+/// reference, as a list does, so compare its elements.</param>
 internal readonly record struct Cia401DefaultPdo(
     int Number,
     bool IsTpdo,
@@ -57,9 +58,6 @@ internal sealed class Cia401Configuration
     /// <summary>PDO 2, 3 and 4 carry analog channels (CiA 401-1 §6.2.7 to §6.2.12).</summary>
     private const int FirstAnalogPdo = 2;
     private const int LastAnalogPdo = 4;
-
-    /// <summary>The device profile number in the low 16 bits of <c>1000h</c> (CiA 401-1 §6.2.1).</summary>
-    private const ushort ProfileNumber = 401;
 
     private const uint DigitalInputsBit = 1u << 16;
     private const uint DigitalOutputsBit = 1u << 17;
@@ -115,12 +113,17 @@ internal sealed class Cia401Configuration
     /// the I/O functions that exist, the mapping bit M (23) clear for the pre-defined mapping and
     /// the specific functionality (bits 24 to 31) zero (CiA 401-1 §6.2.1, Tables 2 and 3). Calls
     /// <see cref="Validate"/>.</summary>
+    /// <remarks>This is the word of this logical device itself. In a module with several logical
+    /// devices, <c>1000h</c> carries <c>FFFFh</c> in the additional information and this word moves to
+    /// <c>67FFh</c> + <c>n·800h</c> for logical device <c>n</c> (CiA 301 v4.2.0 §7.5.2.1; CiA 401-1
+    /// §6.2.1). The node composes that; the configuration does not, and its value is the same in
+    /// every logical device.</remarks>
     public CanOpenDeviceType DeviceType
     {
         get
         {
             Validate();
-            var value = (uint)ProfileNumber;
+            var value = (uint)Cia401Profile.Number;
             if (DigitalInputs > 0)
             {
                 value |= DigitalInputsBit;
@@ -221,7 +224,8 @@ internal sealed class Cia401Configuration
 
         // Receive PDOs are enabled, and so is TPDO 1 (§6.2.6): digital inputs are not the analog
         // inputs whose default TPDOs are disabled.
-        pdos.Add(new Cia401DefaultPdo(CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, 1), isTpdo, true, entries));
+        pdos.Add(new Cia401DefaultPdo(
+            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, 1), isTpdo, true, entries.AsReadOnly()));
     }
 
     private void AddAnalog(List<Cia401DefaultPdo> pdos, int pdoInDevice0, bool isTpdo, int channels, ushort indexInDevice0)
@@ -242,7 +246,7 @@ internal sealed class Cia401Configuration
 
         // Receive PDOs are enabled; the TPDOs with analog inputs are not (see DefaultPdos).
         pdos.Add(new Cia401DefaultPdo(
-            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, pdoInDevice0), isTpdo, !isTpdo, entries));
+            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, pdoInDevice0), isTpdo, !isTpdo, entries.AsReadOnly()));
     }
 
     private static void CheckRange(int value, int max, string name)

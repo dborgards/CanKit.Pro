@@ -204,9 +204,12 @@ public class Cia401ConfigurationTests
 
     [Theory]
     [InlineData(1, 1, 0, 0)]
+    [InlineData(4, 4, 0, 0)]
     [InlineData(5, 4, 1, 0)]
+    [InlineData(8, 4, 4, 0)]
     [InlineData(9, 4, 4, 1)]
     [InlineData(12, 4, 4, 4)]
+    [InlineData(13, 4, 4, 4)]
     [InlineData(254, 4, 4, 4)]
     public void Analog_Outputs_Spread_Over_Up_To_Three_RPDOs_Of_Four_Channels_All_Enabled(
         int outputs, int out2, int out3, int out4)
@@ -318,6 +321,28 @@ public class Cia401ConfigurationTests
         var tpdo = Pdo(Config(di: 8, logicalDevice: 7), number: 449, isTpdo: true);
 
         tpdo.Entries.Should().Equal(((ushort)0x9800, (byte)1, (byte)8));
+    }
+
+    [Fact]
+    public void Logical_Device_Seven_Shifts_The_Analog_Indices_Too()
+    {
+        // 6401h + 7 * 800h = 9C01h, 6411h + 7 * 800h = 9C11h; PDO 2 is 7 * 64 + 2 = 450.
+        var configuration = Config(ai: 4, ao: 4, logicalDevice: 7);
+
+        Pdo(configuration, number: 450, isTpdo: true).Entries.Should().OnlyContain(e => e.Index == 0x9C01 && e.Bits == 16);
+        Pdo(configuration, number: 450, isTpdo: false).Entries.Should().OnlyContain(e => e.Index == 0x9C11 && e.Bits == 16);
+    }
+
+    [Fact]
+    public void The_Entries_Of_A_Default_Pdo_Cannot_Be_Written_Through_A_Cast()
+    {
+        foreach (var pdo in Config(di: 8, ai: 4).DefaultPdos)
+        {
+            var collection = pdo.Entries.Should().BeAssignableTo<System.Collections.Generic.ICollection<(ushort Index, byte Subindex, byte Bits)>>().Subject;
+            collection.IsReadOnly.Should().BeTrue();
+            ((Action)(() => collection.Add(((ushort)0x6000, (byte)9, (byte)8)))).Should().Throw<NotSupportedException>();
+            pdo.Entries.Should().NotBeAssignableTo<System.Collections.Generic.List<(ushort Index, byte Subindex, byte Bits)>>();
+        }
     }
 
     // ---- Validate ---------------------------------------------------------------------------------
