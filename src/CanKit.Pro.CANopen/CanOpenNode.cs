@@ -606,8 +606,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // EMCY takes the gated path (#549), the reset's new inhibit epoch drops it first: this check is
     // defence in depth behind the epoch, and removing it alone fails no test. Null for every other
     // EMCY, which therefore behaves as it did before profiles existed.
+    // warning: a profile's warning, of the class 00xxh (CanOpenNode.Application.cs,
+    // SendProfileWarning). It is no active error and sets no bit: its frame carries 1001h as it is
+    // when the frame is transmitted and 1001h is not written; 1003h enters it as it enters every EMCY
+    // the node transmits (NoteTransmittedWarning, #556).
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
-        byte? applicationErrorRegister = null, int? profileResetGeneration = null, bool gate = false)
+        byte? applicationErrorRegister = null, int? profileResetGeneration = null, bool gate = false,
+        bool warning = false)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
@@ -619,7 +624,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         byte nodeBits = NodeErrorBits;
         byte communicationBits = CommunicationErrorBits;
         object inhibitEpoch = _emcyInhibitEpoch;
-        _errorRegisterQueued = true;
+        // A warning writes no register, so a reset has none of it to write back either.
+        if (!warning) _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
         // the previous send can retarget the dictionary before this queued emergency starts.
         Func<Task> transmit = () =>
@@ -631,13 +637,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid)
             {
-                // No frame. An application EMCY that does not reach the bus leaves 1001h alone;
-                // the node's own still sets the register it decided, so an error that ended is
-                // not read on (Codex on #417).
-                if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, communicationBits);
+                // No frame. An application EMCY that does not reach the bus leaves 1001h alone,
+                // and so does a warning; the node's own still sets the register it decided, so an
+                // error that ended is not read on (Codex on #417).
+                if (applicationErrorRegister is null && !warning) UpdateErrorRegister(passed: null, communicationBits);
                 return Task.CompletedTask;
             }
-            NoteTransmittedEmcy(frame, applicationErrorRegister, communicationBits, nodeBits);
+            if (warning) NoteTransmittedWarning(frame);
+            else NoteTransmittedEmcy(frame, applicationErrorRegister, communicationBits, nodeBits);
             var send = SendControlFrame(cobId, frame, cancellationToken);
             return _options.EnableEmcyInhibit ? RecordEmcyCompletionAsync(send, inhibitEpoch) : send;
         };
@@ -645,7 +652,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // turn can come long after its release (the boot-up's send is waited for first), in a state
         // the node has entered since, and the gate holds it while the node is Stopped (CiA 301 v4.2.0
         // §7.3.2.2.4, Table 37) and drops it on a reset (the epoch). Without inhibit time the gate
-        // waits for nothing else (#549). So does every other EMCY of a profile, raise and clear (gate):
+        // waits for nothing else (#549). So does every other EMCY of a profile, raise, clear and warning (gate):
         // one raised while the boot-up's send is still pending waits for it likewise (#561), and one
         // queued behind a profile EMCY that waits must not outlive a reset that drops that one. Every
         // other EMCY keeps the path its options give it.

@@ -605,16 +605,17 @@ internal sealed partial class CanOpenNode
         UpdateErrorRegister(passed: null, _registerCommunicationBits);
     }
 
-    // The EMCYs of profile errors raised in Initialisation, oldest first, not yet ordered: in that
-    // state only the boot-up object exists (CiA 301 §7.3.2.2.1, Table 37), so they wait for it
-    // (ReleaseProfileEmcysAfterBootUp). It holds exactly the errors active in Initialisation, as
-    // every one of those was raised in it: a reset ends all profile errors and drops this list
-    // before it enters the state, and whatever calls a profile before the start-up job does so in
-    // the start-up's Initialisation.
-    // So an error cleared before the boot-up leaves its entry and nothing else, and the list is
-    // bounded by the errors active at once however long an LSS slave waits for its node-id. Null
-    // when empty. Actor loop only.
-    private List<(ApplicationSlot Slot, ushort Code, byte[] ManufacturerSpecific)>? _heldProfileEmcys;
+    // The EMCYs of profile errors raised in Initialisation, and the warnings sent there, oldest
+    // first, not yet ordered: in that state only the boot-up object exists (CiA 301 §7.3.2.2.1,
+    // Table 37), so they wait for it (ReleaseProfileEmcysAfterBootUp). Its errors are exactly the
+    // errors active in Initialisation, as every one of those was raised in it: a reset ends all
+    // profile errors and drops this list before it enters the state, and whatever calls a profile
+    // before the start-up job does so in the start-up's Initialisation.
+    // So an error cleared before the boot-up leaves its entry and nothing else; a warning is not an
+    // error, and no clear takes it out (#556). The errors are bounded by those active at once; the
+    // warnings by what a profile sends while an LSS slave waits for its node-id. Null when empty.
+    // Actor loop only.
+    private List<(ApplicationSlot Slot, ushort Code, byte[] ManufacturerSpecific, bool Warning)>? _heldProfileEmcys;
 
     /// <summary>Records an error of <paramref name="slot"/>'s application and orders its EMCY: once per
     /// error event, so an error that is active already does nothing (CiA 301 §7.2.7.1). Unlike a
@@ -651,7 +652,7 @@ internal sealed partial class CanOpenNode
         var manufacturer = manufacturerSpecific.ToArray();
         if (_state == NmtState.Initializing)
         {
-            (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer));
+            (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: false));
             return;
         }
         if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
@@ -670,11 +671,52 @@ internal sealed partial class CanOpenNode
         ShowProfileErrorsInRegister();
         if (_state == NmtState.Initializing)
         {
-            _heldProfileEmcys?.RemoveAll(held => ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
+            _heldProfileEmcys?.RemoveAll(held => !held.Warning && ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
             return;
         }
         if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
         EmitNodeEmcy(ErrorResetCode, profile: true);
+    }
+
+    /// <summary>The highest error code of the class "error reset or no error", <c>00xxh</c> (CiA 301
+    /// v4.2.0 §7.2.7.1, Table 25): the codes of a warning are <c>0001h</c> to this.</summary>
+    private const ushort HighestNoErrorCode = 0x00FF;
+
+    /// <summary>Sends a warning of <paramref name="slot"/>'s application: one EMCY of the class
+    /// <c>00xxh</c> that is no active error and writes nothing to <c>1001h</c> (see
+    /// <see cref="ICanOpenApplicationHost.SendWarning"/>). In Initialisation it is held with the
+    /// errors' EMCYs until the boot-up has been ordered; in Stopped it is dropped, as Stopped keeps
+    /// the most recent active EMCY reason only (CiA 301 v4.2.0 §7.3.2.2.4); otherwise it takes the
+    /// gated path of a profile EMCY, behind a pending boot-up.</summary>
+    private void SendProfileWarning(ApplicationSlot slot, ushort errorCode, ReadOnlySpan<byte> manufacturerSpecific)
+    {
+        if (errorCode is ErrorResetCode or > HighestNoErrorCode)
+        {
+            throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode,
+                "A warning is of the class 00xxh, \"error reset or no error\" (CiA 301 v4.2.0 §7.2.7.1, Table 25), "
+                + "0001h to 00FFh: an error of another class is raised with RaiseError, and 0000h is the error reset.");
+        }
+        if (manufacturerSpecific.Length > EmcyMessage.ManufacturerFieldLength)
+        {
+            throw new ArgumentException(
+                $"The manufacturer-specific field is at most {EmcyMessage.ManufacturerFieldLength} bytes.",
+                nameof(manufacturerSpecific));
+        }
+        RequireActor(nameof(ApplicationHost.SendWarning));
+
+        var manufacturer = manufacturerSpecific.ToArray();
+        switch (_state)
+        {
+            case NmtState.Initializing:
+                (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: true));
+                return;
+            case NmtState.Stopped:
+                return;
+            default:
+                EmcyChainWaitsForBootUp();
+                _ = EmitEmcy(new EmcyMessage(_nodeId, errorCode, 0, manufacturer), gate: true, warning: true);
+                return;
+        }
     }
 
     // Counts the NMT resets that ended the profile errors. A profile EMCY released behind a boot-up
@@ -729,8 +771,8 @@ internal sealed partial class CanOpenNode
         _heldProfileEmcys = null;
         AppendBootUpWait(bootUp);
         int generation = _profileResetGeneration;
-        foreach (var (_, code, manufacturer) in held)
-            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation);
+        foreach (var (_, code, manufacturer, warning) in held)
+            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation, warning: warning);
     }
 
     // The send of the boot-up the node ordered last (ReleaseProfileEmcysAfterBootUp). Actor loop only.
@@ -920,6 +962,9 @@ internal sealed partial class CanOpenNode
             => _node.RaiseProfileError(Slot, errorCode, errorRegisterBits, manufacturerSpecific);
 
         public void ClearError(ushort errorCode) => _node.ClearProfileError(Slot, errorCode);
+
+        public void SendWarning(ushort errorCode, ReadOnlySpan<byte> manufacturerSpecific = default)
+            => _node.SendProfileWarning(Slot, errorCode, manufacturerSpecific);
 
         // Leaving Operational, or a state a profile's own fault calls for. Never Operational: only
         // the master's NMT Start puts the node there.

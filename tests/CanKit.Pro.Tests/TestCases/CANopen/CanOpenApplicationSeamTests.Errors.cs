@@ -461,6 +461,216 @@ public partial class CanOpenApplicationSeamTests
     }
 
     // -----------------------------------------------------------------------------------------
+    // Warnings: an EMCY of the class "error reset or no error", 00xxh (CiA 301 v4.2.0 §7.2.7.1,
+    // Table 25), that is not an error (#556).
+    // -----------------------------------------------------------------------------------------
+
+    private static async Task WarnAsync(CanOpenNode node, RecordingApplication app, ushort code, byte[]? manufacturer = null)
+    {
+        await OnActor(node, () => app.Host!.SendWarning(code, manufacturer));
+        await EmcyChainSettledAsync(node);
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Is_One_Emcy_With_The_Healthy_Register_And_Leaves_1001h_Alone()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await WarnAsync(rig.Node, app, 0x0080, new byte[] { 1, 2 });
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy(0x0080, 0x00, 1, 2),
+            "a warning is no error: the frame carries the register as it is, 00h on a healthy node");
+        ErrorRegister(rig.Node).Should().Be(0x00, "nothing became active, so 1001h shows no error");
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Carries_The_Bits_Of_An_Active_Error_And_Adds_And_Removes_None()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+
+        await WarnAsync(rig.Node, app, 0x0080);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(2);
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x0080, 0x05), "the error that is active shows in the warning's frame");
+        ErrorRegister(rig.Node).Should().Be(0x05, "the warning neither ends the error nor adds a bit");
+
+        // The warning left nothing behind to end: clearing the error leaves a healthy register.
+        await ClearAsync(rig.Node, app, 0x5000);
+        rig.Wire.Payloads(SlaveEmcy)[2].Should().Equal(Emcy(0x0000, 0x00));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Fact] // #556
+    public async Task The_Same_Warning_Twice_Is_Two_Emcys()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await WarnAsync(rig.Node, app, 0x0080);
+        await WarnAsync(rig.Node, app, 0x0080);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(2, "a warning is an event of its own each time, not an error state");
+        rig.Wire.Payloads(SlaveEmcy).Should().AllSatisfy(frame => frame.Should().Equal(Emcy(0x0080, 0x00)));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Theory] // #556
+    [InlineData(0x0000)]
+    [InlineData(0x0100)]
+    [InlineData(0x1000)]
+    [InlineData(0x5000)]
+    [InlineData(0xFF80)]
+    public async Task A_Warning_Outside_0001h_To_00FFh_Is_Refused(int code)
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        Exception? refused = null;
+
+        await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.SendWarning((ushort)code)));
+        await EmcyChainSettledAsync(rig.Node);
+
+        refused.Should().BeOfType<ArgumentOutOfRangeException>(
+                "a warning is of the class 00xxh (CiA 301 v4.2.0 Table 25), and 0000h is the error reset")
+            .Which.ParamName.Should().Be("errorCode");
+        rig.Wire.Count(SlaveEmcy).Should().Be(0);
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Theory] // #556: both ends of 0001h to 00FFh are accepted
+    [InlineData(0x0001)]
+    [InlineData(0x00FF)]
+    public async Task A_Warning_At_Either_End_Of_0001h_To_00FFh_Is_Sent(int code)
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await WarnAsync(rig.Node, app, (ushort)code);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy((ushort)code, 0x00));
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_With_A_Manufacturer_Field_Longer_Than_Five_Bytes_Is_Refused_Even_Where_It_Would_Be_Held()
+    {
+        // In Initialisation, where the warning would be held for the boot-up: refused when it is sent,
+        // not when it is released.
+        var app = Profile();
+        using var rig = UnconfiguredLssRig(app);
+        Settle(rig.Node);
+        Exception? refused = null;
+
+        await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.SendWarning(0x0080, new byte[6])));
+        refused.Should().BeOfType<ArgumentException>("the manufacturer field is five bytes");
+
+        await ConfigureNodeIdAsync(rig);
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "a refused warning was not held");
+    }
+
+    [Fact] // #556
+    public void A_Warning_Is_Sent_On_The_Actor_Only()
+    {
+        using var bus = Open(NewSession(), 1);
+        var app = Profile();
+        using var node = OpenNode(bus, With(app));
+        Settle(node);
+
+        Action warn = () => app.Host!.SendWarning(0x0080);
+
+        warn.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Is_Entered_In_The_Error_History_Like_Every_Emcy_And_Cleared_With_It()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app).WithErrorHistoryCapacity(4));
+
+        await WarnAsync(rig.Node, app, 0x0080, new byte[] { 1, 2, 3 });
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(1);
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(1u, "1003h enters every EMCY the node transmits but 0000h (§7.5.2.4)");
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0x0201_0080u,
+            "the code low, the first two manufacturer-specific bytes high (§7.5.2.4, Figure 53)");
+        ErrorRegister(rig.Node).Should().Be(0x00, "the entry is a record of the frame, not an active error");
+
+        // An application's SendEmcyAsync of the same code is entered the same way, on top of it.
+        await rig.Node.SendEmcyAsync(0x0080, 0x00, new byte[] { 1, 2, 3 });
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(2u);
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0x0201_0080u);
+        rig.Od.ReadUnsigned(0x1003, 0x02).Should().Be(0x0201_0080u);
+
+        // Writing 00h to sub-index 00h empties the history, the warning's entries with the rest.
+        rig.Od.WriteUnsigned(0x1003, 0x00, 0);
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(0u);
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0u);
+        rig.Od.ReadUnsigned(0x1003, 0x02).Should().Be(0u);
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_With_The_Emcy_Switched_Off_Sends_Nothing_And_Leaves_1001h_Alone()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+        rig.Od.WriteUnsigned(0x1014, 0, SlaveEmcy | CanOpenCobId.InvalidBit);
+        Settle(rig.Node);
+
+        await WarnAsync(rig.Node, app, 0x0080);
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "bit 31 of 1014h: there is no EMCY to send");
+        ErrorRegister(rig.Node).Should().Be(0x05);
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Sent_In_Stopped_Is_Dropped_And_Leaves_The_Held_Emcy_Held()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => rig.Node.State == NmtState.Stopped, "Stopped");
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+
+        await WarnAsync(rig.Node, app, 0x0080);
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "no EMCY goes out in Stopped (§7.3.2.2.4)");
+
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle(
+                "Stopped keeps the most recent active EMCY reason (§7.3.2.2.4), and a warning is none")
+            .Which.Should().Equal(Emcy(0x5000, 0x05));
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Waits_For_The_Inhibit_Time()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+
+        await OnActor(rig.Node, () => app.Host!.SendWarning(0x0080));
+        await UntilEmcyParkedAsync(rig.Node);
+        Advance(clock, rig.Node, TimeSpan.FromMilliseconds(6500));
+
+        (await EmcyParkedAsync(rig.Node)).Should().BeTrue("the warning still waits for the end of the interval");
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "the inhibit time spaces a warning as any other EMCY (§7.5.2.18)");
+
+        Advance(clock, rig.Node, LongestInhibit - TimeSpan.FromMilliseconds(6500));
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x0080, 0x00));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Communication failure.
     // -----------------------------------------------------------------------------------------
 

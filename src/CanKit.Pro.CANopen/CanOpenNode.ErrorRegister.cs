@@ -43,6 +43,12 @@ namespace CanKit.Pro.CANopen;
 // leaves nothing on the bus. The node's
 // communication errors are not held this way, so a node without applications holds nothing in
 // Initialisation.
+// A warning a profile sends (host SendWarning, error codes 0001h to 00FFh, the class "error reset or
+// no error" of Table 25) is no active error: it sets no bit, writes nothing to 1001h, and its frame
+// carries the register as it is when the frame goes out (1003h enters it as any EMCY). It goes
+// through the same chain, inhibit time, boot-up hold and reset as a profile error's EMCY. Sent in
+// Stopped it is dropped, since Stopped keeps the most recent active EMCY reason (§7.3.2.2.4) and a
+// warning is none (#556).
 // A reset (transition 5, then 0) ends every communication error and every profile error without
 // an EMCY, and drops a profile EMCY that has not gone out: one still held, and one already released
 // behind a boot-up but not yet transmitted (a master that resets the node on seeing its boot-up).

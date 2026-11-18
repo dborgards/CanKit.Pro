@@ -529,6 +529,161 @@ public partial class CanOpenApplicationSeamTests
         ErrorRegister(rig.Node).Should().Be(0x05, "the error the register must show reached it with the EMCY");
     }
 
+    [Fact] // #556
+    public async Task A_Warning_Sent_While_The_Node_Id_Is_Missing_Follows_The_Boot_Up_And_Is_Entered_In_1003h()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app).WithErrorHistoryCapacity(4).WithLss(new LssSlaveOptions()),
+            nodeId: CanOpenCobId.UnconfiguredNodeId);
+        Settle(rig.Node);
+
+        await OnActor(rig.Node, () => app.Host!.SendWarning(0x0080, new byte[] { 0x34, 0x12 }));
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Wire.Sequence.Should().BeEmpty("an unconfigured slave transmits nothing");
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(0u, "a held warning has not been transmitted yet");
+
+        await ConfigureNodeIdAsync(rig);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(rig.Node);
+
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire), Emcy(0x0080, 0x00, 0x34, 0x12));
+        ErrorRegister(rig.Node).Should().Be(0x00, "a warning sets no bit, held or not");
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(1u, "entered when it is transmitted, behind the boot-up");
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0x1234_0080u, "the code low, the first two manufacturer bytes high");
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Sent_In_OnReset_Follows_The_Boot_Up_In_Order_And_Clearing_An_Error_Of_Its_Code_Keeps_It()
+    {
+        var app = Profile();
+        app.WhenReset = _ =>
+        {
+            var host = app.Host!;
+            host.RaiseError(0x5000, 0x04);
+            host.SendWarning(0x0080);
+            // An error of the warning's code, raised and cleared while both are held: the clear drops
+            // the error's EMCY, and the warning, which is no error, stays.
+            host.RaiseError(0x0080, 0x20);
+            host.ClearError(0x0080);
+        };
+        using var rig = new EntryRig(With(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        HoldBootUpUntilTheEmcyHasHadItsChance(rig);
+        int mark = rig.Wire.Sequence.Length;
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await EmcyChainSettledAsync(rig.Node);
+
+        var frames = BootUpsAndEmcys(rig.Wire, mark);
+        frames.Select(f => f.CobId).Should().Equal(new[] { SlaveHeartbeat, SlaveEmcy, SlaveEmcy },
+            "the boot-up first, then the EMCYs held in Initialisation in the order they were ordered");
+        frames[1].Data.Should().Equal(Emcy(0x5000, 0x05));
+        frames[2].Data.Should().Equal(Emcy(0x0080, 0x05), "the warning carries the error that is active");
+        ErrorRegister(rig.Node).Should().Be(0x05);
+    }
+
+    [Fact] // #556
+    public async Task A_Reset_While_A_Warning_Is_Held_Drops_It()
+    {
+        var app = Profile();
+        using var rig = UnconfiguredLssRig(app);
+        Settle(rig.Node);
+        await OnActor(rig.Node, () => app.Host!.SendWarning(0x0080));
+
+        rig.Wire.Transmit(0x000, new byte[] { (byte)NmtCommand.ResetCommunication, 0 });
+        await WaitUntilAsync(() => app.Log.Contains("reset ResetCommunication"), "the reset");
+        Settle(rig.Node);
+        rig.Node.State.Should().Be(NmtState.Initializing);
+
+        await ConfigureNodeIdAsync(rig);
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "the reset dropped the warning before it could go out");
+    }
+
+    [Fact] // #556, #561
+    public async Task A_Warning_Sent_In_Stopped_Leaves_A_Held_Profile_Emcy_On_Its_Gated_Path_Behind_A_Pending_Boot_Up()
+    {
+        // As A_Profile_Emcy_Held_In_Stopped_Does_Not_Overtake_A_Pending_Boot_Up, with a warning sent in
+        // Stopped after the error: the warning is dropped, and the held error's EMCY neither gives way to
+        // it nor loses the gated path that keeps it behind the boot-up.
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new RawWire(session, 2);
+        var app = Profile();
+        app.OnAttach = host =>
+        {
+            var node = NodeOf(host);
+            var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat
+                ? WaitUntilAsync(() => chainWaits.Task.IsCompleted || wire.Count(SlaveEmcy) > 0,
+                    "the EMCY on the wire, or the EMCY chain waiting for the boot-up")
+                : Task.CompletedTask;
+        };
+        using var slave = OpenNode(bus, With(app), new ManualTimeSource());
+        Settle(slave);
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => slave.State == NmtState.Stopped, "Stopped");
+        await OnActor(slave, () =>
+        {
+            app.Host!.RaiseError(0x5000, 0x04);
+            app.Host.SendWarning(0x0080);
+        });
+        wire.Count(SlaveHeartbeat).Should().Be(0, "the boot-up is still held");
+
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(slave);
+
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
+    }
+
+    [Fact] // #556, #549
+    public async Task A_Warning_Sent_Behind_The_Start_Up_Waits_For_The_Boot_Up_And_Then_For_Stopped_To_End()
+    {
+        // A post from Attach sends the warning while the boot-up is kept from the wire; the master stops
+        // the node before the boot-up is let go, so the warning's turn on the EMCY chain comes in Stopped.
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new RawWire(session, 2);
+        var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bootUpMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var app = Profile();
+        app.OnAttach = host =>
+        {
+            var node = NodeOf(host);
+            node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat ? bootUpMayLeave.Task : Task.CompletedTask;
+            host.Post(() => host.SendWarning(0x0080));
+        };
+        using var slave = OpenNode(bus, With(app), new ManualTimeSource());
+        await chainWaits.Task.WithTimeoutAsync(ShortTimeout);
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => slave.State == NmtState.Stopped, "Stopped");
+        Settle(slave);
+
+        bootUpMayLeave.SetResult(true);
+        await wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (wire.Count(SlaveEmcy) == 0 && !await EmcyParkedAsync(slave))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The warning never took its turn.");
+            await Task.Delay(1);
+        }
+        await CanOpenTransmitBarrier.DrainAsync(slave);
+        wire.Count(SlaveEmcy).Should().Be(0, "no EMCY in Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37)");
+
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(slave);
+
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x0080, 0x00));
+    }
+
     [Fact]
     public async Task A_Reset_While_An_Error_Is_Held_Drops_It()
     {

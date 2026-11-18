@@ -288,6 +288,48 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>
     void ClearError(ushort errorCode);
 
+    /// <summary>Sends one EMCY of the class "error reset or no error", <c>00xxh</c> (CiA 301 v4.2.0
+    /// §7.2.7.1, Table 25): a warning that is not an error, such as the "Analog inputs disabled" of
+    /// CiA 401-1 v3.1.0 §5.3. Actor loop; not from <see cref="ICanOpenApplication.Attach"/>.</summary>
+    /// <remarks>
+    /// <para>
+    /// The warning is an event, not a state: it is no active error, <c>1001h</c> is neither set nor
+    /// written, and there is no clear. Each call sends its own frame, a second one with the same code
+    /// included. The frame carries the node's error register as <c>1001h</c> holds it when the frame
+    /// is transmitted, so <c>00h</c> on a node without an active error, and the bits of the errors
+    /// that are active otherwise.
+    /// </para>
+    /// <para>
+    /// Like every emergency the node transmits, the warning is entered in the pre-defined error field
+    /// <c>1003h</c> when the node has it (CiA 301 v4.2.0 §7.5.2.4): the code low, the first two
+    /// manufacturer-specific bytes high, as for an application's <see cref="ICanOpenNode.SendEmcyAsync"/>
+    /// of the same code. Writing <c>00h</c> to <c>1003h:00</c> clears it with the rest.
+    /// </para>
+    /// <para>
+    /// The frame follows the node's rules for an EMCY of a profile (<see cref="RaiseError"/>): the
+    /// inhibit time of <c>1015h</c> spaces it as any other; with the EMCY switched off (bit 31 of
+    /// <c>1014h</c>) nothing is sent; sent in Initialisation, it is held until the boot-up has been
+    /// ordered and goes out behind it, in order with the EMCYs of the errors raised there; sent while
+    /// the boot-up's send is still pending, it waits for it; when its turn on the EMCY chain comes in
+    /// Stopped, it waits until the node leaves Stopped; and an NMT reset drops it while it has not
+    /// been transmitted. Sent in Stopped, it is dropped: nothing is sent then or later, and an EMCY
+    /// the node holds there stays held, on its gated path. CiA 301 v4.2.0 §7.3.2.2.4 has two
+    /// sentences on this: EMCYs triggered in Stopped "are pending", and "the most recent active EMCY
+    /// reason may be transmitted" after the transition into another state. The node keeps one EMCY
+    /// pending and sends it on leaving Stopped; a warning is no active reason, an event that has passed
+    /// once the state is left, so it is not the one kept, and it does not displace the one that
+    /// is.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is not in
+    /// <c>0001h</c> to <c>00FFh</c>: an error of another class is raised with
+    /// <see cref="RaiseError"/>, and <c>0000h</c>, the error reset, says that the errors were repaired,
+    /// which the node sends when they are (<see cref="ClearError"/>).</exception>
+    /// <exception cref="ArgumentException"><paramref name="manufacturerSpecific"/> is longer than
+    /// five bytes.</exception>
+    /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>
+    void SendWarning(ushort errorCode, ReadOnlySpan<byte> manufacturerSpecific = default);
+
     /// <summary>Asks the node to enter Pre-Operational or Stopped: to leave Operational, or to go
     /// where the application's own fault calls for. Only the master starts the node. Actor loop.</summary>
     /// <remarks>

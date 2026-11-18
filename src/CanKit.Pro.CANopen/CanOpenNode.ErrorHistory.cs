@@ -11,8 +11,10 @@ namespace CanKit.Pro.CANopen;
 // It holds "the errors that occurred on the CANopen device and were signaled via the emergency
 // object", so an error is entered in the step of the EMCY chain that transmits it: the application's
 // and the node's own alike, not one that is switched off, cancelled or replaced while held, not
-// 0000h, which reports that an error ended, and not the EMCY of another node. The entry is the
-// frame's: the code low, the first two manufacturer-specific bytes high.
+// 0000h, which reports that an error ended, and not the EMCY of another node. A profile's warning
+// (host SendWarning, 0001h to 00FFh) is entered like any other EMCY, as an application's
+// SendEmcyAsync of the same code is: it differs from an error only in setting no bit in 1001h (#556).
+// The entry is the frame's: the code low, the first two manufacturer-specific bytes high.
 //
 // Status like 1001h: 1010h does not store it, 1011h does not restore it, and an NMT reset leaves it,
 // which departs from §7.3.2.2.1 on purpose, by the maintainer's decision on #434, so that a master
@@ -69,6 +71,17 @@ internal sealed partial class CanOpenNode
         => _od.Transaction(() =>
         {
             frame[2] = (byte)(UpdateErrorRegister(applicationErrorRegister, communicationBits) | nodeBits);
+            EnterInErrorHistory(frame);
+        });
+
+    /// <summary>The warning in <paramref name="frame"/> is being transmitted (a profile's
+    /// <c>SendWarning</c>): the frame carries <c>1001h</c> as it is, which it does not write, and
+    /// <c>1003h</c> gets its entry as for every EMCY the node transmits, as one dictionary transaction.
+    /// Actor loop only.</summary>
+    private void NoteTransmittedWarning(byte[] frame)
+        => _od.Transaction(() =>
+        {
+            frame[2] = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
             EnterInErrorHistory(frame);
         });
 
