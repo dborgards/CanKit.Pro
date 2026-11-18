@@ -653,8 +653,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
                 {
                     process.OnOutputsChanged(this);
                 }
-                // Everything, deliberately: the model's failure must not leave what it changed
-                // unreported; it is thrown with the subscribers' once nothing is pending.
+                // Everything, deliberately: the model is application code, and whatever it throws
+                // must not break the device or leave what it changed unreported. Collected, and
+                // thrown at the end of this method with the subscribers' once nothing is pending
+                // (one as itself, several as an AggregateException), out of the device's callback,
+                // so the node reports it on BackgroundExceptionOccurred.
                 catch (Exception ex)
                 {
                     (failures ??= new List<Exception>()).Add(ex);
@@ -713,8 +716,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
                     {
                         ((EventHandler<Cia401OutputsChangedEventArgs>)subscriber)(this, args);
                     }
-                    // Everything, deliberately: one subscriber's failure must not keep the event from
-                    // the others; it is thrown once they all have it.
+                    // Everything, deliberately: a subscriber is application code, and whatever it
+                    // throws must not break the device or keep the event from the other subscribers
+                    // and the plant model. Collected, and thrown by RaiseOutputsChanged once they all
+                    // have it (one as itself, several as an AggregateException), out of the device's
+                    // callback, so the node reports it on BackgroundExceptionOccurred.
                     catch (Exception ex)
                     {
                         (failures ??= new List<Exception>()).Add(ex);
