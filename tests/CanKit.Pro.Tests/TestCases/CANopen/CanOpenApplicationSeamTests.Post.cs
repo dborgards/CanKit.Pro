@@ -319,17 +319,27 @@ public partial class CanOpenApplicationSeamTests
         seen.Should().Be(NmtState.PreOperational, "the deadline runs behind the start-up job, not ahead of it");
     }
 
+    /// <remarks>
+    /// What this proves is that the callback is held, not run, up to the failure: the second
+    /// application reads the count after the actor has fired the deadline, then fails the open. It
+    /// also fails if the failed open released the held work to the actor, whose shutdown drains its
+    /// mailbox and would run it. That the work is dropped rather than merely left held
+    /// (<c>CloseApplicationPosts</c>, the closed check in <c>RunApplicationDeadline</c>) is not
+    /// observable: nothing releases held work after a failed open, so removing the drop alone does
+    /// not fail this test.
+    /// </remarks>
     [Fact] // #561
-    public void A_Deadline_Held_By_An_Open_That_Fails_Is_Dropped()
+    public void A_Deadline_Due_During_An_Open_That_Fails_Does_Not_Run_Before_The_Failure()
     {
         using var bus = Open(NewSession(), 1);
         using var service = new CanBusService(bus);
         int ran = 0;
+        int ranBeforeTheFailure = -1;
         var early = new RecordingApplication("early")
         {
             OnAttach = host => host.Arm(TimeSpan.Zero, () => Interlocked.Increment(ref ran)),
         };
-        // Holds the constructor until the actor has fired the deadline, then fails the open.
+        // Holds the constructor until the actor has fired the deadline, reads the count, then fails the open.
         var broken = new RecordingApplication("broken")
         {
             OnAttach = host =>
@@ -337,14 +347,15 @@ public partial class CanOpenApplicationSeamTests
                 var node = NodeOf(host);
                 node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
                 node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+                ranBeforeTheFailure = Volatile.Read(ref ran);
                 throw new InvalidOperationException("no device");
             },
         };
 
         Assert.Throws<InvalidOperationException>(() => new CanOpenNode(service, Slave, With(early, broken), ownsService: false, new ManualTimeSource()));
 
-        // The node's actor ended with the failed open: nothing can run the held callback any more.
-        Volatile.Read(ref ran).Should().Be(0, "a deadline held while the node was being opened is dropped with the open");
+        ranBeforeTheFailure.Should().Be(0, "the deadline was held while the node was being opened");
+        Volatile.Read(ref ran).Should().Be(0, "the failed open ended the actor, and the held callback with it");
     }
 
     [Fact]
