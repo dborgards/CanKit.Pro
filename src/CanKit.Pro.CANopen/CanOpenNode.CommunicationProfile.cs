@@ -813,8 +813,12 @@ internal sealed partial class CanOpenNode
             desired[nodeId] = TimeSpan.FromMilliseconds(ms);
         }
 
-        ReconcileHeartbeatEmcyWatches(desired);
+        // The watches first, the timeouts they end second: ending a timeout publishes the failure,
+        // and a profile told of it can write 1016h again. That write rebuilds the watches inline,
+        // so it has to find this rebuild finished rather than have it reinstall, afterwards, a
+        // watch the write removed (Codex on #546).
         _heartbeatConsumer.Replace(desired);
+        ReconcileHeartbeatEmcyWatches(desired);
     }
 
     // =========================================================================================

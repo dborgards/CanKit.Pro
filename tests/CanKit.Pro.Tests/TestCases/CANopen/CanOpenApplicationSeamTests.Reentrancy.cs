@@ -110,6 +110,33 @@ public partial class CanOpenApplicationSeamTests
         (await FailureActiveAsync(rig.Node, app)).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task A_Watch_Dropped_From_The_Callback_Of_A_Changed_Consumer_Time_Stays_Dropped()
+    {
+        // Changing the consumer time of the silent producer ends its failure; the profile drops the
+        // watch when it hears of that. The node's own rebuild of the watches, which the change began,
+        // must not put the watch back afterwards.
+        var app = Watcher();
+        app.WhenFailureChanged = active =>
+        {
+            if (!active) app.Host!.ObjectDictionary.WriteUnsigned(0x1016, 1, 0);
+        };
+        using var watch = new ProducerWatchRig(app);
+        await watch.BeatAsync();
+        watch.Silence();
+        Failures(app).Should().Equal("failure True");
+
+        watch.Rig.Od.WriteUnsigned(0x1016, 1, ((uint)ProducerNode << 16) | 200);
+        Settle(watch.Rig.Node);
+        // Past both consumer times, the 100 ms the watch had and the 200 ms it was given.
+        Advance(watch.Clock, watch.Rig.Node, TimeSpan.FromMilliseconds(500));
+
+        Failures(app).Should().Equal(new[] { "failure True", "failure False" },
+            "the producer is no longer watched, so it cannot time out again");
+        watch.Rig.Od.ReadUnsigned(0x1016, 1).Should().Be(0u);
+        (await FailureActiveAsync(watch.Rig.Node, app)).Should().BeFalse();
+    }
+
     // -----------------------------------------------------------------------------------------
     // A callback that disposes the node: the applications after it are not called.
     // -----------------------------------------------------------------------------------------
