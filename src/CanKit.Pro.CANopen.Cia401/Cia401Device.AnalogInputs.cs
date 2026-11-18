@@ -15,17 +15,15 @@ internal sealed partial class Cia401Device
     /// carries (CiA 401-1 §8.6.3).</summary>
     private const int ChannelsPerSourceBank = 32;
 
-    // The bits of 6421h (CiA 401-1 §8.6.2, Figure 8 and Table 148).
-    private const byte UpperLimitSelected = 0x01;
-    private const byte LowerLimitSelected = 0x02;
-    private const byte DeltaSelected = 0x04;
-    private const byte NegativeDeltaSelected = 0x08;
-    private const byte PositiveDeltaSelected = 0x10;
-    private const byte ReservedSelectionBits = 0xE0;
+    // The bits of 6421h are those of Cia401AnalogInterruptTrigger (CiA 401-1 §8.6.2, Table 148); the
+    // two groups that Figure 6 (§7.2.4) ANDs are the limits and the deltas, and the rest is reserved.
+    private const Cia401AnalogInterruptTrigger LimitBits =
+        Cia401AnalogInterruptTrigger.UpperLimit | Cia401AnalogInterruptTrigger.LowerLimit;
 
-    // The two groups of 6421h that Figure 6 (§7.2.4) ANDs: the limits and the deltas.
-    private const byte LimitBits = UpperLimitSelected | LowerLimitSelected;
-    private const byte DeltaBits = DeltaSelected | NegativeDeltaSelected | PositiveDeltaSelected;
+    private const Cia401AnalogInterruptTrigger DeltaBits = Cia401AnalogInterruptTrigger.Delta
+        | Cia401AnalogInterruptTrigger.NegativeDelta | Cia401AnalogInterruptTrigger.PositiveDelta;
+
+    private const byte ReservedSelectionBits = unchecked((byte)~(byte)(LimitBits | DeltaBits));
 
     // Null when the configuration has no analog inputs; for a device built from a description,
     // null until Attach finds 6401h. Written before the host is published.
@@ -251,18 +249,18 @@ internal sealed partial class Cia401Device
     /// <see cref="SetAnalogInput"/>).</summary>
     private static bool AnalogInterrupt(ObjectDictionary od, AnalogInputBlock block, byte sub, short value, short last)
     {
-        int selection = block.TriggerSelection.ReadByte(od, sub);
-        if (selection == 0) return false;
+        var selection = (Cia401AnalogInterruptTrigger)block.TriggerSelection.ReadByte(od, sub);
+        if (selection == Cia401AnalogInterruptTrigger.None) return false;
 
         int leftAdjusted = Cia401LeftAdjusted.Widen(value);
         long change = (long)value - last;
         bool limitSelected = (selection & LimitBits) != 0;
         bool deltaSelected = (selection & DeltaBits) != 0;
-        bool limitHolds = ((selection & UpperLimitSelected) != 0 && leftAdjusted >= block.UpperLimit.Read(od, sub))
-            || ((selection & LowerLimitSelected) != 0 && leftAdjusted < block.LowerLimit.Read(od, sub));
-        bool deltaHolds = ((selection & DeltaSelected) != 0 && Math.Abs(change) > block.Delta.Read(od, sub))
-            || ((selection & NegativeDeltaSelected) != 0 && -change > block.NegativeDelta.Read(od, sub))
-            || ((selection & PositiveDeltaSelected) != 0 && change > block.PositiveDelta.Read(od, sub));
+        bool limitHolds = ((selection & Cia401AnalogInterruptTrigger.UpperLimit) != 0 && leftAdjusted >= block.UpperLimit.Read(od, sub))
+            || ((selection & Cia401AnalogInterruptTrigger.LowerLimit) != 0 && leftAdjusted < block.LowerLimit.Read(od, sub));
+        bool deltaHolds = ((selection & Cia401AnalogInterruptTrigger.Delta) != 0 && Math.Abs(change) > block.Delta.Read(od, sub))
+            || ((selection & Cia401AnalogInterruptTrigger.NegativeDelta) != 0 && -change > block.NegativeDelta.Read(od, sub))
+            || ((selection & Cia401AnalogInterruptTrigger.PositiveDelta) != 0 && change > block.PositiveDelta.Read(od, sub));
         return (!limitSelected || limitHolds) && (!deltaSelected || deltaHolds);
     }
 

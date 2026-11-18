@@ -24,7 +24,11 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// </remarks>
 internal static class Cia401Objects
 {
-    private const byte HighestArraySubindex = 0xFE;
+    /// <summary>The highest sub-index, <c>FEh</c>, of the arrays of clause 8 that carry one group of
+    /// eight digital channels or one analog channel per sub-index (CiA 401-1 §8.2.1: "a maximum of
+    /// 254 x 8-bit inputs"; Table 39 gives sub-index 00h of <c>6000h</c> the range 01h to FEh).
+    /// The configuration takes its channel limits from it.</summary>
+    internal const byte HighestArraySubindex = 0xFE;
     private const byte HighestRangeSubindex = 0x80;
 
     // ---- Digital input module, CiA 401-1 §8.2 -----------------------------------------------------

@@ -97,8 +97,8 @@ internal sealed partial class Cia401Device
         }
 
         RequireHost();
-        int g = (channel - 1) / ChannelsPerGroup;
-        var bit = 1 << ((channel - 1) % ChannelsPerGroup);
+        int g = (channel - 1) / Cia401Configuration.ChannelsPerDigitalGroup;
+        var bit = 1 << ((channel - 1) % Cia401Configuration.ChannelsPerDigitalGroup);
         return (block.Terminal[g] & bit) != 0;
     }
 
@@ -210,7 +210,7 @@ internal sealed partial class Cia401Device
             if (changed == 0) continue;
             int bit = 0;
             while ((changed & (1 << bit)) == 0) bit++;
-            return (g + 1, (g * ChannelsPerGroup) + bit + 1);
+            return (g + 1, (g * Cia401Configuration.ChannelsPerDigitalGroup) + bit + 1);
         }
 
         return null;
@@ -227,7 +227,7 @@ internal sealed partial class Cia401Device
         internal DigitalOutputBlock(int channels, int logicalDevice)
         {
             Channels = channels;
-            Groups = (channels + ChannelsPerGroup - 1) / ChannelsPerGroup;
+            Groups = (channels + Cia401Configuration.ChannelsPerDigitalGroup - 1) / Cia401Configuration.ChannelsPerDigitalGroup;
             Held = new byte[Groups];
             _terminal = new byte[Groups];
             Write = new ProfileObject(logicalDevice, Cia401Objects.WriteDigitalOutput8);

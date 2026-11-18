@@ -38,19 +38,34 @@ internal readonly record struct Cia401DefaultPdo(
 /// </remarks>
 internal sealed class Cia401Configuration
 {
+    /// <summary>The digital channels one sub-index of an 8-bit digital object carries, a group
+    /// (CiA 401-1 §7.2.1.3). The one place the device and the configuration take it from.</summary>
+    internal const int ChannelsPerDigitalGroup = 8;
+
     /// <summary>The most digital channels one function can carry: <c>FEh</c> sub-indices of eight
     /// (CiA 401-1 §8.2.1, §8.3.1).</summary>
-    public const int MaxDigitalChannels = 254 * 8;
+    public const int MaxDigitalChannels = Cia401Objects.HighestArraySubindex * ChannelsPerDigitalGroup;
 
     /// <summary>The most analog channels one function can carry: <c>FEh</c> sub-indices (CiA 401-1
     /// §8.4.2, §8.5.2).</summary>
-    public const int MaxAnalogChannels = 254;
+    public const int MaxAnalogChannels = Cia401Objects.HighestArraySubindex;
+
+    /// <summary>Bits 16 to 19 of the device type, the I/O functions implemented (CiA 401-1 §6.2.1,
+    /// Table 2): the one place the configuration and the peer take them from.</summary>
+    internal const uint DigitalInputsBit = 1u << 16;
+
+    /// <summary>Bit 17 of the device type: digital outputs (see <see cref="DigitalInputsBit"/>).</summary>
+    internal const uint DigitalOutputsBit = 1u << 17;
+
+    /// <summary>Bit 18 of the device type: analog inputs (see <see cref="DigitalInputsBit"/>).</summary>
+    internal const uint AnalogInputsBit = 1u << 18;
+
+    /// <summary>Bit 19 of the device type: analog outputs (see <see cref="DigitalInputsBit"/>).</summary>
+    internal const uint AnalogOutputsBit = 1u << 19;
 
     /// <summary>The sub-indices of eight digital channels PDO 1 carries: 64 channels, 8 bytes
     /// (CiA 401-1 §6.2.5, §6.2.6, §6.1).</summary>
     private const int DigitalGroupsInDefaultPdo = 8;
-
-    private const int ChannelsPerDigitalGroup = 8;
 
     /// <summary>The analog channels one default PDO carries (CiA 401-1 §6.2.7 to §6.2.12).</summary>
     private const int AnalogChannelsPerDefaultPdo = 4;
@@ -58,11 +73,6 @@ internal sealed class Cia401Configuration
     /// <summary>PDO 2, 3 and 4 carry analog channels (CiA 401-1 §6.2.7 to §6.2.12).</summary>
     private const int FirstAnalogPdo = 2;
     private const int LastAnalogPdo = 4;
-
-    private const uint DigitalInputsBit = 1u << 16;
-    private const uint DigitalOutputsBit = 1u << 17;
-    private const uint AnalogInputsBit = 1u << 18;
-    private const uint AnalogOutputsBit = 1u << 19;
 
     private const byte DigitalBits = 8;
     private const byte AnalogBits = 16;

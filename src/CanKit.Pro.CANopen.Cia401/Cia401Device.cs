@@ -749,7 +749,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// full.</summary>
     private static byte GroupChannelMask(int channels, int g)
     {
-        int inGroup = Math.Min(ChannelsPerGroup, channels - (g * ChannelsPerGroup));
+        int inGroup = Math.Min(Cia401Configuration.ChannelsPerDigitalGroup, channels - (g * Cia401Configuration.ChannelsPerDigitalGroup));
         return (byte)((1 << inGroup) - 1);
     }
 

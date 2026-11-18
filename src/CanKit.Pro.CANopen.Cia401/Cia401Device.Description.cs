@@ -134,8 +134,8 @@ internal sealed partial class Cia401Device
 
         var configuration = new Cia401Configuration
         {
-            DigitalInputs = Elements(od, Cia401Objects.ReadDigitalInput8) * ChannelsPerGroup,
-            DigitalOutputs = Elements(od, Cia401Objects.WriteDigitalOutput8) * ChannelsPerGroup,
+            DigitalInputs = Elements(od, Cia401Objects.ReadDigitalInput8) * Cia401Configuration.ChannelsPerDigitalGroup,
+            DigitalOutputs = Elements(od, Cia401Objects.WriteDigitalOutput8) * Cia401Configuration.ChannelsPerDigitalGroup,
             AnalogInputs = Elements(od, Cia401Objects.ReadAnalogInput16),
             AnalogOutputs = Elements(od, Cia401Objects.WriteAnalogOutput16),
             LogicalDevice = _logicalDevice,

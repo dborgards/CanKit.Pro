@@ -7,8 +7,6 @@ namespace CanKit.Pro.CANopen.Cia401;
 // The digital input block, 8-bit access (CiA 401-1 §7.2.2, §8.2.1 to §8.2.7).
 internal sealed partial class Cia401Device
 {
-    private const int ChannelsPerGroup = 8;
-
     // Null when the configuration has no digital inputs; for a device built from a description,
     // null until Attach finds 6000h. Written before the host is published.
     private DigitalInputBlock? _digitalInputs;
@@ -49,8 +47,8 @@ internal sealed partial class Cia401Device
         }
 
         var host = RequireHost();
-        int group = (channel - 1) / ChannelsPerGroup;
-        var bit = (byte)(1 << ((channel - 1) % ChannelsPerGroup));
+        int group = (channel - 1) / Cia401Configuration.ChannelsPerDigitalGroup;
+        var bit = (byte)(1 << ((channel - 1) % Cia401Configuration.ChannelsPerDigitalGroup));
         host.Post(() => ApplyDigitalInputs(host, block, group, bit, level ? bit : (byte)0));
     }
 
@@ -200,7 +198,7 @@ internal sealed partial class Cia401Device
         internal DigitalInputBlock(int channels, int logicalDevice)
         {
             Channels = channels;
-            Groups = (channels + ChannelsPerGroup - 1) / ChannelsPerGroup;
+            Groups = (channels + Cia401Configuration.ChannelsPerDigitalGroup - 1) / Cia401Configuration.ChannelsPerDigitalGroup;
             Physical = new byte[Groups];
             Read = new ProfileObject(logicalDevice, Cia401Objects.ReadDigitalInput8);
             Polarity = new ProfileObject(logicalDevice, Cia401Objects.PolarityDigitalInput8);

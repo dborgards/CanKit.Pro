@@ -12,7 +12,8 @@ internal enum Cia401AnalogInterruptTrigger : byte
     /// <summary>No condition.</summary>
     None = 0,
 
-    /// <summary>Bit 0: the input exceeds the upper limit (<c>6424h</c>).</summary>
+    /// <summary>Bit 0: the input is equal to or above the upper limit (<c>6424h</c>, CiA 401-1 v3.1.0
+    /// §8.6.5; Table 148 says "exceeded").</summary>
     UpperLimit = 1,
 
     /// <summary>Bit 1: the input falls below the lower limit (<c>6425h</c>).</summary>

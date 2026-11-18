@@ -67,11 +67,6 @@ internal readonly record struct Cia401Observation(ForeignPdoObserveResult Result
 /// </remarks>
 internal sealed class Cia401Peer : ICanOpenProfilePeer
 {
-    private const int DigitalInputsBit = 16;
-    private const int DigitalOutputsBit = 17;
-    private const int AnalogInputsBit = 18;
-    private const int AnalogOutputsBit = 19;
-
     private readonly ICanOpenNode _node;
 
     internal Cia401Peer(ICanOpenProfile profile, ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice)
@@ -82,10 +77,10 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         LogicalDevice = logicalDevice;
 
         uint type = logicalDevice.DeviceType.Value;
-        DigitalInputs = HasBit(type, DigitalInputsBit) ? new DigitalInputBlock(this) : null;
-        DigitalOutputs = HasBit(type, DigitalOutputsBit) ? new DigitalOutputBlock(this) : null;
-        AnalogInputs = HasBit(type, AnalogInputsBit) ? new AnalogInputBlock(this) : null;
-        AnalogOutputs = HasBit(type, AnalogOutputsBit) ? new AnalogOutputBlock(this) : null;
+        DigitalInputs = HasBit(type, Cia401Configuration.DigitalInputsBit) ? new DigitalInputBlock(this) : null;
+        DigitalOutputs = HasBit(type, Cia401Configuration.DigitalOutputsBit) ? new DigitalOutputBlock(this) : null;
+        AnalogInputs = HasBit(type, Cia401Configuration.AnalogInputsBit) ? new AnalogInputBlock(this) : null;
+        AnalogOutputs = HasBit(type, Cia401Configuration.AnalogOutputsBit) ? new AnalogOutputBlock(this) : null;
     }
 
     /// <inheritdoc />
@@ -232,7 +227,7 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
 
     // ---- shared by the blocks ---------------------------------------------------------------------
 
-    private static bool HasBit(uint value, int bit) => (value & (1u << bit)) != 0;
+    private static bool HasBit(uint value, uint bit) => (value & bit) != 0;
 
     private ushort Shift(Cia401ObjectDefinition definition)
         => CanOpenLogicalDeviceAddressing.Index(LogicalDevice.Index, definition.Index);
