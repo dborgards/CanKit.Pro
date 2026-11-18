@@ -145,6 +145,16 @@ public class Cia401DeviceDescriptionTests
             .Where(e => e.Message.Contains("6000h") && e.Message.Contains("no channel"));
     }
 
+    [Fact] // final review S1: 6423h is "Conditional: Device with analog input" (CiA 401-1 §8.6.4, Table 153)
+    public void A_File_With_6401h_And_Without_6423h_Fails_The_Open()
+    {
+        var open = () => Open(Eds.Of("cia401.eds").Remove(0x6423));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6401h") && e.Message.Contains("6423h") && e.Message.Contains("§8.6.4"));
+    }
+
     [Fact]
     public void A_Sub_Index_00h_Above_The_Maximum_Fails_The_Open()
     {

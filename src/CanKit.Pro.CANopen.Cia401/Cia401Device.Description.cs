@@ -25,6 +25,12 @@ internal sealed partial class Cia401Device
     /// dictionary. A block exists when its mandatory object does: the digital inputs with
     /// <c>6000h</c>, the digital outputs with <c>6200h</c>, the analog inputs with <c>6401h</c>,
     /// the analog outputs with <c>6411h</c> (the 8-bit and 16-bit access of the first slice). The
+    /// analog inputs have a second mandatory object, <c>6423h</c>, conditional on a device with
+    /// analog inputs as <c>6401h</c> is (CiA 401-1 §8.6.4), where every other parameter of the first
+    /// slice is optional; the catalogue does not record categories, so this is the one place the
+    /// rule is written. So the mandatory objects are <c>6000h</c>; <c>6200h</c>; <c>6401h</c> and
+    /// <c>6423h</c>; <c>6411h</c>, and a file that declares <c>6401h</c> without <c>6423h</c> fails
+    /// the open rather than giving a block whose interrupts no master could enable. The
     /// channels are what sub-index 00h announces: eight per sub-index for a digital block, one for
     /// an analog block (CiA 401-1 §7.2.1.3). It must be 1 to <c>FEh</c>, and each sub-index up to
     /// it must be declared: a mandatory object with 0 gives a block without a channel and fails the
@@ -145,6 +151,8 @@ internal sealed partial class Cia401Device
                 Shift(_logicalDevice, Cia401Objects.WriteAnalogOutput16)));
         }
 
+        if (configuration.AnalogInputs > 0) RequireWith(od, Cia401Objects.AnalogInputGlobalInterruptEnable, Cia401Objects.ReadAnalogInput16);
+
         _digitalInputs = configuration.DigitalInputs > 0 ? new DigitalInputBlock(configuration.DigitalInputs, _logicalDevice) : null;
         _digitalOutputs = configuration.DigitalOutputs > 0 ? new DigitalOutputBlock(configuration.DigitalOutputs, _logicalDevice) : null;
         _analogInputs = configuration.AnalogInputs > 0 ? new AnalogInputBlock(configuration.AnalogInputs, _logicalDevice) : null;
@@ -248,6 +256,19 @@ internal sealed partial class Cia401Device
         }
 
         return count;
+    }
+
+    /// <summary>Fails the open when the file declares <paramref name="block"/>'s mandatory object
+    /// but not <paramref name="required"/>, which the norm makes mandatory with it (see the
+    /// function blocks on <see cref="FromDescription"/>).</summary>
+    private void RequireWith(ObjectDictionary od, Cia401ObjectDefinition required, Cia401ObjectDefinition block)
+    {
+        var index = Shift(_logicalDevice, required);
+        if (od.ContainsIndex(index)) return;
+        throw OptionsError(string.Format(CultureInfo.InvariantCulture,
+            "The device description declares {0:X4}h ({1}) and not {2:X4}h ({3}), which {4} makes mandatory for a device " +
+            "with this function block (logical device {5}).",
+            Shift(_logicalDevice, block), block.Name, index, required.Name, Clause(required), _logicalDevice));
     }
 
     private ArgumentException TypeError(ushort index, byte subindex, OdDataType expected, OdDataType found, Cia401ObjectDefinition definition)
