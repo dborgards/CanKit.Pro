@@ -355,10 +355,11 @@ internal sealed partial class CanOpenNode
     // Work an application posts to the actor loop (ICanOpenApplicationHost.Post).
     // =========================================================================================
 
-    // The posts made before the node has opened, oldest first: the actor's thread runs from early in
-    // the constructor, and a post made in Attach, or by another thread once Attach has handed the
-    // application its host, would otherwise run while the constructor still composes the default
-    // PDOs and takes the power-on values. Non-null while held; released behind the start-up job
+    // The posts made, and the deadline callbacks that came due (RunApplicationDeadline), before the
+    // node has opened, oldest first: the actor's thread runs from early in the constructor, and a post
+    // made in Attach, or by another thread once Attach has handed the application its host, would
+    // otherwise run while the constructor still composes the default PDOs and takes the power-on
+    // values. Non-null while held; released behind the start-up job
     // (ReleaseApplicationPosts), dropped when the open fails (CloseApplicationPosts). Under
     // _applicationPostGate, as is _applicationPostsClosed.
     private readonly object _applicationPostGate = new();
@@ -422,6 +423,47 @@ internal sealed partial class CanOpenNode
                 foreach (var work in held) _actor.Post(work);
             }
         }
+    }
+
+    // Whether the start-up job has begun. Actor loop only: set by that job, read by a deadline callback.
+    private bool _startUpBegun;
+
+    /// <summary>
+    /// A deadline of <paramref name="slot"/>'s application came due (<see cref="ICanOpenApplicationHost.Arm"/>).
+    /// Actor loop. Before the node has opened its callback is held like a post (#561): the actor's
+    /// thread runs from early in the constructor, and a deadline armed in <c>Attach</c> and due at once
+    /// would otherwise run while the constructor still attaches the next application, composes the
+    /// device types and the default PDOs and takes the power-on values. Held, it is queued behind the
+    /// start-up job with the posts, in the order the deadlines came due, and dropped when the open
+    /// fails. After the release and before the start-up job has run, it is queued behind that job;
+    /// from then on it runs at once.
+    /// </summary>
+    /// <remarks>The deadline itself is armed when <c>Arm</c> is called and expires when it comes due,
+    /// so its time counts from the call and <see cref="IDeadline.IsExpired"/> is true while the
+    /// callback is held; a <c>Dispose</c> then is too late to stop it, as for any expired deadline.</remarks>
+    private void RunApplicationDeadline(ApplicationSlot slot, Action onExpired)
+    {
+        Action work = () =>
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            InvokeApplication(slot, _ => onExpired());
+        };
+        lock (_applicationPostGate)
+        {
+            if (_applicationPostsClosed) return;
+            if (_heldApplicationPosts is { } held)
+            {
+                held.Add(work);
+                return;
+            }
+        }
+        if (!_startUpBegun)
+        {
+            // Released, and the start-up job is in the mailbox ahead of this.
+            _actor.Post(work);
+            return;
+        }
+        work();
     }
 
     /// <summary>The open failed: what is held is dropped, and so is every later post.</summary>
@@ -554,7 +596,8 @@ internal sealed partial class CanOpenNode
     // state only the boot-up object exists (CiA 301 §7.3.2.2.1, Table 37), so they wait for it
     // (ReleaseProfileEmcysAfterBootUp). It holds exactly the errors active in Initialisation, as
     // every one of those was raised in it: a reset ends all profile errors and drops this list
-    // before it enters the state, and nothing calls a profile before the start-up's Initialisation.
+    // before it enters the state, and whatever calls a profile before the start-up job does so in
+    // the start-up's Initialisation.
     // So an error cleared before the boot-up leaves its entry and nothing else, and the list is
     // bounded by the errors active at once however long an LSS slave waits for its node-id. Null
     // when empty. Actor loop only.
@@ -598,7 +641,7 @@ internal sealed partial class CanOpenNode
             (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer));
             return;
         }
-        EmitNodeEmcy(errorCode, manufacturer);
+        EmitNodeEmcy(errorCode, manufacturer, behindBootUp: _state != NmtState.Stopped && EmcyChainWaitsForBootUp());
     }
 
     /// <summary>Ends an error of <paramref name="slot"/>'s application: nothing when it is not active,
@@ -665,22 +708,44 @@ internal sealed partial class CanOpenNode
     /// </remarks>
     private void ReleaseProfileEmcysAfterBootUp(Task bootUp)
     {
+        _bootUpSend = bootUp;
         var held = _heldProfileEmcys;
         if (held is not { Count: > 0 }) return;
         _heldProfileEmcys = null;
-        _ = AppendToEmcyChain(() =>
-        {
-            HeldEmcysWaitForBootUpForTests?.Invoke();
-            return bootUp.ContinueWith(static sent => { _ = sent.Exception; },
-                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        });
+        AppendBootUpWait(bootUp);
         int generation = _profileResetGeneration;
         foreach (var (_, code, manufacturer) in held)
             _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation);
     }
 
+    // The send of the boot-up the node ordered last (ReleaseProfileEmcysAfterBootUp). Actor loop only.
+    private Task _bootUpSend = Task.CompletedTask;
+
+    /// <summary>A profile EMCY ordered in Pre-Operational or Operational while the boot-up's send is
+    /// still pending waits for it on the EMCY chain, as the EMCYs held in Initialisation do: the
+    /// work of a profile that was held behind the start-up job (a post or a deadline from
+    /// <c>Attach</c>, #561) runs right after the boot-up has been ordered, and its EMCY must not
+    /// overtake the boot-up on the bus. Nothing once the boot-up is out. Returns whether it put a
+    /// wait on the chain; the EMCY then takes the gated path (<see cref="EmitEmcy"/>), as a released
+    /// one does, so that a Stop or a reset during the wait is honoured (#549). Actor loop.</summary>
+    private bool EmcyChainWaitsForBootUp()
+    {
+        if (_bootUpSend.IsCompleted) return false;
+        AppendBootUpWait(_bootUpSend);
+        return true;
+    }
+
+    /// <summary>Puts a wait for <paramref name="bootUp"/>'s send on the EMCY chain. Actor loop.</summary>
+    private void AppendBootUpWait(Task bootUp)
+        => _ = AppendToEmcyChain(() =>
+        {
+            HeldEmcysWaitForBootUpForTests?.Invoke();
+            return bootUp.ContinueWith(static sent => { _ = sent.Exception; },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        });
+
     /// <summary>Test seam: runs on the actor when the EMCY chain starts waiting for the boot-up
-    /// before it sends the profile EMCYs held in Initialisation.</summary>
+    /// before it sends a profile EMCY (<see cref="AppendBootUpWait"/>).</summary>
     internal Action? HeldEmcysWaitForBootUpForTests { get; set; }
 
     private void RequireActor(string member)
@@ -796,7 +861,7 @@ internal sealed partial class CanOpenNode
         public IDeadline Arm(TimeSpan delay, Action onExpired)
         {
             if (onExpired is null) throw new ArgumentNullException(nameof(onExpired));
-            return _node._deadlines.Arm(delay, () => _node.InvokeApplication(Slot, _ => onExpired()));
+            return _node._deadlines.Arm(delay, () => _node.RunApplicationDeadline(Slot, onExpired));
         }
 
         public void Post(Action action) => _node.PostApplicationWork(Slot, action);

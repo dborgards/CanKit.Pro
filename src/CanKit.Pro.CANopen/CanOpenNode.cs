@@ -352,14 +352,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // Pre-Operational over it without leaving Operational (#357 C-10).
         _actor.Post(() =>
         {
+            _startUpBegun = true;
             ApplyAllCommunicationObjects();
             StartSrdoConfigurationCheck();
             // An unconfigured LSS slave stays in NMT reset-communication waiting (§8.3.1):
             // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
             if (LayerSettingsBlockBoot()) return;
             _state = NmtState.PreOperational;
-            // A deadline an application armed in Attach can run before this job, in
-            // Initialisation; an error it raised there follows the boot-up.
+            // The deadlines and posts of an application from before the open are held behind this
+            // job (#561). What can still reach a profile ahead of it is an OnEntriesWritten for a
+            // write another thread made while the node was being opened; an error raised there, in
+            // Initialisation, follows the boot-up.
             ReleaseProfileEmcysAfterBootUp(EmitHeartbeat(0x00));
             StartControllerOverrunMonitoring();
             StartControllerErrorMonitoring();
@@ -601,7 +604,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Null for
     // every other EMCY, which therefore behaves as it did before profiles existed.
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
-        byte? applicationErrorRegister = null, int? profileResetGeneration = null)
+        byte? applicationErrorRegister = null, int? profileResetGeneration = null, bool gate = false)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
@@ -638,8 +641,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // turn can come long after its release (the boot-up's send is waited for first), in a state
         // the node has entered since, and the gate holds it while the node is Stopped (CiA 301 v4.2.0
         // §7.3.2.2.4, Table 37) and drops it on a reset (the epoch). Without inhibit time the gate
-        // waits for nothing else (#549). Every other EMCY keeps the path its options give it.
-        bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null;
+        // waits for nothing else (#549). So does a profile EMCY raised while the boot-up's send is still
+        // pending, which waits for it likewise (gate, #561). Every other EMCY keeps the path its options
+        // give it.
+        bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null || gate;
         return AppendToEmcyChain(() => gated
             ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
     }

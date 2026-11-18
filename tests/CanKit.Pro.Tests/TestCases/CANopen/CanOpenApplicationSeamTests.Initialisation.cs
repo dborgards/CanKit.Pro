@@ -72,46 +72,41 @@ public partial class CanOpenApplicationSeamTests
         ErrorRegister(rig.Node).Should().Be(0x05, "the held EMCY wrote the register when it went out");
     }
 
-    [Fact]
-    public async Task An_Error_Raised_Before_The_Start_Up_Follows_The_Boot_Up()
+    [Fact] // #561
+    public async Task An_Error_Raised_By_A_Deadline_Due_During_Attach_Follows_The_Boot_Up()
     {
-        using var running = new ManualResetEventSlim();
-        using var release = new ManualResetEventSlim();
+        // The deadline is held until the node has ordered its start-up, so it raises the error in
+        // Pre-operational, right behind the boot-up. The boot-up is kept from the wire until the EMCY is
+        // there or the EMCY chain waits for it, which makes their order on the wire observable.
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new RawWire(session, 2);
         NmtState? stateWhenRaised = null;
-        bool released = false;
-        bool ranFirst = false;
         var app = Profile();
-        // A deadline armed in Attach and due at once, which Attach waits for until it runs: the open
-        // posts the start-up job only after that, so the deadline is ahead of it on the actor. Without
-        // the wait the order is a race: the actor loop drains its mailbox before it takes in a timer
-        // armed from another thread, so a start-up job posted before the loop's next pass ran first.
-        // The deadline then waits for the test, so the boot-up cannot leave before the hold is in place.
         app.OnAttach = host =>
         {
+            var node = NodeOf(host);
+            var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat
+                ? WaitUntilAsync(() => chainWaits.Task.IsCompleted || wire.Count(SlaveEmcy) > 0,
+                    "the EMCY on the wire, or the EMCY chain waiting for the boot-up")
+                : Task.CompletedTask;
             host.Arm(TimeSpan.Zero, () =>
             {
-                running.Set();
-                released = release.Wait(ShortTimeout);
                 stateWhenRaised = host.State;
                 host.RaiseError(0x5000, 0x04);
             });
-            ranFirst = running.Wait(ShortTimeout);
         };
-        using var rig = new EntryRig(With(app), new ManualTimeSource());
-        HoldBootUpUntilTheEmcyHasHadItsChance(rig);
+        using var slave = OpenNode(bus, With(app), new ManualTimeSource());
 
-        release.Set();
-        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
-        await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
-        await EmcyChainSettledAsync(rig.Node);
+        await wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        await wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(slave);
 
-        // Asserted here, not in the callback: a throw on the actor loop is a background exception,
-        // not a test failure.
-        ranFirst.Should().BeTrue("the deadline was running before the open went on to post the start-up job");
-        released.Should().BeTrue("the deadline waited for the test, so the hold was in place before the boot-up");
-        stateWhenRaised.Should().Be(NmtState.Initializing, "the error is raised before the node has booted");
-        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire), Emcy(0x5000, 0x05));
-        ErrorRegister(rig.Node).Should().Be(0x05);
+        stateWhenRaised.Should().Be(NmtState.PreOperational, "a deadline due before the node has opened runs behind the start-up");
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
+        ErrorRegister(slave).Should().Be(0x05);
     }
 
     [Fact]
@@ -309,6 +304,49 @@ public partial class CanOpenApplicationSeamTests
         rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(1, "the EMCY goes out once, when the node has left Stopped");
         rig.Wire.Payloads(SlaveEmcy)[0].Should().Equal(Emcy(0x5000, 0x05));
         ErrorRegister(rig.Node).Should().Be(0x05);
+    }
+
+    [Fact] // #561, #549
+    public async Task An_Error_Raised_Behind_The_Start_Up_Waits_For_The_Boot_Up_And_Then_For_Stopped_To_End()
+    {
+        // A post from Attach runs right behind the start-up job and raises an error while the boot-up is
+        // still kept from the wire; the master stops the node before the boot-up is let go.
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new RawWire(session, 2);
+        var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bootUpMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var app = Profile();
+        app.OnAttach = host =>
+        {
+            var node = NodeOf(host);
+            node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat ? bootUpMayLeave.Task : Task.CompletedTask;
+            host.Post(() => host.RaiseError(0x5000, 0x04));
+        };
+        using var slave = OpenNode(bus, With(app), new ManualTimeSource());
+        await chainWaits.Task.WithTimeoutAsync(ShortTimeout);
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => slave.State == NmtState.Stopped, "Stopped");
+        Settle(slave);
+
+        bootUpMayLeave.SetResult(true);
+        await wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (wire.Count(SlaveEmcy) == 0 && !await EmcyParkedAsync(slave))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The EMCY never took its turn.");
+            await Task.Delay(1);
+        }
+        await CanOpenTransmitBarrier.DrainAsync(slave);
+        wire.Count(SlaveEmcy).Should().Be(0, "no EMCY in Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37)");
+
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(slave);
+        await CanOpenTransmitBarrier.DrainAsync(slave);
+
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
     }
 
     [Fact] // #549

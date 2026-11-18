@@ -34,10 +34,23 @@ internal interface ICanOpenApplicationHost
     /// <summary>Arms a one-shot deadline on the node's clock (<see cref="Now"/>);
     /// <paramref name="onExpired"/> runs on the actor loop as a callback of this application: what it
     /// writes there counts as the application's own, and what it throws is reported. Any thread.</summary>
-    /// <remarks>The deadline is the application's: an NMT reset does not cancel it, and it fires in
-    /// every NMT state. For a period, arm again from <paramref name="onExpired"/> with the delay to
-    /// the next due time as read from <see cref="Now"/>, so the period does not drift by the
-    /// handling time.</remarks>
+    /// <remarks>
+    /// <para>
+    /// The deadline is the application's: an NMT reset does not cancel it, and it fires in every NMT
+    /// state. For a period, arm again from <paramref name="onExpired"/> with the delay to the next due
+    /// time as read from <see cref="Now"/>, so the period does not drift by the handling time.
+    /// </para>
+    /// <para>
+    /// Armed before the node has opened — from <see cref="ICanOpenApplication.Attach"/>, or from
+    /// another thread while the constructor is still running — the deadline counts from this call,
+    /// but a callback that comes due before the node has ordered its start-up is held as a
+    /// <see cref="Post"/> is: it runs behind the start-up job, in Pre-Operational, or for an LSS slave
+    /// still waiting for its node-id in Initialisation, never while the node is still being built,
+    /// and it is dropped when the open fails (#561). Such a deadline has expired when it came due
+    /// (<see cref="IDeadline.IsExpired"/>): disposing it while its callback is held does not stop the
+    /// callback. Its EMCYs do not overtake the boot-up (<see cref="RaiseError"/>).
+    /// </para>
+    /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="onExpired"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="delay"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The node's actor has ended.</exception>
@@ -70,11 +83,9 @@ internal interface ICanOpenApplicationHost
     /// another thread while the constructor is still running — the action is held, and queued once
     /// the node has ordered its start-up, behind it: it runs in Pre-Operational, or for an LSS slave
     /// still waiting for its node-id in Initialisation, and not while the node is still being built.
-    /// When the open fails, a held action is dropped. One exception: a deadline armed before the
-    /// node has opened (<see cref="Arm"/> from <see cref="ICanOpenApplication.Attach"/>, say) can fire
-    /// on the actor loop while the constructor still runs — an open question of <see cref="Arm"/>,
-    /// issue #561 — and a Post made from that deadline is made
-    /// inside a callback of this application, so it runs inline, then.
+    /// When the open fails, a held action is dropped. A deadline that comes due before the node has
+    /// opened is held the same way (<see cref="Arm"/>), so no callback of the application runs while
+    /// the node is still being built.
     /// </para>
     /// <para>
     /// Once the node is disposed, or after an open that failed, the action is dropped without being
@@ -234,9 +245,11 @@ internal interface ICanOpenApplicationHost
     /// shown in <c>1001h</c>, without a frame. In Stopped the EMCY is held, and only the most
     /// recent EMCY the node holds goes out when it leaves Stopped. In Initialisation the EMCY is held
     /// until the boot-up has been ordered, and every one held there goes out behind it in the order
-    /// raised. Such an EMCY is sent once the boot-up's send has completed; when its turn comes and the
-    /// node has been stopped meanwhile, it waits until the node leaves Stopped and goes out then,
-    /// whatever the options (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY in Stopped).
+    /// raised. Such an EMCY is sent once the boot-up's send has completed, and so is one raised in
+    /// Pre-Operational while that send is still pending (by work held behind the start-up job, say);
+    /// when its turn comes and the node has been stopped meanwhile, it waits until the node leaves
+    /// Stopped and goes out then, whatever the options (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY
+    /// in Stopped).
     /// </para>
     /// <para>An NMT reset ends every error without an EMCY, and <c>1001h</c> loses its bits. An EMCY
     /// held in Initialisation that has not been transmitted when the reset comes is dropped with its
