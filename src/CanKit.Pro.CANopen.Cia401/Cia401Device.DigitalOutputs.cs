@@ -354,11 +354,11 @@ internal sealed partial class Cia401Device
         /// from those. Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.WriteDigitalOutput8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.ChangePolarityDigitalOutput8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.ErrorModeDigitalOutput8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.ErrorValueDigitalOutput8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.FilterMaskDigitalOutput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.WriteDigitalOutput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ChangePolarityDigitalOutput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ErrorModeDigitalOutput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ErrorValueDigitalOutput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.FilterMaskDigitalOutput8);
             for (int g = 0; g < Groups; g++) LoadHeld(od, g);
             Publish(ComputeTerminal(od));
         }

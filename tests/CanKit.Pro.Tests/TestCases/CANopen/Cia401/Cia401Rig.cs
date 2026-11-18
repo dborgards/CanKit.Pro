@@ -42,6 +42,13 @@ internal sealed class Cia401Rig : IDisposable
     /// <summary>RPDO 1 of the device, the default RPDO of its digital outputs (CiA 401-1 §6.2.5).</summary>
     internal const uint Rpdo1 = 0x200 + DeviceId;
 
+    /// <summary>TPDO 2 of the device, the default TPDO of its analog inputs 1 to 4 (CiA 401-1
+    /// §6.2.8), disabled by default: <see cref="EnableTpdoAsync"/> creates it.</summary>
+    internal const uint Tpdo2 = 0x280 + DeviceId;
+
+    /// <summary>The device's EMCY COB-ID (CiA 301 v4.2.0 §7.3.3, Table 39).</summary>
+    internal const uint Emcy = 0x080 + DeviceId;
+
     internal const uint SdoRequest = 0x600 + DeviceId;
     internal const uint SdoResponse = 0x580 + DeviceId;
 
@@ -55,6 +62,10 @@ internal sealed class Cia401Rig : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<uint, List<byte[]>> _frames = new();
     private readonly List<(uint CobId, byte[] Data)> _sequence = new();
+
+    /// <summary>Options under which a master may write the PDO records over SDO, which
+    /// <see cref="EnableTpdoAsync"/> needs: they are read-only on the bus otherwise.</summary>
+    internal static CanOpenNodeOptions WritablePdoRecords => new() { WritableCommunicationParameters = true };
 
     /// <summary>Opens the device for <paramref name="configuration"/>. <paramref name="options"/> are
     /// what the test starts from (the defaults when null); the rig hands them to
@@ -138,6 +149,34 @@ internal sealed class Cia401Rig : IDisposable
     /// Works in every NMT state.</summary>
     internal Task DrainAsync() => CanOpenTransmitBarrier.DrainAsync(Node);
 
+    /// <summary>
+    /// The barrier before asserting what EMCYs were not sent, or exactly how many were: settles the
+    /// actor, so that every callback queued before the call has run and ordered its EMCYs, then
+    /// waits until every EMCY ordered so far has been through the node's EMCY chain — the frame is
+    /// out, which on the virtual adapter means the master's channel has seen it. The chain is not
+    /// covered by <see cref="DrainAsync"/>: each step goes from a thread-pool continuation back to
+    /// the actor before it reserves its send. The chain is a field the actor extends, so it is read
+    /// on the actor and awaited until it is the same task twice (as the seam tests do).
+    /// </summary>
+    internal async Task DrainEmcyAsync()
+    {
+        await DrainAsync();
+        var field = typeof(CanOpenNode).GetField("_emcySendChain", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("CanOpenNode has no _emcySendChain field any more.");
+        Task? last = null;
+        while (true)
+        {
+            Task? current = null;
+            await Node.PostToActorAsync(() => current = (Task)field.GetValue(Node)!);
+            if (await Task.WhenAny(current!, Task.Delay(HangGuard)) != current)
+                throw new TimeoutException("Timed out waiting for the EMCY chain.");
+            if (ReferenceEquals(current, last)) break;
+            last = current;
+        }
+
+        await DrainAsync();
+    }
+
     /// <summary>Runs two empty jobs through the device node's actor: whatever it was handed before,
     /// and whatever that queued in turn, has run.</summary>
     internal void Settle()
@@ -205,13 +244,36 @@ internal sealed class Cia401Rig : IDisposable
     internal Task WaitForStateAsync(NmtState state)
         => WaitUntilAsync(() => Node.State == state, state.ToString());
 
-    /// <summary><see cref="StartAsync"/>, then waits for the TPDO 1 that entering Operational sends
-    /// (CiA 401-1 §6.1), so that what a test counts afterwards is its own.</summary>
-    internal async Task StartAndTakeFirstTpdoAsync()
+    /// <summary><see cref="StartAsync"/>, then waits for the TPDO on <paramref name="cobId"/>
+    /// (TPDO 1 unless given) that entering Operational sends (CiA 401-1 §6.1), so that what a test
+    /// counts afterwards is its own.</summary>
+    internal async Task StartAndTakeFirstTpdoAsync(uint cobId = Tpdo1)
     {
-        int before = Count(Tpdo1);
+        int before = Count(cobId);
         await StartAsync();
-        await WaitForCountAsync(Tpdo1, before + 1);
+        await WaitForCountAsync(cobId, before + 1);
+    }
+
+    /// <summary>NMT Enter Pre-Operational to the device, and waits until it is there and its actor
+    /// has settled.</summary>
+    internal async Task EnterPreOperationalAsync()
+    {
+        Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, DeviceId });
+        await WaitUntilAsync(() => Node.State == NmtState.PreOperational, "PreOperational");
+        Settle();
+    }
+
+    /// <summary>
+    /// Creates TPDO <paramref name="pdo"/> (1 to 4) the way a master does over SDO (CiA 301 v4.2.0
+    /// §7.5.2.37): bit 31 of its COB-ID, "PDO exists / is valid", from 1 to 0, the CAN-ID left as
+    /// the device has it. Its mapping is the default the device set, so the re-mapping procedure of
+    /// §7.5.2.38 has nothing to do. Needs a rig opened with <see cref="WritablePdoRecords"/>.
+    /// </summary>
+    internal async Task EnableTpdoAsync(int pdo)
+    {
+        var index = (ushort)(0x1800 + pdo - 1);
+        uint cobId = await ReadU32Async(index, 0x01);
+        await WriteU32Async(index, 0x01, cobId & ~0x8000_0000u);
     }
 
     // ---- SDO, expedited, from the master side -----------------------------------------------------
@@ -242,6 +304,41 @@ internal sealed class Cia401Rig : IDisposable
         var response = await SdoAsync(new byte[] { 0x40, (byte)index, (byte)(index >> 8), subindex, 0, 0, 0, 0 });
         response[0].Should().Be(0x4F, $"the device answers the upload of {index:X4}h:{subindex:X2}h with one byte");
         return response[4];
+    }
+
+    /// <summary>An expedited four-byte download; the response, an acknowledgement or an abort.</summary>
+    internal Task<byte[]> DownloadU32Async(ushort index, byte subindex, uint value)
+        => SdoAsync(new byte[]
+        {
+            0x23, (byte)index, (byte)(index >> 8), subindex,
+            (byte)value, (byte)(value >> 8), (byte)(value >> 16), (byte)(value >> 24),
+        });
+
+    /// <summary>An expedited four-byte download that must be acknowledged.</summary>
+    internal async Task WriteU32Async(ushort index, byte subindex, uint value)
+    {
+        var response = await DownloadU32Async(index, subindex, value);
+        response[0].Should().Be(0x60, $"the device acknowledges the download to {index:X4}h:{subindex:X2}h");
+    }
+
+    /// <summary>An expedited download of an INTEGER32 that must be acknowledged.</summary>
+    internal Task WriteI32Async(ushort index, byte subindex, int value)
+        => WriteU32Async(index, subindex, unchecked((uint)value));
+
+    /// <summary>An upload of a four-byte entry: its value.</summary>
+    internal async Task<uint> ReadU32Async(ushort index, byte subindex)
+    {
+        var response = await SdoAsync(new byte[] { 0x40, (byte)index, (byte)(index >> 8), subindex, 0, 0, 0, 0 });
+        response[0].Should().Be(0x43, $"the device answers the upload of {index:X4}h:{subindex:X2}h with four bytes");
+        return (uint)(response[4] | (response[5] << 8) | (response[6] << 16) | (response[7] << 24));
+    }
+
+    /// <summary>An upload of an INTEGER16 entry: its value.</summary>
+    internal async Task<short> ReadI16Async(ushort index, byte subindex)
+    {
+        var response = await SdoAsync(new byte[] { 0x40, (byte)index, (byte)(index >> 8), subindex, 0, 0, 0, 0 });
+        response[0].Should().Be(0x4B, $"the device answers the upload of {index:X4}h:{subindex:X2}h with two bytes");
+        return (short)(response[4] | (response[5] << 8));
     }
 
     /// <summary>The abort code of an SDO response that must be an abort.</summary>

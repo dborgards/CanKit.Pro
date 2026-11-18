@@ -97,15 +97,19 @@ public class Cia401DeviceDigitalInputTests
     {
         foreach (var configuration in new[]
         {
-            new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 },
             new Cia401Configuration { DigitalOutputs = 8, AnalogOutputs = 1 },
-            new Cia401Configuration { AnalogInputs = 1 },
+            new Cia401Configuration { AnalogInputs = 1, AnalogOutputs = 1 },
             new Cia401Configuration { AnalogOutputs = 1 },
         })
         {
             FluentActions.Invoking(() => new Cia401Device(configuration))
                 .Should().Throw<ArgumentException>().Which.ParamName.Should().Be("configuration");
         }
+
+        // Analog inputs are built: alone and beside digital inputs the device is created.
+        FluentActions.Invoking(() => new Cia401Device(new Cia401Configuration { AnalogInputs = 1 })).Should().NotThrow();
+        FluentActions.Invoking(() => new Cia401Device(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 }))
+            .Should().NotThrow();
 
         FluentActions.Invoking(() => new Cia401Device(null!)).Should().Throw<ArgumentNullException>();
         FluentActions.Invoking(() => new Cia401Device(new Cia401Configuration()))

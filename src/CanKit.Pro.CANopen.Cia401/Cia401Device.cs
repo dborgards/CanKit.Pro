@@ -52,6 +52,11 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// from the start. Nor the sub-indices 02h and 03h of <c>1029h</c> (§6.2.4): a device failure follows
 /// sub-index 01h.
 /// </para>
+/// <para>
+/// <b>Analog inputs.</b> The 16-bit inputs, their interrupt conditions, the interrupt source and the
+/// warning of §5.3, with the readings of the norm they rest on and the one deviation (the clearing
+/// of <c>6422h</c>), are described on <see cref="SetAnalogInput"/>.
+/// </para>
 /// </remarks>
 internal sealed partial class Cia401Device : ICanOpenApplication
 {
@@ -78,15 +83,15 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// (<see cref="Cia401Configuration.Validate"/>).</exception>
     /// <exception cref="ArgumentException">The configuration has no I/O function
     /// (<see cref="Cia401Configuration.Validate"/>), or one this device does not implement yet:
-    /// analog inputs and analog outputs arrive with their own partials.</exception>
+    /// analog outputs arrive with their own partial.</exception>
     public Cia401Device(Cia401Configuration configuration)
     {
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
         configuration.Validate();
-        if (configuration.AnalogInputs > 0 || configuration.AnalogOutputs > 0)
+        if (configuration.AnalogOutputs > 0)
         {
             throw new ArgumentException(
-                "The CiA 401 device implements digital inputs and outputs only so far: analog inputs and analog "
+                "The CiA 401 device implements digital inputs, digital outputs and analog inputs only so far: analog "
                 + "outputs are not built yet, and a device that declared their default PDOs without their objects "
                 + "could not open.", nameof(configuration));
         }
@@ -108,6 +113,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
             : null;
         _digitalOutputs = configuration.DigitalOutputs > 0
             ? new DigitalOutputBlock(configuration.DigitalOutputs, _logicalDevice)
+            : null;
+        _analogInputs = configuration.AnalogInputs > 0
+            ? new AnalogInputBlock(configuration.AnalogInputs, _logicalDevice)
             : null;
     }
 
@@ -147,6 +155,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
 
         _digitalInputs?.Declare(host.ObjectDictionary);
         _digitalOutputs?.Declare(host.ObjectDictionary);
+        _analogInputs?.Declare(host.ObjectDictionary);
 
         host.SetDeviceType(_logicalDevice, _deviceType);
         foreach (var pdo in _defaultPdos)
@@ -168,7 +177,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// download before the device is asked, but a local write through the dictionary asks the device.
     /// Refuses a value other than 0 and 1 for a BOOLEAN entry (<c>6005h</c>), which is TRUE or FALSE
     /// and nothing else (CiA 301 v4.2.0 §7.1.4.3), with <c>06090030h</c>, "invalid value for
-    /// parameter" (Table 22). The device's own writes pass. Every other write is accepted.</summary>
+    /// parameter" (Table 22). Refuses an analog interrupt trigger selection (<c>6421h</c>) with a
+    /// reserved bit set with the same code (CiA 401-1 §8.6.2). The device's own writes pass. Every
+    /// other write is accepted.</summary>
     public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
     {
         // Nobody writes a claimed entry before Attach has declared it.
@@ -177,6 +188,8 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         if (!host.ObjectDictionary.TryGet(index, subindex, out var entry)) return OdWriteDecision.Accept;
         if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
         if (entry.DataType == OdDataType.Boolean && value.Length == 1 && value[0] > 1)
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        if (IsReservedTriggerSelection(index, subindex, value))
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
         return OdWriteDecision.Accept;
     }
@@ -192,6 +205,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         {
             DigitalInputsWritten(host, entry, send);
             DigitalOutputsWritten(host, entry);
+            AnalogInputsWritten(host, entry);
         }
         RefreshDigitalOutputs(host);
         RequestTransmission(host, send);
@@ -200,8 +214,10 @@ internal sealed partial class Cia401Device : ICanOpenApplication
 
     /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).
     /// Entering Operational sends every TPDO of transmission type <c>FFh</c> (§6.1): the device asks
-    /// for every entry its blocks transmit, in one request, whatever the interrupt masks say. Actor
-    /// loop.</summary>
+    /// for every entry its blocks transmit, in one request, whatever the interrupt masks and the
+    /// global interrupt enables say; the analog inputs also start their interrupt state afresh and
+    /// raise the warning of §5.3 when <c>6423h</c> is FALSE, which leaving Operational ends (see
+    /// <see cref="SetAnalogInput"/>). Actor loop.</summary>
     public void OnNmtStateChanged(NmtState previous, NmtState current)
     {
         var host = AttachedHost();
@@ -211,7 +227,12 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         {
             var send = new List<CanOpenObjectAddress>();
             DigitalInputsToSendOnStart(send);
+            AnalogInputsEnterOperational(host, send);
             RequestTransmission(host, send);
+        }
+        else if (previous == NmtState.Operational)
+        {
+            AnalogInputsLeaveOperational(host);
         }
         RaiseOutputsChanged();
     }
@@ -222,11 +243,13 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// application reported outlasts the reset. Reset Node, the application reset, also drops the
     /// held output values for what <c>6200h</c> holds after it (CiA 401-1 §6.2.5 NOTE); Reset
     /// Communication resets no application and leaves the outputs as they are. The physical input
-    /// levels the application set are kept. Actor loop.</summary>
+    /// levels the application set are kept. Every reset clears the analog interrupt source
+    /// <c>6422h</c> (see <see cref="SetAnalogInput"/>). Actor loop.</summary>
     public void OnReset(NmtCommand command)
     {
         var host = AttachedHost();
         if (command == NmtCommand.ResetNode) DigitalOutputsReset(host);
+        AnalogInputsReset(host);
         RaiseOutputsChanged();
     }
 
@@ -258,11 +281,16 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <summary>The device's own write of one byte. Actor loop, inside a callback of the device, so
     /// it is not reported back (<see cref="ICanOpenApplication.OnEntriesWritten"/>).</summary>
     private void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte value)
+        => WriteOwn(host, index, subindex, new[] { value });
+
+    /// <summary>The device's own write of an entry's raw little-endian bytes, as
+    /// <see cref="WriteOwn(ICanOpenApplicationHost, ushort, byte, byte)"/>.</summary>
+    private void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte[] value)
     {
         Volatile.Write(ref _ownWriteThread, Environment.CurrentManagedThreadId);
         try
         {
-            host.ObjectDictionary.WriteRaw(index, subindex, new[] { value });
+            host.ObjectDictionary.WriteRaw(index, subindex, value);
         }
         finally
         {
@@ -286,20 +314,38 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         return (byte)((1 << inGroup) - 1);
     }
 
-    /// <summary>Declares an 8-bit digital array with the data type, access, PDO mapping and default
-    /// the catalogue gives it: sub-index 0, the const UNSIGNED8 "highest sub-index supported"
-    /// (CiA 301 §7.4.5) holding <paramref name="groups"/>, then one element per group; an object
-    /// without a default ("No", §8.2.1) starts at 0. Constructing thread, in Attach.</summary>
-    private static void DeclareGroupArray(ObjectDictionary od, int logicalDevice, int groups, Cia401ObjectDefinition definition)
+    /// <summary>Declares an array with the data type, access, PDO mapping and default the catalogue
+    /// gives it: sub-index 0, the const UNSIGNED8 "highest sub-index supported" (CiA 301 §7.4.5)
+    /// holding <paramref name="elements"/>, then one element per group of eight digital channels,
+    /// per analog channel or per interrupt source bank; an object without a default ("No", CiA 401-1
+    /// §8.2.1, §8.4.2) starts at 0. Constructing thread, in Attach.</summary>
+    private static void DeclareArray(ObjectDictionary od, int logicalDevice, int elements, Cia401ObjectDefinition definition)
     {
         var index = Shift(logicalDevice, definition);
-        od.AddU8(index, 0x00, (byte)groups, OdAccess.ReadOnly, pdoMappable: false);
-        var initial = (byte)(definition.DefaultValue ?? 0);
-        for (int sub = 1; sub <= groups; sub++)
+        od.AddU8(index, 0x00, (byte)elements, OdAccess.ReadOnly, pdoMappable: false);
+        var initial = Encode(definition.DataType, definition.DefaultValue ?? 0);
+        for (int sub = 1; sub <= elements; sub++)
         {
-            od.AddRaw(index, (byte)sub, definition.DataType, new[] { initial }, definition.Access,
+            od.AddRaw(index, (byte)sub, definition.DataType, initial, definition.Access,
                 definition.PdoMapping != Cia401PdoMapping.No);
         }
+    }
+
+    /// <summary>The little-endian bytes of <paramref name="value"/> in the width of
+    /// <paramref name="type"/>, one of the integer types of the catalogue's 8-, 16- and 32-bit
+    /// objects (CiA 301 v4.2.0 §7.1.4.4, §7.1.4.5: two's complement for the signed ones).</summary>
+    private static byte[] Encode(OdDataType type, long value)
+    {
+        int width = type switch
+        {
+            OdDataType.Boolean or OdDataType.Unsigned8 or OdDataType.Integer8 => 1,
+            OdDataType.Unsigned16 or OdDataType.Integer16 => 2,
+            OdDataType.Unsigned32 or OdDataType.Integer32 => 4,
+            _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Not an integer type of the catalogue."),
+        };
+        var bytes = new byte[width];
+        for (int i = 0; i < width; i++) bytes[i] = unchecked((byte)(value >> (8 * i)));
+        return bytes;
     }
 
     /// <summary>Declares a one-byte variable with what the catalogue gives it. Constructing thread,

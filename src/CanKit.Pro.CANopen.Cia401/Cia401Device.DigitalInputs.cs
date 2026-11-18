@@ -216,13 +216,13 @@ internal sealed partial class Cia401Device
         /// groups at sub-index 0 of each array. Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.ReadDigitalInput8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.PolarityDigitalInput8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalFilterEnable8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ReadDigitalInput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.PolarityDigitalInput8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalFilterEnable8);
             DeclareVariable(od, _logicalDevice, Cia401Objects.GlobalInterruptEnableDigital8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskAnyChange8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskLowToHigh8);
-            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskHighToLow8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskAnyChange8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskLowToHigh8);
+            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskHighToLow8);
         }
     }
 }
