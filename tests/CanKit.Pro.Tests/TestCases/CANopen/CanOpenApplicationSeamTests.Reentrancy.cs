@@ -166,6 +166,27 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task A_State_Change_Callback_That_Disposes_The_Node_Ends_The_Round()
+    {
+        var first = new RecordingApplication("first");
+        var second = new RecordingApplication("second");
+        CanOpenNode? node = null;
+        first.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Operational) node!.Dispose();
+        };
+        using var rig = new EntryRig(With(first, second));
+        node = rig.Node;
+        Settle(rig.Node);
+
+        await RunPrivateOnActor(rig.Node, "HandleIncoming",
+            CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Slave }, false);
+
+        first.Log.Should().Contain("nmt PreOperational>Operational");
+        second.Log.Should().NotContain("nmt PreOperational>Operational", "the node was gone before the second application's turn");
+    }
+
+    [Fact]
     public async Task A_Failure_Callback_That_Disposes_The_Node_Ends_The_Round()
     {
         var first = Watcher("first");
