@@ -203,13 +203,24 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The device description is the node's identity and wins over the application: it
     /// stays as it is, and the profile number it holds in <paramref name="index"/> must be the one
-    /// the application set, or the file describes another device than the one attached.</summary>
+    /// the application set, or the file describes another device than the one attached. The file
+    /// must declare the object as the read-only UNSIGNED32 a device type is (#553).</summary>
     private void RequireDescribedProfile(ushort index, ApplicationSlot setter, CanOpenDeviceType set)
     {
-        if (!_od.TryReadRaw(index, 0x00, out var raw) || !CanOpenDeviceType.TryParse(raw, out var described))
+        // The declaration first, then the value: four bytes of an INTEGER32, or a word a master may
+        // overwrite, are not a device type (CiA 301 v4.2.0 §7.5.2.1: UNSIGNED32, ro; a chain object has
+        // "the very same value definition"), #553.
+        if (!_od.TryGet(index, 0x00, out var entry) || entry.DataType != OdDataType.Unsigned32
+            || !_od.TryReadRaw(index, 0x00, out var raw) || !CanOpenDeviceType.TryParse(raw, out var described))
         {
             throw OptionsError($"The device description declares object 0x{index:X4}, which is not an UNSIGNED32 " +
                 $"at sub-index 0: application '{setter.Application.Name}' sets the device type {set}.");
+        }
+        if (entry.Access != OdAccess.ReadOnly)
+        {
+            throw OptionsError($"The device description declares object 0x{index:X4} with access {entry.Access}, but a " +
+                $"device-type object is read-only (CiA 301 v4.2.0 §7.5.2.1): application '{setter.Application.Name}' " +
+                $"sets the device type {set}, and a write over the network must not replace it.");
         }
         if (described.ProfileNumber == set.ProfileNumber) return;
         throw OptionsError($"The device description's object 0x{index:X4} holds profile {described.ProfileNumber} " +

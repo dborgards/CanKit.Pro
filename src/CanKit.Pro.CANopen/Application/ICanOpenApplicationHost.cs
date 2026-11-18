@@ -101,8 +101,9 @@ internal interface ICanOpenApplicationHost
     /// </para>
     /// <para>
     /// A device description that declares <c>1000h</c> or a chain object wins: the node writes
-    /// nothing there, and the open fails when the file's object holds another profile number, when
-    /// the file's <c>1000h</c> does not hold <c>FFFFh</c> in its upper half on a node with several
+    /// nothing there, and the open fails when the file declares the object as anything but a read-only
+    /// UNSIGNED32 (§7.5.2.1; a type of the same width, or a write access, included), when it holds
+    /// another profile number, when the file's <c>1000h</c> does not hold <c>FFFFh</c> in its upper half on a node with several
     /// logical devices (a reader of <c>1000h</c> would stop at the first), or when it holds
     /// <c>FFFFh</c> on a node with one and no <c>67FFh</c> exists for a reader to find. The message
     /// names the object and the application.

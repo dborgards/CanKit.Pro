@@ -497,6 +497,59 @@ public partial class CanOpenApplicationSeamTests
         result.Devices.Select(d => (d.Index, d.DeviceType.Value)).Should().Equal((0, 0x00050191u), (1, Profile408));
     }
 
+    // -----------------------------------------------------------------------------------------
+    // A described device-type object: its declaration as well as its value (#553).
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>The two-device description of <see cref="A_Described_Chain_Keeps_Its_Own_Words"/>,
+    /// with <c>67FFh</c> declared with <paramref name="dataType"/> and <paramref name="access"/> instead
+    /// of UNSIGNED32 and <c>ro</c>; the word, <c>000F0191h</c>, still fits in four bytes.</summary>
+    private static CanOpenDeviceDescription ChainWith67FFDeclaredAs(string dataType, string access)
+    {
+        var eds = EdsWith6000(0xFFFF0191, (0x67FF, Profile401));
+        const string Declared = "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\n";
+        eds.Should().Contain(Declared);
+        return CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
+            $"[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType={dataType}\nAccessType={access}\n"));
+    }
+
+    private static CanOpenNodeOptions TwoDevices() => With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408)));
+
+    [Fact] // #553
+    public void A_Described_Device_Type_Object_Of_Another_Type_Of_The_Same_Width_Fails_The_Open()
+    {
+        var failure = OptionsRefused(TwoDevices(), ChainWith67FFDeclaredAs("0x0004", "ro"));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32").And.Contain("io");
+    }
+
+    [Theory] // #553
+    [InlineData("rw")]
+    [InlineData("wo")]
+    [InlineData("rww")]
+    [InlineData("rwr")]
+    public void A_Writable_Described_Device_Type_Object_Fails_The_Open(string access)
+    {
+        var failure = OptionsRefused(TwoDevices(), ChainWith67FFDeclaredAs("0x0007", access));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("read-only").And.Contain("io");
+    }
+
+    [Theory] // #553
+    [InlineData("ro")]
+    [InlineData("const")]
+    public void A_Read_Only_Unsigned32_Device_Type_Object_Is_Accepted(string access)
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, TwoDevices(), description: ChainWith67FFDeclaredAs("0x0007", access));
+
+        node.ObjectDictionary.TryGet(0x67FF, 0x00, out var entry).Should().BeTrue();
+        entry.DataType.Should().Be(OdDataType.Unsigned32);
+        entry.Access.Should().Be(OdAccess.ReadOnly);
+        DeviceTypeOf(node, 0x67FF).Should().Be(Profile401);
+    }
+
     [Fact]
     public void A_Partly_Described_Chain_Declares_The_Rest()
     {
