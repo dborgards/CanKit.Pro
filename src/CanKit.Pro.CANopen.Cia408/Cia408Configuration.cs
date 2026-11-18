@@ -66,9 +66,10 @@ internal enum Cia408ControlMode : sbyte
 /// from. The values are those the object carries. 7 to 127 are reserved and negative values belong
 /// to the manufacturer. Neither is a member, and <see cref="Cia408Configuration.Validate"/> refuses them.
 /// </summary>
-/// <remarks>Table 79 marks 3 to 6 "n.a." for valves. The configuration does not refuse them on a
-/// <see cref="Cia408Resolution.Valve16"/> device. A drive's device modes are not part of what it
-/// checks, and nothing derived here depends on them.</remarks>
+/// <remarks>Table 79 gives 3 to 6 for drives only: its valves column marks them "n.a.". So
+/// <see cref="Cia408Configuration.Validate"/> refuses any of them in a configuration whose
+/// control modes include no drive mode (6 to 12). This applies whatever the resolution. Nothing
+/// derived here depends on the device modes.</remarks>
 internal enum Cia408DeviceMode : sbyte
 {
     /// <summary>0, "No device mode".</summary>
@@ -161,7 +162,8 @@ internal sealed class Cia408Configuration
     /// <see cref="Validate"/> refuses: a device runs at least one controller.</summary>
     public IReadOnlyList<Cia408ControlMode> ControlModes { get; init; } = Array.Empty<Cia408ControlMode>();
 
-    /// <summary>The supported device modes (<c>6042h</c>). None of them may appear twice. By
+    /// <summary>The supported device modes (<c>6042h</c>). None of them may appear twice. Modes 3 to
+    /// 6 need a drive control mode in <see cref="ControlModes"/> (see <see cref="Cia408DeviceMode"/>). By
     /// default only <see cref="Cia408DeviceMode.SetpointViaBus"/>, the default of <c>6042h</c>
     /// (§9.3.4).</summary>
     public IReadOnlyList<Cia408DeviceMode> DeviceModes { get; init; } = new[] { Cia408DeviceMode.SetpointViaBus };
@@ -178,8 +180,9 @@ internal sealed class Cia408Configuration
     /// mode is not one of Table 82, a device mode is not one of Table 79, or the logical device lies
     /// outside <c>0</c> to <c>7</c>. The parameter name is that of the property.</exception>
     /// <exception cref="ArgumentException">There is no control mode or no device mode, a mode appears
-    /// twice, or a drive control mode is given with <see cref="Cia408Resolution.Valve16"/>, whose
-    /// dtprs code 01b says the device supports no drive (Table 53).</exception>
+    /// twice, a drive control mode is given with <see cref="Cia408Resolution.Valve16"/>, whose
+    /// dtprs code 01b says the device supports no drive (Table 53), or a device mode of 3 to 6 is
+    /// given without a drive control mode (§9.3.4, Table 79: "n.a." for valves).</exception>
     public void Validate()
     {
         if (Resolution is not (Cia408Resolution.Valve16 or Cia408Resolution.Valve32Drive32 or Cia408Resolution.Valve16Drive32))
@@ -212,6 +215,7 @@ internal sealed class Cia408Configuration
         }
 
         var controlModes = new HashSet<Cia408ControlMode>();
+        var hasDriveMode = false;
         foreach (var mode in ControlModes)
         {
             if (mode is < Cia408ControlMode.SpoolPositionOpenLoop or > Cia408ControlMode.PFlowWithPowerLimitation)
@@ -232,6 +236,8 @@ internal sealed class Cia408Configuration
                     + "supports no drive (dtprs 01b, CiA 408 §8.6.2, Table 53).",
                     nameof(ControlModes));
             }
+
+            hasDriveMode |= IsDriveMode(mode);
         }
 
         if (DeviceModes.Count == 0)
@@ -253,6 +259,14 @@ internal sealed class Cia408Configuration
             if (!deviceModes.Add(mode))
             {
                 throw new ArgumentException($"DeviceModes names {mode} more than once.", nameof(DeviceModes));
+            }
+
+            if (mode >= Cia408DeviceMode.InstallMode && !hasDriveMode)
+            {
+                throw new ArgumentException(
+                    $"{mode} is a device mode of drives only, and ControlModes names no drive control mode "
+                    + "(6 to 12): CiA 408 v2.2.0 §9.3.4, Table 79 marks device modes 3 to 6 \"n.a.\" for valves.",
+                    nameof(DeviceModes));
             }
         }
     }
@@ -332,8 +346,10 @@ internal sealed class Cia408Configuration
     /// <para>The norm contradicts itself on one row. Table 13 has TPDO mapping 9 (pFlow) in 16 bit
     /// only. The entry description of that mapping (§8.4.10, Table 31) gives its first object as
     /// "6045h in case of 32-bit" and the other two as 16-bit "in case of 16-bit or 32-bit value". The
-    /// reading taken is Table 13's, so pFlow on a 32-bit valve has no TPDO 2. Table 32's RPDO
-    /// mapping 10 and its entry description (§8.5.11, Table 52) agree on 16 bit only.</para>
+    /// 32-bit variant that Table 31 implies would map <c>6045h:00</c> (32 bits), then
+    /// <c>6701h:01</c> (16 bits), then <c>6381h:01</c> (16 bits). The reading taken is Table 13's,
+    /// so pFlow on a 32-bit valve has no TPDO 2. Table 32's RPDO mapping 10 and its entry
+    /// description (§8.5.11, Table 52) agree on 16 bit only.</para>
     /// <para><see cref="Cia408DefaultPdo"/> does not carry communication parameters. The norm defines
     /// no COB-IDs and no enable bits for these PDOs. Its one transmission rule is that a TPDO of
     /// transmission type 255 is sent immediately after the corresponding RPDO is received (§8.4.1).

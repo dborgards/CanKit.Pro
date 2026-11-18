@@ -395,6 +395,41 @@ public class Cia408ConfigurationTests
     }
 
     [Theory]
+    [InlineData("Valve16", new[] { 2 }, 5, "Automatic")]                    // a Q valve set to automatic
+    [InlineData("Valve16", new[] { 1, 2 }, 3, "InstallMode")]
+    [InlineData("Valve16", new[] { 4 }, 4, "ReferenceMode")]
+    [InlineData("Valve16", new[] { 13 }, 6, "AutomaticSingleStep")]
+    [InlineData("Valve32Drive32", new[] { 2, 13 }, 5, "Automatic")]         // a drive resolution, but no drive mode
+    [InlineData("Valve16Drive32", new[] { 2 }, 4, "ReferenceMode")]
+    public void A_Drive_Device_Mode_Without_A_Drive_Control_Mode_Is_Rejected(
+        string resolution, int[] modes, int deviceMode, string name)
+    {
+        // Table 79 marks device modes 3 to 6 "n.a." in its valves column.
+        var act = () => WithDeviceModes(Config(resolution, modes), 1, deviceMode).Validate();
+
+        var thrown = act.Should().ThrowExactly<ArgumentException>().WithMessage($"*{name}*drive*").Which;
+        thrown.ParamName.Should().Be("DeviceModes");
+    }
+
+    [Fact]
+    public void A_Drive_Device_Mode_With_A_Drive_Control_Mode_Is_Accepted()
+    {
+        // The drive mode need not be the default control mode.
+        ((Action)(() => WithDeviceModes(Config("Valve16Drive32", [2, 9]), 1, 5).Validate())).Should().NotThrow();
+        ((Action)(() => WithDeviceModes(Config("Valve16Drive32", [9]), 3, 4, 5, 6).Validate())).Should().NotThrow();
+        ((Action)(() => WithDeviceModes(Config("Valve32Drive32", [13, 6]), 6).Validate())).Should().NotThrow();
+        ((Action)(() => WithDeviceModes(Config("Valve16", EveryValveMode), 0, 1, 2).Validate())).Should().NotThrow();
+    }
+
+    private static Cia408Configuration WithDeviceModes(Cia408Configuration configuration, params int[] deviceModes) => new()
+    {
+        Resolution = configuration.Resolution,
+        ControlModes = configuration.ControlModes,
+        DeviceModes = deviceModes.Select(m => (Cia408DeviceMode)m).ToArray(),
+        LogicalDevice = configuration.LogicalDevice,
+    };
+
+    [Theory]
     [InlineData(7)]
     [InlineData(127)]
     [InlineData(-1)]
