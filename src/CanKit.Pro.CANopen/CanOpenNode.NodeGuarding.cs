@@ -286,8 +286,9 @@ internal sealed partial class CanOpenNode
         if (_lifeGuardingOccurred)
         {
             _lifeGuardingOccurred = false;
+            var resolved = LifeGuardingEventOf(LifeGuardingState.Resolved);
             PublishCommunicationFailure();
-            RaiseLifeGuardingEvent(LifeGuardingState.Resolved);
+            RaiseLifeGuardingEvent(resolved);
         }
     }
 
@@ -297,9 +298,17 @@ internal sealed partial class CanOpenNode
         // One indication per lapse: the event is resolved by the next poll, not repeated by the
         // clock. A master that never returns produces exactly one "occurred".
         _lifeGuardingOccurred = true;
+        var occurred = LifeGuardingEventOf(LifeGuardingState.Occurred);
         PublishCommunicationFailure();
-        RaiseLifeGuardingEvent(LifeGuardingState.Occurred);
+        RaiseLifeGuardingEvent(occurred);
     }
+
+    /// <summary>The event of a lapse or a resolution, with the guarding it happened under. Taken
+    /// before the applications are told of the failure: one that switches guarding off from its
+    /// callback (100Ch or 100Dh = 0) does so after the event, and must not turn it into a lapse of
+    /// guarding that was off.</summary>
+    private LifeGuardingEventArgs LifeGuardingEventOf(LifeGuardingState state)
+        => new(state, _guardTime, _lifeTimeFactor);
 
     /// <summary>100Ch / 100Dh changed in the OD: "The value of 0000h shall disable the life
     /// guarding" (§7.5.2.11), likewise a life time factor of 00h (§7.5.2.12). A running
@@ -335,8 +344,9 @@ internal sealed partial class CanOpenNode
             EndCommunicationError(CommunicationError.LifeGuardingTimeout);
     }
 
-    private void RaiseLifeGuardingEvent(LifeGuardingState state)
+    private void RaiseLifeGuardingEvent(LifeGuardingEventArgs args)
     {
+        var state = args.State;
         if (state == LifeGuardingState.Occurred) ApplyCommunicationErrorBehavior();
         if (_options.EmitGuardingErrorEmcy)
         {
@@ -353,7 +363,6 @@ internal sealed partial class CanOpenNode
                 EndCommunicationError(CommunicationError.LifeGuardingTimeout);
             }
         }
-        var args = new LifeGuardingEventArgs(state, _guardTime, _lifeTimeFactor);
         EnqueueEvent(() =>
         {
             try { DeliverToSubscribers(LifeGuardingEvent, args); }

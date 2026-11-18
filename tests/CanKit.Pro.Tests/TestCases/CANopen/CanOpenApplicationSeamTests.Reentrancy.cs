@@ -110,6 +110,66 @@ public partial class CanOpenApplicationSeamTests
         (await FailureActiveAsync(rig.Node, app)).Should().BeFalse();
     }
 
+    /// <summary>Life guarding at 50 ms × 2, started by a poll, with the first <see cref="LifeGuardingEventArgs"/>
+    /// of <paramref name="state"/> the node raises.</summary>
+    private static (EntryRig Rig, ManualTimeSource Clock, Task<LifeGuardingEventArgs> Raised) GuardedRig(
+        RecordingApplication app, LifeGuardingState state)
+    {
+        var clock = new ManualTimeSource();
+        var rig = new EntryRig(WithErrorBehavior(app), clock);
+        var raised = new TaskCompletionSource<LifeGuardingEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.LifeGuardingEvent += (_, e) =>
+        {
+            if (e.State == state) raised.TrySetResult(e);
+        };
+        rig.Od.WriteUnsigned(0x100C, 0, 50);
+        rig.Od.WriteUnsigned(0x100D, 0, 2);
+        Settle(rig.Node);
+        return (rig, clock, raised.Task);
+    }
+
+    [Fact]
+    public async Task A_Lapse_Reports_The_Guarding_It_Lapsed_Under_When_The_Callback_Switches_It_Off()
+    {
+        var app = Watcher();
+        app.WhenFailureChanged = active =>
+        {
+            if (active) app.Host!.ObjectDictionary.WriteUnsigned(0x100C, 0, 0);
+        };
+        var (rig, clock, occurred) = GuardedRig(app, LifeGuardingState.Occurred);
+        using var _ = rig;
+        await PollLifeGuarding(rig.Node);
+
+        Advance(clock, rig.Node, TimeSpan.FromMilliseconds(101));
+
+        var args = await occurred.WithTimeoutAsync(ShortTimeout);
+        args.GuardTime.Should().Be(TimeSpan.FromMilliseconds(50), "the node life time that lapsed was 50 ms × 2");
+        args.LifeTimeFactor.Should().Be(2);
+        rig.Od.ReadUnsigned(0x100C, 0).Should().Be(0u, "the callback did switch guarding off");
+    }
+
+    [Fact]
+    public async Task A_Resolution_Reports_The_Guarding_It_Resolved_When_The_Callback_Switches_It_Off()
+    {
+        var app = Watcher();
+        app.WhenFailureChanged = active =>
+        {
+            if (!active) app.Host!.ObjectDictionary.WriteUnsigned(0x100C, 0, 0);
+        };
+        var (rig, clock, resolved) = GuardedRig(app, LifeGuardingState.Resolved);
+        using var _ = rig;
+        await PollLifeGuarding(rig.Node);
+        Advance(clock, rig.Node, TimeSpan.FromMilliseconds(101));
+        Failures(app).Should().Equal("failure True");
+
+        await PollLifeGuarding(rig.Node);
+
+        var args = await resolved.WithTimeoutAsync(ShortTimeout);
+        args.GuardTime.Should().Be(TimeSpan.FromMilliseconds(50), "the poll resolved guarding at 50 ms × 2");
+        args.LifeTimeFactor.Should().Be(2);
+        rig.Od.ReadUnsigned(0x100C, 0).Should().Be(0u, "the callback did switch guarding off");
+    }
+
     [Fact]
     public async Task A_Watch_Dropped_From_The_Callback_Of_A_Changed_Consumer_Time_Stays_Dropped()
     {
