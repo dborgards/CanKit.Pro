@@ -1345,8 +1345,11 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   paketiert und sehen die Naht über `InternalsVisibleTo`; − mehr Pakete zu pflegen.
 - **Status:** Entschieden am 17.11.2026. Der Gerätetyp und die logischen Geräte sind öffentlich
   (FR-CO-063); die Naht, der Profilbeschreiber und der Katalog existieren als `internal`-Typen im
-  Namespace `CanKit.Pro.CANopen.Application`. Ein Profilpaket gibt es nicht. Der ADR bleibt
-  „entschieden, nicht umgesetzt", bis die Naht veröffentlicht ist.
+  Namespace `CanKit.Pro.CANopen.Application`. CiA 401 gibt es als nicht paketiertes Projekt
+  `CanKit.Pro.CANopen.Cia401` gegen die interne Naht: Objektkatalog, Geräteseite (erste Scheibe) und
+  Tool-Seite. Beim Bauen ist die Naht um zwei Aufrufe gewachsen: Standard-PDOs und das Einreihen von
+  Arbeit in die Schleife des Knotens. CiA 408 und die Veröffentlichung stehen noch aus. Der ADR
+  bleibt „entschieden, nicht umgesetzt", bis die Naht veröffentlicht ist.
 
 ---
 
