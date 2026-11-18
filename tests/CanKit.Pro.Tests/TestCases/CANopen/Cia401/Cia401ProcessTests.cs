@@ -307,6 +307,28 @@ public class Cia401ProcessTests
         model.Calls.Should().Be(2, "after attach, and for the RPDO, though the subscriber threw");
     }
 
+    [Fact]
+    public async Task Two_Throwing_Subscribers_Are_Reported_Once_As_One_AggregateException()
+    {
+        var failures = new List<Exception>();
+        using var rig = new Cia401Rig(Digital8);
+        rig.Node.BackgroundExceptionOccurred += (_, ex) => { lock (failures) failures.Add(ex); };
+        rig.Device.OutputsChanged += (_, _) => throw new InvalidOperationException("first");
+        rig.Device.OutputsChanged += (_, _) => throw new InvalidOperationException("second");
+        await rig.StartAsync();
+
+        await rig.SendRpdo1Async(0x01);
+        await rig.FlushBackgroundReportsAsync();
+
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x01, "the device carries on");
+        lock (failures)
+        {
+            failures.Should().ContainSingle("one report for the callback, however many subscribers threw")
+                .Which.Should().BeOfType<AggregateException>()
+                .Which.InnerExceptions.Select(ex => ex.Message).Should().Equal("first", "second");
+        }
+    }
+
     [Fact] // review 4a: inputs set in the call after a reset
     public async Task Inputs_The_Model_Sets_After_A_Reset_Are_Sent_On_The_Next_Start()
     {

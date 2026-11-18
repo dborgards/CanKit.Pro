@@ -881,6 +881,20 @@ public class Cia401DeviceAnalogInputTests
     }
 
     [Fact]
+    public void An_Empty_Set_Of_Values_Is_Accepted_And_Sets_Nothing()
+    {
+        using var rig = new Cia401Rig(Analog(4));
+        rig.Device.SetAnalogInput(4, 44);
+        rig.Settle();
+
+        FluentActions.Invoking(() => rig.Device.SetAnalogInputs(4, ReadOnlySpan<short>.Empty)).Should().NotThrow(
+            "an empty span from the last channel does not run past it");
+        rig.Settle();
+
+        rig.Device.ReadAnalogInput(4).Should().Be(44);
+    }
+
+    [Fact]
     public void A_Device_Without_Analog_Inputs_Has_No_Channel()
     {
         using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8 });

@@ -788,6 +788,9 @@ public class Cia401DeviceDigitalOutputTests
 
         FluentActions.Invoking(() => rig.Device.ReadDigitalOutputs(1))
             .Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("group");
+        FluentActions.Invoking(() => rig.Device.ReadDigitalOutput(1))
+            .Should().Throw<ArgumentOutOfRangeException>().WithMessage("The device has 0 digital outputs*")
+            .Which.ParamName.Should().Be("channel");
         rig.Device.OutputsInErrorState.Should().BeFalse();
     }
 

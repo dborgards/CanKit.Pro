@@ -421,6 +421,8 @@ public class Cia401PeerTests
         foreach (var (what, call) in outOfRange)
             call.Should().ThrowExactly<ArgumentOutOfRangeException>($"{what} checks its number before it returns a task");
         ((Action)(() => _ = peer.ReadAsync(null!, 1))).Should().ThrowExactly<ArgumentNullException>();
+        ((Action)(() => _ = peer.WriteAsync(null!, 1, new byte[] { 1 }))).Should().ThrowExactly<ArgumentNullException>()
+            .Which.ParamName.Should().Be("definition");
         ((Action)(() => _ = peer.WriteAsync(Cia401Objects.ReadDigitalInput8, 1, new byte[] { 1 })))
             .Should().ThrowExactly<InvalidOperationException>();
         ((Action)(() => _ = peer.ObserveAsync(0x191, new byte[] { 1 }, null!))).Should().ThrowExactly<ArgumentNullException>();
@@ -458,6 +460,34 @@ public class Cia401PeerTests
         shorter.Should().ThrowExactly<InvalidDataException>();
     }
 
+    [Fact]
+    public void A_Data_Type_Without_A_Fixed_Width_Is_Refused()
+    {
+        Action encode = () => Cia401Codec.Encode(OdDataType.Domain, 1);
+        Action decode = () => Cia401Codec.Decode(OdDataType.VisibleString, new byte[] { 0x41 });
+
+        encode.Should().ThrowExactly<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("type");
+        decode.Should().ThrowExactly<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("type");
+    }
+
+    [Fact]
+    public void Exactly_The_Integer_Types_Are_Signed()
+    {
+        // CiA 301 v4.2.0 §7.1.4.6: INTEGER8 to INTEGER64 are two's complement; nothing else is.
+        foreach (var type in Enum.GetValues(typeof(OdDataType)).Cast<OdDataType>())
+            Cia401Codec.IsSigned(type).Should().Be(type.ToString().StartsWith("Integer", StringComparison.Ordinal), $"{type}");
+    }
+
+    [Fact]
+    public void A_64_Bit_Entry_Is_Decoded_Whole()
+    {
+        var raw = new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x88 };
+
+        // All 64 bits fill the long, so signed and unsigned read the same pattern.
+        Cia401Codec.DecodeBits(raw, 64, signed: true).Should().Be(unchecked((long)0x8807_0605_0403_0201UL));
+        Cia401Codec.DecodeBits(raw, 64, signed: false).Should().Be(unchecked((long)0x8807_0605_0403_0201UL));
+    }
+
     // ---- interpreting signals ------------------------------------------------------------------------
 
     [Fact]
@@ -481,6 +511,29 @@ public class Cia401PeerTests
             new Cia401PdoValue(0x6401, 0x01, Cia401Objects.ReadAnalogInput16, "Read analog input 16-bit, analog input 1", -32768),
             new Cia401PdoValue(0x6020, 0x01, Cia401Objects.ReadDigitalInputBit[0], "Read digital input bit 1 to 128, input 1", 1),
             new Cia401PdoValue(0x6422, 0x01, Cia401Objects.AnalogInputInterruptSource, "Analog input interrupt source, bank 1", 0x80000001L));
+    }
+
+    [Fact]
+    public void An_Interpreted_Value_Gives_Each_Part_Through_Its_Property()
+    {
+        using var tool = new LoneTool();
+        var peer = tool.Peer(0x000F0191);
+
+        var values = peer.Interpret(new[] { Signal(0x6401, 0x02, 16, 0x30, 0xF8), Signal(0x2000, 0x01, 8, 0x7F) });
+
+        // What a tool reads off a value; the comparisons of whole values above read the fields.
+        var known = values[0];
+        known.Index.Should().Be(0x6401);
+        known.Subindex.Should().Be(0x02);
+        known.Definition.Should().BeSameAs(Cia401Objects.ReadAnalogInput16);
+        known.Description.Should().Be("Read analog input 16-bit, analog input 2");
+        known.Value.Should().Be(-2000, "INTEGER16 F830h, sign-extended");
+        var unknown = values[1];
+        unknown.Index.Should().Be(0x2000);
+        unknown.Subindex.Should().Be(0x01);
+        unknown.Definition.Should().BeNull();
+        unknown.Description.Should().Be("2000h:01h");
+        unknown.Value.Should().Be(0x7F);
     }
 
     [Fact]

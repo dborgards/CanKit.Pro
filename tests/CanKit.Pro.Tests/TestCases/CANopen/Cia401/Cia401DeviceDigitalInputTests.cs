@@ -147,6 +147,23 @@ public class Cia401DeviceDigitalInputTests
         options.Applications.Should().Equal(device);
     }
 
+    [Fact]
+    public void AddTo_And_Attach_Refuse_A_Null_Argument()
+    {
+        var device = new Cia401Device(Inputs(8));
+
+        FluentActions.Invoking(() => Cia401Device.AddTo(null!, device))
+            .Should().ThrowExactly<ArgumentNullException>().Which.ParamName.Should().Be("options");
+        FluentActions.Invoking(() => Cia401Device.AddTo(new CanOpenNodeOptions(), null!))
+            .Should().ThrowExactly<ArgumentNullException>().Which.ParamName.Should().Be("device");
+        FluentActions.Invoking(() => device.Attach(null!))
+            .Should().ThrowExactly<ArgumentNullException>().Which.ParamName.Should().Be("host");
+
+        // The refused Attach took nothing: the device still attaches to a node.
+        using var rig = new Cia401Rig(new[] { device }, description: null, options: null);
+        rig.Device.ReadDigitalInputs(1).Should().Be(0x00);
+    }
+
     /// <summary>Options in which every property but the PDO count, error behaviour and the
     /// applications differs from a fresh <see cref="CanOpenNodeOptions"/>, so that a copy that drops
     /// one of them back to its default shows.</summary>
@@ -439,6 +456,19 @@ public class Cia401DeviceDigitalInputTests
             .Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("group");
         FluentActions.Invoking(() => rig.Device.ReadDigitalInputs(4))
             .Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("group");
+    }
+
+    [Fact]
+    public void A_Configured_Device_Without_Digital_Inputs_Refuses_Every_Channel_And_Group()
+    {
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalOutputs = 8 });
+
+        FluentActions.Invoking(() => rig.Device.SetDigitalInput(1, true)).Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("The device has 0 digital inputs*").Which.ParamName.Should().Be("channel");
+        FluentActions.Invoking(() => rig.Device.SetDigitalInputs(1, 0x01)).Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("The device has 0 groups of digital inputs*").Which.ParamName.Should().Be("group");
+        FluentActions.Invoking(() => rig.Device.ReadDigitalInputs(1)).Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("The device has 0 groups of digital inputs*").Which.ParamName.Should().Be("group");
     }
 
     [Fact]

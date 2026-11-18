@@ -66,6 +66,52 @@ public class Cia401DeviceDescriptionTests
     }
 
     [Fact]
+    public void A_File_With_Analog_Blocks_Only_Yields_A_Device_Without_Digital_Blocks()
+    {
+        // cia401.eds without its digital objects and the PDOs that map them, RPDO 1 and TPDO 1.
+        var eds = Eds.Of("cia401.eds").Remove(0x1400).Remove(0x1600).Remove(0x1800).Remove(0x1A00);
+        foreach (ushort index in DigitalObjects) eds.Remove(index);
+        using var rig = Open(eds);
+
+        FluentActions.Invoking(() => rig.Device.SetDigitalInput(1, true))
+            .Should().Throw<InvalidOperationException>().WithMessage("*declares none*");
+        FluentActions.Invoking(() => rig.Device.ReadDigitalOutputs(1))
+            .Should().Throw<InvalidOperationException>().WithMessage("*declares none*");
+        rig.Device.SetAnalogInput(2, -5);
+        rig.Settle();
+        rig.Device.ReadAnalogInput(2).Should().Be(-5);
+        rig.Device.ReadAnalogOutput(2).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_Polarity_Write_To_A_Sub_Index_That_Is_No_Group_Changes_No_Input()
+    {
+        // 6000h has two groups; 6002h a third, surplus, sub-index, and a writable sub-index 00h.
+        using var rig = Open(Eds.Of("cia401-digital.eds")
+            .Set("6002", "SubNumber", "4")
+            .Set("6002sub0", "DefaultValue", "3")
+            .Set("6002sub0", "AccessType", "rw")
+            .Add("[6002sub3]\nParameterName=Polarity digital input 8-bit group 3\nObjectType=0x7\nDataType=0x0005\n"
+                + "AccessType=rw\nDefaultValue=0x00\nPDOMapping=1\n"));
+        var failures = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, ex) => { lock (failures) failures.Add(ex); };
+        await rig.StartAndTakeFirstTpdoAsync();
+        int before = rig.Count(Cia401Rig.Tpdo1);
+
+        await rig.WriteU8Async(0x6002, 0x03, 0xFF);
+        await rig.WriteU8Async(0x6002, 0x00, 3);
+        await rig.FenceAsync();
+        await rig.DrainAsync();
+        await rig.FlushBackgroundReportsAsync();
+
+        lock (failures) failures.Should().BeEmpty("the device passes over both writes");
+        rig.Count(Cia401Rig.Tpdo1).Should().Be(before, "neither write is a polarity of a group, so no input changed");
+        rig.Device.ReadDigitalInputs(1).Should().Be(0x00);
+        rig.Device.ReadDigitalInputs(2).Should().Be(0x00);
+        (await rig.ReadU8Async(0x6002, 0x03)).Should().Be(0xFF, "the surplus sub-index is stored");
+    }
+
+    [Fact]
     public void Without_A_Device_Type_In_The_File_The_Device_Sets_The_One_Its_Blocks_Give()
     {
         using var rig = Open(Eds.Of("cia401-digital.eds").Remove(0x1000));
@@ -632,6 +678,48 @@ public class Cia401DeviceDescriptionTests
             .Where(e => e.ParamName == "options")
             .Where(e => e.Message.Contains("6000h") && e.Message.Contains("01h")
                 && e.Message.Contains("Unsigned16") && e.Message.Contains("Unsigned8"));
+    }
+
+    [Fact]
+    public void A_Variable_Declared_With_Another_Data_Type_Fails_The_Open()
+    {
+        var open = () => Open(Eds.Of("cia401-digital.eds").Set("6005", "DataType", "0x0005"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6005h sub-index 00h as Unsigned8") && e.Message.Contains("CiA 401-1 §8.2.4")
+                && e.Message.Contains("Boolean"));
+    }
+
+    [Fact]
+    public void A_Device_Type_Object_Of_Another_Data_Type_Fails_The_Open_And_Names_Its_Clause_By_Title()
+    {
+        var open = () => Open(Eds.Of("cia401-digital.eds").Add(VariableSection(0x67FF, "Device type", "0x0006", "0x0191")));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("67FFh sub-index 00h as Unsigned16")
+                && e.Message.Contains("CiA 401-1, General device profile objects") && e.Message.Contains("Unsigned32"));
+    }
+
+    [Fact]
+    public void A_Manufacturer_Specific_Array_Is_Accepted_With_The_Elements_The_File_Gives()
+    {
+        // 6404h is a DOMAIN array whose elements CiA 401-1 §8.4.5 leaves to the manufacturer.
+        using var rig = Open(Eds.Of("cia401-digital.eds").Add(ArraySections(0x6404, "Read manufacturer-specific analog input", "0x0007", "ro", "0")));
+
+        rig.Od.TryGet(0x6404, 0x01, out var element).Should().BeTrue();
+        element.DataType.Should().Be(OdDataType.Unsigned32, "the file's type, which the catalogue does not check");
+    }
+
+    [Fact]
+    public void An_Array_Without_Its_Sub_Index_00h_Fails_The_Open()
+    {
+        var open = () => Open(Eds.Of("cia401-digital.eds").RemoveSection("6002sub0"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6002h") && e.Message.Contains("without its sub-index 00h"));
     }
 
     [Fact]

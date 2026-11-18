@@ -437,22 +437,31 @@ public partial class CanOpenApplicationSeamTests
         AssertSingleFrame(rig.Wire.Payloads(Tpdo1Of22), 7);
     }
 
-    [Fact]
-    public async Task Setting_A_Default_Pdo_After_Attach_Is_Refused()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Setting_A_Default_Pdo_After_Attach_Is_Refused(bool tpdo)
     {
         var app = Defaults(_ => { });
-        app.WhenWritten = _ => app.Host!.SetDefaultTpdo(1, Map(0x6000, 0x01));
+        app.WhenWritten = _ =>
+        {
+            if (tpdo) app.Host!.SetDefaultTpdo(1, Map(0x6000, 0x01));
+            else app.Host!.SetDefaultRpdo(1, Map(0x6000, 0x01));
+        };
         using var rig = new EntryRig(With(app));
-        var cobIdBefore = rig.Od.ReadUnsigned(0x1800, 0x01);
+        ushort comm = tpdo ? (ushort)0x1800 : (ushort)0x1400;
+        ushort map = tpdo ? (ushort)0x1A00 : (ushort)0x1600;
+        var cobIdBefore = rig.Od.ReadUnsigned(comm, 0x01);
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         rig.Node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
 
         rig.Od.WriteUnsigned(0x6000, 0x01, 7);
 
         var failure = await reported.Task.WithTimeoutAsync(ShortTimeout);
-        failure.Should().BeOfType<InvalidOperationException>();
-        rig.Od.ReadUnsigned(0x1800, 0x01).Should().Be(cobIdBefore, "the refused call changed nothing");
-        rig.Od.ReadUnsigned(0x1A00, 0x00).Should().Be(0u);
+        failure.Should().BeOfType<InvalidOperationException>()
+            .Which.Message.Should().StartWith(tpdo ? "SetDefaultTpdo is for the application's Attach" : "SetDefaultRpdo is for the application's Attach");
+        rig.Od.ReadUnsigned(comm, 0x01).Should().Be(cobIdBefore, "the refused call changed nothing");
+        rig.Od.ReadUnsigned(map, 0x00).Should().Be(0u);
     }
 
     // -----------------------------------------------------------------------------------------
