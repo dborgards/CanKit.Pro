@@ -59,6 +59,26 @@ internal interface ICanOpenApplication
     /// <summary>What the application needs from the node. Read when the node opens, once.</summary>
     CanOpenApplicationRequirements Requirements { get; }
 
+    /// <summary>The claimed entries whose every committed write the application is told of, one by
+    /// one and with the value written (<see cref="OnCommandWritten"/>), instead of coalesced through
+    /// <see cref="OnEntriesWritten"/>: a command word, whose edges a profile reacts to, such as the
+    /// fault-reset edge of the CiA 408 v2.2.0 control word (§7.7, Table 7). Empty for none.</summary>
+    /// <remarks>
+    /// <para>
+    /// Read once, when the node opens, right after <see cref="Attach"/> returned, so it can name
+    /// what the application declared there. Each entry must lie in a range the application claims,
+    /// exist by then, and be of a fixed-width data type of at most 8 bytes; a string or a domain is
+    /// not a command. Anything else, and a <see langword="null"/> list, fails the open with an
+    /// <see cref="System.ArgumentException"/> for <c>options</c>.
+    /// </para>
+    /// <para>
+    /// A write to a command entry that the queue of <see cref="OnCommandWritten"/> has no room for
+    /// is refused (see there). A declaration through <c>Add*</c> that replaces a command entry is no
+    /// written value: it is reported through <see cref="OnEntriesWritten"/>, as for any claimed entry.
+    /// </para>
+    /// </remarks>
+    IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; }
+
     /// <summary>The node is opening: declare the objects, set the device type and the default PDOs.
     /// Runs on the constructing thread, before the node boots; what the application declared here is
     /// what an NMT reset restores and what <c>1010h</c> stores.</summary>
@@ -89,8 +109,9 @@ internal interface ICanOpenApplication
     /// <summary>Entries the application claims were written and stored.</summary>
     /// <remarks>
     /// <para>
-    /// Every stored write counts, whether or not it changed the value. A write that
-    /// <see cref="ValidateWrite"/> refused, or answered with <see cref="OdWriteDecision.Handled"/>,
+    /// Every stored write counts, whether or not it changed the value, except a written value of a
+    /// command entry (<see cref="CommandEntries"/>), which goes to <see cref="OnCommandWritten"/>,
+    /// one call per write, instead. A write that <see cref="ValidateWrite"/> refused, or answered with <see cref="OdWriteDecision.Handled"/>,
     /// stored nothing and is not reported. Coalesced: the entries written since the last call arrive
     /// in one list, each once, sorted by index and then sub-index. The call comes one actor job after
     /// the write, so a change of NMT state that followed the write can have been reported first.
@@ -113,6 +134,52 @@ internal interface ICanOpenApplication
     /// </para>
     /// </remarks>
     void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries);
+
+    /// <summary>A command entry (<see cref="CommandEntries"/>) was written: one call per committed
+    /// write, in the order the writes were committed, with a copy of the value each stored.</summary>
+    /// <remarks>
+    /// <para>
+    /// Every write that stored a value counts, from wherever it came — an SDO download, an RPDO, the
+    /// local user through <see cref="ObjectDictionary"/> — also when it stored the value the entry
+    /// held already, and also when a second write followed before the actor loop came round: two
+    /// writes, two calls, each with its own value. The value is copied under the dictionary's write
+    /// gate as the write is committed, so a later write cannot change what this call carries. A
+    /// write that was refused — by <see cref="ValidateWrite"/>, by the dictionary for its size, by
+    /// the SDO server for the access — stored nothing and is not reported, and neither is one that
+    /// <see cref="ValidateWrite"/> answered with <see cref="OdWriteDecision.Handled"/>. The rule for
+    /// the application's own writes is that of <see cref="OnEntriesWritten"/>: what it writes from
+    /// inside one of its callbacks is not reported to it, nor what it writes in <see cref="Attach"/>,
+    /// nor the values an NMT reset restores.
+    /// </para>
+    /// <para>
+    /// The calls come on the actor loop, one actor job after the writes, in the job that tells
+    /// <see cref="OnEntriesWritten"/> too: first every command write committed since the last such
+    /// job, in commit order, then the coalesced <see cref="OnEntriesWritten"/>. A command entry is
+    /// never reported through <see cref="OnEntriesWritten"/> for a written value. A call that throws
+    /// is reported on
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, and the next write is still told.
+    /// </para>
+    /// <para>
+    /// The writes wait in a queue of the node's, which holds at most 256 of them, for all
+    /// applications together: the actor's mailbox is unbounded, and a master that writes a command
+    /// entry faster than the actor loop comes round must not make the node hold an unbounded number
+    /// of values for it. A write that finds the queue full is refused before it is stored, so no
+    /// committed write is lost: an SDO download is aborted with <c>0800 0022h</c>, "data cannot be
+    /// transferred or stored to the application because of the present device state" (CiA 301
+    /// v4.2.0 §7.2.4.3.17, Table 22); a local write throws the <see cref="System.ArgumentException"/>
+    /// of <see cref="ObjectDictionary.WriteRaw"/> carrying that code; an RPDO's entry is not
+    /// written, the rest of the RPDO is, and the node reports the refusal on
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, as for every RPDO entry the
+    /// dictionary refuses. The application has seen <see cref="ValidateWrite"/> accept such a write
+    /// by then: the queue is checked after it, so a value the application refuses is refused with
+    /// the application's code whatever the queue holds.
+    /// </para>
+    /// <para>
+    /// An NMT reset drops the writes still queued, before the applications are told of the reset
+    /// (<see cref="OnNmtStateChanged"/> into Initializing), and so does the disposal of the node.
+    /// </para>
+    /// </remarks>
+    void OnCommandWritten(CanOpenObjectAddress entry, byte[] value);
 
     /// <summary>The node's NMT state changed from <paramref name="previous"/> to
     /// <paramref name="current"/>.</summary>

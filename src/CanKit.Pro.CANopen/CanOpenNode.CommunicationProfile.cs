@@ -947,6 +947,9 @@ internal sealed partial class CanOpenNode
             OnLeaveOperational();
             LeaveSrdoOperational();
         }
+        // What an application has not been told yet belongs to the device the reset ends; dropped
+        // before the applications hear of the reset.
+        DropQueuedCommandWritesForReset();
         _state = NmtState.Initializing;
         NotifyNmtStateChanged(stateBeforeReset);
         // An application may have disposed the node from that notification: the drain, the restore

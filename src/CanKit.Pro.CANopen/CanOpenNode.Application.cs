@@ -114,6 +114,7 @@ internal sealed partial class CanOpenNode
         }
 
         _applications = slots;
+        var commandEntries = new HashSet<uint>();
         foreach (var slot in slots)
         {
             _attachingSlot = slot;
@@ -125,7 +126,10 @@ internal sealed partial class CanOpenNode
             {
                 _attachingSlot = null;
             }
+            // Read once, after Attach: the list may name what the application declared there.
+            commandEntries.UnionWith(ValidatedCommandEntries(slot));
         }
+        if (commandEntries.Count > 0) _commandEntries = commandEntries;
         ComposeDeviceTypes();
         ComposeDefaultPdos();
 
@@ -206,14 +210,19 @@ internal sealed partial class CanOpenNode
 
     /// <summary>
     /// EntryWritten, on the writing thread and under the dictionary's write gate: a stored write to
-    /// an entry an application claims. Records the entry and queues one evaluation, which tells the
-    /// claimant on the actor loop (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for
-    /// what the claimant writes from inside its own callback, and not for a restore of values in
-    /// a reset: neither is news to it.
+    /// an entry an application claims. Records the entry, or for a command entry whose write was
+    /// validated (<see cref="ReserveCommandWrite"/>) queues a copy of the value it stored, and queues
+    /// one evaluation, which tells the claimant on the actor loop
+    /// (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for what the claimant writes from
+    /// inside its own callback, and not for a restore of values in a reset: neither is news to it.
     /// </summary>
     private void OnOdEntryWrittenForApplications(ushort index, byte subindex)
     {
         if (_applications.Length == 0) return;
+        // Taken by this write or by none: a reservation belongs to the write it was made for, which
+        // is the one being reported here when the keys match (ReserveCommandWrite).
+        var reserved = _reservedCommand;
+        _reservedCommand = null;
         // RestoreValues sets this under the write gate, which this write holds too: it is true for
         // the restore's own writes and for nobody else's.
         if (_restoringValues) return;
@@ -224,13 +233,26 @@ internal sealed partial class CanOpenNode
         if (_actor.IsOnCurrentActor && ReferenceEquals(_applicationInCallback, claimant)) return;
         if (Volatile.Read(ref _disposed) != 0) return;
 
+        var key = CosKey(index, subindex);
+        byte[]? command = null;
+        // Under the write gate, before anyone else can write the entry: the value this write stored.
+        if (reserved == key) _od.TryReadRaw(index, subindex, out command);
+        bool post;
         lock (_applicationGate)
         {
-            (_applicationDirty ??= new HashSet<uint>()).Add(CosKey(index, subindex));
-            if (_applicationEvaluationPosted) return;
+            if (command is not null) (_queuedCommands ??= new()).Add((claimant, new CanOpenObjectAddress(index, subindex), command));
+            else (_applicationDirty ??= new HashSet<uint>()).Add(key);
+            post = !_applicationEvaluationPosted;
             _applicationEvaluationPosted = true;
         }
+        if (post) PostApplicationEvaluation();
+    }
 
+    /// <summary>Queues the one evaluation of the application round, once the flag that says it is
+    /// queued has been set under <c>_applicationGate</c>; an actor that has ended takes nothing, and
+    /// the flag is cleared again.</summary>
+    private void PostApplicationEvaluation()
+    {
         try
         {
             _actor.Post(EvaluateApplicationEntriesOnActor);
@@ -245,21 +267,27 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// Tells each claimant the entries written since it was last told: sorted by index, then
-    /// sub-index, each once. Actor loop. Writes landing while this runs re-arm the dirty set and
-    /// queue the next evaluation, so none is lost; one claimant that throws does not keep the next
-    /// from being told (<see cref="InvokeApplication"/>), one that disposes the node does.
+    /// Tells each claimant its command writes, in commit order (<see cref="DeliverCommandWrites"/>),
+    /// then the entries written since it was last told: sorted by index, then sub-index, each once.
+    /// Actor loop. Writes landing while this runs re-arm the queue and the dirty set and queue the
+    /// next evaluation, so none is lost; one claimant that throws does not keep the next from being
+    /// told (<see cref="InvokeApplication"/>), one that disposes the node does.
     /// </summary>
     private void EvaluateApplicationEntriesOnActor()
     {
         HashSet<uint>? dirty;
+        List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value)>? commands;
         lock (_applicationGate)
         {
             dirty = _applicationDirty;
             _applicationDirty = null;
+            commands = _queuedCommands;
+            _queuedCommands = null;
             _applicationEvaluationPosted = false;
         }
-        if (dirty is null || dirty.Count == 0 || Volatile.Read(ref _disposed) != 0) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (commands is not null && !DeliverCommandWrites(commands)) return;
+        if (dirty is null || dirty.Count == 0) return;
 
         var keys = new uint[dirty.Count];
         dirty.CopyTo(keys);
@@ -302,9 +330,13 @@ internal sealed partial class CanOpenNode
         bool onActor = _actor.IsOnCurrentActor;
         var outer = onActor ? _applicationInCallback : null;
         if (onActor) _applicationInCallback = null;
+        // A reservation left by a validated write that was not stored after all goes with the next
+        // validation (ReserveCommandWrite).
+        _reservedCommand = null;
+        OdWriteDecision decision;
         try
         {
-            return slot.Application.ValidateWrite(index, subindex, value);
+            decision = slot.Application.ValidateWrite(index, subindex, value);
         }
         // Everything, deliberately: this is the application's code, and whatever it throws must not
         // reach the dictionary's writer, which on an SDO download or a PDO is the node's own actor
@@ -318,6 +350,11 @@ internal sealed partial class CanOpenNode
         {
             if (onActor) _applicationInCallback = outer;
         }
+        // The queue of command writes is checked once the application has accepted the write, so a
+        // value it refuses is refused with its code whatever the queue holds. Whose write it is goes
+        // by the callback that was running before the validation, as for OnEntriesWritten.
+        if (!decision.Store || decision.Abort is not null) return decision;
+        return ReserveCommandWrite(index, subindex, own: onActor && ReferenceEquals(outer, slot));
     }
 
     /// <summary>

@@ -318,6 +318,10 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <see cref="FromDescription"/>, and failure monitoring.</summary>
     public CanOpenApplicationRequirements Requirements { get; }
 
+    /// <summary>None: every CiA 401-1 object is a level, which the device reads when it is told of
+    /// the write (<see cref="OnEntriesWritten"/>).</summary>
+    public IReadOnlyList<CanOpenObjectAddress> CommandEntries => Array.Empty<CanOpenObjectAddress>();
+
     /// <summary>Declares the objects of every function block, or adopts those the node's device
     /// description declared (<see cref="FromDescription"/>); brings the inputs to the application's
     /// levels and the outputs to what their write objects hold; sets the device type and the default
@@ -437,6 +441,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         RefreshAnalogOutputs();
         RequestTransmission(host, send);
         RaiseOutputsChanged();
+    }
+
+    /// <summary>Not called: the device has no command entries (<see cref="CommandEntries"/>).</summary>
+    public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+    {
     }
 
     /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).

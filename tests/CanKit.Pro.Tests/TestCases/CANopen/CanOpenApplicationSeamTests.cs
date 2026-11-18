@@ -213,6 +213,10 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public Action<bool>? WhenFailureChanged { get; set; }
 
+        public IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; set; } = Array.Empty<CanOpenObjectAddress>();
+
+        public Action<CanOpenObjectAddress, byte[]>? WhenCommand { get; set; }
+
         /// <summary>What the node called, in order; a copy, so the actor can keep appending.</summary>
         public IReadOnlyList<string> Log
         {
@@ -247,6 +251,12 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         {
             Record("written " + string.Join(",", entries.Select(e => $"{e.Index:X4}:{e.Subindex:X2}")));
             WhenWritten?.Invoke(entries);
+        }
+
+        public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+        {
+            Record($"command {entry.Index:X4}:{entry.Subindex:X2}={string.Concat(value.Select(b => b.ToString("X2")))}");
+            WhenCommand?.Invoke(entry, value);
         }
 
         public void OnNmtStateChanged(NmtState previous, NmtState current)
