@@ -880,14 +880,17 @@ internal sealed partial class CanOpenNode
             EmitPendingEmcy(pending);
         }
 
-        NotifyNmtStateChanged(previous);
-
         // A state-change heartbeat is an early heartbeat, so it belongs to the heartbeat protocol
         // and goes out only while that protocol is in use (1017h ≠ 0). With the producer off the
         // node is in the configuration node guarding runs in, and an unsolicited data frame on
         // 0x700 + id is indistinguishable from a toggle-0 guarding reply (#43).
         if (_heartbeatProducer.Interval > TimeSpan.Zero)
             _ = EmitHeartbeat((byte)_state);
+
+        // Last, once the transition is complete, announcement included: a profile told of it can
+        // ask for another state, which runs a whole transition inline, and this one must not then
+        // finish behind it and announce the state that one reached a second time, in place of its own.
+        NotifyNmtStateChanged(previous);
     }
 
     /// <summary>

@@ -287,4 +287,28 @@ public partial class CanOpenApplicationSeamTests
         second.Log.Where(e => e.StartsWith("nmt ", StringComparison.Ordinal)).Should().Equal(expected,
             "the second application is told of Operational before the change out of it, although the first asked for it");
     }
+
+    [Fact]
+    public async Task Each_Change_Announces_Its_Own_State_When_A_Callback_Changes_It_Again()
+    {
+        var app = new RecordingApplication("leaver");
+        app.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Operational) app.Host!.RequestNmtState(NmtState.Stopped);
+        };
+        // A clock that does not move: the producer sends state-change heartbeats only.
+        using var rig = new EntryRig(With(app), new ManualTimeSource());
+        rig.Node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(100));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        int mark = rig.Wire.Count(SlaveHeartbeat);
+
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.Start, Slave });
+        await WaitUntilAsync(() => rig.Node.State == NmtState.Stopped, "Stopped");
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, mark + 2);
+
+        rig.Wire.Payloads(SlaveHeartbeat).Skip(mark).Select(frame => frame[0]).Should().Equal(
+            new byte[] { (byte)NmtState.Operational, (byte)NmtState.Stopped },
+            "the node was in Operational before the profile took it out, and the master is told both, in order");
+    }
 }

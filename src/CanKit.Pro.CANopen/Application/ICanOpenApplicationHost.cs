@@ -126,11 +126,8 @@ internal interface ICanOpenApplicationHost
     /// from that callback.
     /// </para>
     /// <para>
-    /// With the heartbeat producer running (<c>1017h</c> ≠ 0), a request from inside
-    /// <see cref="ICanOpenApplication.OnNmtStateChanged"/> for a change other than the boot-up of a
-    /// reset or a start-up (an NMT command, the error behaviour, another request) makes the
-    /// state-change heartbeat of the change being told carry the state the request reached: that
-    /// state goes out twice, and the state in between never.
+    /// The change being told is complete by then, its state-change heartbeat (with <c>1017h</c> ≠ 0)
+    /// included, so the master sees each state in the order the node passed through it.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="target"/> is neither
