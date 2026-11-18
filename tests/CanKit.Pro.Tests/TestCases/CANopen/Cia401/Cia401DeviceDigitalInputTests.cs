@@ -92,24 +92,30 @@ public class Cia401DeviceDigitalInputTests
         device0.Requirements.CommunicationFailureMonitoring.Should().BeTrue();
     }
 
-    [Fact]
-    public void Functions_That_Are_Not_Built_Yet_Are_Refused()
+    [Fact] // every function block of the first slice is built: nothing is refused
+    public void A_Device_With_All_Four_Function_Blocks_Opens()
     {
-        foreach (var configuration in new[]
+        using var rig = new Cia401Rig(new Cia401Configuration
         {
-            new Cia401Configuration { DigitalOutputs = 8, AnalogOutputs = 1 },
-            new Cia401Configuration { AnalogInputs = 1, AnalogOutputs = 1 },
-            new Cia401Configuration { AnalogOutputs = 1 },
-        })
+            DigitalInputs = 8,
+            DigitalOutputs = 8,
+            AnalogInputs = 4,
+            AnalogOutputs = 4,
+        });
+        var od = rig.Od;
+
+        od.ReadUnsigned(0x1000, 0x00).Should().Be(0x000F0191u, "profile 401 with bits 16 to 19 (§6.2.1)");
+        foreach (ushort index in new ushort[] { 0x6000, 0x6200, 0x6401, 0x6411 })
         {
-            FluentActions.Invoking(() => new Cia401Device(configuration))
-                .Should().Throw<ArgumentException>().Which.ParamName.Should().Be("configuration");
+            od.TryGet(index, 0x01, out _).Should().BeTrue($"{index:X4}h is declared");
         }
 
-        // Analog inputs are built: alone and beside digital inputs the device is created.
-        FluentActions.Invoking(() => new Cia401Device(new Cia401Configuration { AnalogInputs = 1 })).Should().NotThrow();
-        FluentActions.Invoking(() => new Cia401Device(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 }))
-            .Should().NotThrow();
+        od.ReadUnsigned(0x1400, 0x01).Should().Be(Cia401Rig.Rpdo1, "RPDO 1, digital outputs (§6.2.5)");
+        od.ReadUnsigned(0x1401, 0x01).Should().Be(Cia401Rig.Rpdo2, "RPDO 2, analog outputs (§6.2.7)");
+        od.ReadUnsigned(0x1800, 0x01).Should().Be(Cia401Rig.Tpdo1, "TPDO 1, digital inputs (§6.2.6)");
+        od.ReadUnsigned(0x1801, 0x01).Should().Be(0x8000_0000u | Cia401Rig.Tpdo2, "TPDO 2, analog inputs, disabled");
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
+        rig.Device.ReadAnalogOutput(4).Should().Be(0);
 
         FluentActions.Invoking(() => new Cia401Device(null!)).Should().Throw<ArgumentNullException>();
         FluentActions.Invoking(() => new Cia401Device(new Cia401Configuration()))

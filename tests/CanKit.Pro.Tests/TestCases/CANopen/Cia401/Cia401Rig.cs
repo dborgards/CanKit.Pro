@@ -46,6 +46,10 @@ internal sealed class Cia401Rig : IDisposable
     /// §6.2.8), disabled by default: <see cref="EnableTpdoAsync"/> creates it.</summary>
     internal const uint Tpdo2 = 0x280 + DeviceId;
 
+    /// <summary>RPDO 2 of the device, the default RPDO of its analog outputs 1 to 4 (CiA 401-1
+    /// §6.2.7), enabled by default.</summary>
+    internal const uint Rpdo2 = 0x300 + DeviceId;
+
     /// <summary>The device's EMCY COB-ID (CiA 301 v4.2.0 §7.3.3, Table 39).</summary>
     internal const uint Emcy = 0x080 + DeviceId;
 
@@ -75,9 +79,17 @@ internal sealed class Cia401Rig : IDisposable
     {
     }
 
+    /// <summary>Opens the device for <paramref name="configuration"/> with the plant model
+    /// <paramref name="process"/>.</summary>
+    internal Cia401Rig(Cia401Configuration configuration, ICia401Process process, CanOpenNodeOptions? options = null)
+        : this(new[] { configuration }, options, process)
+    {
+    }
+
     /// <summary>Opens one node with a device for each of <paramref name="configurations"/>, attached
     /// in that order: several logical devices of one node.</summary>
-    internal Cia401Rig(IReadOnlyList<Cia401Configuration> configurations, CanOpenNodeOptions? options = null)
+    internal Cia401Rig(IReadOnlyList<Cia401Configuration> configurations, CanOpenNodeOptions? options = null,
+        ICia401Process? process = null)
     {
         var session = VirtualAdapterFixture.NewSession("cia401");
         _masterBus = VirtualAdapterFixture.Open(session, 0);
@@ -99,7 +111,7 @@ internal sealed class Cia401Rig : IDisposable
         var composed = options ?? new CanOpenNodeOptions();
         foreach (var configuration in configurations)
         {
-            var device = new Cia401Device(configuration);
+            var device = new Cia401Device(configuration, devices.Count == 0 ? process : null);
             devices.Add(device);
             composed = Cia401Device.AddTo(composed, device);
         }
@@ -240,6 +252,26 @@ internal sealed class Cia401Rig : IDisposable
         await FenceAsync();
     }
 
+    /// <summary>RPDO 2 from the master with <paramref name="data"/>, then <see cref="FenceAsync"/>.</summary>
+    internal async Task SendRpdo2Async(params byte[] data)
+    {
+        Transmit(Rpdo2, data);
+        await FenceAsync();
+    }
+
+    /// <summary>The little-endian bytes of 16-bit values, as a PDO carries them.</summary>
+    internal static byte[] Words(params short[] values)
+    {
+        var data = new byte[values.Length * 2];
+        for (int i = 0; i < values.Length; i++)
+        {
+            data[2 * i] = (byte)values[i];
+            data[(2 * i) + 1] = (byte)(values[i] >> 8);
+        }
+
+        return data;
+    }
+
     /// <summary>Waits until the device is in <paramref name="state"/>.</summary>
     internal Task WaitForStateAsync(NmtState state)
         => WaitUntilAsync(() => Node.State == state, state.ToString());
@@ -324,6 +356,22 @@ internal sealed class Cia401Rig : IDisposable
     /// <summary>An expedited download of an INTEGER32 that must be acknowledged.</summary>
     internal Task WriteI32Async(ushort index, byte subindex, int value)
         => WriteU32Async(index, subindex, unchecked((uint)value));
+
+    /// <summary>An expedited two-byte download; the response, an acknowledgement or an abort.</summary>
+    internal Task<byte[]> DownloadI16Async(ushort index, byte subindex, short value)
+        => SdoAsync(new byte[] { 0x2B, (byte)index, (byte)(index >> 8), subindex, (byte)value, (byte)(value >> 8), 0, 0 });
+
+    /// <summary>An expedited download of an INTEGER16 that must be acknowledged.</summary>
+    internal async Task WriteI16Async(ushort index, byte subindex, short value)
+    {
+        var response = await DownloadI16Async(index, subindex, value);
+        response[0].Should().Be(0x60, $"the device acknowledges the download to {index:X4}h:{subindex:X2}h");
+    }
+
+    /// <summary>The save signature of <c>1010h</c>, "save" (CiA 301 v4.2.0 §7.5.2.13), written by the
+    /// master to sub-index 01h: every parameter the node stores, the application's objects among
+    /// them.</summary>
+    internal Task SaveAsync() => WriteU32Async(0x1010, 0x01, 0x6576_6173);
 
     /// <summary>An upload of a four-byte entry: its value.</summary>
     internal async Task<uint> ReadU32Async(ushort index, byte subindex)

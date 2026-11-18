@@ -3,8 +3,8 @@ using CanKit.Pro.CANopen.Nmt;
 
 namespace CanKit.Pro.CANopen.Cia401;
 
-// The error state of the outputs (CiA 401-1 §5.2, §6.2.4, §8.3.3, §8.3.4) and the device failure
-// the application reports.
+// The error state of the outputs, digital and analog (CiA 401-1 §5.2, §6.2.4, §8.3.3, §8.3.4,
+// §8.7.4, §8.7.5), and the device failure the application reports.
 internal sealed partial class Cia401Device
 {
     /// <summary><c>1029h</c>, error behavior: a CiA 301 object (v4.2.0 §7.5.2.32), whose sub-index
@@ -20,42 +20,46 @@ internal sealed partial class Cia401Device
     // Whether any cause is active: written on the actor loop, read from any thread.
     private volatile bool _inErrorState;
 
-    /// <summary>Whether the outputs are in the error state. Any thread.</summary>
+    /// <summary>Whether the outputs, digital and analog, are in the error state. Any thread.</summary>
     /// <remarks>
     /// <para>
-    /// The error state has three causes, and lasts while any of them does: a communication failure
-    /// (bus-off, a heartbeat or life guarding event: §5.2, the node's
+    /// One error state for both output blocks. It has three causes, and lasts while any of them
+    /// does: a communication failure (bus-off, a heartbeat or life guarding event: §5.2, the node's
     /// <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/>); the NMT state Stopped, the
-    /// "'Stop Remote Node' indication" of §8.3.3, however the node got there; and a device failure
-    /// the application reports with <see cref="ReportDeviceFailure"/>. A failure that begins while
-    /// the node is Stopped keeps the outputs in the error state when the node is started again.
+    /// "'Stop Remote Node' indication" of §8.3.3 and §8.7.4, however the node got there; and a
+    /// device failure the application reports with <see cref="ReportDeviceFailure"/>. A failure
+    /// that begins while the node is Stopped keeps the outputs in the error state when the node is
+    /// started again.
     /// </para>
     /// <para>
-    /// Entering it, each output with <c>6206h</c> = 1 takes the value of <c>6207h</c> and each with
-    /// <c>6206h</c> = 0 keeps its value (§8.3.3, §8.3.4); <see cref="ReadDigitalOutputs"/> shows the
-    /// result. <c>6200h</c> keeps the value last written: Figure 5 (§7.2.3) has the received value
-    /// enter <c>6200h</c> before the error switch, which does not write back into it. So a master
-    /// reads what it wrote, and the application reads what the terminals drive.
+    /// Entering it, each digital output with <c>6206h</c> = 1 takes the value of <c>6207h</c> and
+    /// each with <c>6206h</c> = 0 keeps its value (§8.3.3, §8.3.4); each analog output with
+    /// <c>6443h</c> = 1h takes the upper word of <c>6444h</c> and each with 0h keeps its value
+    /// (§8.7.4, §8.7.5; see <see cref="ReadAnalogOutput"/>). <see cref="ReadDigitalOutputs"/> and
+    /// <see cref="ReadAnalogOutput"/> show the result. <c>6200h</c> and <c>6411h</c> keep the value
+    /// last written: Figure 5 (§7.2.3) and Figure 7 (§7.2.5) have the received value enter the write
+    /// object before the error switch, which does not write back into it. So a master reads what it
+    /// wrote, and the application reads what the terminals drive.
     /// </para>
     /// <para>
-    /// While it lasts, a write to <c>6200h</c> is stored there and reaches no terminal, not even
-    /// one with <c>6206h</c> = 0: in Figure 5 the error switch takes <c>6200h</c> off the output
-    /// path, and the <c>6206h</c> = 0 branch feeds back the output's own value, which is the "kept"
-    /// of §8.3.3. Leaving the error state changes no output by itself (the figure would switch
-    /// <c>6200h</c> back at once; the device does not, so that an output the master never wrote does
-    /// not move when a failure ends): the next accepted write to <c>6200h</c> does, through the
-    /// filter mask, whatever value it carries. What decides is the state when the device applies a
-    /// write, which is one actor job after the write is stored
-    /// (<see cref="ICanOpenApplication.OnEntriesWritten"/>): a write stored just before the error
-    /// state begins can be applied inside it, and so not reach the terminal, and one stored just
-    /// before it ends can be applied after it, and so reach the terminal.
+    /// While it lasts, a write to <c>6200h</c> or <c>6411h</c> is stored there and reaches no
+    /// terminal, not even one whose error mode keeps its value: in both figures the error switch
+    /// takes the write object off the output path, and the branch of error mode 0 feeds back the
+    /// output's own value, which is the "kept" of §8.3.3 and the "actual value rest" of §8.7.4.
+    /// Leaving the error state changes no output by itself (the figures would switch the write
+    /// object back at once; the device does not, so that an output the master never wrote does not
+    /// move when a failure ends): the next accepted write does, whatever value it carries. What
+    /// decides is the state when the device applies a write, which is one actor job after the write
+    /// is stored (<see cref="ICanOpenApplication.OnEntriesWritten"/>): a write stored just before
+    /// the error state begins can be applied inside it, and so not reach the terminal, and one stored
+    /// just before it ends can be applied after it, and so reach the terminal.
     /// </para>
     /// <para>
     /// An NMT reset ends the communication failure and Stopped; a device failure outlasts it,
     /// since it is the application's statement about its hardware, until
     /// <see cref="ReportDeviceFailure"/>(<see langword="false"/>). Reset Node also returns the
-    /// outputs to what <c>6200h</c> holds after it, the application being reset (§6.2.5 NOTE);
-    /// Reset Communication leaves them where they are.
+    /// outputs to what <c>6200h</c> and <c>6411h</c> hold after it, the application being reset
+    /// (§6.2.5 NOTE, §6.2.7 NOTE); Reset Communication leaves them where they are.
     /// </para>
     /// <para>
     /// What this slice leaves out is listed in the remarks on <see cref="Cia401Device"/>.
@@ -64,7 +68,7 @@ internal sealed partial class Cia401Device
     /// <see langword="false"/> before the device is attached, and for a device without outputs.
     /// </para>
     /// </remarks>
-    public bool OutputsInErrorState => _digitalOutputs is not null && _inErrorState;
+    public bool OutputsInErrorState => (_digitalOutputs is not null || _analogOutputs is not null) && _inErrorState;
 
     /// <summary>Reports that a device failure began (<see langword="true"/>) or ended: one of the
     /// "device internal failures" of CiA 401-1 §5.2, which the application detects in its hardware.
@@ -118,7 +122,9 @@ internal sealed partial class Cia401Device
         bool active = _communicationFailure || _stopped || _deviceFailure;
         if (active == _inErrorState) return;
         _inErrorState = active;
-        if (active) DigitalOutputsEnterErrorState(host);
+        if (!active) return;
+        DigitalOutputsEnterErrorState(host);
+        AnalogOutputsEnterErrorState(host);
     }
 
     /// <summary>The NMT state <c>1029h:01</c> names for a device failure (CiA 401-1 §6.2.4). Actor

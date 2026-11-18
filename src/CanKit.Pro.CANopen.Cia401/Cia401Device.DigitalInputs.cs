@@ -117,6 +117,23 @@ internal sealed partial class Cia401Device
         RefreshDigitalInputGroup(host, block, entry.Subindex - 1, send);
     }
 
+    /// <summary>Reset Node: <c>6000h</c> of every group is rewritten as the physical levels XOR the
+    /// polarity of <c>6002h</c> as the node restored it, for the value the node restored to
+    /// <c>6000h</c>, a default or what <c>1010h</c> stored, is not what the sensors deliver. No
+    /// interrupt is evaluated: in Initialisation nothing is sent, and entering Operational sends
+    /// every group (§6.1). Actor loop.</summary>
+    private void DigitalInputsReset(ICanOpenApplicationHost host)
+    {
+        var block = _digitalInputs;
+        if (block is null) return;
+        for (int g = 0; g < block.Groups; g++)
+        {
+            var sub = (byte)(g + 1);
+            var logical = (byte)(block.Physical[g] ^ ReadByte(host, block.Polarity, sub));
+            if (logical != ReadByte(host, block.Read, sub)) WriteOwn(host, block.Read, sub, logical);
+        }
+    }
+
     /// <summary>Every sub-index of <c>6000h</c>, for the transmission on entering Operational.</summary>
     private void DigitalInputsToSendOnStart(List<CanOpenObjectAddress> send)
     {

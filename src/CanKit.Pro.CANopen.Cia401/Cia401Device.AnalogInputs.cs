@@ -99,9 +99,9 @@ internal sealed partial class Cia401Device
     /// </para>
     /// <para>
     /// <b>The last communicated value</b> of a channel, which the deltas are measured from, is its
-    /// value at its last interrupt, at the node's last entry into Operational, and when <c>6423h</c>
-    /// last went from FALSE to TRUE — without the last, the first change after enabling would be
-    /// measured from a value long gone.
+    /// value at its last interrupt, at the node's last entry into Operational, at the last NMT reset,
+    /// and when <c>6423h</c> last went from FALSE to TRUE — without the last, the first change after
+    /// enabling would be measured from a value long gone.
     /// </para>
     /// <para>
     /// <b>What an interrupt does.</b> It sets the channel's bit in <c>6422h</c>, 32 channels per
@@ -225,6 +225,7 @@ internal sealed partial class Cia401Device
     private void ApplyAnalogInput(ICanOpenApplicationHost host, AnalogInputBlock block, byte sub, short value,
         bool enabled, List<CanOpenObjectAddress> send)
     {
+        block.Physical[sub - 1] = value;
         if (ReadAnalogValue(host, block, sub) == value) return;
         WriteOwn(host, block.Read, sub, Encode(OdDataType.Integer16, value));
         if (!enabled || !AnalogInterrupt(host.ObjectDictionary, block, sub, value, block.LastCommunicated[sub - 1])) return;
@@ -276,7 +277,8 @@ internal sealed partial class Cia401Device
         }
     }
 
-    /// <summary>Every channel's current value becomes its last communicated one.</summary>
+    /// <summary>Every channel's current value becomes its last communicated one. Reads
+    /// <c>6401h</c>, which outside <see cref="OnReset"/> is the value the application set.</summary>
     private static void TakeCurrentAsLastCommunicated(ICanOpenApplicationHost host, AnalogInputBlock block)
     {
         for (int c = 1; c <= block.Channels; c++) block.LastCommunicated[c - 1] = ReadAnalogValue(host, block, (byte)c);
@@ -320,12 +322,27 @@ internal sealed partial class Cia401Device
         host.ClearError(AnalogInputsDisabledWarning);
     }
 
-    /// <summary>An NMT reset clears <c>6422h</c>, which Reset Communication does not restore, and
-    /// reads <c>6423h</c> afresh, which Reset Node restores without reporting it. Actor loop.</summary>
-    private void AnalogInputsReset(ICanOpenApplicationHost host)
+    /// <summary>An NMT reset starts the interrupt state afresh. Reset Node first rewrites
+    /// <c>6401h</c> with the value the application set last, for the value the node restored, a
+    /// default or what <c>1010h</c> stored, is not what the input delivers. Then, for either reset,
+    /// each channel's value becomes its last communicated one, <c>6422h</c> is cleared (Reset
+    /// Communication restores neither, Reset Node may have restored stored bits) and <c>6423h</c>
+    /// is read afresh, which Reset Node restores without reporting it. Actor loop.</summary>
+    private void AnalogInputsReset(ICanOpenApplicationHost host, bool resetNode)
     {
         var block = _analogInputs;
         if (block is null) return;
+        if (resetNode)
+        {
+            for (int c = 1; c <= block.Channels; c++)
+            {
+                short value = block.Physical[c - 1];
+                if (ReadAnalogValue(host, block, (byte)c) != value)
+                    WriteOwn(host, block.Read, (byte)c, Encode(OdDataType.Integer16, value));
+            }
+        }
+
+        TakeCurrentAsLastCommunicated(host, block);
         ClearInterruptSource(host, block);
         block.GlobalInterruptEnableSeen = ReadByte(host, block.GlobalInterruptEnable, 0) != 0;
     }
@@ -372,6 +389,7 @@ internal sealed partial class Cia401Device
             Channels = channels;
             Banks = (channels + ChannelsPerSourceBank - 1) / ChannelsPerSourceBank;
             LastCommunicated = new short[channels];
+            Physical = new short[channels];
             Read = Shift(logicalDevice, Cia401Objects.ReadAnalogInput16);
             TriggerSelection = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptTriggerSelection);
             InterruptSource = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptSource);
@@ -391,6 +409,10 @@ internal sealed partial class Cia401Device
 
         /// <summary>The last communicated value per channel. Actor loop only.</summary>
         internal short[] LastCommunicated { get; }
+
+        /// <summary>The value per channel the application set last, 0 until it sets one: what
+        /// <c>6401h</c> shows, and what Reset Node writes back into it. Actor loop only.</summary>
+        internal short[] Physical { get; }
 
         /// <summary><c>6423h</c> as the device last saw it, to tell a write of TRUE that enables
         /// interrupts from one that finds them enabled. Actor loop only.</summary>
