@@ -94,9 +94,18 @@ internal sealed partial class CanOpenNode
             var comm = (ushort)((isTpdo ? Co.TpdoComm : Co.RpdoComm) + number - 1);
             var map = (ushort)((isTpdo ? Co.TpdoMap : Co.RpdoMap) + number - 1);
             if (_describedObjects.Contains(comm) || _describedObjects.Contains(map)) continue;
+            var cobId = DefaultApplicationPdoCobId(comm, number, isTpdo, enabled);
+            // An LSS slave without a node-id: the pre-defined COB-ID names node-id FFh, and for RPDO 4
+            // (500h + FFh = 5FFh) that is a restricted CAN-ID, which the record refuses. The node has no
+            // PDOs on the bus before it is given a node-id, and ApplyActiveNodeId moves the COB-ID to
+            // the node-id it is given, as it does for the node's own placeholders. So the PDO is
+            // written invalid through the procedure, and made valid without the record's check. Only
+            // here and only then: the record's validation of every other write stays as it is.
+            bool validWithoutNodeId = number <= 4 && !CanOpenCobId.IsActiveNodeId(_nodeId)
+                && (cobId & CanOpenCobId.InvalidBit) == 0;
             try
             {
-                WritePdoRecords(comm, map, entries, DefaultApplicationPdoCobId(comm, number, isTpdo, enabled),
+                WritePdoRecords(comm, map, entries, validWithoutNodeId ? cobId | CanOpenCobId.InvalidBit : cobId,
                     CanOpenTransmissionType.EventDrivenProfile, inhibit: 0, eventTimerMs: 0, isTpdo, number);
             }
             catch (ArgumentException ex)
@@ -105,6 +114,7 @@ internal sealed partial class CanOpenNode
                     $"Application '{setter.Application.Name}' sets the default of {PdoKind(isTpdo)} {number}: {ex.Message}",
                     "options", ex);
             }
+            if (validWithoutNodeId) _od.WriteRawUnchecked(comm, 0x01, ObjectDictionary.EncodeU32(cobId));
         }
     }
 

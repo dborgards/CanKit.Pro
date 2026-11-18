@@ -66,14 +66,18 @@ internal interface ICanOpenApplicationHost
     /// <para>
     /// The COB-ID of TPDO 1 to 4 is the pre-defined connection set of the node-id, with bit 31 set
     /// when <paramref name="enabled"/> is <see langword="false"/>. Above TPDO 4 CiA 301 pre-defines no
-    /// COB-ID: the record gets the mapping and keeps an invalid COB-ID without a CAN-ID, whatever
-    /// <paramref name="enabled"/> says, for the master to assign one.
+    /// COB-ID: the record gets the mapping and keeps the invalid COB-ID the node writes for an
+    /// unassigned TPDO, <c>C0000000h</c> (no CAN-ID, no RTR), whatever <paramref name="enabled"/>
+    /// says, for the master to assign one.
     /// </para>
     /// <para>
     /// The default is part of the power-on values: an NMT reset returns the records to it, and
     /// <c>1011h</c> restores it. When LSS gives the node another node-id, the node moves a COB-ID that
     /// still names the pre-defined connection set of the node-id it leaves to the new one, as it does
-    /// for its own default COB-IDs. A PDO a device description declares is left as the file has it:
+    /// for its own default COB-IDs. On an LSS slave opened without a node-id the COB-ID names node-id
+    /// <c>FFh</c>, and is written even where that is a restricted CAN-ID (RPDO 4: <c>5FFh</c>): the
+    /// node has no PDOs on the bus until it is given a node-id, and then moves the COB-ID to it. Only
+    /// this call does so; a write to the record keeps its checks. A PDO a device description declares is left as the file has it:
     /// the call has no effect on it. A PDO the description leaves out does not exist (CiA 301 §7.3.3),
     /// and a default for it fails the open.
     /// </para>
@@ -93,7 +97,9 @@ internal interface ICanOpenApplicationHost
     /// type <c>FFh</c> and its COB-ID. <see cref="ICanOpenApplication.Attach"/> only.</summary>
     /// <remarks>As <see cref="SetDefaultTpdo"/>, with <see cref="ICanOpenNode.ConfigureRpdo"/>'s
     /// procedure, the type CiA 401-1 §6.2.5 gives a default RPDO, and the RPDO always enabled up to
-    /// RPDO 4.</remarks>
+    /// RPDO 4. Above RPDO 4 the record keeps the invalid COB-ID the node writes for an unassigned
+    /// RPDO, <c>80000000h</c>. On an LSS slave without a node-id RPDO 4's COB-ID is <c>5FFh</c>, a
+    /// restricted CAN-ID, and is written all the same (see <see cref="SetDefaultTpdo"/>).</remarks>
     /// <exception cref="InvalidOperationException">Called outside the application's own
     /// <see cref="ICanOpenApplication.Attach"/>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="mapping"/> is null.</exception>

@@ -110,9 +110,8 @@ public partial class CanOpenApplicationSeamTests
         using var node = OpenNode(bus, With(app).With(pdoCount: 5), nodeId: Node22);
 
         var od = node.ObjectDictionary;
-        // Bit 30 of a TPDO COB-ID is the RTR bit, which the node's placeholder for an unassigned
-        // TPDO carries; the property is bit 31 set and no CAN-ID.
-        (od.ReadUnsigned(0x1804, 0x01) & ~CanOpenCobId.NoRtrBit).Should().Be(0x80000000u,
+        // The invalid COB-ID the node writes for an unassigned TPDO: bit 31, bit 30 (no RTR), no CAN-ID.
+        od.ReadUnsigned(0x1804, 0x01).Should().Be(0xC0000000u,
             "CiA 301 has no default COB-ID above PDO 4, so the PDO stays invalid whatever enabled says");
         od.ReadUnsigned(0x1804, 0x02).Should().Be(255u);
         od.ReadUnsigned(0x1A04, 0x00).Should().Be(1u);
@@ -255,6 +254,43 @@ public partial class CanOpenApplicationSeamTests
 
         rig.Od.ReadUnsigned(0x1800, 0x01).Should().Be(0x000001A3u,
             "the node retargets a COB-ID that still names the pre-defined connection set of the node-id it leaves");
+    }
+
+    [Fact]
+    public async Task An_Lss_Slave_Without_A_Node_Id_Takes_Its_Default_Pdos_To_The_Node_Id_It_Is_Given()
+    {
+        // Without a node-id the pre-defined COB-ID of RPDO 4 is 500h + FFh = 5FFh, a restricted
+        // CAN-ID: the default is written all the same, and follows the node-id LSS assigns.
+        var app = Defaults(host =>
+        {
+            host.SetDefaultRpdo(4, Map(0x6000, 0x02));
+            host.SetDefaultTpdo(1, Map(0x6000, 0x01));
+        }, pdoCount: 4);
+        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        using var rig = new EntryRig(With(app).WithLss(new LssSlaveOptions()), nodeId: CanOpenCobId.UnconfiguredNodeId);
+        Settle(rig.Node);
+
+        int replies = rig.Wire.Count(CanOpenCobId.LssSlaveMessage);
+        rig.Wire.Transmit(CanOpenCobId.LssMasterMessage, new byte[] { LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0 });
+        rig.Wire.Transmit(CanOpenCobId.LssMasterMessage, new byte[] { LssCommand.ConfigureNodeId, Node22, 0, 0, 0, 0, 0, 0 });
+        await rig.Wire.WaitForCountAsync(CanOpenCobId.LssSlaveMessage, replies + 1);
+        await rig.Wire.WaitForCountAsync(BootUpOf22, 1);
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.ResetCommunication, Node22 });
+        await rig.Wire.WaitForCountAsync(BootUpOf22, 2);
+        Settle(rig.Node);
+
+        rig.Od.ReadUnsigned(0x1403, 0x01).Should().Be(0x00000522u, "RPDO 4 on the pre-defined COB-ID of node-id 22h");
+        rig.Od.ReadUnsigned(0x1800, 0x01).Should().Be(0x000001A2u, "TPDO 1 on the pre-defined COB-ID of node-id 22h");
+
+        rig.Node.ConfigureTpdo(2, Map(0x2101, 0x00));
+        await StartAnyAsync(rig);
+        rig.Wire.Transmit(0x522, new byte[] { 9 });
+        await WaitUntilAsync(() => rig.Od.ReadUnsigned(0x6000, 0x02) == 9, "RPDO 4 to land in 6000h:02");
+        rig.Od.WriteUnsigned(0x6000, 0x01, 7);
+        await rig.Wire.WaitForCountAsync(Tpdo1Of22, 1);
+        await WitnessOf22Async(rig);
+
+        AssertSingleFrame(rig.Wire.Payloads(Tpdo1Of22), 7);
     }
 
     [Fact]
