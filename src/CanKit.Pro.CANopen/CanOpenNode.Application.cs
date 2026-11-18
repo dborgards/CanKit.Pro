@@ -7,6 +7,7 @@ using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
 
@@ -43,6 +44,10 @@ internal sealed partial class CanOpenNode
 
         // Read once with the claims, for the same reason.
         internal bool MonitorsCommunicationFailure { get; init; }
+
+        // The highest PDO number the application configures (CanOpenApplicationRequirements.PdoCount),
+        // read once with the claims: the bound of its default PDOs.
+        internal int PdoCount { get; init; }
 
         // What this application was last told about the communication failure. Per application,
         // not per node: a callback of one application can change the condition before the next
@@ -90,13 +95,15 @@ internal sealed partial class CanOpenNode
                     throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.Applications.");
             }
             var host = new ApplicationHost(this);
+            var requirements = application.Requirements;
             slots[i] = new ApplicationSlot(application, host)
             {
                 Claims = ValidatedClaims(application, slots, i),
-                MonitorsCommunicationFailure = application.Requirements.CommunicationFailureMonitoring,
+                MonitorsCommunicationFailure = requirements.CommunicationFailureMonitoring,
+                PdoCount = requirements.PdoCount,
             };
             host.Slot = slots[i];
-            ValidateRequirements(application);
+            ValidateRequirements(application, requirements);
         }
 
         _applications = slots;
@@ -113,6 +120,7 @@ internal sealed partial class CanOpenNode
             }
         }
         ComposeDeviceTypes();
+        ComposeDefaultPdos();
 
         // What the applications declared is part of the power-on state, like what the description
         // declared: Reset Node returns it to this, and 1010h saves it.
@@ -152,9 +160,8 @@ internal sealed partial class CanOpenNode
         return claims;
     }
 
-    private void ValidateRequirements(ICanOpenApplication application)
+    private void ValidateRequirements(ICanOpenApplication application, CanOpenApplicationRequirements requirements)
     {
-        var requirements = application.Requirements;
         if (requirements.PdoCount > _pdoCount)
         {
             throw OptionsError($"Application '{application.Name}' configures {requirements.PdoCount} PDOs: " +
@@ -653,6 +660,12 @@ internal sealed partial class CanOpenNode
 
         public void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType)
             => _node.SetApplicationDeviceType(Slot, logicalDevice, deviceType);
+
+        public void SetDefaultTpdo(int pdoNumber, PdoMapping mapping, bool enabled = true)
+            => _node.SetApplicationDefaultPdo(Slot, isTpdo: true, pdoNumber, mapping, enabled);
+
+        public void SetDefaultRpdo(int pdoNumber, PdoMapping mapping)
+            => _node.SetApplicationDefaultPdo(Slot, isTpdo: false, pdoNumber, mapping, enabled: true);
 
         public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries)
         {

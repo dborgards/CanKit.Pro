@@ -110,9 +110,9 @@ public static class CanOpenLogicalDevices
     public const int MaxCount = 8;
 
     private const ushort DeviceTypeObject = 0x1000;
-    private const ushort FirstArea = 0x6000;
-    private const int AreaSize = 0x800;
-    private const int PdosPerLogicalDevice = 64;
+    internal const ushort FirstArea = 0x6000;
+    internal const int AreaSize = 0x800;
+    internal const int PdosPerLogicalDevice = 64;
 
     /// <summary>The first object index of a logical device, <c>6000h + logicalDevice·800h</c>.</summary>
     /// <param name="logicalDevice">The logical device, <c>0</c> to <c>7</c>.</param>

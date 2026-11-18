@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.Reliability;
 
 namespace CanKit.Pro.CANopen.Application;
@@ -50,6 +51,58 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="ArgumentException">The application does not claim the device-type object of
     /// <paramref name="logicalDevice"/>.</exception>
     void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType);
+
+    /// <summary>Sets the default of TPDO <paramref name="pdoNumber"/>: its mapping, the transmission
+    /// type <c>FFh</c> and its COB-ID. <see cref="ICanOpenApplication.Attach"/> only.</summary>
+    /// <remarks>
+    /// <para>
+    /// The node writes the default into the PDO records once every application has attached, through
+    /// the re-mapping procedure <see cref="ICanOpenNode.ConfigureTpdo"/> runs (CiA 301 §7.5.2.38),
+    /// so the mapping is checked as it would be over SDO and the PDO engine runs with what the
+    /// records hold. The transmission type is <c>FFh</c>, event-driven and profile-specific (CiA 301
+    /// Table 72), the type CiA 401-1 §6.2.6 gives a default TPDO; inhibit time and event timer are
+    /// 0. The mapping is copied when this is called.
+    /// </para>
+    /// <para>
+    /// The COB-ID of TPDO 1 to 4 is the pre-defined connection set of the node-id, with bit 31 set
+    /// when <paramref name="enabled"/> is <see langword="false"/>. Above TPDO 4 CiA 301 pre-defines no
+    /// COB-ID: the record gets the mapping and keeps an invalid COB-ID without a CAN-ID, whatever
+    /// <paramref name="enabled"/> says, for the master to assign one.
+    /// </para>
+    /// <para>
+    /// The default is part of the power-on values: an NMT reset returns the records to it, and
+    /// <c>1011h</c> restores it. When LSS gives the node another node-id, the node moves a COB-ID that
+    /// still names the pre-defined connection set of the node-id it leaves to the new one, as it does
+    /// for its own default COB-IDs. A PDO a device description declares is left as the file has it:
+    /// the call has no effect on it. A PDO the description leaves out does not exist (CiA 301 §7.3.3),
+    /// and a default for it fails the open.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">Called outside the application's own
+    /// <see cref="ICanOpenApplication.Attach"/>.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="mapping"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="pdoNumber"/> is below 1 or above
+    /// the <see cref="CanOpenApplicationRequirements.PdoCount"/> the application asks for.</exception>
+    /// <exception cref="ArgumentException">An entry of <paramref name="mapping"/> other than a dummy
+    /// entry lies in no range the application claims: a profile maps the objects it owns. Two
+    /// applications setting the same TPDO, and a mapping the records refuse, fail the open with an
+    /// <see cref="ArgumentException"/> for <c>options</c> once every application has attached.</exception>
+    void SetDefaultTpdo(int pdoNumber, PdoMapping mapping, bool enabled = true);
+
+    /// <summary>Sets the default of RPDO <paramref name="pdoNumber"/>: its mapping, the transmission
+    /// type <c>FFh</c> and its COB-ID. <see cref="ICanOpenApplication.Attach"/> only.</summary>
+    /// <remarks>As <see cref="SetDefaultTpdo"/>, with <see cref="ICanOpenNode.ConfigureRpdo"/>'s
+    /// procedure, the type CiA 401-1 §6.2.5 gives a default RPDO, and the RPDO always enabled up to
+    /// RPDO 4.</remarks>
+    /// <exception cref="InvalidOperationException">Called outside the application's own
+    /// <see cref="ICanOpenApplication.Attach"/>.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="mapping"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="pdoNumber"/> is below 1 or above
+    /// the <see cref="CanOpenApplicationRequirements.PdoCount"/> the application asks for.</exception>
+    /// <exception cref="ArgumentException">An entry of <paramref name="mapping"/> other than a dummy
+    /// entry lies in no range the application claims. Two applications setting the same RPDO, and a
+    /// mapping the records refuse, fail the open as for <see cref="SetDefaultTpdo"/>.</exception>
+    void SetDefaultRpdo(int pdoNumber, PdoMapping mapping);
 
     /// <summary>Asks the node to transmit what maps <paramref name="entries"/>. Actor loop.</summary>
     /// <remarks>
