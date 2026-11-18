@@ -411,6 +411,52 @@ public class Cia401DeviceDescriptionTests
         rig.Payloads(Cia401Rig.Tpdo1)[before].Should().Equal(0x01, 0x00);
     }
 
+    [Fact] // final review S2: 6005h defaults to TRUE (CiA 401-1 §8.2.4)
+    public async Task Without_6005h_A_Change_Interrupts_As_With_The_Global_Enable_True()
+    {
+        using var rig = Open(Eds.Of("cia401-digital.eds").Remove(0x6005));
+
+        rig.Od.ContainsIndex(0x6005).Should().BeFalse("a parameter the file leaves out is not added");
+        Cia401Rig.AbortCode(await rig.SdoAsync(Upload(0x6005, 0x00))).Should().Be(ObjectDoesNotExist);
+
+        // 6006h:01 is FFh in the file: the change is an interrupt unless the global enable is FALSE.
+        await rig.StartAndTakeFirstTpdoAsync();
+        int before = rig.Count(Cia401Rig.Tpdo1);
+        rig.Device.SetDigitalInput(3, true);
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo1, before + 1);
+        rig.Payloads(Cia401Rig.Tpdo1)[before].Should().Equal(0x04, 0x00);
+    }
+
+    [Fact] // final review S2: 6421h defaults to 07h, upper limit, lower limit and delta (CiA 401-1 §8.6.2)
+    public async Task Without_6421h_Each_Channel_Interrupts_On_Upper_Limit_Lower_Limit_And_Delta()
+    {
+        using var rig = Open(Eds.Of("cia401.eds").Remove(0x6421));
+        rig.Od.ContainsIndex(0x6421).Should().BeFalse("a parameter the file leaves out is not added");
+        await rig.WriteU8Async(0x6423, 0x00, 1); // FALSE to TRUE: the reference is the current 0
+        await rig.WriteU32Async(0x6426, 0x01, 50);
+        rig.Settle(); // the device has handled the write to 6423h (OnEntriesWritten, one job later)
+
+        // Each step reads the interrupt source bit of channel 1 (6422h:01, bit 0) over SDO, in
+        // Pre-operational, and clears it by writing 6423h TRUE again before the next.
+        async Task<bool> InterruptsAsync(short value)
+        {
+            rig.Device.SetAnalogInput(1, value);
+            bool interrupted = (await rig.ReadU32Async(0x6422, 0x01) & 1u) != 0;
+            await rig.WriteU8Async(0x6423, 0x00, 1);
+            rig.Settle();
+            return interrupted;
+        }
+
+        (await InterruptsAsync(30)).Should().BeFalse("the delta is selected: 30 from 0 is not more than 50");
+        (await InterruptsAsync(100)).Should().BeTrue("100 from 0 is more than 50, and with both limits 0 one holds");
+
+        await rig.WriteI32Async(0x6424, 0x01, 1000 << 16);
+        (await InterruptsAsync(300)).Should().BeFalse(
+            "the limits are selected: 300 is below the upper limit 1000 and not below the lower limit 0");
+        (await InterruptsAsync(-100)).Should().BeTrue("the lower limit is selected: -100 is below 0, and 200 from 100");
+        (await InterruptsAsync(2000)).Should().BeTrue("the upper limit is selected: 2000 is above 1000, and 2100 from -100");
+    }
+
     [Fact]
     public async Task Without_6206h_To_6208h_The_Outputs_Behave_As_Their_Defaults()
     {
