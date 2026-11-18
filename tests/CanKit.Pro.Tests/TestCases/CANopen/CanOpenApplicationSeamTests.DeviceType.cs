@@ -365,6 +365,32 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public void A_Described_Device_Type_Object_That_Is_Not_Unsigned32_Fails_The_Open()
+    {
+        // 67FFh described as an UNSIGNED16: there is no device type to compare with the one set.
+        var eds = EdsWith6000(0x00000191, (0x67FF, 0x0191)).Replace(
+            "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x00000191",
+            "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0006\nAccessType=ro\nDefaultValue=0x0191");
+
+        var failure = OptionsRefused(With(Typed("one", (0, Profile401))), CanOpenDeviceDescription.ParseEds(eds));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32").And.Contain("one");
+    }
+
+    [Fact]
+    public void All_Eight_Logical_Devices_Make_A_Full_Chain()
+    {
+        using var bus = Open(NewSession(), 1);
+        var types = Enumerable.Range(0, 8).Select(device => (device, 0x00010000u | (uint)(0x0191 + device))).ToArray();
+
+        using var node = OpenNode(bus, With(Typed("all", types)));
+
+        DeviceTypeOf(node).Should().Be(0xFFFF0191u);
+        for (int device = 0; device < 8; device++)
+            DeviceTypeOf(node, (ushort)(0x67FF + device * 0x800)).Should().Be(types[device].Item2);
+    }
+
+    [Fact]
     public void A_Described_Chain_Object_Is_Checked_For_A_Single_Device_Too()
     {
         var description = DescriptionWith6000(0x00000191, (0x67FF, 0x00000192));

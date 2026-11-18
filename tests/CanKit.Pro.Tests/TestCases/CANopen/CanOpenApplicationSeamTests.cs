@@ -62,7 +62,11 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
     /// <c>1000h</c> holds <paramref name="deviceType"/>, and it declares each of
     /// <paramref name="deviceTypeObjects"/> as a read-only UNSIGNED32 with that value.</summary>
     private static CanOpenDeviceDescription DescriptionWith6000(uint deviceType = 0,
-        params (ushort Index, uint Word)[] deviceTypeObjects) => CanOpenDeviceDescription.ParseEds(
+        params (ushort Index, uint Word)[] deviceTypeObjects)
+        => CanOpenDeviceDescription.ParseEds(EdsWith6000(deviceType, deviceTypeObjects));
+
+    /// <summary>The text of <see cref="DescriptionWith6000"/>, for a test that changes it before parsing.</summary>
+    private static string EdsWith6000(uint deviceType = 0, params (ushort Index, uint Word)[] deviceTypeObjects) =>
         "[FileInfo]\n" +
         "FileName=seam.eds\n" +
         "FileVersion=1\n" +
@@ -151,7 +155,7 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         "PDOMapping=0\n" +
         string.Concat(deviceTypeObjects.Select(o =>
             $"[{o.Index:X4}]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\n" +
-            $"DefaultValue=0x{o.Word:X8}\nPDOMapping=0\n")));
+            $"DefaultValue=0x{o.Word:X8}\nPDOMapping=0\n"));
 
     /// <summary>Counts the boot-up messages (heartbeat state 0) of one producer.</summary>
     private sealed class BootupWatch
@@ -343,6 +347,35 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         failure.Message.Should().Contain("low").And.Contain("0x1F00-0x2000");
         app.Log.Should().BeEmpty("a claim that is refused is refused before anything is attached");
+    }
+
+    [Fact]
+    public void A_Claim_From_2000h_Is_Accepted()
+    {
+        using var bus = Open(NewSession(), 1);
+        var app = new RecordingApplication("lowest", new CanOpenIndexRange(0x2000, 0x2000));
+
+        using var node = OpenNode(bus, With(app));
+
+        app.Log.Should().StartWith("attach", "2000h is the first index outside the node's own areas");
+    }
+
+    [Fact]
+    public void A_Range_That_Ends_Before_It_Starts_Is_Refused()
+    {
+        var failure = Assert.Throws<ArgumentException>(() => new CanOpenIndexRange(0x6001, 0x6000));
+
+        failure.ParamName.Should().Be("first");
+        failure.Message.Should().Contain("0x6001").And.Contain("0x6000");
+    }
+
+    [Fact]
+    public void A_Null_Application_Fails_The_Open()
+    {
+        // WithApplication refuses null; the list itself can still hold one.
+        var options = new CanOpenNodeOptions { Applications = new ICanOpenApplication[] { new RecordingApplication("first"), null! } };
+
+        OpenFails(options).Message.Should().Contain("Applications[1]");
     }
 
     [Fact]
@@ -562,5 +595,39 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         Advance(clock, node, TimeSpan.FromMilliseconds(1));
         Volatile.Read(ref fired).Should().Be(1);
         (app.Host!.Now - nowAtAttach).Should().Be(TimeSpan.FromMilliseconds(50), "Now reads the node's clock");
+    }
+
+    [Fact]
+    public void The_Host_Refuses_Null_Arguments_Where_They_Are_Given()
+    {
+        using var bus = Open(NewSession(), 1);
+        var app = new RecordingApplication("caller");
+        using var node = OpenNode(bus, With(app));
+        Settle(node);
+
+        // On the caller's thread, not later on the actor: a deadline without a callback would only
+        // fail when it fires, and a null list would fail inside the node.
+        FluentActions.Invoking(() => app.Host!.Arm(TimeSpan.FromMilliseconds(10), null!))
+            .Should().Throw<ArgumentNullException>().Which.ParamName.Should().Be("onExpired");
+        FluentActions.Invoking(() => app.Host!.RequestTransmission(null!))
+            .Should().Throw<ArgumentNullException>().Which.ParamName.Should().Be("entries");
+    }
+
+    [Fact]
+    public void A_Write_To_A_Claimed_Entry_After_A_Failed_Open_Is_Stored_And_Tells_Nobody()
+    {
+        // The open fails after the node subscribed to its dictionary and after its actor ended: the
+        // service was disposed, so subscribing to it throws. An application that kept its host still
+        // holds the dictionary (ICanOpenApplication: it is told nothing when the open fails).
+        using var bus = Open(NewSession(), 1);
+        var service = new CanBusService(bus);
+        service.Dispose();
+        var app = Entries();
+
+        Assert.Throws<ObjectDisposedException>(() => new CanOpenNode(service, Slave, With(app), ownsService: false));
+        app.Host!.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 9);
+
+        app.Host.ObjectDictionary.ReadUnsigned(0x6000, 0x01).Should().Be(9u, "the dictionary outlives the node that failed to open");
+        Written(app).Should().BeEmpty();
     }
 }

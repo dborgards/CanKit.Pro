@@ -138,6 +138,30 @@ public partial class CanOpenApplicationSeamTests
         ErrorRegister(rig.Node).Should().Be(0x21, "the error that ended before the boot-up left nothing behind");
     }
 
+    [Fact]
+    public async Task Clearing_A_Held_Error_Leaves_Another_Profiles_Error_Of_The_Same_Code()
+    {
+        var first = new RecordingApplication("first");
+        var second = new RecordingApplication("second");
+        first.WhenReset = _ => first.Host!.RaiseError(0x5000, 0x04);
+        second.WhenReset = _ =>
+        {
+            second.Host!.RaiseError(0x5000, 0x20);
+            second.Host.ClearError(0x5000);
+        };
+        using var rig = new EntryRig(With(first, second));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        int mark = rig.Wire.Sequence.Length;
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(rig.Node);
+
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire, mark), Emcy(0x5000, 0x05));
+        ErrorRegister(rig.Node).Should().Be(0x05, "an error is the profile's own: the other profile cleared only its own");
+    }
+
     /// <summary>
     /// A profile raises an error in the first reset's <c>OnReset</c>; its EMCY is released behind that
     /// reset's boot-up, and the boot-up is kept from the wire until the EMCY chain waits for it. With
