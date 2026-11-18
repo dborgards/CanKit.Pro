@@ -38,8 +38,9 @@ public class Cia401DeviceAnalogInputTests
     private static byte[] I16(params short[] values)
         => values.SelectMany(v => new[] { (byte)v, (byte)(v >> 8) }).ToArray();
 
-    private static readonly byte[] WarningEmcy = { 0x80, 0x00, 0x01, 0, 0, 0, 0, 0 };
-    private static readonly byte[] ErrorResetEmcy = { 0x00, 0x00, 0x00, 0, 0, 0, 0, 0 };
+    /// <summary>Error code <c>0080h</c> (§5.3, §5.4 Table 1), of the class "error reset or no error"
+    /// (CiA 301 v4.2.0 §7.2.7.1, Table 25): on a node without an error the register byte is 00h.</summary>
+    private static readonly byte[] WarningEmcy = { 0x80, 0x00, 0x00, 0, 0, 0, 0, 0 };
 
     /// <summary>A device with <paramref name="channels"/> analog inputs whose TPDO 2 the master has
     /// created over SDO (it is disabled by default, §6.2.8 and the scope record).</summary>
@@ -192,26 +193,24 @@ public class Cia401DeviceAnalogInputTests
         await rig.WaitForCountAsync(Cia401Rig.Emcy, 1);
         await rig.DrainEmcyAsync();
 
-        // Error code 0080h (§5.4 Table 1). The application raises it with no register bit; the node
-        // sets the generic bit for every active error (CiA 301 v4.2.0 §7.5.2.2), so the wire shows 01h.
+        // Error code 0080h (§5.4 Table 1) is a warning, not an error (CiA 301 v4.2.0 Table 25,
+        // 00xxh): a healthy node keeps a healthy register, in the frame and in 1001h (#556).
         rig.Payloads(Cia401Rig.Emcy).Should().ContainSingle().Which.Should().Equal(WarningEmcy);
-        rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x01u, "1001h shows the generic error while the warning lasts");
+        rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x00u, "the warning is no error: 1001h shows none");
         rig.Node.State.Should().Be(NmtState.Operational, "the warning causes no NMT transition (§5.3)");
     }
 
     [Fact]
-    public async Task Writing_6423h_True_Ends_The_Warning_With_An_Error_Reset()
+    public async Task Writing_6423h_True_After_The_Warning_Sends_Nothing()
     {
         using var rig = new Cia401Rig(Analog(1));
         await rig.StartAsync();
         await rig.WaitForCountAsync(Cia401Rig.Emcy, 1);
 
         await rig.WriteU8Async(0x6423, 0x00, 1);
-        await rig.WaitForCountAsync(Cia401Rig.Emcy, 2);
         await rig.DrainEmcyAsync();
 
-        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(2);
-        rig.Payloads(Cia401Rig.Emcy)[1].Should().Equal(ErrorResetEmcy);
+        rig.Count(Cia401Rig.Emcy).Should().Be(1, "the warning was an event, not an error: there is nothing to reset");
         rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x00u);
         rig.Node.State.Should().Be(NmtState.Operational);
     }
@@ -232,26 +231,28 @@ public class Cia401DeviceAnalogInputTests
     }
 
     [Fact]
-    public async Task Leaving_Operational_Ends_The_Warning_And_The_Next_Entry_Raises_It_Again()
+    public async Task Leaving_Operational_Sends_Nothing_And_The_Next_Entry_Sends_The_Warning_Again()
     {
         using var rig = new Cia401Rig(Analog(1));
         await rig.StartAsync();
         await rig.WaitForCountAsync(Cia401Rig.Emcy, 1);
 
         await rig.EnterPreOperationalAsync();
-        await rig.WaitForCountAsync(Cia401Rig.Emcy, 2);
+        await rig.DrainEmcyAsync();
+        rig.Count(Cia401Rig.Emcy).Should().Be(1, "the warning left no error for leaving Operational to reset");
+
         await rig.StartAsync();
-        await rig.WaitForCountAsync(Cia401Rig.Emcy, 3);
+        await rig.WaitForCountAsync(Cia401Rig.Emcy, 2);
         await rig.DrainEmcyAsync();
 
-        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(3);
-        rig.Payloads(Cia401Rig.Emcy)[0].Should().Equal(WarningEmcy);
-        rig.Payloads(Cia401Rig.Emcy)[1].Should().Equal(ErrorResetEmcy);
-        rig.Payloads(Cia401Rig.Emcy)[2].Should().Equal(WarningEmcy);
+        // §5.3: on each transition into Operational with 6423h FALSE.
+        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(2);
+        rig.Payloads(Cia401Rig.Emcy).Should().AllSatisfy(frame => frame.Should().Equal(WarningEmcy));
+        rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x00u);
     }
 
     [Fact]
-    public async Task Through_Stopped_The_Error_Reset_Is_Held_And_Goes_Out_Before_The_Next_Warning()
+    public async Task Through_Stopped_Nothing_Is_Held_And_The_Next_Entry_Sends_The_Warning_Again()
     {
         using var rig = new Cia401Rig(Analog(1));
         await rig.StartAsync();
@@ -259,22 +260,19 @@ public class Cia401DeviceAnalogInputTests
 
         await rig.StopAsync();
         await rig.DrainEmcyAsync();
-        rig.Count(Cia401Rig.Emcy).Should().Be(1, "no EMCY in Stopped (CiA 301 v4.2.0 Table 37): the error reset is held");
+        rig.Count(Cia401Rig.Emcy).Should().Be(1);
 
         await rig.StartAsync();
-        await rig.WaitForCountAsync(Cia401Rig.Emcy, 3);
+        await rig.WaitForCountAsync(Cia401Rig.Emcy, 2);
         await rig.DrainEmcyAsync();
 
-        // The held reset leaves with Stopped, before the device is told of Operational and raises
-        // the warning anew: the master ends on the warning, which is what holds.
-        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(3);
-        rig.Payloads(Cia401Rig.Emcy)[1].Should().Equal(ErrorResetEmcy);
-        rig.Payloads(Cia401Rig.Emcy)[2].Should().Equal(WarningEmcy);
-        rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x01u);
+        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(2, "no error reset was held in Stopped: only the next warning");
+        rig.Payloads(Cia401Rig.Emcy)[1].Should().Equal(WarningEmcy);
+        rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x00u);
     }
 
     [Fact]
-    public async Task Reset_Communication_Ends_The_Warning_Without_An_Emcy_And_The_Next_Entry_Raises_It_Again()
+    public async Task After_Reset_Communication_The_Next_Entry_Sends_The_Warning_Again()
     {
         using var rig = new Cia401Rig(Analog(1));
         await rig.StartAsync();
@@ -283,7 +281,7 @@ public class Cia401DeviceAnalogInputTests
         await rig.ResetAsync(NmtCommand.ResetCommunication);
         await rig.DrainEmcyAsync();
 
-        rig.Count(Cia401Rig.Emcy).Should().Be(1, "a reset ends a profile error at the node without an EMCY");
+        rig.Count(Cia401Rig.Emcy).Should().Be(1, "a reset sends no EMCY of the device");
         rig.Node.State.Should().Be(NmtState.PreOperational);
         (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0, "6423h is still FALSE");
 
@@ -305,7 +303,7 @@ public class Cia401DeviceAnalogInputTests
     }
 
     [Fact]
-    public async Task Reset_Node_Ends_The_Warning_Without_An_Emcy()
+    public async Task After_Reset_Node_The_Next_Entry_Sends_The_Warning_Again()
     {
         using var rig = new Cia401Rig(Analog(1));
         await rig.StartAsync();
@@ -314,7 +312,7 @@ public class Cia401DeviceAnalogInputTests
         await rig.ResetAsync(NmtCommand.ResetNode);
         await rig.DrainEmcyAsync();
 
-        rig.Count(Cia401Rig.Emcy).Should().Be(1, "a reset ends a profile error without an EMCY");
+        rig.Count(Cia401Rig.Emcy).Should().Be(1, "a reset sends no EMCY of the device");
         rig.Od.ReadUnsigned(0x1001, 0x00).Should().Be(0x00u);
 
         await rig.StartAsync();

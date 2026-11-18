@@ -8,7 +8,8 @@ namespace CanKit.Pro.CANopen.Cia401;
 internal sealed partial class Cia401Device
 {
     /// <summary>Error code <c>0080h</c>, "Warning: Analog inputs disabled" (CiA 401-1 §5.3, §5.4
-    /// Table 1). An error code, not an object index.</summary>
+    /// Table 1), of the class "error reset or no error" (CiA 301 v4.2.0 §7.2.7.1, Table 25). An
+    /// error code, not an object index.</summary>
     private const ushort AnalogInputsDisabledWarning = 0x0080;
 
     /// <summary>The channels one sub-index of <c>6422h</c>, an UNSIGNED32 "interrupt source bank",
@@ -120,14 +121,20 @@ internal sealed partial class Cia401Device
     /// Operational, and on every NMT reset.
     /// </para>
     /// <para>
-    /// <b>The warning of §5.3.</b> When the node enters Operational with <c>6423h</c> FALSE, the
-    /// device raises error <c>0080h</c> (§5.4 Table 1) with no register bit of its own; the node sets
-    /// the generic bit for every active error, so the EMCY carries <c>01h</c> in its error register
-    /// byte, and the node's NMT state is untouched, as §5.3 demands. §5.3 ties the warning to the
-    /// transition, so writing FALSE while Operational raises nothing. The norm does not say when it
-    /// ends; the device ends it, with the error reset <c>0000h</c> (CiA 301 v4.2.0 §7.2.7.1), when
-    /// <c>6423h</c> is written TRUE or the node leaves Operational, and raises it again on the next
-    /// entry with <c>6423h</c> FALSE. A reset ends it without an EMCY, as it ends every error.
+    /// <b>The warning of §5.3.</b> Each time the node enters Operational with <c>6423h</c> FALSE,
+    /// the device sends the EMCY <c>0080h</c> (§5.4 Table 1), and the node's NMT state is
+    /// untouched, as §5.3 demands. The code is of the class "error reset or no error" (CiA 301
+    /// v4.2.0 §7.2.7.1, Table 25), so the warning is sent as what it is
+    /// (<see cref="ICanOpenApplicationHost.SendWarning"/>), not raised as an error: it sets no bit in
+    /// <c>1001h</c>, its frame carries the register as it is (<c>00h</c> on a node without an
+    /// error), and there is nothing to end, neither when <c>6423h</c> is written TRUE nor when the
+    /// node leaves Operational (#556). §5.3 ties the warning to the transition, so writing FALSE
+    /// while Operational sends nothing. One case sends no warning: on a node with several
+    /// applications, one told of the change before this device can stop the node inside the same
+    /// round of notifications, so the device is told of Pre-operational to Operational while the node
+    /// is Stopped already; a warning sent in Stopped is dropped
+    /// (<see cref="ICanOpenApplicationHost.SendWarning"/>), and the device's request for its TPDOs
+    /// does nothing there either.
     /// </para>
     /// <para>
     /// <b>Entering Operational</b> sends every TPDO of transmission type 255 that maps an entry of
@@ -315,9 +322,9 @@ internal sealed partial class Cia401Device
         for (int c = 1; c <= block.Channels; c++) block.LastCommunicated[c - 1] = ReadAnalogValue(host, block, (byte)c);
     }
 
-    /// <summary>A write to <c>6423h</c> clears <c>6422h</c>; TRUE ends the warning of §5.3, and
-    /// FALSE to TRUE takes the current values as the last communicated ones. FALSE raises nothing
-    /// (§5.3 names the transition into Operational). The limits, deltas and the selection are read
+    /// <summary>A write to <c>6423h</c> clears <c>6422h</c>, and FALSE to TRUE takes the current
+    /// values as the last communicated ones. Neither value sends a warning (§5.3 names the transition
+    /// into Operational), and TRUE has none to end. The limits, deltas and the selection are read
     /// when a value changes and need nothing here. Actor loop.</summary>
     private void AnalogInputsWritten(ICanOpenApplicationHost host, CanOpenObjectAddress entry)
     {
@@ -328,13 +335,12 @@ internal sealed partial class Cia401Device
         bool enabled = block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) != 0;
         if (enabled && !block.GlobalInterruptEnableSeen) TakeCurrentAsLastCommunicated(host, block);
         block.GlobalInterruptEnableSeen = enabled;
-        if (enabled) host.ClearError(AnalogInputsDisabledWarning);
     }
 
     /// <summary>Entering Operational: the interrupt state starts afresh (the last communicated
     /// values are the current ones, <c>6422h</c> is cleared, before the request of §6.1 that
     /// <see cref="OnNmtStateChanged"/> makes next), and with <c>6423h</c> FALSE the warning of §5.3
-    /// is raised. Actor loop.</summary>
+    /// is sent, at this entry as at every other. Actor loop.</summary>
     private void AnalogInputsEnterOperational(ICanOpenApplicationHost host)
     {
         var block = _analogInputs;
@@ -342,15 +348,7 @@ internal sealed partial class Cia401Device
 
         TakeCurrentAsLastCommunicated(host, block);
         ClearInterruptSource(host, block);
-        if (block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) == 0) host.RaiseError(AnalogInputsDisabledWarning, 0);
-    }
-
-    /// <summary>Leaving Operational ends the warning of §5.3; in Initialisation (a reset) the node
-    /// has ended it already, without an EMCY. Actor loop.</summary>
-    private void AnalogInputsLeaveOperational(ICanOpenApplicationHost host)
-    {
-        if (_analogInputs is null) return;
-        host.ClearError(AnalogInputsDisabledWarning);
+        if (block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) == 0) host.SendWarning(AnalogInputsDisabledWarning);
     }
 
     /// <summary>An NMT reset starts the interrupt state afresh. Reset Node first rewrites

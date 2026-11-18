@@ -169,8 +169,6 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// <item><description>"By more than" means strictly greater.</description></item>
 /// <item><description>The last communicated value is reset at an interrupt, on entering
 /// Operational, on every reset, and when <c>6423h</c> goes from FALSE to TRUE.</description></item>
-/// <item><description>The warning of §5.3 ends when <c>6423h</c> is written TRUE or the node
-/// leaves Operational. The norm does not say when it ends.</description></item>
 /// </list>
 /// </description></item>
 /// <item><description><b>Analog outputs</b> (<see cref="ReadAnalogOutput"/>):
@@ -442,9 +440,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).
     /// Entering Operational sends every TPDO of transmission type <c>FFh</c> (§6.1) that maps an
     /// entry of the device: the analog inputs first start their interrupt state afresh
-    /// (<c>6422h</c> cleared) and raise the warning of §5.3 when <c>6423h</c> is FALSE, which leaving
-    /// Operational ends (see <see cref="SetAnalogInput"/>); then the device asks for every entry it
-    /// owns, in one request, whatever the interrupt masks and the global interrupt enables say.
+    /// (<c>6422h</c> cleared) and send the warning of §5.3 when <c>6423h</c> is FALSE (see
+    /// <see cref="SetAnalogInput"/>); then the device asks for every entry it owns, in one request,
+    /// whatever the interrupt masks and the global interrupt enables say.
     /// Leaving Initialisation with a device failure active asks the node for the state
     /// <c>1029h:01</c> names (§6.2.4; see <see cref="ReportDeviceFailure"/>). Actor loop.</summary>
     /// <remarks>
@@ -481,10 +479,6 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         {
             AnalogInputsEnterOperational(host);
             RequestTransmission(host, _ownedEntries);
-        }
-        else if (previous == NmtState.Operational)
-        {
-            AnalogInputsLeaveOperational(host);
         }
         RaiseOutputsChanged();
     }
