@@ -47,8 +47,13 @@ internal interface ICanOpenApplication
     /// <summary>The name that error messages use for this application.</summary>
     string Name { get; }
 
-    /// <summary>The object indices the application owns, within <c>2000h</c> to <c>FFFFh</c>. The
-    /// ranges of one node's applications must not overlap. Read when the node opens, once.</summary>
+    /// <summary>The object indices the application owns, within <c>2000h</c> to <c>BFFFh</c>: the
+    /// manufacturer-specific area, the standardized profile areas of the eight logical devices, and
+    /// the standardized network and system variable areas (CiA 301 v4.2.0 §7.4.1, Table 41). Below
+    /// lie the node's own areas, above it <c>C000h</c> to <c>FFFFh</c> are reserved; a range that
+    /// reaches either, by one index included, fails the open with an <see cref="System.ArgumentException"/>
+    /// for <c>options</c>. The ranges of one node's applications must not overlap. Read when the node
+    /// opens, once.</summary>
     IReadOnlyList<CanOpenIndexRange> ClaimedRanges { get; }
 
     /// <summary>What the application needs from the node. Read when the node opens, once.</summary>

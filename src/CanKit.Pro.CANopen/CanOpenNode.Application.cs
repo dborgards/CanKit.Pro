@@ -22,6 +22,10 @@ internal sealed partial class CanOpenNode
     // reserved areas, which belong to the node.
     private const ushort FirstClaimableIndex = 0x2000;
 
+    // The highest index an application may claim, the last of the standardized system variable area:
+    // C000h to FFFFh are reserved (CiA 301 v4.2.0 §7.4.1, Table 41), #555.
+    private const ushort LastClaimableIndex = 0xBFFF;
+
     // Bit 6 of 1001h: reserved, always 0b (CiA 301 v4.2.0 §7.5.2.2, Table 54). A profile may not set it.
     private const byte ReservedErrorRegisterBit = 0x40;
 
@@ -141,6 +145,11 @@ internal sealed partial class CanOpenNode
             {
                 throw OptionsError($"Application '{application.Name}' claims {range}, which reaches below 0x{FirstClaimableIndex:X4}: " +
                     "the communication profile and the reserved areas belong to the node.");
+            }
+            if (range.Last > LastClaimableIndex)
+            {
+                throw OptionsError($"Application '{application.Name}' claims {range}, which reaches above 0x{LastClaimableIndex:X4}: " +
+                    "C000h to FFFFh are reserved (CiA 301 v4.2.0 §7.4.1, Table 41).");
             }
             for (int other = 0; other < r; other++)
             {
