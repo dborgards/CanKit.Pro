@@ -607,6 +607,7 @@ public class Cia401DeviceDigitalInputTests
 
         (await rig.ReadU8Async(0x6000, 0x09)).Should().Be(0x80);
         rig.Count(Cia401Rig.Tpdo1).Should().Be(1, "no default PDO maps group 9 (CiA 401-1 §6.1)");
+        await rig.FlushBackgroundReportsAsync(); // the reports are delivered on the thread pool
         lock (failures) failures.Should().BeEmpty("entering Operational and the change raised nothing");
     }
 

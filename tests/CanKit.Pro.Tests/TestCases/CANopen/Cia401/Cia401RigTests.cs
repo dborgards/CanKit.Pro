@@ -1,3 +1,5 @@
+using System;
+using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
@@ -75,5 +77,28 @@ public class Cia401RigTests
 
         rig.Count(Cia401Rig.Tpdo1).Should().Be(2, "once the barrier opens, the frame it waited for has been seen");
         rig.Payloads(Cia401Rig.Tpdo1)[1].Should().Equal(0x01);
+    }
+
+    [Fact]
+    public async Task Flushing_The_Background_Reports_Waits_For_A_Report_Still_Being_Delivered()
+    {
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalOutputs = 8 });
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        rig.Device.OutputsChanged += (_, _) => throw new InvalidOperationException("handler");
+        rig.Node.BackgroundExceptionOccurred += (_, _) =>
+        {
+            entered.Set();
+            release.Wait();
+        };
+
+        rig.Od.WriteRaw(0x6200, 0x01, new byte[] { 0x01 }); // the handler throws: one report
+        rig.Settle();
+        entered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue("the report reaches its subscriber");
+        var flush = rig.FlushBackgroundReportsAsync();
+
+        flush.IsCompleted.Should().BeFalse("the subscriber still holds the report the flush has to wait for");
+        release.Set();
+        await flush;
     }
 }

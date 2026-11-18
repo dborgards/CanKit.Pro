@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Cia401;
 using CanKit.Pro.CANopen.Nmt;
@@ -252,7 +254,9 @@ internal sealed class Cia401Rig : IDisposable
 
     internal void Transmit(uint cobId, byte[] data) => _masterBus.Transmit(CanFrame.Classic((int)cobId, data));
 
-    private static async Task WaitUntilAsync(Func<bool> condition, string what)
+    /// <summary>Waits until <paramref name="condition"/> holds. A hang guard bounds the wait; it
+    /// asserts nothing about time.</summary>
+    internal static async Task WaitUntilAsync(Func<bool> condition, string what)
     {
         var deadline = DateTime.UtcNow + HangGuard;
         while (!condition())
@@ -260,6 +264,26 @@ internal sealed class Cia401Rig : IDisposable
             if (DateTime.UtcNow > deadline) throw new TimeoutException($"Timed out waiting for {what}.");
             await Task.Delay(2);
         }
+    }
+
+    /// <summary>
+    /// Settles the device node's actor, then waits until every
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/> report made so far has been delivered.
+    /// The node hands its reports to a dispatcher that delivers them on the thread pool, one at a
+    /// time and in the order made (<see cref="BackgroundExceptionDispatcher"/>); a marker queued
+    /// behind them runs after the last. So afterwards a count of reports is exact, "none" included,
+    /// for whatever the actor did before the call.
+    /// </summary>
+    internal async Task FlushBackgroundReportsAsync()
+    {
+        Settle();
+        var field = typeof(CanOpenNode).GetField("_backgroundReports", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("CanOpenNode has no _backgroundReports field any more.");
+        var dispatcher = (BackgroundExceptionDispatcher)field.GetValue(Node)!;
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        dispatcher.Post(() => delivered.TrySetResult(true));
+        if (await Task.WhenAny(delivered.Task, Task.Delay(HangGuard)) != delivered.Task)
+            throw new TimeoutException("Timed out waiting for the background reports to be delivered.");
     }
 
     public void Dispose()

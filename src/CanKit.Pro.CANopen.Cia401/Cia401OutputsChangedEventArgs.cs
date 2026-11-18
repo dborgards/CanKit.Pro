@@ -26,7 +26,8 @@ internal sealed class Cia401OutputsChangedEventArgs : EventArgs
     public int Channel { get; }
 
     /// <summary>The levels at the terminals of every group after the change, group 1 first, bit 0
-    /// being the lowest channel of the group (CiA 401-1 §7.2.1.3). A copy: it does not change
-    /// afterwards.</summary>
+    /// being the lowest channel of the group (CiA 401-1 §7.2.1.3). The set of levels the device
+    /// published for that change, which never changes afterwards: a later change publishes a new
+    /// one.</summary>
     public IReadOnlyList<byte> Levels { get; }
 }

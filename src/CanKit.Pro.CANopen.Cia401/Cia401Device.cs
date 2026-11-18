@@ -193,6 +193,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
             DigitalInputsWritten(host, entry, send);
             DigitalOutputsWritten(host, entry);
         }
+        RefreshDigitalOutputs(host);
         RequestTransmission(host, send);
         RaiseOutputsChanged();
     }
@@ -215,18 +216,16 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         RaiseOutputsChanged();
     }
 
-    /// <summary>A reset ends the communication failure and Stopped as causes of the error state
-    /// (the node has told both by now); a device failure the application reported outlasts it. Reset
-    /// Node, the application reset, also drops the held output values for what <c>6200h</c> holds
-    /// after it (CiA 401-1 §6.2.5 NOTE); Reset Communication resets no application and leaves the
-    /// outputs as they are. The physical input levels the application set are kept. Actor
-    /// loop.</summary>
+    /// <summary>A reset ends the communication failure and Stopped as causes of the error state:
+    /// the node has told both by now (Initializing, and the end of the failure before this call), and
+    /// the device keeps the levels it was told rather than overriding them here; a device failure the
+    /// application reported outlasts the reset. Reset Node, the application reset, also drops the
+    /// held output values for what <c>6200h</c> holds after it (CiA 401-1 §6.2.5 NOTE); Reset
+    /// Communication resets no application and leaves the outputs as they are. The physical input
+    /// levels the application set are kept. Actor loop.</summary>
     public void OnReset(NmtCommand command)
     {
         var host = AttachedHost();
-        _communicationFailure = false;
-        _stopped = false;
-        UpdateErrorState(host);
         if (command == NmtCommand.ResetNode) DigitalOutputsReset(host);
         RaiseOutputsChanged();
     }

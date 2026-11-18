@@ -77,12 +77,20 @@ internal sealed partial class Cia401Device
     /// </para>
     /// <para>
     /// When it begins, the device asks the node for the NMT state <c>1029h:01</c> names (§5.2,
-    /// §6.2.4): 00h Pre-operational, only when the node is Operational; 01h no change; 02h Stopped.
-    /// A node without <c>1029h</c> behaves as for 00h (§6.2.4 NOTE); the reserved values change
-    /// nothing, as the node treats them for a communication failure. The communication failures
-    /// themselves are the node's to act on, and the device asks nothing for them. That is all: a
-    /// master that starts the node while the failure lasts is not refused, and the outputs stay in
-    /// the error state; and when the failure ends, the node stays where it is.
+    /// §6.2.4): 00h Pre-operational, only when the node is Operational; 01h no change; 02h Stopped,
+    /// from whatever state the node is in, Pre-operational included, since §6.2.4 makes 02h
+    /// unconditional and only 00h conditional on Operational. The node itself acts on its own
+    /// communication errors only from Operational, for 02h too; for a device failure the device
+    /// follows §6.2.4 instead. A node without <c>1029h</c> behaves as for 00h (§6.2.4 NOTE); the
+    /// reserved values change nothing, as the node treats them for a communication failure. The
+    /// communication failures themselves are the node's to act on, and the device asks nothing for
+    /// them.
+    /// </para>
+    /// <para>
+    /// That is all. A master that starts the node while the failure lasts is not refused, and the
+    /// outputs stay in the error state: the node redirects a Start for its own communication failure,
+    /// but the application seam offers a profile no way to take part in that, which is recorded for
+    /// the seam's publication review (issue #548). When the failure ends, the node stays where it is.
     /// </para>
     /// </remarks>
     /// <exception cref="System.InvalidOperationException">No node has attached the device yet.</exception>

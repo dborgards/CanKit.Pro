@@ -31,12 +31,25 @@ public class Cia401DeviceDigitalOutputTests
         private readonly object _gate = new();
         private readonly List<(Cia401OutputsChangedEventArgs Args, bool OnActor)> _seen = new();
 
+        private readonly List<byte[]> _published = new();
+
         internal Recorder(Cia401Rig rig)
         {
             rig.Device.OutputsChanged += (_, e) =>
             {
                 lock (_gate) _seen.Add((e, rig.Node.ActorForTests.IsOnCurrentActor));
             };
+            rig.Device.LevelsPublishedForTests += levels =>
+            {
+                lock (_gate) _published.Add(levels.ToArray());
+            };
+        }
+
+        /// <summary>Every set of terminal levels the device published, in order: what a reader on
+        /// another thread could have seen.</summary>
+        internal IReadOnlyList<byte[]> Published
+        {
+            get { lock (_gate) return _published.ToList(); }
         }
 
         internal IReadOnlyList<Cia401OutputsChangedEventArgs> Events
@@ -167,6 +180,88 @@ public class Cia401DeviceDigitalOutputTests
         rig.Settle();
 
         recorder.Events.Should().ContainSingle("only the first write changed a terminal");
+    }
+
+    [Fact] // review: one OnEntriesWritten, one set of levels
+    public async Task Writes_Told_In_One_Callback_Publish_Only_The_Final_Levels()
+    {
+        using var rig = new Cia401Rig(Outputs(12));
+        var recorder = new Recorder(rig);
+
+        // Three writes in one actor job are told in one OnEntriesWritten, sorted: 6200h:01, 6200h:02,
+        // 6202h:02. Refreshed after each, group 2 would show its old held value under its new
+        // polarity (0Fh) before showing the final 00h.
+        await rig.Node.PostToActorAsync(() =>
+        {
+            rig.Od.WriteRaw(0x6200, 0x01, new byte[] { 0x01 });
+            rig.Od.WriteRaw(0x6200, 0x02, new byte[] { 0xFF });
+            rig.Od.WriteRaw(0x6202, 0x02, new byte[] { 0xFF });
+        });
+        rig.Settle();
+
+        recorder.Published.Should().ContainSingle("no intermediate level is published")
+            .Which.Should().Equal(0x01, 0x00);
+        var raised = recorder.Events.Should().ContainSingle().Which;
+        raised.Group.Should().Be(1);
+        raised.Channel.Should().Be(1);
+        raised.Levels.Should().Equal(0x01, 0x00);
+    }
+
+    [Fact]
+    public async Task Writes_That_Leave_Every_Level_Where_It_Was_Publish_And_Raise_Nothing()
+    {
+        using var rig = new Cia401Rig(Outputs(12));
+        var recorder = new Recorder(rig);
+
+        await rig.Node.PostToActorAsync(() =>
+        {
+            rig.Od.WriteRaw(0x6200, 0x01, new byte[] { 0x00 });
+            rig.Od.WriteRaw(0x6200, 0x02, new byte[] { 0xFF });
+            rig.Od.WriteRaw(0x6202, 0x02, new byte[] { 0xFF });
+        });
+        rig.Settle();
+
+        rig.Device.ReadDigitalOutputs(2).Should().Be(0x00, "held FFh inverted by 6202h FFh");
+        recorder.Published.Should().BeEmpty("the levels after the callback are the levels before it");
+        recorder.Events.Should().BeEmpty();
+    }
+
+    [Fact] // review: a handler that changes the outputs inline
+    public async Task Every_Subscriber_Sees_The_Changes_In_Order_When_A_Handler_Changes_The_Outputs()
+    {
+        using var rig = new Cia401Rig(Outputs(8));
+        await rig.WriteU8Async(0x1029, 0x01, 0x01);
+        var first = new List<byte>();
+        var second = new List<byte>();
+        rig.Device.OutputsChanged += (_, e) =>
+        {
+            first.Add(e.Levels[0]);
+            if (first.Count == 1) rig.Device.ReportDeviceFailure(true); // inline: the device's own callback
+        };
+        rig.Device.OutputsChanged += (_, e) => second.Add(e.Levels[0]);
+        await rig.StartAsync();
+
+        await rig.SendRpdo1Async(0xFF);
+
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
+        first.Should().Equal(new byte[] { 0xFF, 0x00 }, "the write, then the error state");
+        second.Should().Equal(new byte[] { 0xFF, 0x00 }, "the same events in the same order, ending on the latest levels");
+    }
+
+    [Fact]
+    public async Task A_Throwing_Subscriber_Keeps_No_Other_Subscriber_From_The_Event()
+    {
+        using var rig = new Cia401Rig(Outputs(8));
+        var seen = new List<byte>();
+        rig.Device.OutputsChanged += (_, _) => throw new InvalidOperationException("first");
+        rig.Device.OutputsChanged += (_, e) => seen.Add(e.Levels[0]);
+        await rig.StartAsync();
+
+        await rig.SendRpdo1Async(0x01);
+        await rig.SendRpdo1Async(0x03);
+
+        seen.Should().Equal(new byte[] { 0x01, 0x03 });
     }
 
     [Fact]
@@ -337,6 +432,24 @@ public class Cia401DeviceDigitalOutputTests
         rig.Device.OutputsInErrorState.Should().BeTrue();
     }
 
+    [Fact] // Review Focus 2 through Stop and Start
+    public async Task An_Output_The_Master_Never_Wrote_Stays_At_Its_Error_Value_When_The_Node_Is_Started_Again()
+    {
+        using var rig = new Cia401Rig(Outputs(8));
+        var recorder = new Recorder(rig);
+        await rig.WriteU8Async(0x6207, 0x01, 0xFF);
+        await rig.StartAsync();
+        await rig.StopAsync();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0xFF);
+
+        await rig.StartAsync();
+        rig.Settle();
+
+        rig.Device.OutputsInErrorState.Should().BeFalse("Stopped ended");
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0xFF, "6200h was never written: nothing tells the output to move");
+        recorder.Events.Should().ContainSingle("only entering Stopped moved the outputs");
+    }
+
     [Fact]
     public async Task A_Device_Failure_With_1029h_1_Leaves_The_Node_Operational()
     {
@@ -359,6 +472,19 @@ public class Cia401DeviceDigitalOutputTests
         using var rig = new Cia401Rig(Outputs(8));
         await rig.WriteU8Async(0x1029, 0x01, 0x02);
         await rig.StartAsync();
+
+        rig.Device.ReportDeviceFailure(true);
+        await rig.WaitForStateAsync(NmtState.Stopped);
+        rig.Settle();
+
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+    }
+
+    [Fact] // review ruling: 02h is unconditional (§6.2.4), unlike the node's own reaction
+    public async Task A_Device_Failure_With_1029h_2_Stops_The_Node_From_Pre_Operational()
+    {
+        using var rig = new Cia401Rig(Outputs(8));
+        await rig.WriteU8Async(0x1029, 0x01, 0x02);
 
         rig.Device.ReportDeviceFailure(true);
         await rig.WaitForStateAsync(NmtState.Stopped);
@@ -532,6 +658,26 @@ public class Cia401DeviceDigitalOutputTests
         rig.Device.ReadDigitalOutputs(1).Should().Be(0xFF, "6200h was never written: nothing tells the output to move");
     }
 
+    [Fact] // review minor 6
+    public async Task Reset_Node_During_A_Communication_Failure_Returns_The_Outputs_To_Their_Defaults_Once()
+    {
+        using var rig = new Cia401Rig(Outputs(8));
+        var recorder = new Recorder(rig);
+        await rig.WriteU8Async(0x6207, 0x01, 0xFF);
+        await rig.StartAsync();
+        HeartbeatTimeout(rig);
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0xFF);
+        int before = recorder.Events.Count;
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        rig.Device.OutputsInErrorState.Should().BeFalse("the reset ended the communication failure");
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00, "6200h and 6207h are back at their defaults");
+        recorder.Events.Count.Should().Be(before + 1, "the reset moved the outputs once");
+        recorder.Events[before].Levels.Should().Equal(0x00);
+    }
+
     [Fact] // ruling 5: a device failure is the application's statement about the hardware
     public async Task A_Device_Failure_Outlasts_Reset_Node_Until_The_Application_Ends_It()
     {
@@ -573,6 +719,9 @@ public class Cia401DeviceDigitalOutputTests
 
         calls.Should().Be(2);
         rig.Device.ReadDigitalOutputs(1).Should().Be(0x03);
+        // The node delivers its reports on the thread pool: wait for both, then for anything behind them.
+        await Cia401Rig.WaitUntilAsync(() => { lock (failures) return failures.Count >= 2; }, "two background reports");
+        await rig.FlushBackgroundReportsAsync();
         lock (failures) failures.Should().HaveCount(2).And.OnlyContain(ex => ex.Message == "handler");
         rig.Node.State.Should().Be(NmtState.Operational);
     }

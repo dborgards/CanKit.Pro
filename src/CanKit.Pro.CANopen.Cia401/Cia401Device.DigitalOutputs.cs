@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using CanKit.Pro.CANopen.Application;
 
@@ -16,29 +18,49 @@ internal sealed partial class Cia401Device
     // change waits to be reported. Actor loop.
     private byte[]? _outputsBefore;
 
+    // True while OutputsChanged is being raised: a change a handler makes then is left pending, and
+    // the raise that is running reports it once every subscriber has had the event before it.
+    // Actor loop.
+    private bool _raisingOutputsChanged;
+
     /// <summary>The level at the terminal of a digital output changed. Raised on the node's actor
     /// loop, at the end of the callback that changed it, once the device's state is consistent, and
     /// only when a level actually changed: a write of the value already there raises nothing.</summary>
     /// <remarks>
     /// <para>
-    /// One event per callback, however many groups changed in it: <see cref="Cia401OutputsChangedEventArgs.Group"/>
-    /// and <see cref="Cia401OutputsChangedEventArgs.Channel"/> name the lowest that changed, and
-    /// <see cref="Cia401OutputsChangedEventArgs.Levels"/> holds every group, compared with the levels
-    /// before the callback.
+    /// One event per callback, however many entries and groups changed in it:
+    /// <see cref="Cia401OutputsChangedEventArgs.Group"/> and <see cref="Cia401OutputsChangedEventArgs.Channel"/>
+    /// name the lowest that changed, and <see cref="Cia401OutputsChangedEventArgs.Levels"/> holds every
+    /// group. The device works out a callback's levels before it publishes any: the levels after the
+    /// callback are compared with those before it, a callback that leaves every level where it was
+    /// publishes and raises nothing, and no level a callback would pass through on the way is ever
+    /// visible to <see cref="ReadDigitalOutputs"/>.
     /// </para>
     /// <para>
     /// The handler runs inside a callback of the device, so the device's methods called from it apply
     /// at once (<see cref="ICanOpenApplicationHost.Post"/>): a handler that loops an output back to an
     /// input with <see cref="SetDigitalInputs"/> sees it in <see cref="ReadDigitalInputs"/> before it
-    /// returns. It must not block: it holds up the node. What it throws is reported on
-    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, as anything thrown out of an
-    /// application's callback is, and the device carries on; when the event is raised inside a
-    /// <see cref="ReportDeviceFailure"/> that was itself called from a callback of the device, the
-    /// exception reaches that caller instead. Either way the device's state is complete before the
-    /// handler runs.
+    /// returns, and one that calls <see cref="ReportDeviceFailure"/> changes the outputs there and
+    /// then. Such a change is not raised inside the running event: every subscriber is given the
+    /// event in hand first, and then the change, as an event of its own, so each subscriber sees the
+    /// changes in the order they happened and ends on the latest levels. It must not block: it holds
+    /// up the node.
+    /// </para>
+    /// <para>
+    /// Each subscriber is called on its own, so one that throws keeps no other from the event. What
+    /// they throw is reported on <see cref="ICanOpenNode.BackgroundExceptionOccurred"/> once every
+    /// subscriber has been called, as anything thrown out of an application's callback is, and the
+    /// device carries on (several exceptions as one <see cref="AggregateException"/>); when the event
+    /// is raised inside a <see cref="ReportDeviceFailure"/> that was itself called from a callback of
+    /// the device, the exception reaches that caller instead. Either way the device's state is
+    /// complete before the first subscriber runs.
     /// </para>
     /// </remarks>
     public event EventHandler<Cia401OutputsChangedEventArgs>? OutputsChanged;
+
+    /// <summary>A seam for tests: every set of terminal levels the device publishes after Attach,
+    /// at the moment it becomes visible to <see cref="ReadDigitalOutputs"/>. Actor loop.</summary>
+    internal event Action<IReadOnlyList<byte>>? LevelsPublishedForTests;
 
     /// <summary>The levels at the terminals of the eight outputs of one group, bit 0 being the lowest
     /// channel of the group (CiA 401-1 §7.2.1.3). Any thread.</summary>
@@ -57,7 +79,12 @@ internal sealed partial class Cia401Device
     /// <item><description>A write to <c>6200h</c>, by RPDO, SDO or locally, is stored there, and
     /// replaces the device's held logical value in the bits <c>6208h</c> has set; the others keep
     /// theirs (§8.3.5: the received value is neglected and the old output value kept). The mask is
-    /// read when the write is applied.</description></item>
+    /// read when the write is applied. A local write the application makes from inside a callback of
+    /// the device (an <see cref="OutputsChanged"/> handler, say) is the device's own write under the
+    /// node's rule, is not reported back to it (<see cref="ICanOpenApplication.OnEntriesWritten"/>)
+    /// and so is stored and never applied, to <c>6200h</c> and to <c>6202h</c>, <c>6206h</c> and
+    /// <c>6207h</c> alike; the device has no method that sets an output instead, the outputs being
+    /// the master's to write. Make such a write from outside the device's callbacks.</description></item>
     /// <item><description>In the error state (<see cref="OutputsInErrorState"/>) the held value is
     /// the error switch's: each bit with <c>6206h</c> = 1 takes the bit of <c>6207h</c>, each bit with
     /// <c>6206h</c> = 0 keeps the value it had (§8.3.3, §8.3.4). Writes to <c>6200h</c> are stored
@@ -124,13 +151,15 @@ internal sealed partial class Cia401Device
     }
 
     /// <summary>
-    /// A written entry of the output block. <c>6200h</c> takes the received value into the held one
-    /// through the filter mask, outside the error state only (see <see cref="OutputsInErrorState"/>).
-    /// <c>6206h</c> and <c>6207h</c> written in the error state apply at once, the error switch of
-    /// Figure 5 (§7.2.3) being live while the failure lasts; <c>6202h</c> applies at once in every
-    /// state; <c>6208h</c> is read when a write is applied and needs nothing. Coalesced
-    /// (<see cref="ICanOpenApplication.OnEntriesWritten"/>): what <c>6200h</c> holds now is applied,
-    /// not each value it held in between. Actor loop.
+    /// A written entry of the output block, into the held values only: the caller refreshes the
+    /// levels once for all the entries of its callback (<see cref="RefreshDigitalOutputs"/>), so that
+    /// no level computed from half of them is published. <c>6200h</c> takes the received value into
+    /// the held one through the filter mask, outside the error state only (see
+    /// <see cref="OutputsInErrorState"/>). <c>6206h</c> and <c>6207h</c> written in the error state
+    /// apply at once, the error switch of Figure 5 (§7.2.3) being live while the failure lasts;
+    /// <c>6202h</c> is read by the refresh, in every state; <c>6208h</c> is read when a write is
+    /// applied and needs nothing. Coalesced (<see cref="ICanOpenApplication.OnEntriesWritten"/>):
+    /// what <c>6200h</c> holds now is applied, not each value it held in between. Actor loop.
     /// </summary>
     private void DigitalOutputsWritten(ICanOpenApplicationHost host, CanOpenObjectAddress entry)
     {
@@ -149,12 +178,6 @@ internal sealed partial class Cia401Device
             if (!_inErrorState) return;
             block.ApplyErrorValue(od, g);
         }
-        else if (entry.Index != block.Polarity)
-        {
-            return;
-        }
-
-        RefreshDigitalOutputs(host, block);
     }
 
     /// <summary>Entering the error state: every bit with <c>6206h</c> = 1 takes <c>6207h</c>
@@ -164,7 +187,7 @@ internal sealed partial class Cia401Device
         var block = _digitalOutputs;
         if (block is null) return;
         for (int g = 0; g < block.Groups; g++) block.ApplyErrorValue(host.ObjectDictionary, g);
-        RefreshDigitalOutputs(host, block);
+        RefreshDigitalOutputs(host);
     }
 
     /// <summary>Reset Node drops the held values, which are volatile: they are taken from
@@ -184,19 +207,23 @@ internal sealed partial class Cia401Device
             if (_inErrorState) block.ApplyErrorValue(od, g);
         }
 
-        RefreshDigitalOutputs(host, block);
+        RefreshDigitalOutputs(host);
     }
 
     /// <summary>Brings the terminal levels to the held values XOR <c>6202h</c>, and when that
     /// changed one, remembers the levels before it for <see cref="RaiseOutputsChanged"/>. The one
-    /// place a terminal level changes after Attach. Actor loop.</summary>
-    private void RefreshDigitalOutputs(ICanOpenApplicationHost host, DigitalOutputBlock block)
+    /// place a terminal level changes after Attach; called once the held values of a step are
+    /// complete. Actor loop.</summary>
+    private void RefreshDigitalOutputs(ICanOpenApplicationHost host)
     {
+        var block = _digitalOutputs;
+        if (block is null) return;
         var current = block.Terminal;
         var levels = block.ComputeTerminal(host.ObjectDictionary);
         if (SameLevels(levels, current)) return;
         _outputsBefore ??= current;
         block.Publish(levels);
+        LevelsPublishedForTests?.Invoke(new ReadOnlyCollection<byte>(levels));
     }
 
     private static bool SameLevels(byte[] a, byte[] b)
@@ -209,27 +236,70 @@ internal sealed partial class Cia401Device
         return true;
     }
 
-    /// <summary>Raises <see cref="OutputsChanged"/> for what changed since the running callback first
-    /// changed a level, if anything did. Called last in each callback, so the device's state is
-    /// complete when the handler runs. Actor loop.</summary>
+    /// <summary>
+    /// Raises <see cref="OutputsChanged"/> for what changed since the running callback first changed
+    /// a level, if anything did. Called last in each callback, so the device's state is complete when
+    /// the subscribers run. Called while the event is being raised already (a subscriber changed the
+    /// outputs), it leaves the change pending, and the running raise reports it after the event in
+    /// hand has reached every subscriber, and so on until nothing is pending. Each subscriber is
+    /// called on its own; what they throw is thrown from here once nothing is pending. Actor loop.
+    /// </summary>
     private void RaiseOutputsChanged()
     {
         var block = _digitalOutputs;
-        var before = _outputsBefore;
-        if (block is null || before is null) return;
-        _outputsBefore = null;
+        if (block is null || _raisingOutputsChanged) return;
 
-        var after = block.Terminal;
+        List<Exception>? failures = null;
+        _raisingOutputsChanged = true;
+        try
+        {
+            while (_outputsBefore is { } before)
+            {
+                _outputsBefore = null;
+                var after = block.Terminal;
+                var args = ChangeBetween(before, after);
+                if (args is null || OutputsChanged is not { } handler) continue;
+                foreach (var subscriber in handler.GetInvocationList())
+                {
+                    try
+                    {
+                        ((EventHandler<Cia401OutputsChangedEventArgs>)subscriber)(this, args);
+                    }
+                    // Everything, deliberately: one subscriber's failure must not keep the event from
+                    // the others; it is thrown once they all have it.
+                    catch (Exception ex)
+                    {
+                        (failures ??= new List<Exception>()).Add(ex);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _raisingOutputsChanged = false;
+        }
+
+        if (failures is null) return;
+        if (failures.Count == 1) ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        throw new AggregateException(failures);
+    }
+
+    /// <summary>The event for the change from <paramref name="before"/> to
+    /// <paramref name="after"/>, naming the lowest group and channel that changed; null when none
+    /// did.</summary>
+    private static Cia401OutputsChangedEventArgs? ChangeBetween(byte[] before, byte[] after)
+    {
         for (int g = 0; g < after.Length; g++)
         {
             int changed = before[g] ^ after[g];
             if (changed == 0) continue;
             int bit = 0;
             while ((changed & (1 << bit)) == 0) bit++;
-            OutputsChanged?.Invoke(this, new Cia401OutputsChangedEventArgs(Cia401FunctionBlock.DigitalOutput,
-                g + 1, (g * ChannelsPerGroup) + bit + 1, new ReadOnlyCollection<byte>(after)));
-            return;
+            return new Cia401OutputsChangedEventArgs(Cia401FunctionBlock.DigitalOutput,
+                g + 1, (g * ChannelsPerGroup) + bit + 1, new ReadOnlyCollection<byte>(after));
         }
+
+        return null;
     }
 
     /// <summary>The digital outputs of one device: their indices in its logical device, the held
