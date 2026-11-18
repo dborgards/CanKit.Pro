@@ -347,6 +347,84 @@ public partial class CanOpenApplicationSeamTests
         ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
     }
 
+    [Fact] // #549, review of #561
+    public async Task A_Reset_Drops_A_Profile_Emcy_Held_In_Stopped_And_Queued_Behind_A_Released_One()
+    {
+        // The boot-up of a reset is kept from the wire throughout. Its released EMCY (A) waits on the
+        // chain for it; the master stops the node, the profile raises B, which Stopped holds; the master
+        // lets the node leave Stopped, so B joins the chain behind A; then it resets the node, and only
+        // after that are the boot-ups let go.
+        var app = Profile();
+        int resets = 0;
+        app.WhenReset = _ =>
+        {
+            if (Interlocked.Increment(ref resets) == 1) app.Host!.RaiseError(0x5000, 0x04);
+        };
+        using var rig = new EntryRig(With(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bootUpsMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+        rig.Node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat ? bootUpsMayLeave.Task : Task.CompletedTask;
+        int bootUps = rig.Wire.Count(SlaveHeartbeat);
+
+        rig.Wire.Transmit(0x000, ResetCommand(NmtCommand.ResetNode));
+        await chainWaits.Task.WithTimeoutAsync(ShortTimeout);
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => rig.Node.State == NmtState.Stopped, "Stopped");
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x3200, 0x20));
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await WaitUntilAsync(() => rig.Node.State == NmtState.PreOperational, "Pre-operational");
+        Settle(rig.Node);
+        rig.Wire.Transmit(0x000, ResetCommand(NmtCommand.ResetNode));
+        await WaitUntilAsync(() => Volatile.Read(ref resets) == 2, "the second reset");
+        Settle(rig.Node);
+
+        bootUpsMayLeave.SetResult(true);
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, bootUps + 2);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(0,
+            "the second reset ended both errors before their EMCYs' turn: A was released behind a boot-up, B was held in Stopped");
+        ErrorRegister(rig.Node).Should().Be(0);
+    }
+
+    [Fact] // #561, review
+    public async Task A_Profile_Emcy_Held_In_Stopped_Does_Not_Overtake_A_Pending_Boot_Up()
+    {
+        // The start-up's boot-up is kept from the wire until an EMCY is there or the EMCY chain waits for
+        // the boot-up. Meanwhile the master stops the node, the profile raises an error, which Stopped
+        // holds, and the master lets the node leave Stopped: the held EMCY is released while the boot-up's
+        // send is still pending.
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new RawWire(session, 2);
+        var app = Profile();
+        app.OnAttach = host =>
+        {
+            var node = NodeOf(host);
+            var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat
+                ? WaitUntilAsync(() => chainWaits.Task.IsCompleted || wire.Count(SlaveEmcy) > 0,
+                    "the EMCY on the wire, or the EMCY chain waiting for the boot-up")
+                : Task.CompletedTask;
+        };
+        using var slave = OpenNode(bus, With(app), new ManualTimeSource());
+        Settle(slave);
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => slave.State == NmtState.Stopped, "Stopped");
+        await OnActor(slave, () => app.Host!.RaiseError(0x5000, 0x04));
+        wire.Count(SlaveHeartbeat).Should().Be(0, "the boot-up is still held");
+
+        wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(slave);
+
+        ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
+    }
+
     [Fact] // #549, #561
     public async Task A_Reset_Drops_A_Profiles_Error_Reset_Queued_Behind_An_Emcy_That_Waits_In_Stopped()
     {

@@ -925,6 +925,7 @@ internal sealed partial class CanOpenNode
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
         _pendingEmcy = null;
         _pendingEmcyIsApplications = false;
+        _pendingEmcyIsProfile = false;
         EndCommunicationErrorsForReset();
         // §7.2.8.3.2.1: "The toggle bit in the guarding protocol shall be reset to 0 when the NMT
         // sub-state reset communication is passed."

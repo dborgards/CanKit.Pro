@@ -175,7 +175,8 @@ internal sealed partial class CanOpenNode
 
     // profile: an EMCY of an attached profile, raise or clear. It takes the gated path of the chain
     // (EmitEmcy), so that its turn is decided in the state the node is in then: it waits in Stopped,
-    // and a reset drops it, whatever it waited behind (#549, #561).
+    // and a reset drops it, whatever it waited behind (#549, #561). Held in Stopped, it keeps that
+    // when it is released (_pendingEmcyIsProfile, EmitPendingEmcy).
     private void EmitNodeEmcy(ushort errorCode, byte[]? manufacturerSpecific = null, bool profile = false)
     {
         // The register byte is filled in when the frame is transmitted (EmitEmcy).
@@ -186,11 +187,17 @@ internal sealed partial class CanOpenNode
             // the transition into another NMT state.
             _pendingEmcy = msg;
             _pendingEmcyIsApplications = false;
+            _pendingEmcyIsProfile = profile;
             _heldNodeEmcy = true;
             return;
         }
         _ = EmitEmcy(msg, gate: profile);
     }
+
+    // Whether _pendingEmcy is an EMCY of an attached profile: released, it takes the gated path and
+    // waits for a pending boot-up, as it would have outside Stopped (EmitPendingEmcy). Never set on a
+    // node without applications. Actor loop only.
+    private bool _pendingEmcyIsProfile;
 
     // Whether _pendingEmcy came from SendEmcyAsync: its register is then the application's part,
     // which the node takes when the EMCY is transmitted. Actor loop only.
@@ -208,12 +215,17 @@ internal sealed partial class CanOpenNode
     {
         bool applications = _pendingEmcyIsApplications;
         _pendingEmcyIsApplications = false;
+        bool profile = _pendingEmcyIsProfile;
+        _pendingEmcyIsProfile = false;
         // A held node EMCY that the application's replaced still updates 1001h, ahead of it on
         // the chain: with the EMCY switched off meanwhile, the application's sends nothing and
         // writes nothing, and an error that ended in Stopped would be read on (Codex on #417).
         if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(CommunicationErrorBits);
         _heldNodeEmcy = false;
-        _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
+        // A profile's EMCY keeps the rules of every profile EMCY: behind a boot-up whose send is
+        // still pending, and on the gated path, so that a reset before its turn drops it (#549, #561).
+        if (profile) EmcyChainWaitsForBootUp();
+        _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null, gate: profile);
     }
 
     /// <summary>NMT reset: transitions 5 and 0 of Figure 37 — "After NMT state INITIALISATION the

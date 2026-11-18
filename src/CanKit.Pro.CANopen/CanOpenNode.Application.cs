@@ -660,6 +660,7 @@ internal sealed partial class CanOpenNode
             _heldProfileEmcys?.RemoveAll(held => ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
             return;
         }
+        if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
         EmitNodeEmcy(ErrorResetCode, profile: true);
     }
 

@@ -48,7 +48,8 @@ internal interface ICanOpenApplicationHost
     /// still waiting for its node-id in Initialisation, never while the node is still being built,
     /// and it is dropped when the open fails (#561). Such a deadline has expired when it came due
     /// (<see cref="IDeadline.IsExpired"/>): disposing it while its callback is held does not stop the
-    /// callback. Its EMCYs do not overtake the boot-up (<see cref="RaiseError"/>).
+    /// callback. Its EMCYs, like every EMCY of the application, do not overtake a boot-up whose send
+    /// is still pending (<see cref="RaiseError"/>).
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="onExpired"/> is null.</exception>
@@ -245,9 +246,10 @@ internal interface ICanOpenApplicationHost
     /// shown in <c>1001h</c>, without a frame. In Stopped the EMCY is held, and only the most
     /// recent EMCY the node holds goes out when it leaves Stopped. In Initialisation the EMCY is held
     /// until the boot-up has been ordered, and every one held there goes out behind it in the order
-    /// raised. Such an EMCY is sent once the boot-up's send has completed, and so is one raised in
-    /// Pre-Operational while that send is still pending (by work held behind the start-up job, say);
-    /// when its turn comes and the node has been stopped meanwhile, it waits until the node leaves
+    /// raised. Such an EMCY is sent once the boot-up's send has completed, and so is every other EMCY
+    /// of the application ordered while that send is still pending — raised or cleared in
+    /// Pre-Operational (by work held behind the start-up job, say), or held in Stopped and released
+    /// then; when its turn comes and the node has been stopped meanwhile, it waits until the node leaves
     /// Stopped and goes out then, whatever the options (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY
     /// in Stopped).
     /// </para>
@@ -255,8 +257,10 @@ internal interface ICanOpenApplicationHost
     /// the application, raise or <see cref="ClearError"/>, that has not been transmitted when the reset
     /// comes is dropped, frame and <c>1001h</c> write alike: one held in Initialisation, one already
     /// released behind the boot-up but still waiting for its turn (a master that resets the node as
-    /// soon as it sees the boot-up), one waiting for the node to leave Stopped or for its inhibit time,
-    /// and one queued behind any of these.</para>
+    /// soon as it sees the boot-up), one held in Stopped, one waiting for the node to leave Stopped or
+    /// for its inhibit time, and one queued behind any of these: every EMCY of the application takes
+    /// the gated path of the node's EMCY chain, an EMCY held in Stopped included once it is released,
+    /// whatever the options.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>,
     /// the error reset, which <see cref="ClearError"/> sends; or <paramref name="errorRegisterBits"/>

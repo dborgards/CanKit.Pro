@@ -538,6 +538,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // after the transition into another NMT state.
                 _pendingEmcy = msg;
                 _pendingEmcyIsApplications = true;
+                _pendingEmcyIsProfile = false;
                 return Task.CompletedTask;
             }
             // errorRegister is the application's part of 1001h; the node adds its communication
