@@ -71,6 +71,18 @@ public class Cia401PeerTests
         => new(DeviceId, ForeignPdoKind.Tpdo, 1, 0x180 + DeviceId, index, subindex, value,
             ForeignPdoMappingOrigin.LiveMapping, bits);
 
+    /// <summary>The barrier before "nothing went on the bus": one request the gate lets through
+    /// (<c>1000h:00</c>, allowed with and without a description), awaited, and its frame seen by the
+    /// raw master. The tool sends its requests in order and the virtual bus delivers them in order,
+    /// so a request a refused call had sent would have been seen before it: exactly one is the
+    /// barrier's own.</summary>
+    private static async Task AssertOnlyTheBarrierWentOutAsync(Cia401ToolRig rig)
+    {
+        await rig.Tool.SdoUploadAsync(DeviceId, 0x1000, 0x00).WithTimeoutAsync(HangGuard);
+        await rig.Rig.WaitForCountAsync(Cia401Rig.SdoRequest, 1);
+        rig.Rig.Count(Cia401Rig.SdoRequest).Should().Be(1, "the refused calls sent nothing; the one request is the barrier's");
+    }
+
     // ---- the descriptor and the block properties ---------------------------------------------------
 
     [Theory]
@@ -135,10 +147,10 @@ public class Cia401PeerTests
         Action noDevice = () => profile.CreatePeer(tool.Node, DeviceId, null!);
         Action badId = () => profile.CreatePeer(tool.Node, 0, new CanOpenLogicalDevice(0, new CanOpenDeviceType(0x00010191)));
 
-        other.Should().Throw<ArgumentException>().WithParameterName("logicalDevice");
-        noNode.Should().Throw<ArgumentNullException>().WithParameterName("node");
-        noDevice.Should().Throw<ArgumentNullException>().WithParameterName("logicalDevice");
-        badId.Should().Throw<ArgumentOutOfRangeException>();
+        other.Should().ThrowExactly<ArgumentException>().WithParameterName("logicalDevice");
+        noNode.Should().ThrowExactly<ArgumentNullException>().WithParameterName("node");
+        noDevice.Should().ThrowExactly<ArgumentNullException>().WithParameterName("logicalDevice");
+        badId.Should().ThrowExactly<ArgumentOutOfRangeException>();
     }
 
     // ---- round trips, checked on the device ----------------------------------------------------------
@@ -303,12 +315,33 @@ public class Cia401PeerTests
 
         Func<Task> reserved = () => ai.WriteInterruptTriggerAsync(1, (Cia401AnalogInterruptTrigger)0x20).WithTimeoutAsync(HangGuard);
 
-        var abort = (await reserved.Should().ThrowAsync<SdoAbortException>()).Which;
+        var abort = (await reserved.Should().ThrowExactlyAsync<SdoAbortException>()).Which;
         abort.AbortCode.Should().Be(ValueRangeExceeded, "bits 5 to 7 are reserved (CiA 401-1 §8.6.2)");
         abort.Index.Should().Be(0x6421);
         abort.Subindex.Should().Be(0x01);
         abort.Origin.Should().Be(SdoAbortOrigin.Peer);
         rig.Rig.Od.ReadUnsigned(0x6421, 0x01).Should().Be(0x07u);
+    }
+
+    [Fact]
+    public async Task A_Flag_That_Is_Neither_0_Nor_1_Is_Invalid_Data()
+    {
+        using var rig = new Cia401ToolRig();
+        var peer = rig.Peer();
+        // The device refuses these values from every writer but itself; the dictionary's unchecked
+        // write stands in for a device that holds them anyway.
+        rig.Rig.Od.WriteRawUnchecked(0x6005, 0x00, new byte[] { 2 });
+        rig.Rig.Od.WriteRawUnchecked(0x6423, 0x00, new byte[] { 2 });
+        rig.Rig.Od.WriteRawUnchecked(0x6443, 0x01, new byte[] { 2 });
+        rig.Rig.Settle();
+
+        Func<Task> digital = () => peer.DigitalInputs!.ReadGlobalInterruptEnableAsync().WithTimeoutAsync(HangGuard);
+        Func<Task> analog = () => peer.AnalogInputs!.ReadGlobalInterruptEnableAsync().WithTimeoutAsync(HangGuard);
+        Func<Task> errorMode = () => peer.AnalogOutputs!.ReadErrorModeAsync(1).WithTimeoutAsync(HangGuard);
+
+        await digital.Should().ThrowExactlyAsync<InvalidDataException>("a BOOLEAN is 0 or 1 (CiA 301 v4.2.0 §7.1.4.3)");
+        await analog.Should().ThrowExactlyAsync<InvalidDataException>();
+        await errorMode.Should().ThrowExactlyAsync<InvalidDataException>("values other than 0h and 1h are reserved (CiA 401-1 v3.1.0 §8.7.4)");
     }
 
     [Fact]
@@ -321,12 +354,12 @@ public class Cia401PeerTests
         Func<Task> write = () => peer.DigitalOutputs!.WriteAsync(1, 0xFF).WithTimeoutAsync(HangGuard);
         Func<Task> raw = () => peer.ReadAsync(Cia401Objects.ReadAnalogInput16, 1).WithTimeoutAsync(HangGuard);
 
-        var refused = (await read.Should().ThrowAsync<PeerSdoAccessException>()).Which;
+        var refused = (await read.Should().ThrowExactlyAsync<PeerSdoAccessException>()).Which;
         refused.PeerDescriptionLoaded.Should().BeFalse();
         refused.Index.Should().Be(0x6000);
-        (await write.Should().ThrowAsync<PeerSdoAccessException>()).Which.Index.Should().Be(0x6200);
-        (await raw.Should().ThrowAsync<PeerSdoAccessException>()).Which.Index.Should().Be(0x6401);
-        rig.Rig.Count(Cia401Rig.SdoRequest).Should().Be(0, "the gate refuses before a frame is sent");
+        (await write.Should().ThrowExactlyAsync<PeerSdoAccessException>()).Which.Index.Should().Be(0x6200);
+        (await raw.Should().ThrowExactlyAsync<PeerSdoAccessException>()).Which.Index.Should().Be(0x6401);
+        await AssertOnlyTheBarrierWentOutAsync(rig);
         rig.Rig.Od.ReadUnsigned(0x6200, 0x01).Should().Be(0u);
     }
 
@@ -340,10 +373,10 @@ public class Cia401PeerTests
         Func<Task> source = () => peer.WriteAsync(Cia401Objects.AnalogInputInterruptSource, 1, new byte[4]);
         Func<Task> highest = () => peer.WriteAsync(Cia401Objects.PolarityDigitalInput8, 0, new byte[] { 1 });
 
-        await input.Should().ThrowAsync<InvalidOperationException>();
-        await source.Should().ThrowAsync<InvalidOperationException>();
-        await highest.Should().ThrowAsync<InvalidOperationException>("sub-index 0 of an array is const (CiA 301 §7.4.5)");
-        rig.Rig.Count(Cia401Rig.SdoRequest).Should().Be(0);
+        await input.Should().ThrowExactlyAsync<InvalidOperationException>();
+        await source.Should().ThrowExactlyAsync<InvalidOperationException>();
+        await highest.Should().ThrowExactlyAsync<InvalidOperationException>("sub-index 0 of an array is const (CiA 301 §7.4.5)");
+        await AssertOnlyTheBarrierWentOutAsync(rig);
     }
 
     [Fact]
@@ -359,13 +392,13 @@ public class Cia401PeerTests
         Func<Task> nullDefinition = () => peer.ReadAsync(null!, 1);
         Func<Task> nullValue = () => peer.WriteAsync(Cia401Objects.WriteAnalogOutput16, 1, null!);
 
-        await zero.Should().ThrowAsync<ArgumentOutOfRangeException>();
-        await high.Should().ThrowAsync<ArgumentOutOfRangeException>();
-        await channel.Should().ThrowAsync<ArgumentOutOfRangeException>();
-        await bank.Should().ThrowAsync<ArgumentOutOfRangeException>("an interrupt source has at most eight banks (CiA 401-1 §8.6.3)");
-        await nullDefinition.Should().ThrowAsync<ArgumentNullException>();
-        await nullValue.Should().ThrowAsync<ArgumentNullException>();
-        rig.Rig.Count(Cia401Rig.SdoRequest).Should().Be(0);
+        await zero.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>();
+        await high.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>();
+        await channel.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>();
+        await bank.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>("an interrupt source has at most eight banks (CiA 401-1 §8.6.3)");
+        await nullDefinition.Should().ThrowExactlyAsync<ArgumentNullException>();
+        await nullValue.Should().ThrowExactlyAsync<ArgumentNullException>();
+        await AssertOnlyTheBarrierWentOutAsync(rig);
     }
 
     [Fact]
@@ -421,8 +454,8 @@ public class Cia401PeerTests
         Action longer = () => Cia401Codec.Decode(OdDataType.Unsigned8, new byte[] { 1, 0 });
         Action shorter = () => Cia401Codec.Decode(OdDataType.Integer32, new byte[] { 1, 0 });
 
-        longer.Should().Throw<InvalidDataException>();
-        shorter.Should().Throw<InvalidDataException>();
+        longer.Should().ThrowExactly<InvalidDataException>();
+        shorter.Should().ThrowExactly<InvalidDataException>();
     }
 
     // ---- interpreting signals ------------------------------------------------------------------------
@@ -501,8 +534,8 @@ public class Cia401PeerTests
         Action interpret = () => peer.Interpret(new[] { other });
         Action none = () => peer.Interpret(null!);
 
-        interpret.Should().Throw<ArgumentException>();
-        none.Should().Throw<ArgumentNullException>();
+        interpret.Should().ThrowExactly<ArgumentException>();
+        none.Should().ThrowExactly<ArgumentNullException>();
     }
 
     [Fact]
@@ -515,6 +548,32 @@ public class Cia401PeerTests
 
         values.Should().Equal(new Cia401PdoValue(0x6403, 0x01, Cia401Objects.ReadAnalogInputFloat,
             "Read analog input float, analog input 1", 0x3F80_0000L));
+    }
+
+    [Fact]
+    public void Interpret_Types_A_Narrower_Mapping_Of_A_Signed_Object_In_Its_Mapped_Width()
+    {
+        using var tool = new LoneTool();
+        var peer = tool.Peer(0x00050191);
+
+        var values = peer.Interpret(new[] { Signal(0x6401, 0x01, 8, 0xFF), Signal(0x6401, 0x02, 8, 0x7F) });
+
+        values.Should().Equal(
+            new Cia401PdoValue(0x6401, 0x01, Cia401Objects.ReadAnalogInput16, "Read analog input 16-bit, analog input 1", -1),
+            new Cia401PdoValue(0x6401, 0x02, Cia401Objects.ReadAnalogInput16, "Read analog input 16-bit, analog input 2", 0x7F));
+    }
+
+    [Fact]
+    public void Interpret_Refuses_A_Signal_Without_Bits_Or_With_Fewer_Bytes_Than_Its_Bits()
+    {
+        using var tool = new LoneTool();
+        var peer = tool.Peer(0x00050191);
+
+        Action empty = () => peer.Interpret(new[] { Signal(0x6401, 0x01, 0) });
+        Action shorter = () => peer.Interpret(new[] { Signal(0x6401, 0x01, 16, 0x01) });
+
+        empty.Should().ThrowExactly<ArgumentOutOfRangeException>();
+        shorter.Should().ThrowExactly<InvalidDataException>();
     }
 
     // ---- observing the device's PDOs -----------------------------------------------------------------
@@ -569,6 +628,21 @@ public class Cia401PeerTests
         observed.Values.Should().Equal(
             new Cia401PdoValue(0x6000, 0x02, Cia401Objects.ReadDigitalInput8, "Read digital input 8-bit, inputs 9–16", 0x81),
             new Cia401PdoValue(0x6000, 0x01, Cia401Objects.ReadDigitalInput8, "Read digital input 8-bit, inputs 1–8", 0x3C));
+    }
+
+    [Fact]
+    public async Task A_Cancelled_Observation_Propagates_And_Returns_Nothing()
+    {
+        using var rig = new Cia401ToolRig();
+        var peer = rig.Peer();
+        using var cancelled = new System.Threading.CancellationTokenSource();
+        cancelled.Cancel();
+
+        Func<Task> observe = () => peer.ObserveAsync(Cia401Rig.Tpdo1, new byte[] { 1, 2 }, rig.Description!, cancelled.Token)
+            .WithTimeoutAsync(HangGuard);
+
+        // The core's cancellation, whichever subclass of OperationCanceledException carries it.
+        await observe.Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Fact]
@@ -681,6 +755,8 @@ public class Cia401PeerTests
                     $"the access of {obj.Index:X4}h:{sub:X2}h");
                 od.TryGet(obj.Index, sub, out var entry).Should().BeTrue($"the device declares {obj.Index:X4}h:{sub:X2}h");
                 entry.DataType.Should().Be(highest ? OdDataType.Unsigned8 : definition.DataType);
+                entry.Access.Should().Be(access == AccessType.ReadOnly ? OdAccess.ReadOnly : OdAccess.ReadWrite,
+                    $"the device's access of {obj.Index:X4}h:{sub:X2}h is the fixture's");
                 described++;
             }
         }
@@ -698,5 +774,38 @@ public class Cia401PeerTests
 
         declared.Should().Be(described, "the fixture and the device have the same entries in 6000h to 67FFh");
         described.Should().BeGreaterThan(0);
+
+        // 1000h and the default PDO records hold, once the node has opened, what the fixture says:
+        // the COB-IDs with their validity bit, the transmission types, the mapping counts and entries.
+        od.ReadUnsigned(0x1000, 0x00).Should().Be(ParseDescribed(description.Objects.Objects[0x1000].DefaultValue!));
+        int records = 0;
+        foreach (ushort index in new ushort[] { 0x1400, 0x1401, 0x1600, 0x1601, 0x1800, 0x1801, 0x1A00, 0x1A01 })
+        {
+            foreach (var sub in description.Objects.Objects[index].SubObjects.Values)
+            {
+                od.ReadUnsigned(index, sub.SubIndex).Should().Be(ParseDescribed(sub.DefaultValue!),
+                    $"{index:X4}h:{sub.SubIndex:X2}h of the device is what the fixture describes");
+                records++;
+            }
+        }
+
+        records.Should().Be((2 * 5) + (2 * 6) + (4 * 9), "two RPDO communication records of five entries, two TPDO ones of six, four mapping records of nine");
+    }
+
+    /// <summary>A numeric value of the fixture: decimal or <c>0x</c> hexadecimal, optionally after
+    /// <c>$NODEID+</c>, resolved for the device's node-id (CiA 306).</summary>
+    private static uint ParseDescribed(string text)
+    {
+        uint offset = 0;
+        if (text.StartsWith("$NODEID", StringComparison.OrdinalIgnoreCase))
+        {
+            offset = DeviceId;
+            text = text.Substring("$NODEID".Length).TrimStart('+');
+        }
+
+        uint value = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? uint.Parse(text.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture)
+            : uint.Parse(text, CultureInfo.InvariantCulture);
+        return value + offset;
     }
 }

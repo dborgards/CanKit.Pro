@@ -160,7 +160,7 @@ ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
 AccessType=rw
-DefaultValue=254
+DefaultValue=255
 PDOMapping=0
 
 [1400sub3]
@@ -205,7 +205,7 @@ ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
 AccessType=rw
-DefaultValue=254
+DefaultValue=255
 PDOMapping=0
 
 [1401sub3]
@@ -396,7 +396,7 @@ ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
 AccessType=rw
-DefaultValue=$NODEID+0x40000180
+DefaultValue=$NODEID+0x180
 PDOMapping=0
 
 [1800sub2]
@@ -404,7 +404,7 @@ ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
 AccessType=rw
-DefaultValue=254
+DefaultValue=255
 PDOMapping=0
 
 [1800sub3]
@@ -449,7 +449,7 @@ ParameterName=COB-ID
 ObjectType=0x7
 DataType=0x0007
 AccessType=rw
-DefaultValue=$NODEID+0xC0000280
+DefaultValue=$NODEID+0x80000280
 PDOMapping=0
 
 [1801sub2]
@@ -457,7 +457,7 @@ ParameterName=Transmission type
 ObjectType=0x7
 DataType=0x0005
 AccessType=rw
-DefaultValue=254
+DefaultValue=255
 PDOMapping=0
 
 [1801sub3]
