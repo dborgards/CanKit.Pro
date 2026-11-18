@@ -228,7 +228,7 @@ internal sealed partial class CanOpenNode
     /// Tells each claimant the entries written since it was last told: sorted by index, then
     /// sub-index, each once. Actor loop. Writes landing while this runs re-arm the dirty set and
     /// queue the next evaluation, so none is lost; one claimant that throws does not keep the next
-    /// from being told (<see cref="InvokeApplication"/>).
+    /// from being told (<see cref="InvokeApplication"/>), one that disposes the node does.
     /// </summary>
     private void EvaluateApplicationEntriesOnActor()
     {
@@ -247,6 +247,9 @@ internal sealed partial class CanOpenNode
 
         foreach (var slot in _applications)
         {
+            // One that disposed the node ends the round: the rest are not called on a node that is
+            // gone, as in the other rounds (NotifyNmtStateChanged, PublishCommunicationFailure).
+            if (Volatile.Read(ref _disposed) != 0) return;
             List<CanOpenObjectAddress>? entries = null;
             foreach (var key in keys)
             {
@@ -375,6 +378,7 @@ internal sealed partial class CanOpenNode
     {
         foreach (var slot in _applications)
         {
+            // One that disposed the node ends the round, as in the others.
             if (Volatile.Read(ref _disposed) != 0) return;
             InvokeApplication(slot, application => application.OnReset(command));
         }

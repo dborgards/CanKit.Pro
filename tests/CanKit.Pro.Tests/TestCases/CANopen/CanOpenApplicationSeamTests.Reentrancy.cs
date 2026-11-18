@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
@@ -27,6 +28,13 @@ public partial class CanOpenApplicationSeamTests
 
     private static Task<bool> FailureActiveAsync(CanOpenNode node, RecordingApplication app)
         => node.ActorForTests.PostAsync(() => app.Host!.CommunicationFailureActive);
+
+    /// <summary>Runs <paramref name="name"/>, a private method of the node, as one actor job: the
+    /// task completes once the job has run, whether or not a callback disposed the node in it.</summary>
+    private static Task RunPrivateOnActor(CanOpenNode node, string name, params object[] arguments)
+        => node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
+            .GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(node, arguments));
 
     // -----------------------------------------------------------------------------------------
     // A callback that ends the communication failure it was told about.
@@ -100,5 +108,77 @@ public partial class CanOpenApplicationSeamTests
             "life guarding is off, so no poll would ever end its error");
         ErrorRegister(rig.Node).Should().Be(0);
         (await FailureActiveAsync(rig.Node, app)).Should().BeFalse();
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A callback that disposes the node: the applications after it are not called.
+    // -----------------------------------------------------------------------------------------
+
+    private static RecordingApplication SecondClaimant() => new("second", new CanOpenIndexRange(0x6800, 0x6FFF))
+    {
+        OnAttach = host => host.ObjectDictionary.AddU8(0x6800, 0x01, 0),
+    };
+
+    [Fact]
+    public async Task A_Callback_That_Disposes_The_Node_Ends_The_Round_Of_Written_Entries()
+    {
+        var first = Entries("first");
+        var second = SecondClaimant();
+        CanOpenNode? node = null;
+        first.WhenWritten = _ => node!.Dispose();
+        using var rig = new EntryRig(With(first, second));
+        node = rig.Node;
+        Settle(rig.Node);
+
+        // Both writes and their evaluation in one actor job: one batch with an entry of each
+        // claimant, told before the job ends.
+        await rig.Node.ActorForTests.PostAsync(() =>
+        {
+            rig.Od.WriteUnsigned(0x6000, 0x01, 7);
+            rig.Od.WriteUnsigned(0x6800, 0x01, 7);
+            typeof(CanOpenNode).GetMethod("EvaluateApplicationEntriesOnActor", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(rig.Node, null);
+        });
+
+        Written(first).Should().Equal("written 6000:01");
+        Written(second).Should().BeEmpty("the node was gone before the second claimant's turn");
+    }
+
+    [Fact]
+    public async Task A_Reset_Callback_That_Disposes_The_Node_Ends_The_Round()
+    {
+        var first = new RecordingApplication("first");
+        var second = new RecordingApplication("second");
+        CanOpenNode? node = null;
+        first.WhenReset = _ => node!.Dispose();
+        bool applicationReset = false;
+        using var rig = new EntryRig(With(first, second));
+        node = rig.Node;
+        rig.Node.ApplicationReset += (_, _) => applicationReset = true;
+        Settle(rig.Node);
+
+        await RunPrivateOnActor(rig.Node, "HandleIncoming",
+            CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false);
+
+        first.Log.Should().Contain("reset ResetNode");
+        second.Log.Should().NotContain("reset ResetNode", "the node was gone before the second application's turn");
+        applicationReset.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_Failure_Callback_That_Disposes_The_Node_Ends_The_Round()
+    {
+        var first = Watcher("first");
+        var second = Watcher("second");
+        CanOpenNode? node = null;
+        first.WhenFailureChanged = _ => node!.Dispose();
+        using var rig = new EntryRig(WithErrorBehavior(first, second));
+        node = rig.Node;
+        Settle(rig.Node);
+
+        await RunPrivateOnActor(rig.Node, "RaiseHeartbeatTimeout", ProducerNode, TimeSpan.FromMilliseconds(100));
+
+        Failures(first).Should().Equal("failure True");
+        Failures(second).Should().BeEmpty("the node was gone before the second application's turn");
     }
 }
