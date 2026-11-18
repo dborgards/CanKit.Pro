@@ -217,7 +217,11 @@ public class Cia401ProcessTests
         };
         using var rig = Open(Digital8, model);
         await rig.WriteU8Async(0x1029, 0x01, 0x02);
-        await rig.WriteI16Async(0x1017, 0x00, 1000); // a heartbeat on every change of state
+        // A heartbeat on every change of state. The producer's cycle is scheduled on the node's
+        // actor, whose clock is the rig's ManualTimeSource, and this test never moves it: no
+        // cyclic heartbeat can come, however long the host stalls; only the state changes send,
+        // in order (the node chains its heartbeat frames).
+        await rig.WriteI16Async(0x1017, 0x00, 1000);
         await rig.WriteU8Async(0x6200, 0x01, 0x5A);
         await rig.SaveAsync(); // a reset restores 1000h to 1FFFh: what comes up is what was stored
         int before = rig.Count(Cia401Rig.Heartbeat);
@@ -229,9 +233,11 @@ public class Cia401ProcessTests
         await rig.WaitForStateAsync(NmtState.Stopped);
         await Cia401Rig.WaitUntilAsync(() => rig.Payloads(Cia401Rig.Heartbeat).Skip(before).Any(p => p[0] == 0x04),
             "the heartbeat of Stopped");
-        var states = rig.Payloads(Cia401Rig.Heartbeat).Skip(before).Select(p => p[0]).ToList();
-        states[0].Should().Be(0x00, "the boot-up goes out first");
-        states.Last().Should().Be(0x04, "then the node is Stopped (CiA 401-1 §6.2.4)");
+        var sinceReset = rig.Payloads(Cia401Rig.Heartbeat).Skip(before).Select(p => p[0]).ToList();
+        int bootUp = sinceReset.IndexOf(0x00);
+        bootUp.Should().BeGreaterThanOrEqualTo(0, "the reset's boot-up was seen");
+        sinceReset.Skip(bootUp).Should().Equal(new byte[] { 0x00, 0x7F, 0x04 },
+            "the boot-up first, the heartbeat of Pre-operational that follows it with 1017h set, then Stopped (CiA 401-1 §6.2.4)");
         rig.Device.OutputsInErrorState.Should().BeTrue();
         rig.Device.ReadDigitalOutputs(1).Should().Be(0x00, "6206h FFh puts every output to 6207h, 00h");
     }

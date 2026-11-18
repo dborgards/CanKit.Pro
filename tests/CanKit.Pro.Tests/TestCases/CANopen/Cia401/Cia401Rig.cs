@@ -258,13 +258,28 @@ internal sealed class Cia401Rig : IDisposable
     }
 
     /// <summary>NMT <paramref name="command"/> (Reset Node or Reset Communication) to the device;
-    /// waits for its boot-up and settles its actor, so that the reset's callbacks have run.</summary>
+    /// waits for its boot-up and settles its actor, so that the reset's callbacks have run. The
+    /// boot-up is the frame <c>00h</c> on <see cref="Heartbeat"/>: a heartbeat of a state shares the
+    /// COB-ID and must not pass for it.</summary>
     internal async Task ResetAsync(NmtCommand command)
     {
-        int before = Count(Heartbeat);
+        int before = BootUps();
         Transmit(0x000, new[] { (byte)command, DeviceId });
-        await WaitForCountAsync(Heartbeat, before + 1);
+        await WaitUntilAsync(() => BootUps() > before, $"a boot-up after {before}, saw {BootUps()}");
         Settle();
+    }
+
+    /// <summary>The boot-up frames seen so far: <c>00h</c> on <see cref="Heartbeat"/>
+    /// (CiA 301 v4.2.0 §7.2.8.3.3).</summary>
+    internal int BootUps()
+    {
+        int count = 0;
+        foreach (var payload in Payloads(Heartbeat))
+        {
+            if (payload.Length == 1 && payload[0] == 0x00) count++;
+        }
+
+        return count;
     }
 
     /// <summary>RPDO 1 from the master with <paramref name="data"/>, then <see cref="FenceAsync"/>:
