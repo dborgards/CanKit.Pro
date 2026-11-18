@@ -105,8 +105,8 @@ internal sealed partial class CanOpenNode
             // An LSS slave without a node-id: the pre-defined COB-ID names node-id FFh, and for RPDO 4
             // (500h + FFh = 5FFh) that is a restricted CAN-ID, which the record refuses. Such a slave
             // stays in Initialisation until it is given a node-id (CiA 305 §4.2), PDOs exist only in
-            // Operational (CiA 301 §7.3.2.2.5, Table 37), its RPDOs take no frame meanwhile
-            // (HandleIncomingFrame), and ApplyActiveNodeId moves the COB-ID to the node-id it is
+            // Operational (CiA 301 §7.3.2.2.5, Table 37), an RPDO on a restricted CAN-ID takes no frame
+            // meanwhile (HandleIncomingFrame), and ApplyActiveNodeId moves the COB-ID to the node-id it is
             // given, as it does for the node's own placeholders. So the PDO is written invalid
             // through the procedure and made valid without the record's check. Only here and only
             // then: the record's validation of every other write stays as it is.

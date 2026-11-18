@@ -127,8 +127,9 @@ internal interface ICanOpenApplicationHost
     /// On an LSS slave opened without a node-id the COB-ID names node-id <c>FFh</c> and is written even
     /// where that is a restricted CAN-ID (CiA 301 v4.2.0 §7.3.5, Table 40), as for RPDO 4 (<c>5FFh</c>).
     /// Such a slave stays in Initialisation until it is given a node-id (CiA 305 v3.0.0 §4.2), and PDOs
-    /// exist only in Operational (CiA 301 v4.2.0 §7.3.2.2.5, Table 37); meanwhile the node lets no RPDO
-    /// take a frame, and then it moves the COB-ID to the node-id given. Only this call writes such a
+    /// exist only in Operational (CiA 301 v4.2.0 §7.3.2.2.5, Table 37); meanwhile an RPDO on a
+    /// restricted CAN-ID takes no frame, every other RPDO takes its own as on a node with a node-id,
+    /// and once the slave is given one the node moves the COB-ID to it. Only this call writes such a
     /// COB-ID; a write to the record keeps its checks.
     /// </para>
     /// <para>
@@ -157,7 +158,8 @@ internal interface ICanOpenApplicationHost
     /// the record keeps the invalid COB-ID the node writes for an unassigned RPDO,
     /// <c>80000000h</c>. On an LSS slave without a node-id RPDO 4's COB-ID is <c>5FFh</c>, a
     /// restricted CAN-ID (CiA 301 v4.2.0 §7.3.5, Table 40), and is written all the same (see
-    /// <see cref="SetDefaultTpdo"/>).</remarks>
+    /// <see cref="SetDefaultTpdo"/>); until the slave has a node-id that RPDO takes no frame, so
+    /// node 127's SDO response on <c>5FFh</c> still reaches the node's SDO client.</remarks>
     /// <exception cref="InvalidOperationException">Called outside the application's own
     /// <see cref="ICanOpenApplication.Attach"/>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="mapping"/> is null.</exception>

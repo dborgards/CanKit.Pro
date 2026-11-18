@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -307,6 +308,37 @@ public partial class CanOpenApplicationSeamTests
         rig.Wire.Transmit(0x580u + Node127, new byte[] { 0x43, 0x00, 0x10, 0x00, 0x91, 0x01, 0x0F, 0x00 });
 
         (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(0x91, 0x01, 0x0F, 0x00);
+    }
+
+    [Fact]
+    public async Task An_Rpdo_Of_A_Slave_Without_A_Node_Id_And_Without_An_Application_Takes_Its_Frame()
+    {
+        // No application: an RPDO configured on 0A5h, a CAN-ID of the EMCY range that a validated
+        // write accepts for a PDO. The slave waits in Initialisation, where the RPDO acts on nothing,
+        // but it takes its frame, so the frame never reaches the EMCY consumer. Only an RPDO on a
+        // restricted CAN-ID, which no validated write produces, lets its frame through there.
+        using var rig = new EntryRig(new CanOpenNodeOptions().WithLss(new LssSlaveOptions()), nodeId: CanOpenCobId.UnconfiguredNodeId);
+        rig.Od.AddU8(0x2101, 0x00, 0);
+        rig.Node.ConfigureRpdo(1, Map(0x2101, 0x00), cobId: 0x0A5);
+        var producers = new ConcurrentQueue<byte>();
+        var witness = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.EmcyReceived += (_, e) =>
+        {
+            producers.Enqueue(e.Message.ProducerNodeId);
+            if (e.Message.ProducerNodeId == 0x26) witness.TrySetResult(true);
+        };
+        Settle(rig.Node);
+
+        // An EMCY-shaped frame on the RPDO's CAN-ID, then the witness: an EMCY of node 26h on 0A6h,
+        // where no RPDO is. The node handles frames in wire order and delivers its events in the
+        // order raised, so once the witness has arrived, an event for 0A5h would have arrived before it.
+        var emcy = new byte[] { 0x00, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        rig.Wire.Transmit(0x0A5, emcy);
+        rig.Wire.Transmit(0x0A6, emcy);
+        await witness.Task.WithTimeoutAsync(ShortTimeout);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+
+        producers.Should().Equal(new byte[] { 0x26 }, "the RPDO on 0A5h took its frame; it was not an EMCY of node 25h");
     }
 
     [Fact]
