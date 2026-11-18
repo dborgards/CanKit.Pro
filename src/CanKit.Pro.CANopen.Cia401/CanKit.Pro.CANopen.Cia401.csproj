@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>CiA 401 (generic I/O modules) device profile for CanKit.Pro.CANopen: the object catalogue, the device side and the tool side of CiA 401-1 v3.1.0, built against the internal application seam of the CANopen package. Not published yet.</Description>
+    <!--
+      Built, tested and wired into the solution, but not packed: every type in here is internal
+      and the package does not exist until the publication step (ADR-14). src/Directory.Build.props
+      makes each project under src/ packable, so this project opts out of that, and with it out
+      of the package validation that only has a published baseline to compare with. Both switches
+      go with the publication step.
+    -->
+    <IsPackable>false</IsPackable>
+    <EnablePackageValidation>false</EnablePackageValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../CanKit.Pro.CANopen/CanKit.Pro.CANopen.csproj" />
+  </ItemGroup>
+
+  <!-- The tests reach the internal types of this project, as they do those of the core package. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

@@ -26,4 +26,15 @@
     </AssemblyAttribute>
   </ItemGroup>
 
+  <!--
+    The CiA 401 profile project is built against the internal application seam (ADR-14), so it sees
+    the internals of this package. It is not packaged yet and its types are all internal, which is
+    what makes this safe; the publication step replaces this grant with a public seam and removes it.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.CANopen.Cia401</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>
