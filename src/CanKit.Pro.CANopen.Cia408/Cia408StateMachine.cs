@@ -204,6 +204,11 @@ internal sealed class Cia408StateMachine
     /// <summary>A reset of the application (NMT reset application, or a local restart): D255 out
     /// of whatever state the machine is in, then D0 and D1 into INIT (CiA 408 v2.2.0 §7.6,
     /// Figure 1, Table 6).</summary>
+    /// <remarks>The norm contradicts itself on this reset. Table 6 (§7.6) gives the reset
+    /// application D255 and then D0 and D1. §7.8 Table 10, row 3, has the NMT transitions C9, C10
+    /// and C11 force the device machine to INIT, but labels the row D13, which is the exit from
+    /// FAULT_REACTION into FAULT_INIT. Figure 2 (§7.8) draws the arrow from C9 to C11 into
+    /// FAULT_INIT. Table 6 is taken: it ends in INIT, as the device does after power on.</remarks>
     /// <returns><c>[255, 0, 1]</c>.</returns>
     public IReadOnlyList<int> Restart()
     {

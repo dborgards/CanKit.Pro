@@ -72,7 +72,9 @@ public class Cia408StateMachineTests
 
     private static Cia408State Parse(string state) => (Cia408State)Enum.Parse(typeof(Cia408State), state);
 
-    // ---- Review Focus 4: the 9 x 16 x 2 table ---------------------------------------------------
+    // ---- Review Focus 4: every resting state x every value of bits 3..0 -------------------------
+    // The 8 resting states (FAULT_REACTION is none): the non-fault states and NOT_READY with two
+    // previous-word columns, the three fault states with four (see FaultStateTable).
 
     // Read from Table 7 (CiA 408 v2.2.0 §7.7, p26-27). A reset is evaluated once, in the state the
     // write arrives in, and needs both words as Table 7 writes them; then the level transitions are
@@ -382,6 +384,19 @@ public class Cia408StateMachineTests
 
         machine.ApplyControlWord(0b0011, 0b1111).Should().BeEmpty();
         machine.State.Should().Be(Cia408State.FaultHold);
+    }
+
+    [Theory]
+    [InlineData("FaultHold", 0b0111u, 0b1011u)]
+    [InlineData("FaultDisabled", 0b0101u, 0b1001u)]
+    [InlineData("FaultInit", 0b0100u, 0b1000u)]
+    public void A_Fault_Reset_Needs_Bit_2_Of_The_Previous_Word_At_The_Pattern(string fault, uint previous, uint current)
+    {
+        // The previous word is the pattern with bit 2 set: every bit of Table 7's first word counts.
+        var machine = In(Parse(fault));
+
+        machine.ApplyControlWord(previous, current).Should().BeEmpty();
+        machine.State.Should().Be(Parse(fault));
     }
 
     [Fact]
