@@ -288,11 +288,23 @@ public partial class CanOpenApplicationSeamTests
         // for it (ProtocolActor.FireDueTimers). It still runs behind the start-up.
         using var bus = Open(NewSession(), 1);
         using var busy = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
         Task? blocked = null;
         NmtState? seen = null;
+        // The blocking job is running before Attach returns, so the actor took its batch of work with
+        // that job alone: the start-up job, posted later, waits for the next batch, which the deadline
+        // does not wait for.
         var blocker = new RecordingApplication("blocker")
         {
-            OnAttach = host => blocked = NodeOf(host).PostToActorAsync(() => busy.Wait(ShortTimeout)),
+            OnAttach = host =>
+            {
+                blocked = NodeOf(host).PostToActorAsync(() =>
+                {
+                    started.Set();
+                    busy.Wait(ShortTimeout);
+                });
+                started.Wait(ShortTimeout).Should().BeTrue("the actor runs the blocking job");
+            },
         };
         var early = new RecordingApplication("early")
         {
