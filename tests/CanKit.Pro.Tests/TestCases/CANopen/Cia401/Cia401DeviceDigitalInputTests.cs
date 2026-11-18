@@ -625,4 +625,19 @@ public class Cia401DeviceDigitalInputTests
         await rig.WriteU8Async(0x6005, 0x00, 0x01);
         (await rig.ReadU8Async(0x6005, 0x00)).Should().Be(1);
     }
+
+    [Fact]
+    public void A_Local_Write_Of_A_Boolean_Other_Than_0_Or_1_Is_Refused_With_The_Value_Range_Abort()
+    {
+        using var rig = new Cia401Rig(Inputs(8));
+
+        // The same ValidateWrite decides a local write and an SDO download: the dictionary asks the
+        // claimant for both; a local refusal throws with the abort code an SDO download gets.
+        FluentActions.Invoking(() => rig.Od.WriteRaw(0x6005, 0x00, new byte[] { 0x02 }))
+            .Should().Throw<ArgumentException>().WithMessage("*0x06090030*");
+        rig.Od.ReadRaw(0x6005, 0x00).Should().Equal(new byte[] { 0x01 });
+
+        rig.Od.WriteRaw(0x6005, 0x00, new byte[] { 0x00 });
+        rig.Od.ReadRaw(0x6005, 0x00).Should().Equal(new byte[] { 0x00 });
+    }
 }
