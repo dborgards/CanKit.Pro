@@ -252,18 +252,40 @@ internal sealed partial class Cia401Device
     {
         var selection = (Cia401AnalogInterruptTrigger)block.TriggerSelection.ReadByte(od, sub);
         if (selection == Cia401AnalogInterruptTrigger.None) return false;
-
-        int leftAdjusted = Cia401LeftAdjusted.Widen(value);
-        long change = (long)value - last;
-        bool limitSelected = (selection & LimitBits) != 0;
-        bool deltaSelected = (selection & DeltaBits) != 0;
-        bool limitHolds = ((selection & Cia401AnalogInterruptTrigger.UpperLimit) != 0 && leftAdjusted >= block.UpperLimit.Read(od, sub))
-            || ((selection & Cia401AnalogInterruptTrigger.LowerLimit) != 0 && leftAdjusted < block.LowerLimit.Read(od, sub));
-        bool deltaHolds = ((selection & Cia401AnalogInterruptTrigger.Delta) != 0 && Math.Abs(change) > block.Delta.Read(od, sub))
-            || ((selection & Cia401AnalogInterruptTrigger.NegativeDelta) != 0 && -change > block.NegativeDelta.Read(od, sub))
-            || ((selection & Cia401AnalogInterruptTrigger.PositiveDelta) != 0 && change > block.PositiveDelta.Read(od, sub));
-        return (!limitSelected || limitHolds) && (!deltaSelected || deltaHolds);
+        return LimitGroupMet(od, block, sub, selection, value) && DeltaGroupMet(od, block, sub, selection, (long)value - last);
     }
+
+    /// <summary>The limit group of Figure 6: met when <paramref name="selection"/> has no limit bit,
+    /// or when a selected limit holds — bit 0, the left-adjusted value at or above <c>6424h</c>
+    /// (§8.6.5); bit 1, below <c>6425h</c> (§8.6.6).</summary>
+    private static bool LimitGroupMet(ObjectDictionary od, AnalogInputBlock block, byte sub,
+        Cia401AnalogInterruptTrigger selection, short value)
+    {
+        if (!IsSelected(selection, LimitBits)) return true;
+        int leftAdjusted = Cia401LeftAdjusted.Widen(value);
+        bool upper = IsSelected(selection, Cia401AnalogInterruptTrigger.UpperLimit) && leftAdjusted >= block.UpperLimit.Read(od, sub);
+        if (upper) return true;
+        return IsSelected(selection, Cia401AnalogInterruptTrigger.LowerLimit) && leftAdjusted < block.LowerLimit.Read(od, sub);
+    }
+
+    /// <summary>The delta group of Figure 6: met when <paramref name="selection"/> has no delta bit,
+    /// or when a selected delta holds for <paramref name="change"/>, the value minus the last
+    /// communicated one — bit 2, it is more than <c>6426h</c> either way (§8.6.7); bit 3, more than
+    /// <c>6427h</c> down (§8.6.8); bit 4, more than <c>6428h</c> up (§8.6.9).</summary>
+    private static bool DeltaGroupMet(ObjectDictionary od, AnalogInputBlock block, byte sub,
+        Cia401AnalogInterruptTrigger selection, long change)
+    {
+        if (!IsSelected(selection, DeltaBits)) return true;
+        bool either = IsSelected(selection, Cia401AnalogInterruptTrigger.Delta) && Math.Abs(change) > block.Delta.Read(od, sub);
+        if (either) return true;
+        bool down = IsSelected(selection, Cia401AnalogInterruptTrigger.NegativeDelta) && -change > block.NegativeDelta.Read(od, sub);
+        if (down) return true;
+        return IsSelected(selection, Cia401AnalogInterruptTrigger.PositiveDelta) && change > block.PositiveDelta.Read(od, sub);
+    }
+
+    /// <summary>Whether <paramref name="selection"/> has any of <paramref name="bits"/>.</summary>
+    private static bool IsSelected(Cia401AnalogInterruptTrigger selection, Cia401AnalogInterruptTrigger bits)
+        => (selection & bits) != 0;
 
     /// <summary>Sets channel <paramref name="sub"/>'s bit in its bank of <c>6422h</c> (§8.6.3); a
     /// bank the dictionary does not hold keeps no bits.</summary>
