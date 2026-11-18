@@ -25,23 +25,10 @@ public partial class CanOpenApplicationSeamTests
         => applications.Aggregate(new CanOpenNodeOptions { EnableErrorBehavior = true },
             (options, application) => options.WithApplication(application));
 
-    private static readonly FieldInfo EmcyChain =
-        typeof(CanOpenNode).GetField("_emcySendChain", BindingFlags.NonPublic | BindingFlags.Instance)!;
-
     /// <summary>Returns once every EMCY ordered so far has been through the chain: the frame is out, or,
-    /// with the EMCY switched off, the register is written. The chain is a field the actor extends, so it
-    /// is read on the actor and awaited until it is the same task twice.</summary>
-    private static async Task EmcyChainSettledAsync(CanOpenNode node)
-    {
-        Task? last = null;
-        while (true)
-        {
-            var current = await node.ActorForTests.PostAsync(() => (Task)EmcyChain.GetValue(node)!);
-            await current.WithTimeoutAsync(ShortTimeout);
-            if (ReferenceEquals(current, last)) return;
-            last = current;
-        }
-    }
+    /// with the EMCY switched off, the register is written. The barrier of every assertion here on
+    /// what EMCYs were not sent, or exactly how many were: <see cref="CanOpenTransmitBarrier.DrainEmcyAsync"/>.</summary>
+    private static Task EmcyChainSettledAsync(CanOpenNode node) => CanOpenTransmitBarrier.DrainEmcyAsync(node);
 
     private static byte ErrorRegister(CanOpenNode node) => (byte)node.ObjectDictionary.ReadUnsigned(0x1001, 0);
 
@@ -254,7 +241,9 @@ public partial class CanOpenApplicationSeamTests
 
         zero.Should().BeOfType<ArgumentOutOfRangeException>("0000h is the reset, which ClearError sends");
         tooLong.Should().BeOfType<ArgumentException>("the manufacturer field is five bytes");
-        Settle(rig.Node);
+        // The EMCY barrier, not Settle: an EMCY a refused raise ordered would still be on its way
+        // through the EMCY chain after two actor jobs (#562).
+        await EmcyChainSettledAsync(rig.Node);
         rig.Wire.Count(SlaveEmcy).Should().Be(0);
         ErrorRegister(rig.Node).Should().Be(0, "a refused raise records nothing");
     }
@@ -271,7 +260,6 @@ public partial class CanOpenApplicationSeamTests
 
         await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.RaiseError(0x5000, (byte)bits)));
         await EmcyChainSettledAsync(rig.Node);
-        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
 
         refused.Should().BeOfType<ArgumentOutOfRangeException>("bit 6 of the error register is reserved, always 0b (CiA 301 v4.2.0 §7.5.2.2, Table 54)")
             .Which.ParamName.Should().Be("errorRegisterBits");
@@ -422,7 +410,6 @@ public partial class CanOpenApplicationSeamTests
 
         await ResetFromWireAsync(rig, NmtCommand.ResetNode);
         await EmcyChainSettledAsync(rig.Node);
-        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
 
         (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "a reset ends the error");
         rig.Wire.Count(SlaveEmcy).Should().Be(1, "the reset dropped the EMCY that was waiting, and sent none");

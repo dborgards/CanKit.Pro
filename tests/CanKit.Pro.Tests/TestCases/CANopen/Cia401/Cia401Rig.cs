@@ -185,33 +185,9 @@ internal sealed class Cia401Rig : IDisposable
     /// Works in every NMT state.</summary>
     internal Task DrainAsync() => CanOpenTransmitBarrier.DrainAsync(Node);
 
-    /// <summary>
-    /// The barrier before asserting what EMCYs were not sent, or exactly how many were: settles the
-    /// actor, so that every callback queued before the call has run and ordered its EMCYs, then
-    /// waits until every EMCY ordered so far has been through the node's EMCY chain — the frame is
-    /// out, which on the virtual adapter means the master's channel has seen it. The chain is not
-    /// covered by <see cref="DrainAsync"/>: each step goes from a thread-pool continuation back to
-    /// the actor before it reserves its send. The chain is a field the actor extends, so it is read
-    /// on the actor and awaited until it is the same task twice (as the seam tests do).
-    /// </summary>
-    internal async Task DrainEmcyAsync()
-    {
-        await DrainAsync();
-        var field = typeof(CanOpenNode).GetField("_emcySendChain", BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("CanOpenNode has no _emcySendChain field any more.");
-        Task? last = null;
-        while (true)
-        {
-            Task? current = null;
-            await Node.PostToActorAsync(() => current = (Task)field.GetValue(Node)!);
-            if (await Task.WhenAny(current!, Task.Delay(HangGuard)) != current)
-                throw new TimeoutException("Timed out waiting for the EMCY chain.");
-            if (ReferenceEquals(current, last)) break;
-            last = current;
-        }
-
-        await DrainAsync();
-    }
+    /// <summary>The barrier before asserting what EMCYs were not sent, or exactly how many were: see
+    /// <see cref="CanOpenTransmitBarrier.DrainEmcyAsync"/>.</summary>
+    internal Task DrainEmcyAsync() => CanOpenTransmitBarrier.DrainEmcyAsync(Node);
 
     /// <summary>Runs two empty jobs through the device node's actor: whatever it was handed before,
     /// and whatever that queued in turn, has run.</summary>

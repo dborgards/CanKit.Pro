@@ -299,7 +299,6 @@ public partial class CanOpenApplicationSeamTests
         rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
         await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
         await EmcyChainSettledAsync(rig.Node);
-        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
 
         rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(1, "the EMCY goes out once, when the node has left Stopped");
         rig.Wire.Payloads(SlaveEmcy)[0].Should().Equal(Emcy(0x5000, 0x05));
@@ -344,7 +343,6 @@ public partial class CanOpenApplicationSeamTests
         wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
         await wire.WaitForCountAsync(SlaveEmcy, 1);
         await EmcyChainSettledAsync(slave);
-        await CanOpenTransmitBarrier.DrainAsync(slave);
 
         ShouldBeBootUpThenEmcy(BootUpsAndEmcys(wire), Emcy(0x5000, 0x05));
     }
@@ -359,7 +357,6 @@ public partial class CanOpenApplicationSeamTests
         rig.Node.BeforeControlFrameSendForTests = null;
         await ResetFromWireAsync(rig, NmtCommand.ResetNode);
         await EmcyChainSettledAsync(rig.Node);
-        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
 
         rig.Wire.Count(SlaveEmcy).Should().Be(0, "the reset ended the error before its EMCY went out");
         ErrorRegister(rig.Node).Should().Be(0);
