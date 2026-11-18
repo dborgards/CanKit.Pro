@@ -69,7 +69,7 @@ public partial class CanOpenApplicationSeamTests
         await EmcyChainSettledAsync(rig.Node);
 
         ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire, mark), Emcy(0x5000, 0x05));
-        ErrorRegister(rig.Node).Should().Be(0x05, "the held EMCY wrote the register when it went out");
+        ErrorRegister(rig.Node).Should().Be(0x05, "1001h shows the profile error from its raise on (#550); the EMCY behind the boot-up carried the same register");
     }
 
     [Fact] // #561

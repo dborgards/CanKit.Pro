@@ -168,7 +168,7 @@ public partial class CanOpenApplicationSeamTests
         await EmcyChainSettledAsync(rig.Node);
 
         rig.Wire.Payloads(SlaveEmcy)[0].Should().Equal(Emcy(0x5000, 0x05));
-        ErrorRegister(rig.Node).Should().Be(0x05, "the released EMCY wrote the register it carried");
+        ErrorRegister(rig.Node).Should().Be(0x05, "1001h shows the profile error from its raise on, and the released EMCY carried the same register (#550)");
     }
 
     [Fact]
@@ -205,7 +205,9 @@ public partial class CanOpenApplicationSeamTests
         await EmcyChainSettledAsync(rig.Node);
 
         rig.Wire.Count(SlaveEmcy).Should().Be(0);
-        ErrorRegister(rig.Node).Should().Be(0x05, "the held error's EMCY still wrote the register ahead of the application's");
+        ErrorRegister(rig.Node).Should().Be(0x05, "1001h shows a profile error from its raise to its clear, whatever became of its EMCY (#550). " +
+            "For a communication error, the register write a replaced EMCY still makes is covered by " +
+            "CanOpenPdoEngineTests.A_Held_Error_Reset_Replaced_By_An_Application_Emcy_Still_Clears_The_Register");
     }
 
     [Fact]
