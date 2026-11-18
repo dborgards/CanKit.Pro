@@ -615,6 +615,12 @@ internal sealed partial class CanOpenNode
     /// turn that would transmit it, after the wait: a reset handled before that turn drops it, frame
     /// and <c>1001h</c> write alike.
     /// </para>
+    /// <para>
+    /// A master can as well stop the node before that turn. The released EMCYs therefore take the
+    /// gated path of the EMCY chain whatever the options (<see cref="EmitEmcy"/>): in Stopped the
+    /// step waits until the node leaves it (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), and a reset ends the
+    /// wait without a frame (#549).
+    /// </para>
     /// </remarks>
     private void ReleaseProfileEmcysAfterBootUp(Task bootUp)
     {

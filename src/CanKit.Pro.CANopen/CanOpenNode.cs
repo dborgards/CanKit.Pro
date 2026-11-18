@@ -630,7 +630,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             var send = SendControlFrame(cobId, frame, cancellationToken);
             return _options.EnableEmcyInhibit ? RecordEmcyCompletionAsync(send, inhibitEpoch) : send;
         };
-        return AppendToEmcyChain(() => _options.EnableEmcyInhibit || _options.EnableErrorBehavior
+        // A profile EMCY released behind a boot-up takes the gated path whatever the options say: its
+        // turn can come long after its release (the boot-up's send is waited for first), in a state
+        // the node has entered since, and the gate holds it while the node is Stopped (CiA 301 v4.2.0
+        // §7.3.2.2.4, Table 37) and drops it on a reset (the epoch). Without inhibit time the gate
+        // waits for nothing else (#549). Every other EMCY keeps the path its options give it.
+        bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null;
+        return AppendToEmcyChain(() => gated
             ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
     }
 

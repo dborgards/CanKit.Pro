@@ -235,6 +235,98 @@ public partial class CanOpenApplicationSeamTests
         }
     }
 
+    private static readonly System.Reflection.FieldInfo EmcyInhibitWait =
+        typeof(CanOpenNode).GetField("_emcyInhibitWait", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+
+    /// <summary>Whether the head of the EMCY chain is parked, waiting for the node to leave Stopped (or
+    /// for its inhibit time): it has been decided, on the actor, and was not transmitted.</summary>
+    private static Task<bool> EmcyParkedAsync(CanOpenNode node)
+        => node.ActorForTests.PostAsync(() => EmcyInhibitWait.GetValue(node) is not null);
+
+    /// <summary>
+    /// Issue #549: a profile raises an error in <c>OnReset</c>; its EMCY is released behind the boot-up,
+    /// which is kept from the wire while the master stops the node. When the boot-up is let go, the
+    /// EMCY's turn comes in Stopped. Returns once that turn has been decided: either the EMCY is on the
+    /// wire, or the chain is parked without having sent it.
+    /// </summary>
+    private static async Task<EntryRig> ReleasedEmcyTakesItsTurnInStoppedAsync(CanOpenNodeOptions options, RecordingApplication app)
+    {
+        int resets = 0;
+        app.WhenReset = _ =>
+        {
+            if (Interlocked.Increment(ref resets) == 1) app.Host!.RaiseError(0x5000, 0x04);
+        };
+        var rig = new EntryRig(options.WithApplication(app));
+        try
+        {
+            await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+            Settle(rig.Node);
+            var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bootUpMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            rig.Node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            rig.Node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat ? bootUpMayLeave.Task : Task.CompletedTask;
+
+            rig.Wire.Transmit(0x000, ResetCommand(NmtCommand.ResetNode));
+            await chainWaits.Task.WithTimeoutAsync(ShortTimeout);
+            rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+            await WaitUntilAsync(() => rig.Node.State == NmtState.Stopped, "Stopped");
+            Settle(rig.Node);
+            bootUpMayLeave.SetResult(true);
+
+            await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 2);
+            var deadline = DateTime.UtcNow + ShortTimeout;
+            while (rig.Wire.Count(SlaveEmcy) == 0 && !await EmcyParkedAsync(rig.Node))
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("The released EMCY never took its turn.");
+                await Task.Delay(1);
+            }
+            await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+            return rig;
+        }
+        catch
+        {
+            rig.Dispose();
+            throw;
+        }
+    }
+
+    [Theory] // #549
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Released_Emcy_Whose_Turn_Comes_In_Stopped_Waits_Until_The_Node_Leaves_It(bool emcyInhibit)
+    {
+        var app = Profile();
+        using var rig = await ReleasedEmcyTakesItsTurnInStoppedAsync(new CanOpenNodeOptions { EnableEmcyInhibit = emcyInhibit }, app);
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "no EMCY in Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37)");
+        rig.Node.State.Should().Be(NmtState.Stopped);
+
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(rig.Node);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(1, "the EMCY goes out once, when the node has left Stopped");
+        rig.Wire.Payloads(SlaveEmcy)[0].Should().Equal(Emcy(0x5000, 0x05));
+        ErrorRegister(rig.Node).Should().Be(0x05);
+    }
+
+    [Fact] // #549
+    public async Task A_Reset_While_A_Released_Emcy_Waits_In_Stopped_Drops_It()
+    {
+        var app = Profile();
+        using var rig = await ReleasedEmcyTakesItsTurnInStoppedAsync(new CanOpenNodeOptions(), app);
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "no EMCY in Stopped");
+
+        rig.Node.BeforeControlFrameSendForTests = null;
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        await EmcyChainSettledAsync(rig.Node);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "the reset ended the error before its EMCY went out");
+        ErrorRegister(rig.Node).Should().Be(0);
+    }
+
     // -----------------------------------------------------------------------------------------
     // An LSS slave without a node-id.
     // -----------------------------------------------------------------------------------------
