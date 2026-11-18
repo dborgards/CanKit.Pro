@@ -24,9 +24,9 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Cia401;
 /// <remarks>
 /// <para>The master is raw rather than a second <see cref="CanOpenNode"/>: a node's SDO client
 /// refuses every object but <c>1000h</c>, <c>1001h</c> and <c>1018h</c> of a server it has no
-/// description for, and the description of a CiA 401 device is what the tool side and the EDS
-/// variant build later. Raw expedited transfers reach every object and show the abort codes as
-/// they are on the wire.</para>
+/// description for, and raw expedited transfers reach every object and show the abort codes as
+/// they are on the wire. A tool node with a bound description of the device joins the same bus in
+/// <see cref="Cia401ToolRig"/>.</para>
 /// <para>Nothing here waits on a wall clock for a result. "Nothing was sent" and "exactly so many
 /// frames" are asserted after <see cref="DrainAsync"/>, which says what it guarantees
 /// (<see cref="CanOpenTransmitBarrier"/>): every frame the device decided in the actor jobs queued
@@ -92,6 +92,7 @@ internal sealed class Cia401Rig : IDisposable
         ICia401Process? process = null)
     {
         var session = VirtualAdapterFixture.NewSession("cia401");
+        Session = session;
         _masterBus = VirtualAdapterFixture.Open(session, 0);
         _masterBus.FrameObserved += (_, e) =>
         {
@@ -128,6 +129,10 @@ internal sealed class Cia401Rig : IDisposable
             throw;
         }
     }
+
+    /// <summary>The virtual adapter session of the rig: channel 0 is the master, channel 1 the
+    /// device; a further channel joins the same bus (<see cref="Cia401ToolRig"/>).</summary>
+    internal string Session { get; }
 
     /// <summary>The first device, the only one in most tests.</summary>
     internal Cia401Device Device => Devices[0];
