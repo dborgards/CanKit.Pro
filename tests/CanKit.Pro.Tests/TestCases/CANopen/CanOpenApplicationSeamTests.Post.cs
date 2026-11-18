@@ -413,6 +413,55 @@ public partial class CanOpenApplicationSeamTests
         lock (reported) reported.Should().BeEmpty("it is dropped quietly, not refused by an actor that is shutting down");
     }
 
+    [Fact] // #561
+    public async Task A_Deadline_Due_Before_The_Start_Up_Of_A_Node_Disposed_Meanwhile_Is_Dropped_Quietly()
+    {
+        // The first application keeps the actor busy from its Attach, so the start-up job waits behind
+        // it and the deadline the second arms, due at once on the manual clock, is not fired. The node
+        // opens and is disposed; once its actor refuses work, the actor is let go: it fires the deadline
+        // before the start-up job, as it shuts down, and the callback must be dropped without a trace.
+        using var bus = Open(NewSession(), 1);
+        using var busy = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        int ran = 0;
+        var reported = new List<Exception>();
+        var blocker = new RecordingApplication("blocker")
+        {
+            OnAttach = host =>
+            {
+                var opening = NodeOf(host);
+                opening.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+                _ = opening.PostToActorAsync(() =>
+                {
+                    started.Set();
+                    busy.Wait(ShortTimeout);
+                });
+                started.Wait(ShortTimeout).Should().BeTrue("the actor runs the blocking job");
+            },
+        };
+        var early = new RecordingApplication("early")
+        {
+            OnAttach = host => host.Arm(TimeSpan.Zero, () => Interlocked.Increment(ref ran)),
+        };
+        var node = OpenNode(bus, With(blocker, early), new ManualTimeSource());
+        var actor = typeof(CanOpenNode).GetField("_actor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(node)!;
+        var actorDisposed = actor.GetType().GetField("_disposedFlag", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var dispatcher = (CanKit.Pro.Actor.BackgroundExceptionDispatcher)typeof(CanOpenNode)
+            .GetField("_backgroundReports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(node)!;
+
+        var disposing = Task.Run(node.Dispose);
+        await WaitUntilAsync(() => (int)actorDisposed.GetValue(actor)! != 0, "the actor to refuse work");
+        busy.Set();
+        await disposing.WithTimeoutAsync(ShortTimeout);
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        dispatcher.Post(() => delivered.TrySetResult(true));
+        await delivered.Task.WithTimeoutAsync(ShortTimeout);
+
+        Volatile.Read(ref ran).Should().Be(0, "the node was disposed before the callback's turn");
+        lock (reported) reported.Should().BeEmpty("it is dropped quietly, as a post queued before the disposal is");
+    }
+
     [Fact]
     public void A_Post_Held_By_An_Open_That_Fails_Is_Dropped()
     {

@@ -46,7 +46,8 @@ internal interface ICanOpenApplicationHost
     /// but a callback that comes due before the node has ordered its start-up is held as a
     /// <see cref="Post"/> is: it runs behind the start-up job, in Pre-Operational, or for an LSS slave
     /// still waiting for its node-id in Initialisation, never while the node is still being built,
-    /// and it is dropped when the open fails (#561). Such a deadline has expired when it came due
+    /// and it is dropped without a throw when the open fails, or when the node is disposed before its
+    /// turn (#561). Such a deadline has expired when it came due
     /// (<see cref="IDeadline.IsExpired"/>): disposing it while its callback is held does not stop the
     /// callback. Its EMCYs, like every EMCY of the application, do not overtake a boot-up whose send
     /// is still pending (<see cref="RaiseError"/>).

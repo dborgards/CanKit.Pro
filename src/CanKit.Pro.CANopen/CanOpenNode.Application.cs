@@ -462,8 +462,18 @@ internal sealed partial class CanOpenNode
         }
         if (!_startUpBegun)
         {
-            // Released, and the start-up job is in the mailbox ahead of this.
-            _actor.Post(work);
+            // Released, and the start-up job is in the mailbox ahead of this. As for a Post: a node
+            // disposed meanwhile drops it, and so does an actor that ended between the check and the
+            // post, without a throw (the actor may be shutting down and draining its due timers).
+            if (Volatile.Read(ref _disposed) != 0) return;
+            try
+            {
+                _actor.Post(work);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Dropped, as documented.
+            }
             return;
         }
         work();
