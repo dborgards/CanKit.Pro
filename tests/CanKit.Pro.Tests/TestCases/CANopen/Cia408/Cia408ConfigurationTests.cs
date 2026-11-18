@@ -137,51 +137,53 @@ public class Cia408ConfigurationTests
 
     /// <summary>One row per control mode and resolution the mode can run in, the mode being the only
     /// (and so the default) one: PDO 1 carries mapping 1, PDO 2 the mapping of the mode where the
-    /// table has a row for it in the width in use, <see langword="null"/> where it has none.</summary>
+    /// table has a row for it in the width in use, <see langword="null"/> where it has none. The last
+    /// two columns are the number of default PDOs and the required PDO count.</summary>
     [Theory]
     // valve modes, 16-bit (Valve16 and Valve16Drive32 run a valve mode in 16 bit alike)
-    [InlineData(1, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, null)]
-    [InlineData(1, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, null)]
-    [InlineData(2, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, new uint[] { StatusWord16, 0x63010110 })]
-    [InlineData(2, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, new uint[] { StatusWord16, 0x63010110 })]
-    [InlineData(3, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, null)]
-    [InlineData(3, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, null)]
-    [InlineData(4, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, new uint[] { StatusWord16, 0x63810110 })]
-    [InlineData(4, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, new uint[] { StatusWord16, 0x63810110 })]
-    [InlineData(5, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110, 0x63800110 }, new uint[] { StatusWord16, 0x63010110, 0x63810110 })]
-    [InlineData(5, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110, 0x63800110 }, new uint[] { StatusWord16, 0x63010110, 0x63810110 })]
-    [InlineData(13, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110 }, new uint[] { StatusWord16, 0x67010110 })]
-    [InlineData(13, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110 }, new uint[] { StatusWord16, 0x67010110 })]
-    [InlineData(14, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110, 0x63800110 }, new uint[] { StatusWord16, 0x67010110, 0x63810110 })]
-    [InlineData(14, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110, 0x63800110 }, new uint[] { StatusWord16, 0x67010110, 0x63810110 })]
-    [InlineData(15, "Valve16", ControlWord16, StatusWord16, null, null)]
-    [InlineData(15, "Valve16Drive32", ControlWord16, StatusWord16, null, null)]
+    [InlineData(1, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, null, 3, 2)]
+    [InlineData(1, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, null, 3, 2)]
+    [InlineData(2, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, new uint[] { StatusWord16, 0x63010110 }, 4, 2)]
+    [InlineData(2, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110 }, new uint[] { StatusWord16, 0x63010110 }, 4, 2)]
+    [InlineData(3, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, null, 3, 2)]
+    [InlineData(3, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, null, 3, 2)]
+    [InlineData(4, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, new uint[] { StatusWord16, 0x63810110 }, 4, 2)]
+    [InlineData(4, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63800110 }, new uint[] { StatusWord16, 0x63810110 }, 4, 2)]
+    [InlineData(5, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110, 0x63800110 }, new uint[] { StatusWord16, 0x63010110, 0x63810110 }, 4, 2)]
+    [InlineData(5, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x63000110, 0x63800110 }, new uint[] { StatusWord16, 0x63010110, 0x63810110 }, 4, 2)]
+    [InlineData(13, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110 }, new uint[] { StatusWord16, 0x67010110 }, 4, 2)]
+    [InlineData(13, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110 }, new uint[] { StatusWord16, 0x67010110 }, 4, 2)]
+    [InlineData(14, "Valve16", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110, 0x63800110 }, new uint[] { StatusWord16, 0x67010110, 0x63810110 }, 4, 2)]
+    [InlineData(14, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110, 0x63800110 }, new uint[] { StatusWord16, 0x67010110, 0x63810110 }, 4, 2)]
+    [InlineData(15, "Valve16", ControlWord16, StatusWord16, null, null, 2, 1)]
+    [InlineData(15, "Valve16Drive32", ControlWord16, StatusWord16, null, null, 2, 1)]
     // valve modes, 32-bit; mappings 4 (pQ), TPDO 9 and RPDO 10 (pFlow) have no 32-bit row
-    [InlineData(1, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, null)]
-    [InlineData(2, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, new uint[] { StatusWord32, 0x63090120 })]
-    [InlineData(3, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, null)]
-    [InlineData(4, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, new uint[] { StatusWord32, 0x63890120 })]
-    [InlineData(5, "Valve32Drive32", ControlWord32, StatusWord32, null, null)]
-    [InlineData(13, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x67080120 }, new uint[] { StatusWord32, 0x67090120 })]
-    [InlineData(14, "Valve32Drive32", ControlWord32, StatusWord32, null, null)]
-    [InlineData(15, "Valve32Drive32", ControlWord32, StatusWord32, null, null)]
+    [InlineData(1, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, null, 3, 2)]
+    [InlineData(2, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, new uint[] { StatusWord32, 0x63090120 }, 4, 2)]
+    [InlineData(3, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, null, 3, 2)]
+    [InlineData(4, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, new uint[] { StatusWord32, 0x63890120 }, 4, 2)]
+    [InlineData(5, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
+    [InlineData(13, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x67080120 }, new uint[] { StatusWord32, 0x67090120 }, 4, 2)]
+    [InlineData(14, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
+    [InlineData(15, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
     // drive modes, 32-bit in both resolutions that have a drive
-    [InlineData(6, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x64800120 }, null)]
-    [InlineData(6, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x64800120 }, null)]
-    [InlineData(7, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65000120 }, new uint[] { StatusWord32, 0x65010120 })]
-    [InlineData(7, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65000120 }, new uint[] { StatusWord32, 0x65010120 })]
-    [InlineData(8, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65800120 }, new uint[] { StatusWord32, 0x65810120 })]
-    [InlineData(8, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65800120 }, new uint[] { StatusWord32, 0x65810120 })]
-    [InlineData(9, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 })]
-    [InlineData(9, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 })]
-    [InlineData(10, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 })]
-    [InlineData(10, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 })]
-    [InlineData(11, "Valve32Drive32", ControlWord32, StatusWord32, null, null)]
-    [InlineData(11, "Valve16Drive32", ControlWord32, StatusWord32, null, null)]
-    [InlineData(12, "Valve32Drive32", ControlWord32, StatusWord32, null, null)]
-    [InlineData(12, "Valve16Drive32", ControlWord32, StatusWord32, null, null)]
+    [InlineData(6, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x64800120 }, null, 3, 2)]
+    [InlineData(6, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x64800120 }, null, 3, 2)]
+    [InlineData(7, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65000120 }, new uint[] { StatusWord32, 0x65010120 }, 4, 2)]
+    [InlineData(7, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65000120 }, new uint[] { StatusWord32, 0x65010120 }, 4, 2)]
+    [InlineData(8, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65800120 }, new uint[] { StatusWord32, 0x65810120 }, 4, 2)]
+    [InlineData(8, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x65800120 }, new uint[] { StatusWord32, 0x65810120 }, 4, 2)]
+    [InlineData(9, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 }, 4, 2)]
+    [InlineData(9, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 }, 4, 2)]
+    [InlineData(10, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 }, 4, 2)]
+    [InlineData(10, "Valve16Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x66000120 }, new uint[] { StatusWord32, 0x66010120 }, 4, 2)]
+    [InlineData(11, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
+    [InlineData(11, "Valve16Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
+    [InlineData(12, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
+    [InlineData(12, "Valve16Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
     public void The_Default_PDOs_Are_Mapping_1_And_The_Mapping_Of_The_Default_Control_Mode(
-        int mode, string resolution, uint controlWord, uint statusWord, uint[]? rpdo2, uint[]? tpdo2)
+        int mode, string resolution, uint controlWord, uint statusWord, uint[]? rpdo2, uint[]? tpdo2,
+        int pdoCount, int requiredPdoCount)
     {
         var configuration = Config(resolution, [mode]);
 
@@ -206,8 +208,8 @@ public class Cia408ConfigurationTests
             Entries(configuration, 2, isTpdo: true).Should().Equal(tpdo2);
         }
 
-        configuration.DefaultPdos.Should().HaveCount(2 + (rpdo2 is null ? 0 : 1) + (tpdo2 is null ? 0 : 1));
-        configuration.RequiredPdoCount.Should().Be(rpdo2 is null && tpdo2 is null ? 1 : 2);
+        configuration.DefaultPdos.Should().HaveCount(pdoCount);
+        configuration.RequiredPdoCount.Should().Be(requiredPdoCount);
     }
 
     [Fact]
@@ -287,6 +289,17 @@ public class Cia408ConfigurationTests
             ((Action)(() => collection.Add(((ushort)0x6040, (byte)0, (byte)16)))).Should().Throw<NotSupportedException>();
             pdo.Entries.Should().NotBeAssignableTo<List<(ushort Index, byte Subindex, byte Bits)>>();
         }
+    }
+
+    [Fact]
+    public void The_List_Of_Default_Pdos_Cannot_Be_Written_Through_A_Cast()
+    {
+        var pdos = Config("Valve16", [2]).DefaultPdos;
+
+        var collection = pdos.Should().BeAssignableTo<ICollection<Cia408DefaultPdo>>().Subject;
+        collection.IsReadOnly.Should().BeTrue();
+        ((Action)(() => collection.Clear())).Should().Throw<NotSupportedException>();
+        pdos.Should().NotBeAssignableTo<List<Cia408DefaultPdo>>();
     }
 
     // ---- Validate ------------------------------------------------------------------------------------
