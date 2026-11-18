@@ -47,7 +47,7 @@ internal readonly record struct Cia401Observation(ForeignPdoObserveResult Result
 /// <para><b>Blocks.</b> <see cref="DigitalInputs"/>, <see cref="DigitalOutputs"/>,
 /// <see cref="AnalogInputs"/> and <see cref="AnalogOutputs"/> exist when bit 16, 17, 18 or 19 of the
 /// device type of the logical device is set, and are <see langword="null"/> otherwise (CiA 401-1
-/// v3.1.0 §6.2.1, Table 2). The M bit (bit 23, a manufacturer-specific PDO mapping, CiA 401-1 v3.1.0 Table 3) changes nothing
+/// v3.1.0 §6.2.1, Table 2). The M bit (bit 23, a manufacturer-specific PDO mapping, CiA 401-1 v3.1.0 Table 2) changes nothing
 /// here: the peer reads and writes over SDO, and <see cref="Interpret"/> names the entries a PDO
 /// really carried, whatever its mapping.</para>
 /// <para><b>Indices.</b> Every index comes from <see cref="Cia401Objects"/> and is shifted for the
@@ -121,8 +121,9 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     /// <exception cref="ArgumentNullException"><paramref name="definition"/> or
     /// <paramref name="value"/> is null.</exception>
     /// <exception cref="InvalidOperationException">The catalogue marks the entry read-only — the object
-    /// is <c>ro</c>, or the entry is sub-index <c>00h</c> of an array, which is const (CiA 301 v4.2.0
-    /// §7.4.5) — and nothing was sent.</exception>
+    /// is <c>ro</c>, or the entry is sub-index <c>00h</c> of an array, which every entry description of
+    /// CiA 401-1 v3.1.0 gives the access <c>const</c> (Table 39 for <c>6000h</c>) — and nothing was
+    /// sent.</exception>
     /// <exception cref="PeerSdoAccessException">The bound description does not allow the entry.</exception>
     /// <exception cref="SdoAbortException">The device aborted the download.</exception>
     public Task WriteAsync(Cia401ObjectDefinition definition, byte subindex, byte[] value, CancellationToken cancellationToken = default)
@@ -284,7 +285,7 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         => WriteValueAsync(definition, Element(definition, number, name), value, cancellationToken);
 
     /// <summary>Sub-index <c>00h</c> of an array, the UNSIGNED8 "highest sub-index supported" (CiA 301
-    /// v4.2.0 §7.4.5): how many elements the device has.</summary>
+    /// v4.2.0 §7.4.3, Table 42): how many elements the device has.</summary>
     private async Task<int> ReadCountAsync(Cia401ObjectDefinition definition, CancellationToken cancellationToken)
         => (int)Cia401Codec.Decode(OdDataType.Unsigned8, await ReadAsync(definition, 0, cancellationToken).ConfigureAwait(false));
 

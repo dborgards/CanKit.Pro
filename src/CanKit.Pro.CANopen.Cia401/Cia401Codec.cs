@@ -6,8 +6,8 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// <summary>
 /// The one place a value of the catalogue becomes the bytes the dictionary, an SDO transfer or a PDO
 /// holds, and back, for the device and the peer alike: little-endian, in the width of the data type,
-/// two's complement for the signed types (CiA 301 v4.2.0 §7.1.4.4, §7.1.4.5, and §7.1.2: the least
-/// significant byte first).
+/// two's complement for the signed types (CiA 301 v4.2.0 §7.1.4.5 for the unsigned and §7.1.4.6 for
+/// the signed integers, and §7.1.1: "little endian style", the least significant byte first).
 /// </summary>
 internal static class Cia401Codec
 {
@@ -15,7 +15,7 @@ internal static class Cia401Codec
     private const int MaxBits = 64;
 
     /// <summary>Whether <paramref name="type"/> is one of the signed integer types, whose value is two's
-    /// complement (CiA 301 v4.2.0 §7.1.4.5).</summary>
+    /// complement (CiA 301 v4.2.0 §7.1.4.6).</summary>
     internal static bool IsSigned(OdDataType type) => type switch
     {
         OdDataType.Integer8 or OdDataType.Integer16 or OdDataType.Integer24 or OdDataType.Integer32

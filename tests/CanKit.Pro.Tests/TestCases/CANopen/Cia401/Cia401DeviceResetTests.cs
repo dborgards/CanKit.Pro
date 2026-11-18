@@ -128,7 +128,7 @@ public class Cia401DeviceResetTests
         rig.Device.ReadDigitalOutputs(1).Should().Be(0x0F, "the filter mask is FFh again and no polarity inverts");
     }
 
-    [Fact] // Reset Communication restores 1000h to 1FFFh only (CiA 301 v4.2.0 §7.3.2.2.2)
+    [Fact] // Reset Communication restores 1000h to 1FFFh only (CiA 301 v4.2.0 §7.3.2.2.1)
     public async Task Reset_Communication_Keeps_The_Application_Objects_And_Gives_Back_The_Pdo_Records()
     {
         using var rig = new Cia401Rig(AllFour, Cia401Rig.WritablePdoRecords);

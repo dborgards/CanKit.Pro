@@ -22,8 +22,9 @@ internal enum Cia401FunctionBlock
     General,
 }
 
-/// <summary>The PDO mapping attribute of an entry description, as the norm gives it (CiA 301
-/// §7.4.2): which PDO an entry can be mapped into, and whether the profile maps it by default.</summary>
+/// <summary>The PDO mapping attribute of an entry description, as the norm gives it (CiA 301 v4.2.0
+/// §7.5.1, Table 53): which PDO an entry can be mapped into, and whether the profile maps it by
+/// default.</summary>
 internal enum Cia401PdoMapping
 {
     /// <summary>"No": the entry cannot be mapped.</summary>
@@ -49,8 +50,9 @@ internal enum Cia401PdoMapping
 /// </summary>
 /// <remarks>
 /// The attributes are those of the elements, that is of sub-index <c>01h</c> and the ones that
-/// follow it; sub-index <c>00h</c> of an array is always the const <c>UNSIGNED8</c> "highest
-/// sub-index supported" (CiA 301 §7.4.5) and is not modelled here. Where the norm gives a
+/// follow it; sub-index <c>00h</c> of an array is always the <c>UNSIGNED8</c> "highest sub-index
+/// supported" (CiA 301 v4.2.0 §7.4.3, Table 42), const in every entry description of CiA 401-1
+/// (Table 39 for <c>6000h</c>), and is not modelled here. Where the norm gives a
 /// different value to a later element, the member says so.
 /// </remarks>
 internal sealed class Cia401ObjectDefinition

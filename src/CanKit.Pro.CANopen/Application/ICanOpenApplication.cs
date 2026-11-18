@@ -92,7 +92,8 @@ internal interface ICanOpenApplication
     /// </para>
     /// <para>
     /// Not reported: what the application writes on the actor loop from inside one of its own
-    /// callbacks, deadline callbacks (<see cref="ICanOpenApplicationHost.Arm"/>) included; the values
+    /// callbacks, deadline callbacks (<see cref="ICanOpenApplicationHost.Arm"/>) and the work it
+    /// posts (<see cref="ICanOpenApplicationHost.Post"/>) included; the values
     /// an NMT reset restores; writes made during <see cref="Attach"/>. What another application
     /// writes to these entries from its callbacks is reported.
     /// </para>

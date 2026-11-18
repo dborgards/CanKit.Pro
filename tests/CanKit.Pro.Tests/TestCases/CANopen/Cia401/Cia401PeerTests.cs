@@ -375,7 +375,7 @@ public class Cia401PeerTests
 
         await input.Should().ThrowExactlyAsync<InvalidOperationException>();
         await source.Should().ThrowExactlyAsync<InvalidOperationException>();
-        await highest.Should().ThrowExactlyAsync<InvalidOperationException>("sub-index 0 of an array is const (CiA 301 v4.2.0 §7.4.5)");
+        await highest.Should().ThrowExactlyAsync<InvalidOperationException>("sub-index 0 of an array is const (CiA 401-1 v3.1.0, Table 39 for 6000h and each entry description after it)");
         await AssertOnlyTheBarrierWentOutAsync(rig);
     }
 

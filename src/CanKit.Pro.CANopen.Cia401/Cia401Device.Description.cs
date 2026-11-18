@@ -189,7 +189,7 @@ internal sealed partial class Cia401Device
 
     /// <summary>
     /// The object code and data types of a declared object against the catalogue: an array with an
-    /// UNSIGNED8 sub-index 00h (CiA 301 v4.2.0 §7.4.5) and the catalogue's type in every element
+    /// UNSIGNED8 sub-index 00h (CiA 301 v4.2.0 §7.4.3, Table 42) and the catalogue's type in every element
     /// (for a manufacturer-specific type, any), or a variable at sub-index 00h of the catalogue's
     /// type. The dictionary keeps no object code, so it is told from the shape: an array has
     /// elements above sub-index 00h, a variable has none. An array without elements is an array

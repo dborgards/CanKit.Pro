@@ -60,7 +60,7 @@ internal sealed partial class Cia401Device
     /// The norm is not of one voice here, and this is the reading taken. Figure 6 (§7.2.4) ANDs the
     /// limit comparisons with the delta block, and §8.6.5 and §8.6.6 (and the float objects
     /// §8.6.10, §8.6.11) say a limit interrupts on every change "if there is no additional trigger
-    /// condition, e.g. an input interrupt delta": the delta restricts the limit. §6.2.8, sentence 3,
+    /// condition, e.g. an input interrupt delta": the delta restricts the limit. §6.2.8,
     /// "If more than one interrupt condition is enabled; the PDO is transmitted if one of these
     /// conditions is fulfilled", read across the groups, contradicts both; it is read as applying
     /// within a group. The defaults decide between the two: under a plain OR, 07h with limits 0

@@ -40,16 +40,20 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// is a callback of the device too. The application-side methods (<see cref="SetDigitalInput"/> and
 /// the others) can be called from any thread and from inside the device's callbacks: they check
 /// their arguments on the calling thread and hand the change to <see cref="ICanOpenApplicationHost.Post"/>,
-/// which applies it at once inside a callback and queues it otherwise. The readers read the
-/// dictionary, which is safe from any thread, and so see the last value applied on the actor loop.
-/// The device keeps no reference to the node, only to its host.
+/// which applies it at once inside a callback and queues it otherwise. The readers can be called
+/// from any thread and see the last value applied on the actor loop: the input readers
+/// (<see cref="ReadDigitalInputs"/>, <see cref="ReadAnalogInput"/>) read the dictionary, the output
+/// readers (<see cref="ReadDigitalOutputs"/>, <see cref="ReadDigitalOutput"/>,
+/// <see cref="ReadAnalogOutput"/>) the terminal levels, which the device publishes whole once a
+/// callback has worked them out (see <see cref="OutputsChanged"/>). The device keeps no reference to
+/// the node, only to its host.
 /// </para>
 /// <para>
 /// <b>Life cycle.</b> Before the node has attached the device, the application-side methods throw
 /// <see cref="InvalidOperationException"/>: there is nothing to set yet. A device attaches to one
 /// node; handed to a second, it fails that node's open. Once the node is disposed a set does
-/// nothing (the post is dropped) and a reader shows the last value, from the dictionary the device
-/// still holds.
+/// nothing (the post is dropped) and a reader shows the last value: an input reader from the
+/// dictionary the device still holds, an output reader the levels last published.
 /// </para>
 /// <para>
 /// <b>What is built.</b> The four function blocks of CiA 401-1 with their default access, each
@@ -105,6 +109,14 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// logical device that the first slice does not build, as the file declares them, and does not act
 /// on them: the accesses of one I/O do not "access a single database" (§7.2.1.2) for them, and a
 /// bit or 16-bit input object does not follow the 8-bit one (see
+/// <see cref="FromDescription"/>).</description></item>
+/// <item><description>A device built with <see cref="FromDescription"/> on a file without PDO
+/// records has no PDOs, the default ones included, where §6.1 has a device that supports an I/O
+/// function "support the related default PDOs": the file wins (see
+/// <see cref="FromDescription"/>).</description></item>
+/// <item><description>The other way round, one file is not taken as it stands: a file that declares
+/// <c>6401h</c> without <c>6423h</c>, which §8.6.4 makes mandatory with the analog inputs, fails
+/// the open instead of giving a device whose analog interrupts could never be enabled (see
 /// <see cref="FromDescription"/>).</description></item>
 /// </list>
 /// <para>
@@ -371,8 +383,10 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <see cref="FromDescription"/>, with the abort code an SDO download gets for it
     /// (<c>06010002h</c>, CiA 301 v4.2.0 Table 22): the SDO server refuses such a download before the
     /// device is asked, but a local write through the dictionary asks the device. Refuses a value
-    /// other than 0 and 1 for a BOOLEAN entry (<c>6005h</c>), which is TRUE or FALSE and nothing else
-    /// (CiA 301 v4.2.0 §7.1.4.3), with <c>06090030h</c>, "invalid value for parameter" (Table 22).
+    /// other than 0 and 1 for every writable BOOLEAN entry in the claimed range, whatever block it
+    /// belongs to: <c>6005h</c> and <c>6423h</c>, and any BOOLEAN a description declares there. A
+    /// BOOLEAN is TRUE or FALSE and nothing else (CiA 301 v4.2.0 §7.1.4.3); the code is
+    /// <c>06090030h</c>, "invalid value for parameter" (Table 22).
     /// Refuses an analog interrupt trigger selection (<c>6421h</c>) with a reserved bit set (CiA
     /// 401-1 §8.6.2), and an analog output error mode (<c>6443h</c>) other than 0h and 1h (§8.7.4:
     /// "others = reserved"), with the same code; these two rules hold for the blocks the device has.
@@ -556,9 +570,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// the plant model from its call. What they throw is reported on
     /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/> once every subscriber and the model
     /// have been called, as anything thrown out of an application's callback is, and the device
-    /// carries on (several exceptions as one <see cref="AggregateException"/>); when the event is
-    /// raised inside a <see cref="ReportDeviceFailure"/> that was itself called from a callback of
-    /// the device, the exception reaches that caller instead. Either way the device's state is
+    /// carries on (several exceptions as one <see cref="AggregateException"/>). The device's state is
     /// complete before the first subscriber runs.
     /// </para>
     /// <para>
@@ -754,8 +766,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     }
 
     /// <summary>Declares an array with the data type, access, PDO mapping and default the catalogue
-    /// gives it: sub-index 0, the const UNSIGNED8 "highest sub-index supported" (CiA 301 §7.4.5)
-    /// holding <paramref name="elements"/>, then one element per group of eight digital channels,
+    /// gives it: sub-index 0, the UNSIGNED8 "highest sub-index supported" (CiA 301 v4.2.0 §7.4.3,
+    /// Table 42), const in the entry descriptions of CiA 401-1 (Table 39 for <c>6000h</c>), holding
+    /// <paramref name="elements"/>, then one element per group of eight digital channels,
     /// per analog channel or per interrupt source bank; an object without a default ("No", CiA 401-1
     /// §8.2.1, §8.4.2) starts at 0. Constructing thread, in Attach.</summary>
     private static void DeclareArray(ObjectDictionary od, ProfileObject profileObject, int elements)
