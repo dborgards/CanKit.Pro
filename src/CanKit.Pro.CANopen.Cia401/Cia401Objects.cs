@@ -546,11 +546,10 @@ internal static class Cia401Objects
 
     private static OdDataType DigitalTypeOf(int bits) => bits switch
     {
-        1 => OdDataType.Boolean,
         8 => OdDataType.Unsigned8,
         16 => OdDataType.Unsigned16,
         32 => OdDataType.Unsigned32,
-        _ => throw new ArgumentOutOfRangeException(nameof(bits), bits, "A digital object carries 1, 8, 16 or 32 channels per sub-index."),
+        _ => throw new ArgumentOutOfRangeException(nameof(bits), bits, "An 8-, 16- or 32-bit digital array carries that many channels per sub-index."),
     };
 
     /// <summary>An 8-, 16- or 32-bit digital array.</summary>
