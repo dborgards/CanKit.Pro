@@ -75,19 +75,28 @@ public partial class CanOpenApplicationSeamTests
     [Fact]
     public async Task An_Error_Raised_Before_The_Start_Up_Follows_The_Boot_Up()
     {
+        using var running = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         NmtState? stateWhenRaised = null;
         bool released = false;
+        bool ranFirst = false;
         var app = Profile();
-        // A deadline armed in Attach and due at once runs ahead of the start-up job: the actor does
-        // not let later mailbox work overtake a timer that was due before it was posted. It waits
-        // for the test, so the boot-up cannot have left before the hold is in place.
-        app.OnAttach = host => host.Arm(TimeSpan.Zero, () =>
+        // A deadline armed in Attach and due at once, which Attach waits for until it runs: the open
+        // posts the start-up job only after that, so the deadline is ahead of it on the actor. Without
+        // the wait the order is a race: the actor loop drains its mailbox before it takes in a timer
+        // armed from another thread, so a start-up job posted before the loop's next pass ran first.
+        // The deadline then waits for the test, so the boot-up cannot leave before the hold is in place.
+        app.OnAttach = host =>
         {
-            released = release.Wait(ShortTimeout);
-            stateWhenRaised = host.State;
-            host.RaiseError(0x5000, 0x04);
-        });
+            host.Arm(TimeSpan.Zero, () =>
+            {
+                running.Set();
+                released = release.Wait(ShortTimeout);
+                stateWhenRaised = host.State;
+                host.RaiseError(0x5000, 0x04);
+            });
+            ranFirst = running.Wait(ShortTimeout);
+        };
         using var rig = new EntryRig(With(app), new ManualTimeSource());
         HoldBootUpUntilTheEmcyHasHadItsChance(rig);
 
@@ -98,6 +107,7 @@ public partial class CanOpenApplicationSeamTests
 
         // Asserted here, not in the callback: a throw on the actor loop is a background exception,
         // not a test failure.
+        ranFirst.Should().BeTrue("the deadline was running before the open went on to post the start-up job");
         released.Should().BeTrue("the deadline waited for the test, so the hold was in place before the boot-up");
         stateWhenRaised.Should().Be(NmtState.Initializing, "the error is raised before the node has booted");
         ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire), Emcy(0x5000, 0x05));
