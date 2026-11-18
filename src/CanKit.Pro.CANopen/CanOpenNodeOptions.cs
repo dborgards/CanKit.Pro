@@ -403,6 +403,14 @@ public sealed class CanOpenNodeOptions
             SrdoConfigurationCheckInterval, applications: applications);
     }
 
+    /// <summary>Returns a copy with <see cref="EnableErrorBehavior"/> replaced and everything else
+    /// kept: how a device profile that monitors communication failures
+    /// (<see cref="CanOpenApplicationRequirements.CommunicationFailureMonitoring"/>) turns it on in
+    /// options it is handed.</summary>
+    internal CanOpenNodeOptions WithErrorBehavior(bool enabled)
+        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
+            SrdoConfigurationCheckInterval, enableErrorBehavior: enabled);
+
     /// <summary>Returns a copy of this options record with <see cref="ErrorHistoryCapacity"/> replaced.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacity"/> is outside 0..254.</exception>
     public CanOpenNodeOptions WithErrorHistoryCapacity(int capacity)
@@ -429,7 +437,8 @@ public sealed class CanOpenNodeOptions
         int? pdoCount,
         TimeSpan? srdoConfigurationCheckInterval,
         int? errorHistoryCapacity = null,
-        IReadOnlyList<ICanOpenApplication>? applications = null)
+        IReadOnlyList<ICanOpenApplication>? applications = null,
+        bool? enableErrorBehavior = null)
     {
         var options = new CanOpenNodeOptions
         {
@@ -438,7 +447,7 @@ public sealed class CanOpenNodeOptions
             EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,
             EmitControllerOverrunEmcy = EmitControllerOverrunEmcy,
             EnableEmcyInhibit = EnableEmcyInhibit,
-            EnableErrorBehavior = EnableErrorBehavior,
+            EnableErrorBehavior = enableErrorBehavior ?? EnableErrorBehavior,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,

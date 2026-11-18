@@ -42,7 +42,7 @@ internal sealed partial class CanOpenNode
                 "1000h and the chain of 67FFh objects when the node opens.");
         }
         // Checks the number as well: ArgumentOutOfRangeException, parameter logicalDevice.
-        var index = CanOpenLogicalDevices.DeviceTypeIndex(logicalDevice);
+        var index = DeviceTypeObjectOf(logicalDevice);
         if (!slot.Claims.Any(range => range.Contains(index)))
         {
             throw new ArgumentException(
@@ -68,8 +68,8 @@ internal sealed partial class CanOpenNode
         _deviceTypes = null;
         if (set is null) return;
 
-        var types = new CanOpenDeviceType[CanOpenLogicalDevices.MaxCount];
-        var setters = new ApplicationSlot?[CanOpenLogicalDevices.MaxCount];
+        var types = new CanOpenDeviceType[CanOpenLogicalDeviceAddressing.MaxLogicalDevices];
+        var setters = new ApplicationSlot?[CanOpenLogicalDeviceAddressing.MaxLogicalDevices];
         foreach (var (device, type, setter) in set)
         {
             if (setters[device] is { } first)
@@ -109,7 +109,7 @@ internal sealed partial class CanOpenNode
 
         for (int device = 0; device < count; device++)
         {
-            var index = CanOpenLogicalDevices.DeviceTypeIndex(device);
+            var index = DeviceTypeObjectOf(device);
             if (_describedObjects.Contains(index))
             {
                 RequireDescribedProfile(index, setters[device]!, types[device]);
@@ -129,6 +129,12 @@ internal sealed partial class CanOpenNode
             }
         }
     }
+
+    /// <summary>The device-type object of a logical device: <c>67FFh + x·800h</c>, x the logical device
+    /// counted from 0 (CiA 301 v4.2.0 §7.5.2.1).</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
+    /// <c>0</c> to <c>7</c>; the parameter is <c>logicalDevice</c>.</exception>
+    private static ushort DeviceTypeObjectOf(int logicalDevice) => CanOpenLogicalDeviceAddressing.Index(logicalDevice, 0x67FF);
 
     /// <summary>The device description is the node's identity and wins over the application: it
     /// stays as it is, and the profile number it holds in <paramref name="index"/> must be the one

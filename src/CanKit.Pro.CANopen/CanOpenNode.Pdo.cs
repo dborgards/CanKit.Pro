@@ -122,7 +122,10 @@ internal sealed partial class CanOpenNode
     /// gate throughout (<see cref="ObjectDictionary.Transaction"/>), so the sequence is one
     /// transaction: the SDO server writes on the same loop, a second configuration queues behind
     /// the whole sequence, and a direct dictionary write on another thread waits for it —
-    /// none of them lands between two of its writes.
+    /// none of them lands between two of its writes. The default PDOs of the applications are the
+    /// exception: they are written on the constructing thread while the node opens
+    /// (<see cref="ComposeDefaultPdos"/>), as the device description's records are, and the full
+    /// rebuild the constructor posts brings the engine in line.
     /// </summary>
     private void WritePdoRecords(ushort comm, ushort map, PdoMappingEntry[] entries, uint cobIdWord,
         byte transmissionType, ushort inhibit, ushort eventTimerMs, bool isTpdo, int pdoIndex)

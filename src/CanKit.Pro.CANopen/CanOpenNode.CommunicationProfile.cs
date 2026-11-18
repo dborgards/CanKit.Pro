@@ -544,6 +544,11 @@ internal sealed partial class CanOpenNode
 
     private static uint PdoFrameKey(uint word) => word & 0x3FFF_FFFF;
 
+    /// <summary>Whether a PDO's frame key (<see cref="PdoFrameKey"/>) is a base-frame CAN-ID that
+    /// CiA 301 v4.2.0 §7.3.5 (Table 40) restricts; an extended identifier never is.</summary>
+    private static bool IsRestrictedPdoFrameKey(uint key)
+        => (key & CanOpenCobId.ExtendedFrameBit) == 0 && CanOpenCobId.IsRestricted(key & CanOpenCobId.CanIdMask);
+
     private static bool IsUsablePdoCobIdWord(uint word)
     {
         if ((word & CanOpenCobId.ExtendedFrameBit) != 0) return true;

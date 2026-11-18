@@ -7,6 +7,7 @@ using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
 
@@ -43,6 +44,10 @@ internal sealed partial class CanOpenNode
 
         // Read once with the claims, for the same reason.
         internal bool MonitorsCommunicationFailure { get; init; }
+
+        // The highest PDO number the application configures (CanOpenApplicationRequirements.PdoCount),
+        // read once with the claims: the bound of its default PDOs.
+        internal int PdoCount { get; init; }
 
         // What this application was last told about the communication failure. Per application,
         // not per node: a callback of one application can change the condition before the next
@@ -90,13 +95,15 @@ internal sealed partial class CanOpenNode
                     throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.Applications.");
             }
             var host = new ApplicationHost(this);
+            var requirements = application.Requirements;
             slots[i] = new ApplicationSlot(application, host)
             {
                 Claims = ValidatedClaims(application, slots, i),
-                MonitorsCommunicationFailure = application.Requirements.CommunicationFailureMonitoring,
+                MonitorsCommunicationFailure = requirements.CommunicationFailureMonitoring,
+                PdoCount = requirements.PdoCount,
             };
             host.Slot = slots[i];
-            ValidateRequirements(application);
+            ValidateRequirements(application, requirements);
         }
 
         _applications = slots;
@@ -113,6 +120,7 @@ internal sealed partial class CanOpenNode
             }
         }
         ComposeDeviceTypes();
+        ComposeDefaultPdos();
 
         // What the applications declared is part of the power-on state, like what the description
         // declared: Reset Node returns it to this, and 1010h saves it.
@@ -152,9 +160,8 @@ internal sealed partial class CanOpenNode
         return claims;
     }
 
-    private void ValidateRequirements(ICanOpenApplication application)
+    private void ValidateRequirements(ICanOpenApplication application, CanOpenApplicationRequirements requirements)
     {
-        var requirements = application.Requirements;
         if (requirements.PdoCount > _pdoCount)
         {
             throw OptionsError($"Application '{application.Name}' configures {requirements.PdoCount} PDOs: " +
@@ -276,6 +283,13 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private OdWriteDecision ValidateApplicationWrite(ApplicationSlot slot, ushort index, byte subindex, byte[] value)
     {
+        // ValidateWrite is not an actor-loop callback of the application, even when the write it
+        // decides is made from inside one: the innermost callback is then this one, under the
+        // write gate, and a Post made from it is queued, not run there (ICanOpenApplicationHost.Post).
+        // Restored on the way out, before the write is stored and reported.
+        bool onActor = _actor.IsOnCurrentActor;
+        var outer = onActor ? _applicationInCallback : null;
+        if (onActor) _applicationInCallback = null;
         try
         {
             return slot.Application.ValidateWrite(index, subindex, value);
@@ -287,6 +301,10 @@ internal sealed partial class CanOpenNode
         {
             RaiseBackgroundException(ex);
             return OdWriteDecision.Reject(SdoAbortCode.General);
+        }
+        finally
+        {
+            if (onActor) _applicationInCallback = outer;
         }
     }
 
@@ -318,6 +336,89 @@ internal sealed partial class CanOpenNode
         finally
         {
             _applicationInCallback = outer;
+        }
+    }
+
+    // =========================================================================================
+    // Work an application posts to the actor loop (ICanOpenApplicationHost.Post).
+    // =========================================================================================
+
+    // The posts made before the node has opened, oldest first: the actor's thread runs from early in
+    // the constructor, and a post made in Attach, or by another thread once Attach has handed the
+    // application its host, would otherwise run while the constructor still composes the default
+    // PDOs and takes the power-on values. Non-null while held; released behind the start-up job
+    // (ReleaseApplicationPosts), dropped when the open fails (CloseApplicationPosts). Under
+    // _applicationPostGate, as is _applicationPostsClosed.
+    private readonly object _applicationPostGate = new();
+    private List<Action>? _heldApplicationPosts = new();
+    private bool _applicationPostsClosed;
+
+    /// <summary>
+    /// <see cref="ICanOpenApplicationHost.Post"/>: runs <paramref name="action"/> at once when the
+    /// actor loop is inside one of <paramref name="slot"/>'s callbacks, and otherwise queues it as a
+    /// callback of that application — held until the node has opened, dropped once it is disposed
+    /// or its open failed.
+    /// </summary>
+    private void PostApplicationWork(ApplicationSlot slot, Action action)
+    {
+        if (action is null) throw new ArgumentNullException(nameof(action));
+        // IsOnCurrentActor first: the field belongs to the actor loop, as in
+        // OnOdEntryWrittenForApplications.
+        if (_actor.IsOnCurrentActor && ReferenceEquals(_applicationInCallback, slot))
+        {
+            action();
+            return;
+        }
+        if (Volatile.Read(ref _disposed) != 0) return;
+
+        Action work = () =>
+        {
+            // Queued before the disposal and not started when it came: the node is gone.
+            if (Volatile.Read(ref _disposed) != 0) return;
+            InvokeApplication(slot, _ => action());
+        };
+        lock (_applicationPostGate)
+        {
+            if (_applicationPostsClosed) return;
+            if (_heldApplicationPosts is { } held)
+            {
+                held.Add(work);
+                return;
+            }
+        }
+        try
+        {
+            _actor.Post(work);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The actor ended between the check above and the post: dropped, as documented.
+        }
+    }
+
+    /// <summary>The node has ordered its start-up: the posts held until now are queued behind it, in
+    /// the order they were made, and later ones go straight to the actor. Constructing thread, once.</summary>
+    private void ReleaseApplicationPosts()
+    {
+        lock (_applicationPostGate)
+        {
+            var held = _heldApplicationPosts;
+            _heldApplicationPosts = null;
+            // Under the gate: a post that waits for it lands behind these, never between them.
+            if (held is not null)
+            {
+                foreach (var work in held) _actor.Post(work);
+            }
+        }
+    }
+
+    /// <summary>The open failed: what is held is dropped, and so is every later post.</summary>
+    private void CloseApplicationPosts()
+    {
+        lock (_applicationPostGate)
+        {
+            _heldApplicationPosts = null;
+            _applicationPostsClosed = true;
         }
     }
 
@@ -651,8 +752,16 @@ internal sealed partial class CanOpenNode
             return _node._deadlines.Arm(delay, () => _node.InvokeApplication(Slot, _ => onExpired()));
         }
 
+        public void Post(Action action) => _node.PostApplicationWork(Slot, action);
+
         public void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType)
             => _node.SetApplicationDeviceType(Slot, logicalDevice, deviceType);
+
+        public void SetDefaultTpdo(int pdoNumber, PdoMapping mapping, bool enabled = true)
+            => _node.SetApplicationDefaultPdo(Slot, isTpdo: true, pdoNumber, mapping, enabled);
+
+        public void SetDefaultRpdo(int pdoNumber, PdoMapping mapping)
+            => _node.SetApplicationDefaultPdo(Slot, isTpdo: false, pdoNumber, mapping, enabled: true);
 
         public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries)
         {

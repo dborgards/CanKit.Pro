@@ -1345,8 +1345,11 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   the seam through `InternalsVisibleTo`; − more packages to maintain.
 - **Status:** Decided on 2026-11-17. The device type and the logical devices are public
   (FR-CO-063); the seam, the profile descriptor and the catalogue exist as `internal` types in the
-  namespace `CanKit.Pro.CANopen.Application`. No profile package exists. The ADR stays "decided,
-  not implemented" until the seam is published.
+  namespace `CanKit.Pro.CANopen.Application`. CiA 401 exists as an unpackaged project,
+  `CanKit.Pro.CANopen.Cia401`, against the internal seam: object catalogue, device side (first
+  slice) and tool side. The seam gained two calls while it was being built: default PDOs and posting
+  work to the node's loop. CiA 408 and publication are still to come. The ADR stays "decided, not
+  implemented" until the seam is published.
 
 ---
 

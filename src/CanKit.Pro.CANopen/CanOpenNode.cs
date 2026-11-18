@@ -265,6 +265,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         catch
         {
+            CloseApplicationPosts();
             DisposeControllerOverrunMonitor();
             DisposeControllerErrorMonitor();
             _actor.Dispose();
@@ -333,6 +334,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         catch
         {
+            CloseApplicationPosts();
             CompleteEventQueue();
             DisposeControllerOverrunMonitor();
             DisposeControllerErrorMonitor();
@@ -363,6 +365,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             StartControllerErrorMonitoring();
             NotifyNmtStateChanged(NmtState.Initializing);
         });
+
+        // What the applications posted while the node was being built runs behind the start-up,
+        // and before the first frame the reader hands the actor.
+        ReleaseApplicationPosts();
 
         _readerTask = Task.Run(RunReaderAsync);
     }
@@ -1518,11 +1524,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // on purpose our own TPDO (#93); an explicitly configured consumer outranks the
             // range-based guesses below. Two valid RPDOs may share a COB-ID — the dictionary holds
             // both records and CiA 301 does not forbid it — and then each is actuated (Codex on #133).
+            // One exception, on an LSS slave without a node-id: an RPDO on a restricted CAN-ID
+            // (CiA 301 v4.2.0 §7.3.5, Table 40) takes no frame there. No validated write gives an
+            // RPDO such a CAN-ID; only a profile's default RPDO 4 has one, 5FFh, written while the
+            // slave has no node-id (CanOpenNode.Application.Pdo.cs), and 5FFh is node 127's SDO
+            // response to this node's client below. The slave stays in Initialisation meanwhile
+            // (CiA 305 §4.2), where an RPDO acts on nothing (HandleRpdo). Every other RPDO takes
+            // its frame as on a configured node.
             bool consumed = false;
             for (int n = 1; n <= _pdoCount; n++)
             {
                 if (_rpdos[n] is { Valid: true } rpdo && rpdo.CobId == cobId)
                 {
+                    if (!CanOpenCobId.IsActiveNodeId(_nodeId) && IsRestrictedPdoFrameKey(rpdo.CobId)) continue;
                     if (!isFd) HandleRpdo(rpdo, data);
                     consumed = true;
                 }

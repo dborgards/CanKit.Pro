@@ -164,15 +164,22 @@ public partial class CanOpenApplicationSeamTests
 
         internal ObjectDictionary Od => Node.ObjectDictionary;
 
-        /// <summary>TPDO 2 on the unclaimed <c>2101h</c>: a frame whose arrival says that everything
-        /// the actor was handed before it has been handled, TPDO 1 included.</summary>
+        /// <summary>TPDO 2 on the unclaimed <c>2101h</c>, the witness: a frame the node is still
+        /// transmitting when <see cref="WitnessAsync"/> runs.</summary>
         internal void ConfigureWitness() => Node.ConfigureTpdo(2, new PdoMapping().Add(0x2101, 0x00, 8));
 
+        /// <summary>Triggers the witness and waits for its frame, then for the barrier
+        /// (<see cref="CanOpenTransmitBarrier"/>): the witness frame alone does not order the frames
+        /// before it on the wire, as each takes its own trip through the thread pool; the barrier
+        /// does, for what the actor decided before this call.</summary>
         internal async Task WitnessAsync()
         {
-            int before = Wire.Count(Tpdo2);
+            // The COB-ID TPDO 2 has now: an LSS slave moves it to the node-id it is given.
+            var witnessCobId = Od.ReadUnsigned(0x1801, 0x01) & 0x1FFFFFFFu;
+            int before = Wire.Count(witnessCobId);
             await Node.TriggerTpdoAsync(2);
-            await Wire.WaitForCountAsync(Tpdo2, before + 1);
+            await Wire.WaitForCountAsync(witnessCobId, before + 1);
+            await CanOpenTransmitBarrier.DrainAsync(Node);
         }
 
         internal async Task StartAsync()
@@ -547,8 +554,10 @@ public partial class CanOpenApplicationSeamTests
         // nor on the first SYNC after the node starts (TPDO 1 is the kind that latches for a SYNC).
         // It does not detect the guard in TriggerChangeOfState being removed: the guards behind it
         // (RequestEventDrivenTransmission, OnEnterOperational clearing the latch, SrdoEngine.Trigger)
-        // hold the same line. TPDO 2 answers every SYNC after TPDO 1 has been handled, so the frame
-        // it sends orders everything TPDO 1 did on that SYNC before it.
+        // hold the same line. TPDO 2 answers the SYNC in the same actor job as TPDO 1, so its frame
+        // says the SYNC has been handled; it does not order TPDO 1's frame on the wire, as each frame
+        // takes its own trip through the thread pool. The barrier does: once it opens, whatever
+        // TPDO 1 sent on that SYNC has been seen (CanOpenTransmitBarrier).
         rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x6000, 0x01, 8), TpdoTransmission.SynchronousAcyclic);
         rig.Node.ConfigureTpdo(2, new PdoMapping().Add(0x2101, 0x00, 8), TpdoTransmission.Synchronous);
 
@@ -557,6 +566,7 @@ public partial class CanOpenApplicationSeamTests
         await rig.StartAsync();
         rig.Wire.Transmit(0x080, Array.Empty<byte>());
         await rig.Wire.WaitForCountAsync(Tpdo2, 1);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
 
         rig.Wire.Count(Tpdo1).Should().Be(0, "PDOs exist only in Operational, and the request is not kept for later");
     }
