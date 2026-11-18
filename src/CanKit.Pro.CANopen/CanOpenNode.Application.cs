@@ -283,6 +283,13 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private OdWriteDecision ValidateApplicationWrite(ApplicationSlot slot, ushort index, byte subindex, byte[] value)
     {
+        // ValidateWrite is not an actor-loop callback of the application, even when the write it
+        // decides is made from inside one: the innermost callback is then this one, under the
+        // write gate, and a Post made from it is queued, not run there (ICanOpenApplicationHost.Post).
+        // Restored on the way out, before the write is stored and reported.
+        bool onActor = _actor.IsOnCurrentActor;
+        var outer = onActor ? _applicationInCallback : null;
+        if (onActor) _applicationInCallback = null;
         try
         {
             return slot.Application.ValidateWrite(index, subindex, value);
@@ -294,6 +301,10 @@ internal sealed partial class CanOpenNode
         {
             RaiseBackgroundException(ex);
             return OdWriteDecision.Reject(SdoAbortCode.General);
+        }
+        finally
+        {
+            if (onActor) _applicationInCallback = outer;
         }
     }
 

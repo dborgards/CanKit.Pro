@@ -57,8 +57,10 @@ internal interface ICanOpenApplicationHost
     /// </para>
     /// <para>
     /// Called anywhere else — another thread, or the actor loop outside this application's
-    /// callbacks (in <see cref="ICanOpenApplication.ValidateWrite"/>, or a callback of another
-    /// application) — the action is queued behind the work the actor has been handed already, and
+    /// callbacks: in <see cref="ICanOpenApplication.ValidateWrite"/>, also when the write it decides
+    /// was made from inside one of this application's callbacks (the innermost callback is then
+    /// <see cref="ICanOpenApplication.ValidateWrite"/>, under the dictionary's write gate), or in a
+    /// callback of another application — the action is queued behind the work the actor has been handed already, and
     /// runs later as a callback of this application; what it throws is reported on
     /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>. The actions one thread queues run in
     /// the order it queued them.
@@ -67,8 +69,12 @@ internal interface ICanOpenApplicationHost
     /// Called before the node has opened — from <see cref="ICanOpenApplication.Attach"/>, or from
     /// another thread while the constructor is still running — the action is held, and queued once
     /// the node has ordered its start-up, behind it: it runs in Pre-Operational, or for an LSS slave
-    /// still waiting for its node-id in Initialisation, never while the node is still being built.
-    /// When the open fails, a held action is dropped.
+    /// still waiting for its node-id in Initialisation, and not while the node is still being built.
+    /// When the open fails, a held action is dropped. One exception: a deadline armed before the
+    /// node has opened (<see cref="Arm"/> from <see cref="ICanOpenApplication.Attach"/>, say) can fire
+    /// on the actor loop while the constructor still runs — an open question of <see cref="Arm"/>,
+    /// recorded with the seam's contract questions — and a Post made from that deadline is made
+    /// inside a callback of this application, so it runs inline, then.
     /// </para>
     /// <para>
     /// Once the node is disposed, or after an open that failed, the action is dropped without being

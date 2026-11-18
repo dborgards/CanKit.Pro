@@ -112,6 +112,38 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task A_Post_From_ValidateWrite_Inside_The_Applications_Own_Callback_Is_Queued()
+    {
+        using var bus = Open(NewSession(), 1);
+        var app = Entries();
+        var order = new List<string>();
+        app.Validate = (index, subindex, _) =>
+        {
+            if (index == 0x6000 && subindex == 0x02)
+            {
+                app.Host!.Post(() => order.Add("posted"));
+                order.Add("validated");
+            }
+            return OdWriteDecision.Accept;
+        };
+        app.WhenWritten = _ =>
+        {
+            order.Add("before");
+            // The application's own write, validated on the actor under the write gate.
+            app.Host!.ObjectDictionary.WriteUnsigned(0x6000, 0x02, 1);
+            order.Add("after");
+        };
+        using var node = OpenNode(bus, With(app), new ManualTimeSource());
+
+        node.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 7);
+        await WaitUntilAsync(() => Written(app).Any(), "the claimant to be told");
+        Settle(node);
+
+        order.Should().Equal(new[] { "before", "validated", "after", "posted" },
+            "ValidateWrite is not a callback the action may run inline in, even nested in one that is");
+    }
+
+    [Fact]
     public async Task A_Post_Inside_Another_Applications_Callback_Is_Queued()
     {
         using var bus = Open(NewSession(), 1);
