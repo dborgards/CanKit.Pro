@@ -283,8 +283,18 @@ PDO-Nummern um `n·64` — an genau einer Stelle, einer gemeinsamen Hilfe im Ker
   nach §6.2.5–§6.2.12, Fehlerverhalten §5.2, EMCY `0080h` nach §5.3. Bit-, 16-, 32-Bit-, Float-
   und herstellerspezifische Zugriffe sind im Katalog, ihr Geräteverhalten folgt als eigene
   Scheibe.
-- Analoge Default-TPDOs sind ab Werk gesperrt (CiA 401-1 §1: alle TPDOs sind
-  änderungsgesteuert, „Therefore, default TPDOs containing analog inputs are disabled").
+- Analoge Default-TPDOs sind ab Werk **gültig**: COB-ID mit Bit 31 = 0 und Übertragungsart 255
+  (CiA 401-1 §§6.2.8, 6.2.10, 6.2.12, Tabellen 18, 26, 34), und §6.1 verlangt jedes TPDO dieser
+  Übertragungsart beim Eintritt in Operational. Ab Werk gesperrt ist der **Änderungs-Interrupt**
+  der Analogeingänge, global über `6423h` = FALSE (§8.6.4, Tabelle 154; §6.2.8): ein geänderter
+  Analogwert sendet dann kein TPDO, und bei jedem Eintritt in Operational geht die Warnung `0080h`
+  hinaus (§5.3). `0080h` liegt in der Klasse `00xxh`, „Error reset or no error" (CiA 301 v4.2.0
+  §7.2.7.1, Tabelle 25). Gelesen wird das so, dass die Warnung kein Fehler ist und darum kein Bit im
+  Fehlerregister setzt, das nach CiA 301 v4.2.0 §7.5.2.2 die Fehler anzeigt, die vorliegen; Tabelle 25
+  selbst sagt über das Register nichts. So ist §1 gelesen („All TPDOs are
+  triggered by change-of-state. Therefore, default TPDOs containing analog inputs are disabled"):
+  gesperrt ist der Auslöser, nicht das PDO. *Korrigiert mit #556; bis dahin las dieser Punkt §1 als
+  ab Werk gesperrte TPDOs.*
 
 ### CiA 408 — Zuschnitt
 
