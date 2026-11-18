@@ -90,6 +90,28 @@ internal sealed class Cia401Rig : IDisposable
     /// in that order: several logical devices of one node.</summary>
     internal Cia401Rig(IReadOnlyList<Cia401Configuration> configurations, CanOpenNodeOptions? options = null,
         ICia401Process? process = null)
+        : this(DevicesFor(configurations, process), description: null, options)
+    {
+    }
+
+    /// <summary>Opens a node from <paramref name="description"/> (none when null) with
+    /// <paramref name="device"/> attached: a device built with <see cref="Cia401Device.FromDescription"/>,
+    /// or one built from a configuration, on a described node. An open that fails throws here, with the
+    /// rig's channels closed.</summary>
+    internal Cia401Rig(Cia401Device device, CanOpenDeviceDescription? description, CanOpenNodeOptions? options = null)
+        : this(new[] { device }, description, options)
+    {
+    }
+
+    private static IReadOnlyList<Cia401Device> DevicesFor(IReadOnlyList<Cia401Configuration> configurations, ICia401Process? process)
+    {
+        var devices = new List<Cia401Device>();
+        foreach (var configuration in configurations)
+            devices.Add(new Cia401Device(configuration, devices.Count == 0 ? process : null));
+        return devices;
+    }
+
+    private Cia401Rig(IReadOnlyList<Cia401Device> devices, CanOpenDeviceDescription? description, CanOpenNodeOptions? options)
     {
         var session = VirtualAdapterFixture.NewSession("cia401");
         Session = session;
@@ -108,19 +130,13 @@ internal sealed class Cia401Rig : IDisposable
         };
         _deviceBus = VirtualAdapterFixture.Open(session, 1);
         Clock = new ManualTimeSource();
-        var devices = new List<Cia401Device>();
         var composed = options ?? new CanOpenNodeOptions();
-        foreach (var configuration in configurations)
-        {
-            var device = new Cia401Device(configuration, devices.Count == 0 ? process : null);
-            devices.Add(device);
-            composed = Cia401Device.AddTo(composed, device);
-        }
+        foreach (var device in devices) composed = Cia401Device.AddTo(composed, device);
 
         Devices = devices;
         try
         {
-            Node = new CanOpenNode(new CanBusService(_deviceBus), DeviceId, composed, ownsService: true, Clock);
+            Node = new CanOpenNode(new CanBusService(_deviceBus), DeviceId, composed, ownsService: true, Clock, description);
         }
         catch
         {

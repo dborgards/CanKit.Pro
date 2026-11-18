@@ -14,8 +14,9 @@ internal sealed partial class Cia401Device
     /// (CiA 401-1 §8.7.4); 0h keeps the actual value, and the values above 1h are reserved.</summary>
     private const byte AnalogErrorModeErrorValue = 0x01;
 
-    // Null when the configuration has no analog outputs.
-    private readonly AnalogOutputBlock? _analogOutputs;
+    // Null when the configuration has no analog outputs; for a device built from a description,
+    // null until Attach finds 6411h. Written before the host is published.
+    private AnalogOutputBlock? _analogOutputs;
 
     // The analog terminal values as they were when the running callback first changed them; null
     // while no change waits to be reported. Actor loop.
@@ -82,7 +83,7 @@ internal sealed partial class Cia401Device
     /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
     public short ReadAnalogOutput(int channel)
     {
-        var block = _analogOutputs;
+        var block = ApplicationBlock(ref _analogOutputs, "analog outputs");
         if (block is null || channel < 1 || channel > block.Channels)
         {
             throw new ArgumentOutOfRangeException(nameof(channel), channel,
@@ -229,13 +230,20 @@ internal sealed partial class Cia401Device
         internal ProfileObject ErrorValue { get; }
 
         /// <summary>Declares <c>6411h</c>, <c>6443h</c> and <c>6444h</c> as the catalogue gives
-        /// them, one sub-index per channel, then takes the held values from <c>6411h</c> and the
-        /// terminals from those. Constructing thread, in Attach.</summary>
+        /// them, one sub-index per channel, for a device built from a configuration. Constructing
+        /// thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
             DeclareArray(od, Write, Channels);
             DeclareArray(od, ErrorMode, Channels);
             DeclareArray(od, ErrorValue, Channels);
+        }
+
+        /// <summary>The power-on values, whether the objects were declared or adopted: the held
+        /// values from <c>6411h</c> and the terminals from those, published without an event.
+        /// Constructing thread, in Attach.</summary>
+        internal void Start(ObjectDictionary od)
+        {
             for (int c = 0; c < Channels; c++) LoadHeld(od, c);
             Publish((short[])Held.Clone());
         }

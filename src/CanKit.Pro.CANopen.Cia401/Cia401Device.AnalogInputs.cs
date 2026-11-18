@@ -27,8 +27,9 @@ internal sealed partial class Cia401Device
     private const byte LimitBits = UpperLimitSelected | LowerLimitSelected;
     private const byte DeltaBits = DeltaSelected | NegativeDeltaSelected | PositiveDeltaSelected;
 
-    // Null when the configuration has no analog inputs.
-    private readonly AnalogInputBlock? _analogInputs;
+    // Null when the configuration has no analog inputs; for a device built from a description,
+    // null until Attach finds 6401h. Written before the host is published.
+    private AnalogInputBlock? _analogInputs;
 
     /// <summary>Sets the value of one analog input: the 16-bit value as <c>6401h</c> shows it
     /// (CiA 401-1 §8.4.2). Any thread; applied on the node's actor loop, at once when called from
@@ -197,7 +198,7 @@ internal sealed partial class Cia401Device
 
     private AnalogInputBlock RequireAnalogInput(int channel, string parameter)
     {
-        var block = _analogInputs;
+        var block = ApplicationBlock(ref _analogInputs, "analog inputs");
         if (block is null || channel < 1 || channel > block.Channels)
         {
             throw new ArgumentOutOfRangeException(parameter, channel,
@@ -417,7 +418,8 @@ internal sealed partial class Cia401Device
 
         /// <summary>Declares <c>6401h</c>, <c>6421h</c> to <c>6428h</c> with the data type, access,
         /// PDO mapping and default the catalogue gives them, one sub-index per channel (one per bank
-        /// of 32 for <c>6422h</c>). Constructing thread, in Attach.</summary>
+        /// of 32 for <c>6422h</c>), for a device built from a configuration. Constructing thread, in
+        /// Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
             DeclareArray(od, Read, Channels);
@@ -429,7 +431,6 @@ internal sealed partial class Cia401Device
             DeclareArray(od, Delta, Channels);
             DeclareArray(od, NegativeDelta, Channels);
             DeclareArray(od, PositiveDelta, Channels);
-            GlobalInterruptEnableSeen = GlobalInterruptEnable.ReadByte(od, 0x00) != 0;
         }
     }
 }

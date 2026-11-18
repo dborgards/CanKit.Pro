@@ -19,10 +19,17 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <b>Two ways to the objects.</b> A device built from a <see cref="Cia401Configuration"/> creates
+/// its objects with the catalogue's defaults; one built with <see cref="FromDescription"/> adopts
+/// those the node's device description declared and derives its function blocks from them, the
+/// file winning. Behind either, the behaviour is the same code.
+/// </para>
+/// <para>
 /// <b>Function blocks.</b> Each I/O function of clause 8 lives in a partial of this class, with its
-/// state in a nested block object that exists when the configuration gives the function channels and
-/// is <see langword="null"/> otherwise. This class does what is common to all of them: attach (each
-/// block declares its objects; then the device type and the default PDOs are set), the dispatch of
+/// state in a nested block object that exists when the configuration gives the function channels, or
+/// the description declares its mandatory object, and is <see langword="null"/> otherwise. This class
+/// does what is common to all of them: attach (each block declares its objects or adopts the file's;
+/// then the device type and the default PDOs are set), the dispatch of
 /// written entries and of the change to Operational to the blocks, and one
 /// <see cref="ICanOpenApplicationHost.RequestTransmission"/> per callback for what the blocks ask to
 /// send, so that one event sends one frame per PDO, not one per entry.
@@ -94,6 +101,11 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// has it. It is cleared when <c>6423h</c> is written, on entering Operational and on every reset,
 /// because the application seam reports neither an SDO read nor a transmission (see
 /// <see cref="SetAnalogInput"/>).</description></item>
+/// <item><description>A device built with <see cref="FromDescription"/> keeps the objects of its
+/// logical device that the first slice does not build, as the file declares them, and does not act
+/// on them: the accesses of one I/O do not "access a single database" (§7.2.1.2) for them, and a
+/// bit or 16-bit input object does not follow the 8-bit one (see
+/// <see cref="FromDescription"/>).</description></item>
 /// </list>
 /// <para>
 /// <b>Readings and choices where the norm is silent or not of one voice.</b> Each is argued where
@@ -191,9 +203,17 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     // The plant model, or null.
     private readonly ICia401Process? _process;
 
+    // Whether the device takes its blocks from the node's device description (FromDescription)
+    // rather than from a configuration.
+    private readonly bool _fromDescription;
+
     // The host of the node the device is attached to; null until Attach has declared everything.
     // Written once, on the thread that opens the node; read from any thread.
     private ICanOpenApplicationHost? _host;
+
+    // 1 from the moment an Attach begins until it fails; an Attach that succeeds keeps it. One device,
+    // one node: a second Attach, concurrent or later, is refused before it touches the blocks.
+    private int _attaching;
 
     // The managed thread id of the device's own validated write while it runs, else 0: the write
     // the device makes to an entry it declared read-only (6000h) passes its own ValidateWrite, and
@@ -250,7 +270,8 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <summary>Returns <paramref name="options"/> with <paramref name="device"/> appended to the
     /// applications, the PDO count raised to what the device's default PDOs need (never lowered), and
     /// error behaviour switched on, which the device's failure monitoring needs. Every other option
-    /// is kept.</summary>
+    /// is kept. A device built with <see cref="FromDescription"/> needs no PDO count: the
+    /// description gives the node its PDOs, and the count is left as it is.</summary>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     public static CanOpenNodeOptions AddTo(CanOpenNodeOptions options, Cia401Device device)
     {
@@ -269,34 +290,74 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     public IReadOnlyList<CanOpenIndexRange> ClaimedRanges => _claims;
 
     /// <summary>The highest PDO number of the default PDOs
-    /// (<see cref="Cia401Configuration.RequiredPdoCount"/>), and failure monitoring.</summary>
+    /// (<see cref="Cia401Configuration.RequiredPdoCount"/>), none for a device built with
+    /// <see cref="FromDescription"/>, and failure monitoring.</summary>
     public CanOpenApplicationRequirements Requirements { get; }
 
-    /// <summary>Declares the objects of every function block, sets the device type and the default
-    /// PDOs (CiA 401-1 §6.1, §6.2.1, §6.2.5 to §6.2.12), and only then makes the device usable from
+    /// <summary>Declares the objects of every function block, or adopts those the node's device
+    /// description declared (<see cref="FromDescription"/>); brings the inputs to the application's
+    /// levels and the outputs to what their write objects hold; sets the device type and the default
+    /// PDOs (CiA 401-1 §6.1, §6.2.1, §6.2.5 to §6.2.12); and only then makes the device usable from
     /// the application side. With a plant model, posts its first call, which the node holds until it
     /// has opened (see <see cref="OutputsChanged"/>).</summary>
+    /// <remarks>
+    /// The inputs are brought to the application's levels as Reset Node brings them
+    /// (<see cref="OnReset"/>): <c>6000h</c> is the physical level, 0 until the application sets
+    /// one, under the polarity of <c>6002h</c>, <c>6401h</c> the value the application set, 0 until
+    /// it sets one, and <c>6422h</c> is clear. A value a description gives an input object is
+    /// replaced, so that the device that powers on is the device a reset restores. The outputs take
+    /// the value their write objects hold, a description's included, through the error mode and the
+    /// polarity as always (§6.2.5 NOTE, §6.2.7 NOTE).
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The device is attached to a node already.</exception>
+    /// <exception cref="ArgumentException">The node's device description and the device do not fit
+    /// (<see cref="FromDescription"/>; for a device built from a configuration, the description
+    /// declares an object of its logical device). The parameter is <c>options</c>, as for every
+    /// application that fails the open.</exception>
     public void Attach(ICanOpenApplicationHost host)
     {
         if (host is null) throw new ArgumentNullException(nameof(host));
-        if (Volatile.Read(ref _host) is not null) throw AttachedAlready();
+        if (Interlocked.CompareExchange(ref _attaching, 1, 0) != 0) throw AttachedAlready();
 
-        _digitalInputs?.Declare(host.ObjectDictionary);
-        _digitalOutputs?.Declare(host.ObjectDictionary);
-        _analogInputs?.Declare(host.ObjectDictionary);
-        _analogOutputs?.Declare(host.ObjectDictionary);
-
-        host.SetDeviceType(_logicalDevice, _deviceType);
-        foreach (var pdo in _defaultPdos)
+        try
         {
-            var mapping = new PdoMapping();
-            foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
-            if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping, pdo.Enabled);
-            else host.SetDefaultRpdo(pdo.Number, mapping);
+            var od = host.ObjectDictionary;
+            CanOpenDeviceType deviceType;
+            if (_fromDescription)
+            {
+                deviceType = AdoptDescription(od);
+            }
+            else
+            {
+                RefuseDescribedObjects(od);
+                _digitalInputs?.Declare(od);
+                _digitalOutputs?.Declare(od);
+                _analogInputs?.Declare(od);
+                _analogOutputs?.Declare(od);
+                deviceType = _deviceType;
+            }
+
+            DigitalInputsReset(host);
+            AnalogInputsReset(host, resetNode: true);
+            _digitalOutputs?.Start(od);
+            _analogOutputs?.Start(od);
+
+            host.SetDeviceType(_logicalDevice, deviceType);
+            foreach (var pdo in _defaultPdos)
+            {
+                var mapping = new PdoMapping();
+                foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
+                if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping, pdo.Enabled);
+                else host.SetDefaultRpdo(pdo.Number, mapping);
+            }
+        }
+        catch
+        {
+            Volatile.Write(ref _attaching, 0);
+            throw;
         }
 
-        if (Interlocked.CompareExchange(ref _host, host, null) is not null) throw AttachedAlready();
+        Volatile.Write(ref _host, host);
         if (_process is not null) host.Post(() => RaiseOutputsChanged(callProcess: true));
     }
 
@@ -623,6 +684,22 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         => Volatile.Read(ref _host) ?? throw new InvalidOperationException(
             $"{Name} is not attached to a node yet: open a node with Cia401Device.AddTo first.");
 
+    /// <summary>A block for the application side. A device built from a configuration has its blocks
+    /// from the start and answers a channel of a block it lacks with the
+    /// <see cref="ArgumentOutOfRangeException"/> of the caller, as for any channel it does not have.
+    /// One built with <see cref="FromDescription"/> knows its blocks only once attached: before, and
+    /// for a block the description does not declare, this throws.</summary>
+    /// <exception cref="InvalidOperationException">A device built from a description is not attached
+    /// yet, or its description declares no such block.</exception>
+    private TBlock? ApplicationBlock<TBlock>(ref TBlock? block, string function)
+        where TBlock : class
+    {
+        if (!_fromDescription) return block;
+        RequireHost();
+        return Volatile.Read(ref block) ?? throw new InvalidOperationException(
+            $"{Name} has no {function}: the node's device description declares none.");
+    }
+
     private bool IsOwnWrite => Volatile.Read(ref _ownWriteThread) == Environment.CurrentManagedThreadId;
 
     /// <summary>The device's own write of one byte. Actor loop, inside a callback of the device, so
@@ -720,8 +797,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         /// "If an optional parameter is not implemented, the device shall behave as specified in the
         /// Default value attribute" (CiA 401-1 §8.1, repeated in each optional object of clause 8). A
         /// device built from a configuration declares every parameter of its blocks with the
-        /// catalogue's data type, so the default is never taken there. An object without a default
-        /// ("No") reads 0. The value is decoded with the catalogue's data type.
+        /// catalogue's data type, so the default is never taken there. One built with
+        /// <see cref="FromDescription"/> adds no parameter the file leaves out, and a parameter
+        /// array shorter than its block leaves the channels beyond it at the default. An object
+        /// without a default ("No") reads 0. The value is decoded with the catalogue's data type,
+        /// which an adopted entry has been checked to have.
         /// </remarks>
         internal long Read(ObjectDictionary od, byte subindex)
             => od.TryReadRaw(Index, subindex, out var raw)

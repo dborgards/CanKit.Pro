@@ -10,8 +10,9 @@ namespace CanKit.Pro.CANopen.Cia401;
 // in Cia401Device.Errors.cs.
 internal sealed partial class Cia401Device
 {
-    // Null when the configuration has no digital outputs.
-    private readonly DigitalOutputBlock? _digitalOutputs;
+    // Null when the configuration has no digital outputs; for a device built from a description,
+    // null until Attach finds 6200h. Written before the host is published.
+    private DigitalOutputBlock? _digitalOutputs;
 
     // The terminal levels as they were when the running callback first changed them; null while no
     // change waits to be reported. Actor loop.
@@ -84,7 +85,7 @@ internal sealed partial class Cia401Device
     /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
     public bool ReadDigitalOutput(int channel)
     {
-        var block = _digitalOutputs;
+        var block = ApplicationBlock(ref _digitalOutputs, "digital outputs");
         if (block is null || channel < 1 || channel > block.Channels)
         {
             throw new ArgumentOutOfRangeException(nameof(channel), channel,
@@ -99,7 +100,7 @@ internal sealed partial class Cia401Device
 
     private DigitalOutputBlock RequireOutputGroup(int group)
     {
-        var block = _digitalOutputs;
+        var block = ApplicationBlock(ref _digitalOutputs, "digital outputs");
         if (block is null || group < 1 || group > block.Groups)
         {
             throw new ArgumentOutOfRangeException(nameof(group), group,
@@ -256,8 +257,8 @@ internal sealed partial class Cia401Device
         internal ProfileObject FilterMask { get; }
 
         /// <summary>Declares <c>6200h</c>, <c>6202h</c>, <c>6206h</c>, <c>6207h</c> and <c>6208h</c>
-        /// as the catalogue gives them, then takes the held values from <c>6200h</c> and the levels
-        /// from those. Constructing thread, in Attach.</summary>
+        /// as the catalogue gives them, for a device built from a configuration. Constructing thread,
+        /// in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
             DeclareArray(od, Write, Groups);
@@ -265,6 +266,13 @@ internal sealed partial class Cia401Device
             DeclareArray(od, ErrorMode, Groups);
             DeclareArray(od, ErrorValue, Groups);
             DeclareArray(od, FilterMask, Groups);
+        }
+
+        /// <summary>The power-on levels, whether the objects were declared or adopted: the held values
+        /// from <c>6200h</c> and the levels from those, published without an event. Constructing
+        /// thread, in Attach.</summary>
+        internal void Start(ObjectDictionary od)
+        {
             for (int g = 0; g < Groups; g++) LoadHeld(od, g);
             Publish(ComputeTerminal(od));
         }

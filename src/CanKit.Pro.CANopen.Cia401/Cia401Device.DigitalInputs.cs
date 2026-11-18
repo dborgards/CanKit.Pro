@@ -9,8 +9,9 @@ internal sealed partial class Cia401Device
 {
     private const int ChannelsPerGroup = 8;
 
-    // Null when the configuration has no digital inputs.
-    private readonly DigitalInputBlock? _digitalInputs;
+    // Null when the configuration has no digital inputs; for a device built from a description,
+    // null until Attach finds 6000h. Written before the host is published.
+    private DigitalInputBlock? _digitalInputs;
 
     /// <summary>Sets the physical level of one digital input (CiA 401-1 §7.2.2 Figure 4: what the
     /// sensor delivers, before the polarity of <c>6002h</c>). Any thread; applied on the node's
@@ -35,10 +36,11 @@ internal sealed partial class Cia401Device
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an input of
     /// the device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no digital inputs.</exception>
     public void SetDigitalInput(int channel, bool level)
     {
-        var block = _digitalInputs;
+        var block = ApplicationBlock(ref _digitalInputs, "digital inputs");
         if (block is null || channel < 1 || channel > block.Channels)
         {
             throw new ArgumentOutOfRangeException(nameof(channel), channel,
@@ -87,7 +89,7 @@ internal sealed partial class Cia401Device
 
     private DigitalInputBlock RequireGroup(int group)
     {
-        var block = _digitalInputs;
+        var block = ApplicationBlock(ref _digitalInputs, "digital inputs");
         if (block is null || group < 1 || group > block.Groups)
         {
             throw new ArgumentOutOfRangeException(nameof(group), group,
