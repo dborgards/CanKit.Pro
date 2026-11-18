@@ -602,8 +602,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     // profileResetGeneration: set for a profile EMCY released behind a boot-up, the reset generation
     // of its release. A reset handled before the turn that would transmit it drops it, frame and
-    // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Null for
-    // every other EMCY, which therefore behaves as it did before profiles existed.
+    // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Since such an
+    // EMCY takes the gated path (#549), the reset's new inhibit epoch drops it first: this check is
+    // defence in depth behind the epoch, and removing it alone fails no test. Null for every other
+    // EMCY, which therefore behaves as it did before profiles existed.
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
         byte? applicationErrorRegister = null, int? profileResetGeneration = null, bool gate = false)
     {
@@ -623,7 +625,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         Func<Task> transmit = () =>
         {
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
-            // Here, on the actor in the turn that transmits, after every wait ahead of it on the chain.
+            // Here, on the actor in the turn that transmits, after every wait ahead of it on the chain;
+            // behind the epoch check of the gated path, which drops such an EMCY first.
             if (profileResetGeneration is { } released && released != _profileResetGeneration) return Task.CompletedTask;
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid)
