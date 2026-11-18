@@ -56,6 +56,10 @@ internal readonly record struct Cia401Observation(ForeignPdoObserveResult Result
 /// <para><b>Values.</b> They are encoded and decoded little-endian by the data type of the catalogue
 /// (<see cref="Cia401Codec"/>); a value of another length than its type is an
 /// <see cref="InvalidDataException"/>, not a truncation.</para>
+/// <para><b>Argument errors.</b> A null argument, a group, channel or bank out of range, and a write
+/// to an entry the catalogue marks read-only are thrown by the call itself, before a task exists, on
+/// every method of the peer and its blocks; nothing is sent then. Everything that happens on the bus
+/// ends in the returned task.</para>
 /// <para><b>State.</b> The peer holds the node, the peer's node-id and the logical device, and nothing
 /// else: it caches no value, and the block objects are views of the peer. It can be used from any
 /// thread; the node's SDO client allows one transfer per server at a time and refuses a second with
@@ -152,6 +156,9 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     /// an object outside the profile, a reserved index, an object of another logical device — is kept
     /// with no definition, its index and sub-index in hexadecimal and its value unsigned in the mapped
     /// width.</para>
+    /// <para>A mapped REAL32 entry (<c>6403h</c>, <c>6413h</c> and their kin) is returned as its bit
+    /// pattern, unsigned in the mapped width: <see cref="Cia401PdoValue.Value"/> is an integer, and the
+    /// real is the caller's to make of it.</para>
     /// <para>Dummy entries (<c>0001h</c> to <c>0007h</c>, CiA 301 v4.2.0 §7.4.7.1) occupy their bits in
     /// the PDO, but the core delivers no signal for them, so they never reach this method and have no
     /// value here.</para>
@@ -199,11 +206,16 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     /// <exception cref="ArgumentNullException"><paramref name="peerDescription"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">As for the core method: <paramref name="cobId"/>
     /// is not a valid PDO key, or <paramref name="payload"/> is longer than 8 bytes.</exception>
-    public async Task<Cia401Observation> ObserveAsync(uint cobId, ReadOnlyMemory<byte> payload,
+    public Task<Cia401Observation> ObserveAsync(uint cobId, ReadOnlyMemory<byte> payload,
         CanOpenDeviceDescription peerDescription, CancellationToken cancellationToken = default)
     {
         if (peerDescription is null) throw new ArgumentNullException(nameof(peerDescription));
+        return ObserveCoreAsync(cobId, payload, peerDescription, cancellationToken);
+    }
 
+    private async Task<Cia401Observation> ObserveCoreAsync(uint cobId, ReadOnlyMemory<byte> payload,
+        CanOpenDeviceDescription peerDescription, CancellationToken cancellationToken)
+    {
         var sink = new ListSink();
         var result = await _node.ObserveForeignPdoAsync(PeerNodeId, cobId, payload, peerDescription, sink, cancellationToken)
             .ConfigureAwait(false);
@@ -250,11 +262,20 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     private async Task<long> ReadValueAsync(Cia401ObjectDefinition definition, byte subindex, CancellationToken cancellationToken)
         => Cia401Codec.Decode(definition.DataType, await ReadAsync(definition, subindex, cancellationToken).ConfigureAwait(false));
 
+    /// <summary>Element <paramref name="number"/> of an array, converted. The number is checked here,
+    /// before a task exists; the transfer and the decoding follow in the task.</summary>
+    private Task<T> ReadElementAsync<T>(Cia401ObjectDefinition definition, int number, string name, Func<long, T> convert,
+        CancellationToken cancellationToken)
+    {
+        byte subindex = Element(definition, number, name);
+        return ConvertAsync(ReadValueAsync(definition, subindex, cancellationToken), convert);
+    }
+
+    private static async Task<T> ConvertAsync<T>(Task<long> value, Func<long, T> convert)
+        => convert(await value.ConfigureAwait(false));
+
     private Task WriteValueAsync(Cia401ObjectDefinition definition, byte subindex, long value, CancellationToken cancellationToken)
         => WriteAsync(definition, subindex, Cia401Codec.Encode(definition.DataType, value), cancellationToken);
-
-    private Task<long> ReadElementAsync(Cia401ObjectDefinition definition, int number, string name, CancellationToken cancellationToken)
-        => ReadValueAsync(definition, Element(definition, number, name), cancellationToken);
 
     private Task WriteElementAsync(Cia401ObjectDefinition definition, int number, string name, long value, CancellationToken cancellationToken)
         => WriteValueAsync(definition, Element(definition, number, name), value, cancellationToken);
@@ -297,17 +318,17 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task<int> ReadGroupCountAsync(CancellationToken cancellationToken = default)
             => _peer.ReadCountAsync(Cia401Objects.ReadDigitalInput8, cancellationToken);
 
-        public async Task<byte> ReadAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.ReadDigitalInput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.ReadDigitalInput8, group, Group, static value => (byte)value, cancellationToken);
 
-        public async Task<byte> ReadPolarityAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.PolarityDigitalInput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadPolarityAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.PolarityDigitalInput8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WritePolarityAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.PolarityDigitalInput8, group, Group, mask, cancellationToken);
 
-        public async Task<byte> ReadFilterEnableAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.DigitalFilterEnable8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadFilterEnableAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.DigitalFilterEnable8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteFilterEnableAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.DigitalFilterEnable8, group, Group, mask, cancellationToken);
@@ -318,20 +339,20 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task WriteGlobalInterruptEnableAsync(bool enabled, CancellationToken cancellationToken = default)
             => _peer.WriteValueAsync(Cia401Objects.GlobalInterruptEnableDigital8, 0, enabled ? 1 : 0, cancellationToken);
 
-        public async Task<byte> ReadInterruptMaskAnyChangeAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.DigitalInterruptMaskAnyChange8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadInterruptMaskAnyChangeAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.DigitalInterruptMaskAnyChange8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteInterruptMaskAnyChangeAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.DigitalInterruptMaskAnyChange8, group, Group, mask, cancellationToken);
 
-        public async Task<byte> ReadInterruptMaskLowToHighAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.DigitalInterruptMaskLowToHigh8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadInterruptMaskLowToHighAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.DigitalInterruptMaskLowToHigh8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteInterruptMaskLowToHighAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.DigitalInterruptMaskLowToHigh8, group, Group, mask, cancellationToken);
 
-        public async Task<byte> ReadInterruptMaskHighToLowAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.DigitalInterruptMaskHighToLow8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadInterruptMaskHighToLowAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.DigitalInterruptMaskHighToLow8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteInterruptMaskHighToLowAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.DigitalInterruptMaskHighToLow8, group, Group, mask, cancellationToken);
@@ -347,32 +368,32 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task<int> ReadGroupCountAsync(CancellationToken cancellationToken = default)
             => _peer.ReadCountAsync(Cia401Objects.WriteDigitalOutput8, cancellationToken);
 
-        public async Task<byte> ReadAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.WriteDigitalOutput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.WriteDigitalOutput8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteAsync(int group, byte levels, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.WriteDigitalOutput8, group, Group, levels, cancellationToken);
 
-        public async Task<byte> ReadPolarityAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.ChangePolarityDigitalOutput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadPolarityAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.ChangePolarityDigitalOutput8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WritePolarityAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.ChangePolarityDigitalOutput8, group, Group, mask, cancellationToken);
 
-        public async Task<byte> ReadErrorModeAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.ErrorModeDigitalOutput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadErrorModeAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.ErrorModeDigitalOutput8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteErrorModeAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.ErrorModeDigitalOutput8, group, Group, mask, cancellationToken);
 
-        public async Task<byte> ReadErrorValueAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.ErrorValueDigitalOutput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadErrorValueAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.ErrorValueDigitalOutput8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteErrorValueAsync(int group, byte levels, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.ErrorValueDigitalOutput8, group, Group, levels, cancellationToken);
 
-        public async Task<byte> ReadFilterMaskAsync(int group, CancellationToken cancellationToken = default)
-            => (byte)await _peer.ReadElementAsync(Cia401Objects.FilterMaskDigitalOutput8, group, Group, cancellationToken).ConfigureAwait(false);
+        public Task<byte> ReadFilterMaskAsync(int group, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.FilterMaskDigitalOutput8, group, Group, static value => (byte)value, cancellationToken);
 
         public Task WriteFilterMaskAsync(int group, byte mask, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.FilterMaskDigitalOutput8, group, Group, mask, cancellationToken);
@@ -389,18 +410,17 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task<int> ReadChannelCountAsync(CancellationToken cancellationToken = default)
             => _peer.ReadCountAsync(Cia401Objects.ReadAnalogInput16, cancellationToken);
 
-        public async Task<short> ReadAsync(int channel, CancellationToken cancellationToken = default)
-            => (short)await _peer.ReadElementAsync(Cia401Objects.ReadAnalogInput16, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<short> ReadAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.ReadAnalogInput16, channel, Channel, static value => (short)value, cancellationToken);
 
-        public async Task<Cia401AnalogInterruptTrigger> ReadInterruptTriggerAsync(int channel, CancellationToken cancellationToken = default)
-            => (Cia401AnalogInterruptTrigger)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptTriggerSelection, channel, Channel, cancellationToken)
-                .ConfigureAwait(false);
+        public Task<Cia401AnalogInterruptTrigger> ReadInterruptTriggerAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptTriggerSelection, channel, Channel, static value => (Cia401AnalogInterruptTrigger)value, cancellationToken);
 
         public Task WriteInterruptTriggerAsync(int channel, Cia401AnalogInterruptTrigger trigger, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptTriggerSelection, channel, Channel, (byte)trigger, cancellationToken);
 
-        public async Task<uint> ReadInterruptSourceAsync(int bank, CancellationToken cancellationToken = default)
-            => (uint)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptSource, bank, Bank, cancellationToken).ConfigureAwait(false);
+        public Task<uint> ReadInterruptSourceAsync(int bank, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptSource, bank, Bank, static value => (uint)value, cancellationToken);
 
         public Task<bool> ReadGlobalInterruptEnableAsync(CancellationToken cancellationToken = default)
             => _peer.ReadFlagAsync(Cia401Objects.AnalogInputGlobalInterruptEnable, 0, cancellationToken);
@@ -408,8 +428,8 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task WriteGlobalInterruptEnableAsync(bool enabled, CancellationToken cancellationToken = default)
             => _peer.WriteValueAsync(Cia401Objects.AnalogInputGlobalInterruptEnable, 0, enabled ? 1 : 0, cancellationToken);
 
-        public async Task<int> ReadInterruptUpperLimitAsync(int channel, CancellationToken cancellationToken = default)
-            => (int)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptUpperLimitInteger, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<int> ReadInterruptUpperLimitAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptUpperLimitInteger, channel, Channel, static value => (int)value, cancellationToken);
 
         public Task WriteInterruptUpperLimitAsync(int channel, int limit, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptUpperLimitInteger, channel, Channel, limit, cancellationToken);
@@ -417,8 +437,8 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task WriteInterruptUpperLimitLeftAdjustedAsync(int channel, short threshold, CancellationToken cancellationToken = default)
             => WriteInterruptUpperLimitAsync(channel, Cia401LeftAdjusted.Widen(threshold), cancellationToken);
 
-        public async Task<int> ReadInterruptLowerLimitAsync(int channel, CancellationToken cancellationToken = default)
-            => (int)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptLowerLimitInteger, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<int> ReadInterruptLowerLimitAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptLowerLimitInteger, channel, Channel, static value => (int)value, cancellationToken);
 
         public Task WriteInterruptLowerLimitAsync(int channel, int limit, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptLowerLimitInteger, channel, Channel, limit, cancellationToken);
@@ -426,20 +446,20 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task WriteInterruptLowerLimitLeftAdjustedAsync(int channel, short threshold, CancellationToken cancellationToken = default)
             => WriteInterruptLowerLimitAsync(channel, Cia401LeftAdjusted.Widen(threshold), cancellationToken);
 
-        public async Task<uint> ReadInterruptDeltaAsync(int channel, CancellationToken cancellationToken = default)
-            => (uint)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptDeltaUnsigned, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<uint> ReadInterruptDeltaAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptDeltaUnsigned, channel, Channel, static value => (uint)value, cancellationToken);
 
         public Task WriteInterruptDeltaAsync(int channel, uint delta, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptDeltaUnsigned, channel, Channel, delta, cancellationToken);
 
-        public async Task<uint> ReadInterruptNegativeDeltaAsync(int channel, CancellationToken cancellationToken = default)
-            => (uint)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptNegativeDeltaUnsigned, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<uint> ReadInterruptNegativeDeltaAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptNegativeDeltaUnsigned, channel, Channel, static value => (uint)value, cancellationToken);
 
         public Task WriteInterruptNegativeDeltaAsync(int channel, uint delta, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptNegativeDeltaUnsigned, channel, Channel, delta, cancellationToken);
 
-        public async Task<uint> ReadInterruptPositiveDeltaAsync(int channel, CancellationToken cancellationToken = default)
-            => (uint)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptPositiveDeltaUnsigned, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<uint> ReadInterruptPositiveDeltaAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptPositiveDeltaUnsigned, channel, Channel, static value => (uint)value, cancellationToken);
 
         public Task WriteInterruptPositiveDeltaAsync(int channel, uint delta, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptPositiveDeltaUnsigned, channel, Channel, delta, cancellationToken);
@@ -455,8 +475,8 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task<int> ReadChannelCountAsync(CancellationToken cancellationToken = default)
             => _peer.ReadCountAsync(Cia401Objects.WriteAnalogOutput16, cancellationToken);
 
-        public async Task<short> ReadAsync(int channel, CancellationToken cancellationToken = default)
-            => (short)await _peer.ReadElementAsync(Cia401Objects.WriteAnalogOutput16, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<short> ReadAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.WriteAnalogOutput16, channel, Channel, static value => (short)value, cancellationToken);
 
         public Task WriteAsync(int channel, short value, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.WriteAnalogOutput16, channel, Channel, value, cancellationToken);
@@ -468,8 +488,8 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
         public Task WriteErrorModeAsync(int channel, bool useErrorValue, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogOutputErrorMode, channel, Channel, useErrorValue ? 1 : 0, cancellationToken);
 
-        public async Task<int> ReadErrorValueAsync(int channel, CancellationToken cancellationToken = default)
-            => (int)await _peer.ReadElementAsync(Cia401Objects.AnalogOutputErrorValueInteger, channel, Channel, cancellationToken).ConfigureAwait(false);
+        public Task<int> ReadErrorValueAsync(int channel, CancellationToken cancellationToken = default)
+            => _peer.ReadElementAsync(Cia401Objects.AnalogOutputErrorValueInteger, channel, Channel, static value => (int)value, cancellationToken);
 
         public Task WriteErrorValueAsync(int channel, int value, CancellationToken cancellationToken = default)
             => _peer.WriteElementAsync(Cia401Objects.AnalogOutputErrorValueInteger, channel, Channel, value, cancellationToken);

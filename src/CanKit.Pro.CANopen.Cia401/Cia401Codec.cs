@@ -28,9 +28,11 @@ internal static class Cia401Codec
     /// complement.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> has no fixed width
     /// (a string or <see cref="OdDataType.Domain"/>).</exception>
+    /// <exception cref="NotSupportedException"><paramref name="type"/> is REAL32 or REAL64: a real is
+    /// not an integer, and its bit pattern is not what a caller of a typed value means.</exception>
     internal static byte[] Encode(OdDataType type, long value)
     {
-        var bytes = new byte[Width(type)];
+        var bytes = new byte[IntegerWidth(type)];
         for (int i = 0; i < bytes.Length; i++) bytes[i] = unchecked((byte)(value >> (BitsPerByte * i)));
         return bytes;
     }
@@ -40,9 +42,11 @@ internal static class Cia401Codec
     /// <exception cref="InvalidDataException"><paramref name="raw"/> is not as long as the type is
     /// wide. The value is refused, not cut to its low bytes or padded.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> has no fixed width.</exception>
+    /// <exception cref="NotSupportedException"><paramref name="type"/> is REAL32 or REAL64, as for
+    /// <see cref="Encode"/>.</exception>
     internal static long Decode(OdDataType type, byte[] raw)
     {
-        int width = Width(type);
+        int width = IntegerWidth(type);
         if (raw.Length != width)
         {
             throw new InvalidDataException(
@@ -55,7 +59,8 @@ internal static class Cia401Codec
     /// <summary>The value of the low <paramref name="bits"/> of the little-endian
     /// <paramref name="value"/>, as a PDO carries a mapped entry: sign-extended from bit
     /// <paramref name="bits"/> − 1 when <paramref name="signed"/>, zero-extended otherwise. Bits of
-    /// <paramref name="value"/> beyond <paramref name="bits"/> are ignored.</summary>
+    /// <paramref name="value"/> beyond <paramref name="bits"/> are ignored. It knows no data type, so a
+    /// mapped REAL32 comes out as its bit pattern.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="bits"/> is outside 1 to 64.</exception>
     /// <exception cref="InvalidDataException"><paramref name="value"/> has fewer bytes than
     /// <paramref name="bits"/> need.</exception>
@@ -76,8 +81,10 @@ internal static class Cia401Codec
         return unchecked((long)raw);
     }
 
-    private static int Width(OdDataType type)
+    private static int IntegerWidth(OdDataType type)
     {
+        if (type is OdDataType.Real32 or OdDataType.Real64)
+            throw new NotSupportedException($"A {type} value is a real, not an integer: it is not encoded or decoded as one.");
         int width = OdEntryLayout.FixedSize(type);
         if (width <= 0)
             throw new ArgumentOutOfRangeException(nameof(type), type, "The data type has no fixed width.");

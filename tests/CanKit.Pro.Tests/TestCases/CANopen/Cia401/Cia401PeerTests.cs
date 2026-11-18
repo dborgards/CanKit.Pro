@@ -368,7 +368,42 @@ public class Cia401PeerTests
         rig.Rig.Count(Cia401Rig.SdoRequest).Should().Be(0);
     }
 
+    [Fact]
+    public void Argument_Errors_Are_Thrown_Before_A_Task_Exists()
+    {
+        using var tool = new LoneTool();
+        var peer = tool.Peer(0x000F0191);
+        var outOfRange = new (string What, Action Call)[]
+        {
+            ("a digital input reader", () => _ = peer.DigitalInputs!.ReadPolarityAsync(0)),
+            ("a digital input writer", () => _ = peer.DigitalInputs!.WriteInterruptMaskLowToHighAsync(255, 1)),
+            ("a digital output reader", () => _ = peer.DigitalOutputs!.ReadErrorValueAsync(0)),
+            ("a digital output writer", () => _ = peer.DigitalOutputs!.WriteAsync(255, 1)),
+            ("an analog input reader", () => _ = peer.AnalogInputs!.ReadInterruptSourceAsync(9)),
+            ("an analog input writer", () => _ = peer.AnalogInputs!.WriteInterruptDeltaAsync(0, 1)),
+            ("an analog output reader", () => _ = peer.AnalogOutputs!.ReadErrorModeAsync(0)),
+            ("an analog output writer", () => _ = peer.AnalogOutputs!.WriteErrorValueLeftAdjustedAsync(255, 1)),
+        };
+
+        foreach (var (what, call) in outOfRange)
+            call.Should().ThrowExactly<ArgumentOutOfRangeException>($"{what} checks its number before it returns a task");
+        ((Action)(() => _ = peer.ReadAsync(null!, 1))).Should().ThrowExactly<ArgumentNullException>();
+        ((Action)(() => _ = peer.WriteAsync(Cia401Objects.ReadDigitalInput8, 1, new byte[] { 1 })))
+            .Should().ThrowExactly<InvalidOperationException>();
+        ((Action)(() => _ = peer.ObserveAsync(0x191, new byte[] { 1 }, null!))).Should().ThrowExactly<ArgumentNullException>();
+    }
+
     // ---- the codec -----------------------------------------------------------------------------------
+
+    [Fact]
+    public void A_Real_Is_Not_Encoded_Or_Decoded_As_An_Integer()
+    {
+        Action encode = () => Cia401Codec.Encode(OdDataType.Real32, 1);
+        Action decode = () => Cia401Codec.Decode(OdDataType.Real32, new byte[4]);
+
+        encode.Should().ThrowExactly<NotSupportedException>();
+        decode.Should().ThrowExactly<NotSupportedException>();
+    }
 
     [Fact]
     public void The_Codec_Is_Little_Endian_And_Signed_By_The_Data_Type()
@@ -468,6 +503,18 @@ public class Cia401PeerTests
 
         interpret.Should().Throw<ArgumentException>();
         none.Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
+    public void Interpret_Returns_A_Mapped_Real_As_Its_Bit_Pattern()
+    {
+        using var tool = new LoneTool();
+        var peer = tool.Peer(0x00050191);
+
+        var values = peer.Interpret(new[] { Signal(0x6403, 0x01, 32, 0x00, 0x00, 0x80, 0x3F) });
+
+        values.Should().Equal(new Cia401PdoValue(0x6403, 0x01, Cia401Objects.ReadAnalogInputFloat,
+            "Read analog input float, analog input 1", 0x3F80_0000L));
     }
 
     // ---- observing the device's PDOs -----------------------------------------------------------------

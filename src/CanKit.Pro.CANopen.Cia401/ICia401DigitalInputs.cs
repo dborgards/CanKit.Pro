@@ -15,6 +15,9 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// many groups the device has is the device's business (<see cref="ReadGroupCountAsync"/>): a group
 /// it does not have is refused by the SDO client's peer gate, when the bound description does not
 /// declare it, or aborted by the device.</para>
+/// <para>Argument errors of every method of the four block interfaces — a number out of range — are
+/// thrown by the call itself, before a task exists; nothing is sent then. Everything that happens on
+/// the bus ends in the returned task.</para>
 /// <para>Every call is one SDO transfer through the node's SDO client, with its exceptions: a
 /// <c>PeerSdoAccessException</c> when the bound description does not allow the entry, an
 /// <c>SdoAbortException</c> when the device aborts, and an <see cref="System.IO.InvalidDataException"/>
