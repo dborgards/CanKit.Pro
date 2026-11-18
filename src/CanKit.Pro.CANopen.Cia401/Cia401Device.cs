@@ -666,29 +666,69 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// holding <paramref name="elements"/>, then one element per group of eight digital channels,
     /// per analog channel or per interrupt source bank; an object without a default ("No", CiA 401-1
     /// §8.2.1, §8.4.2) starts at 0. Constructing thread, in Attach.</summary>
-    private static void DeclareArray(ObjectDictionary od, int logicalDevice, int elements, Cia401ObjectDefinition definition)
+    private static void DeclareArray(ObjectDictionary od, ProfileObject profileObject, int elements)
     {
-        var index = Shift(logicalDevice, definition);
-        od.AddU8(index, 0x00, (byte)elements, OdAccess.ReadOnly, pdoMappable: false);
+        var definition = profileObject.Definition;
+        od.AddU8(profileObject.Index, 0x00, (byte)elements, OdAccess.ReadOnly, pdoMappable: false);
         var initial = Cia401Codec.Encode(definition.DataType, definition.DefaultValue ?? 0);
         for (int sub = 1; sub <= elements; sub++)
         {
-            od.AddRaw(index, (byte)sub, definition.DataType, initial, definition.Access,
+            od.AddRaw(profileObject.Index, (byte)sub, definition.DataType, initial, definition.Access,
                 definition.PdoMapping != Cia401PdoMapping.No);
         }
     }
 
     /// <summary>Declares a one-byte variable with what the catalogue gives it. Constructing thread,
     /// in Attach.</summary>
-    private static void DeclareVariable(ObjectDictionary od, int logicalDevice, Cia401ObjectDefinition definition)
-        => od.AddRaw(Shift(logicalDevice, definition), 0x00, definition.DataType,
+    private static void DeclareVariable(ObjectDictionary od, ProfileObject profileObject)
+    {
+        var definition = profileObject.Definition;
+        od.AddRaw(profileObject.Index, 0x00, definition.DataType,
             new[] { (byte)(definition.DefaultValue ?? 0) }, definition.Access,
             definition.PdoMapping != Cia401PdoMapping.No);
+    }
 
     /// <summary>One request for everything collected: the node sends each TPDO that maps one of the
     /// entries once, however many of them it maps.</summary>
     private static void RequestTransmission(ICanOpenApplicationHost host, List<CanOpenObjectAddress> send)
     {
         if (send.Count > 0) host.RequestTransmission(send);
+    }
+
+    /// <summary>A catalogue object at its index in the device's logical device: what a block keeps of
+    /// each of its objects, the definition with the index, so that a parameter is read with the
+    /// default the catalogue gives it.</summary>
+    private readonly struct ProfileObject
+    {
+        internal ProfileObject(int logicalDevice, Cia401ObjectDefinition definition)
+        {
+            Definition = definition;
+            Index = Shift(logicalDevice, definition);
+        }
+
+        internal Cia401ObjectDefinition Definition { get; }
+
+        /// <summary>The index in the device's logical device.</summary>
+        internal ushort Index { get; }
+
+        /// <summary>
+        /// The value of sub-index <paramref name="subindex"/> of a parameter object, as the device
+        /// acts on it: what the dictionary holds, or the catalogue default where the dictionary has no
+        /// such entry. The one place a parameter is read.
+        /// </summary>
+        /// <remarks>
+        /// "If an optional parameter is not implemented, the device shall behave as specified in the
+        /// Default value attribute" (CiA 401-1 §8.1, repeated in each optional object of clause 8). A
+        /// device built from a configuration declares every parameter of its blocks with the
+        /// catalogue's data type, so the default is never taken there. An object without a default
+        /// ("No") reads 0. The value is decoded with the catalogue's data type.
+        /// </remarks>
+        internal long Read(ObjectDictionary od, byte subindex)
+            => od.TryReadRaw(Index, subindex, out var raw)
+                ? Cia401Codec.Decode(Definition.DataType, raw)
+                : Definition.DefaultValue ?? 0;
+
+        /// <summary><see cref="Read"/> of a one-byte parameter.</summary>
+        internal byte ReadByte(ObjectDictionary od, byte subindex) => unchecked((byte)Read(od, subindex));
     }
 }

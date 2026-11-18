@@ -208,14 +208,14 @@ internal sealed partial class Cia401Device
     }
 
     private static short ReadAnalogValue(ICanOpenApplicationHost host, AnalogInputBlock block, byte sub)
-        => (short)host.ObjectDictionary.ReadSigned(block.Read, sub);
+        => (short)host.ObjectDictionary.ReadSigned(block.Read.Index, sub);
 
     /// <summary>A set from the application side: each value into <c>6401h</c> from channel
     /// <paramref name="first"/> on, then one request for every interrupt among them. Actor loop, in
     /// a callback of the device.</summary>
     private void ApplyAnalogInputs(ICanOpenApplicationHost host, AnalogInputBlock block, int first, short[] values)
     {
-        bool enabled = ReadByte(host, block.GlobalInterruptEnable, 0) != 0;
+        bool enabled = block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) != 0;
         var send = new List<CanOpenObjectAddress>(values.Length);
         for (int i = 0; i < values.Length; i++) ApplyAnalogInput(host, block, (byte)(first + i), values[i], enabled, send);
         RequestTransmission(host, send);
@@ -229,12 +229,12 @@ internal sealed partial class Cia401Device
     {
         block.Physical[sub - 1] = value;
         if (ReadAnalogValue(host, block, sub) == value) return;
-        WriteOwn(host, block.Read, sub, Cia401Codec.Encode(OdDataType.Integer16, value));
+        WriteOwn(host, block.Read.Index, sub, Cia401Codec.Encode(OdDataType.Integer16, value));
         if (!enabled || !AnalogInterrupt(host.ObjectDictionary, block, sub, value, block.LastCommunicated[sub - 1])) return;
 
         block.LastCommunicated[sub - 1] = value;
         SetInterruptSource(host, block, sub);
-        send.Add(new CanOpenObjectAddress(block.Read, sub));
+        send.Add(new CanOpenObjectAddress(block.Read.Index, sub));
     }
 
     /// <summary>Whether <paramref name="value"/>, a change of channel <paramref name="sub"/>, raises
@@ -244,38 +244,39 @@ internal sealed partial class Cia401Device
     /// <see cref="SetAnalogInput"/>).</summary>
     private static bool AnalogInterrupt(ObjectDictionary od, AnalogInputBlock block, byte sub, short value, short last)
     {
-        int selection = od.ReadRaw(block.TriggerSelection, sub)[0];
+        int selection = block.TriggerSelection.ReadByte(od, sub);
         if (selection == 0) return false;
 
         int leftAdjusted = Cia401LeftAdjusted.Widen(value);
         long change = (long)value - last;
         bool limitSelected = (selection & LimitBits) != 0;
         bool deltaSelected = (selection & DeltaBits) != 0;
-        bool limitHolds = ((selection & UpperLimitSelected) != 0 && leftAdjusted >= od.ReadSigned(block.UpperLimit, sub))
-            || ((selection & LowerLimitSelected) != 0 && leftAdjusted < od.ReadSigned(block.LowerLimit, sub));
-        bool deltaHolds = ((selection & DeltaSelected) != 0 && Math.Abs(change) > od.ReadUnsigned(block.Delta, sub))
-            || ((selection & NegativeDeltaSelected) != 0 && -change > od.ReadUnsigned(block.NegativeDelta, sub))
-            || ((selection & PositiveDeltaSelected) != 0 && change > od.ReadUnsigned(block.PositiveDelta, sub));
+        bool limitHolds = ((selection & UpperLimitSelected) != 0 && leftAdjusted >= block.UpperLimit.Read(od, sub))
+            || ((selection & LowerLimitSelected) != 0 && leftAdjusted < block.LowerLimit.Read(od, sub));
+        bool deltaHolds = ((selection & DeltaSelected) != 0 && Math.Abs(change) > block.Delta.Read(od, sub))
+            || ((selection & NegativeDeltaSelected) != 0 && -change > block.NegativeDelta.Read(od, sub))
+            || ((selection & PositiveDeltaSelected) != 0 && change > block.PositiveDelta.Read(od, sub));
         return (!limitSelected || limitHolds) && (!deltaSelected || deltaHolds);
     }
 
-    /// <summary>Sets channel <paramref name="sub"/>'s bit in its bank of <c>6422h</c> (§8.6.3).</summary>
+    /// <summary>Sets channel <paramref name="sub"/>'s bit in its bank of <c>6422h</c> (§8.6.3); a
+    /// bank the dictionary does not hold keeps no bits.</summary>
     private void SetInterruptSource(ICanOpenApplicationHost host, AnalogInputBlock block, byte sub)
     {
         var bank = (byte)(((sub - 1) / ChannelsPerSourceBank) + 1);
         uint bit = 1u << ((sub - 1) % ChannelsPerSourceBank);
-        uint bits = host.ObjectDictionary.ReadUnsigned(block.InterruptSource, bank);
-        if ((bits & bit) == 0) WriteOwn(host, block.InterruptSource, bank, Cia401Codec.Encode(OdDataType.Unsigned32, bits | bit));
+        if (!host.ObjectDictionary.TryReadUnsigned(block.InterruptSource.Index, bank, out uint bits)) return;
+        if ((bits & bit) == 0) WriteOwn(host, block.InterruptSource.Index, bank, Cia401Codec.Encode(OdDataType.Unsigned32, bits | bit));
     }
 
-    /// <summary>Clears every bank of <c>6422h</c>: the deviation from §8.6.3 described on
-    /// <see cref="SetAnalogInput"/>.</summary>
+    /// <summary>Clears every bank of <c>6422h</c> the dictionary holds: the deviation from §8.6.3
+    /// described on <see cref="SetAnalogInput"/>.</summary>
     private void ClearInterruptSource(ICanOpenApplicationHost host, AnalogInputBlock block)
     {
         for (int bank = 1; bank <= block.Banks; bank++)
         {
-            if (host.ObjectDictionary.ReadUnsigned(block.InterruptSource, (byte)bank) != 0)
-                WriteOwn(host, block.InterruptSource, (byte)bank, Cia401Codec.Encode(OdDataType.Unsigned32, 0));
+            if (host.ObjectDictionary.TryReadUnsigned(block.InterruptSource.Index, (byte)bank, out uint bits) && bits != 0)
+                WriteOwn(host, block.InterruptSource.Index, (byte)bank, Cia401Codec.Encode(OdDataType.Unsigned32, 0));
         }
     }
 
@@ -293,10 +294,10 @@ internal sealed partial class Cia401Device
     private void AnalogInputsWritten(ICanOpenApplicationHost host, CanOpenObjectAddress entry)
     {
         var block = _analogInputs;
-        if (block is null || entry.Index != block.GlobalInterruptEnable || entry.Subindex != 0) return;
+        if (block is null || entry.Index != block.GlobalInterruptEnable.Index || entry.Subindex != 0) return;
 
         ClearInterruptSource(host, block);
-        bool enabled = ReadByte(host, block.GlobalInterruptEnable, 0) != 0;
+        bool enabled = block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) != 0;
         if (enabled && !block.GlobalInterruptEnableSeen) TakeCurrentAsLastCommunicated(host, block);
         block.GlobalInterruptEnableSeen = enabled;
         if (enabled) host.ClearError(AnalogInputsDisabledWarning);
@@ -312,8 +313,8 @@ internal sealed partial class Cia401Device
 
         TakeCurrentAsLastCommunicated(host, block);
         ClearInterruptSource(host, block);
-        for (int c = 1; c <= block.Channels; c++) send.Add(new CanOpenObjectAddress(block.Read, (byte)c));
-        if (ReadByte(host, block.GlobalInterruptEnable, 0) == 0) host.RaiseError(AnalogInputsDisabledWarning, 0);
+        for (int c = 1; c <= block.Channels; c++) send.Add(new CanOpenObjectAddress(block.Read.Index, (byte)c));
+        if (block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) == 0) host.RaiseError(AnalogInputsDisabledWarning, 0);
     }
 
     /// <summary>Leaving Operational ends the warning of §5.3; in Initialisation (a reset) the node
@@ -340,13 +341,13 @@ internal sealed partial class Cia401Device
             {
                 short value = block.Physical[c - 1];
                 if (ReadAnalogValue(host, block, (byte)c) != value)
-                    WriteOwn(host, block.Read, (byte)c, Cia401Codec.Encode(OdDataType.Integer16, value));
+                    WriteOwn(host, block.Read.Index, (byte)c, Cia401Codec.Encode(OdDataType.Integer16, value));
             }
         }
 
         TakeCurrentAsLastCommunicated(host, block);
         ClearInterruptSource(host, block);
-        block.GlobalInterruptEnableSeen = ReadByte(host, block.GlobalInterruptEnable, 0) != 0;
+        block.GlobalInterruptEnableSeen = block.GlobalInterruptEnable.ReadByte(host.ObjectDictionary, 0) != 0;
     }
 
     /// <summary>Whether a write is a trigger selection with a reserved bit set: bits 5 to 7 of
@@ -355,7 +356,7 @@ internal sealed partial class Cia401Device
     private bool IsReservedTriggerSelection(ushort index, byte subindex, byte[] value)
     {
         var block = _analogInputs;
-        return block is not null && index == block.TriggerSelection && subindex >= 1
+        return block is not null && index == block.TriggerSelection.Index && subindex >= 1
             && value.Length == 1 && (value[0] & ReservedSelectionBits) != 0;
     }
 
@@ -363,24 +364,21 @@ internal sealed partial class Cia401Device
     /// interrupt state that is not in the dictionary.</summary>
     private sealed class AnalogInputBlock
     {
-        private readonly int _logicalDevice;
-
         internal AnalogInputBlock(int channels, int logicalDevice)
         {
             Channels = channels;
             Banks = (channels + ChannelsPerSourceBank - 1) / ChannelsPerSourceBank;
             LastCommunicated = new short[channels];
             Physical = new short[channels];
-            Read = Shift(logicalDevice, Cia401Objects.ReadAnalogInput16);
-            TriggerSelection = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptTriggerSelection);
-            InterruptSource = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptSource);
-            GlobalInterruptEnable = Shift(logicalDevice, Cia401Objects.AnalogInputGlobalInterruptEnable);
-            UpperLimit = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptUpperLimitInteger);
-            LowerLimit = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptLowerLimitInteger);
-            Delta = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptDeltaUnsigned);
-            NegativeDelta = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptNegativeDeltaUnsigned);
-            PositiveDelta = Shift(logicalDevice, Cia401Objects.AnalogInputInterruptPositiveDeltaUnsigned);
-            _logicalDevice = logicalDevice;
+            Read = new ProfileObject(logicalDevice, Cia401Objects.ReadAnalogInput16);
+            TriggerSelection = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptTriggerSelection);
+            InterruptSource = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptSource);
+            GlobalInterruptEnable = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputGlobalInterruptEnable);
+            UpperLimit = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptUpperLimitInteger);
+            LowerLimit = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptLowerLimitInteger);
+            Delta = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptDeltaUnsigned);
+            NegativeDelta = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptNegativeDeltaUnsigned);
+            PositiveDelta = new ProfileObject(logicalDevice, Cia401Objects.AnalogInputInterruptPositiveDeltaUnsigned);
         }
 
         internal int Channels { get; }
@@ -399,39 +397,39 @@ internal sealed partial class Cia401Device
         /// interrupts from one that finds them enabled. Actor loop only.</summary>
         internal bool GlobalInterruptEnableSeen { get; set; }
 
-        internal ushort Read { get; }
+        internal ProfileObject Read { get; }
 
-        internal ushort TriggerSelection { get; }
+        internal ProfileObject TriggerSelection { get; }
 
-        internal ushort InterruptSource { get; }
+        internal ProfileObject InterruptSource { get; }
 
-        internal ushort GlobalInterruptEnable { get; }
+        internal ProfileObject GlobalInterruptEnable { get; }
 
-        internal ushort UpperLimit { get; }
+        internal ProfileObject UpperLimit { get; }
 
-        internal ushort LowerLimit { get; }
+        internal ProfileObject LowerLimit { get; }
 
-        internal ushort Delta { get; }
+        internal ProfileObject Delta { get; }
 
-        internal ushort NegativeDelta { get; }
+        internal ProfileObject NegativeDelta { get; }
 
-        internal ushort PositiveDelta { get; }
+        internal ProfileObject PositiveDelta { get; }
 
         /// <summary>Declares <c>6401h</c>, <c>6421h</c> to <c>6428h</c> with the data type, access,
         /// PDO mapping and default the catalogue gives them, one sub-index per channel (one per bank
         /// of 32 for <c>6422h</c>). Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.ReadAnalogInput16);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogInputInterruptTriggerSelection);
-            DeclareArray(od, _logicalDevice, Banks, Cia401Objects.AnalogInputInterruptSource);
-            DeclareVariable(od, _logicalDevice, Cia401Objects.AnalogInputGlobalInterruptEnable);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogInputInterruptUpperLimitInteger);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogInputInterruptLowerLimitInteger);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogInputInterruptDeltaUnsigned);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogInputInterruptNegativeDeltaUnsigned);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogInputInterruptPositiveDeltaUnsigned);
-            GlobalInterruptEnableSeen = od.ReadRaw(GlobalInterruptEnable, 0x00)[0] != 0;
+            DeclareArray(od, Read, Channels);
+            DeclareArray(od, TriggerSelection, Channels);
+            DeclareArray(od, InterruptSource, Banks);
+            DeclareVariable(od, GlobalInterruptEnable);
+            DeclareArray(od, UpperLimit, Channels);
+            DeclareArray(od, LowerLimit, Channels);
+            DeclareArray(od, Delta, Channels);
+            DeclareArray(od, NegativeDelta, Channels);
+            DeclareArray(od, PositiveDelta, Channels);
+            GlobalInterruptEnableSeen = GlobalInterruptEnable.ReadByte(od, 0x00) != 0;
         }
     }
 }

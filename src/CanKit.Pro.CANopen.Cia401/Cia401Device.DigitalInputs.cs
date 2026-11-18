@@ -82,7 +82,7 @@ internal sealed partial class Cia401Device
     public byte ReadDigitalInputs(int group)
     {
         var block = RequireGroup(group);
-        return ReadByte(RequireHost(), block.Read, (byte)group);
+        return ReadByte(RequireHost(), block.Read.Index, (byte)group);
     }
 
     private DigitalInputBlock RequireGroup(int group)
@@ -114,7 +114,7 @@ internal sealed partial class Cia401Device
     private void DigitalInputsWritten(ICanOpenApplicationHost host, CanOpenObjectAddress entry, List<CanOpenObjectAddress> send)
     {
         var block = _digitalInputs;
-        if (block is null || entry.Index != block.Polarity) return;
+        if (block is null || entry.Index != block.Polarity.Index) return;
         if (entry.Subindex < 1 || entry.Subindex > block.Groups) return;
         RefreshDigitalInputGroup(host, block, entry.Subindex - 1, send);
     }
@@ -131,8 +131,8 @@ internal sealed partial class Cia401Device
         for (int g = 0; g < block.Groups; g++)
         {
             var sub = (byte)(g + 1);
-            var logical = (byte)(block.Physical[g] ^ ReadByte(host, block.Polarity, sub));
-            if (logical != ReadByte(host, block.Read, sub)) WriteOwn(host, block.Read, sub, logical);
+            var logical = (byte)(block.Physical[g] ^ block.Polarity.ReadByte(host.ObjectDictionary, sub));
+            if (logical != ReadByte(host, block.Read.Index, sub)) WriteOwn(host, block.Read.Index, sub, logical);
         }
     }
 
@@ -141,7 +141,7 @@ internal sealed partial class Cia401Device
     {
         var block = _digitalInputs;
         if (block is null) return;
-        for (int sub = 1; sub <= block.Groups; sub++) send.Add(new CanOpenObjectAddress(block.Read, (byte)sub));
+        for (int sub = 1; sub <= block.Groups; sub++) send.Add(new CanOpenObjectAddress(block.Read.Index, (byte)sub));
     }
 
     /// <summary>
@@ -154,18 +154,18 @@ internal sealed partial class Cia401Device
     {
         var sub = (byte)(g + 1);
         byte physical = block.Physical[g];
-        byte logical = (byte)(physical ^ ReadByte(host, block.Polarity, sub));
-        byte previous = ReadByte(host, block.Read, sub);
+        byte logical = (byte)(physical ^ block.Polarity.ReadByte(host.ObjectDictionary, sub));
+        byte previous = ReadByte(host, block.Read.Index, sub);
         if (logical == previous) return;
 
-        WriteOwn(host, block.Read, sub, logical);
+        WriteOwn(host, block.Read.Index, sub, logical);
 
         // The edges of the logical value, not of the physical one (§8.2.6, §8.2.7).
         var changed = (byte)(previous ^ logical);
         var rising = (byte)(changed & logical);
         var falling = (byte)(changed & ~logical);
-        if (!DigitalInterrupt(host, block, sub, changed, rising, falling)) return;
-        send.Add(new CanOpenObjectAddress(block.Read, sub));
+        if (!DigitalInterrupt(host.ObjectDictionary, block, sub, changed, rising, falling)) return;
+        send.Add(new CanOpenObjectAddress(block.Read.Index, sub));
     }
 
     /// <summary>Whether a change raises an interrupt: <c>6005h</c> TRUE (§8.2.4), and a changed bit in
@@ -176,13 +176,13 @@ internal sealed partial class Cia401Device
     /// "High-to-Low" with a falling-edge symbol and <c>6008h</c> "Low-to-High" with a rising one. The
     /// figure is taken for the wiring only (the polarity before <c>6000h</c>, the masks in an OR, and
     /// <c>6005h</c> closing the transmission), not for the directions.</remarks>
-    private static bool DigitalInterrupt(ICanOpenApplicationHost host, DigitalInputBlock block, byte sub,
+    private static bool DigitalInterrupt(ObjectDictionary od, DigitalInputBlock block, byte sub,
         byte changed, byte rising, byte falling)
     {
-        if (ReadByte(host, block.GlobalInterruptEnable, 0) == 0) return false;
-        int any = changed & ReadByte(host, block.AnyChange, sub);
-        int lowToHigh = rising & ReadByte(host, block.LowToHigh, sub);
-        int highToLow = falling & ReadByte(host, block.HighToLow, sub);
+        if (block.GlobalInterruptEnable.ReadByte(od, 0) == 0) return false;
+        int any = changed & block.AnyChange.ReadByte(od, sub);
+        int lowToHigh = rising & block.LowToHigh.ReadByte(od, sub);
+        int highToLow = falling & block.HighToLow.ReadByte(od, sub);
         return (any | lowToHigh | highToLow) != 0;
     }
 
@@ -195,16 +195,14 @@ internal sealed partial class Cia401Device
             Channels = channels;
             Groups = (channels + ChannelsPerGroup - 1) / ChannelsPerGroup;
             Physical = new byte[Groups];
-            Read = Shift(logicalDevice, Cia401Objects.ReadDigitalInput8);
-            Polarity = Shift(logicalDevice, Cia401Objects.PolarityDigitalInput8);
-            GlobalInterruptEnable = Shift(logicalDevice, Cia401Objects.GlobalInterruptEnableDigital8);
-            AnyChange = Shift(logicalDevice, Cia401Objects.DigitalInterruptMaskAnyChange8);
-            LowToHigh = Shift(logicalDevice, Cia401Objects.DigitalInterruptMaskLowToHigh8);
-            HighToLow = Shift(logicalDevice, Cia401Objects.DigitalInterruptMaskHighToLow8);
-            _logicalDevice = logicalDevice;
+            Read = new ProfileObject(logicalDevice, Cia401Objects.ReadDigitalInput8);
+            Polarity = new ProfileObject(logicalDevice, Cia401Objects.PolarityDigitalInput8);
+            FilterEnable = new ProfileObject(logicalDevice, Cia401Objects.DigitalFilterEnable8);
+            GlobalInterruptEnable = new ProfileObject(logicalDevice, Cia401Objects.GlobalInterruptEnableDigital8);
+            AnyChange = new ProfileObject(logicalDevice, Cia401Objects.DigitalInterruptMaskAnyChange8);
+            LowToHigh = new ProfileObject(logicalDevice, Cia401Objects.DigitalInterruptMaskLowToHigh8);
+            HighToLow = new ProfileObject(logicalDevice, Cia401Objects.DigitalInterruptMaskHighToLow8);
         }
-
-        private readonly int _logicalDevice;
 
         internal int Channels { get; }
 
@@ -214,17 +212,19 @@ internal sealed partial class Cia401Device
         /// <summary>The physical levels per group, as the application set them. Actor loop only.</summary>
         internal byte[] Physical { get; }
 
-        internal ushort Read { get; }
+        internal ProfileObject Read { get; }
 
-        internal ushort Polarity { get; }
+        internal ProfileObject Polarity { get; }
 
-        internal ushort GlobalInterruptEnable { get; }
+        internal ProfileObject FilterEnable { get; }
 
-        internal ushort AnyChange { get; }
+        internal ProfileObject GlobalInterruptEnable { get; }
 
-        internal ushort LowToHigh { get; }
+        internal ProfileObject AnyChange { get; }
 
-        internal ushort HighToLow { get; }
+        internal ProfileObject LowToHigh { get; }
+
+        internal ProfileObject HighToLow { get; }
 
         /// <summary>The bits of group <paramref name="g"/> (0-based) that are channels of the device:
         /// all eight but in a last group that is not full.</summary>
@@ -235,13 +235,13 @@ internal sealed partial class Cia401Device
         /// groups at sub-index 0 of each array. Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ReadDigitalInput8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.PolarityDigitalInput8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalFilterEnable8);
-            DeclareVariable(od, _logicalDevice, Cia401Objects.GlobalInterruptEnableDigital8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskAnyChange8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskLowToHigh8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskHighToLow8);
+            DeclareArray(od, Read, Groups);
+            DeclareArray(od, Polarity, Groups);
+            DeclareArray(od, FilterEnable, Groups);
+            DeclareVariable(od, GlobalInterruptEnable);
+            DeclareArray(od, AnyChange, Groups);
+            DeclareArray(od, LowToHigh, Groups);
+            DeclareArray(od, HighToLow, Groups);
         }
     }
 }

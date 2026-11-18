@@ -127,12 +127,12 @@ internal sealed partial class Cia401Device
         int g = entry.Subindex - 1;
         var od = host.ObjectDictionary;
 
-        if (entry.Index == block.Write)
+        if (entry.Index == block.Write.Index)
         {
             if (_inErrorState) return;
             block.TakeReceived(od, g);
         }
-        else if (entry.Index == block.ErrorMode || entry.Index == block.ErrorValue)
+        else if (entry.Index == block.ErrorMode.Index || entry.Index == block.ErrorValue.Index)
         {
             if (!_inErrorState) return;
             block.ApplyErrorValue(od, g);
@@ -215,8 +215,6 @@ internal sealed partial class Cia401Device
     /// logical values, and the levels at the terminals.</summary>
     private sealed class DigitalOutputBlock
     {
-        private readonly int _logicalDevice;
-
         // Published whole and never changed afterwards, so a reader on any thread sees one
         // consistent set of levels.
         private byte[] _terminal;
@@ -227,12 +225,11 @@ internal sealed partial class Cia401Device
             Groups = (channels + ChannelsPerGroup - 1) / ChannelsPerGroup;
             Held = new byte[Groups];
             _terminal = new byte[Groups];
-            Write = Shift(logicalDevice, Cia401Objects.WriteDigitalOutput8);
-            Polarity = Shift(logicalDevice, Cia401Objects.ChangePolarityDigitalOutput8);
-            ErrorMode = Shift(logicalDevice, Cia401Objects.ErrorModeDigitalOutput8);
-            ErrorValue = Shift(logicalDevice, Cia401Objects.ErrorValueDigitalOutput8);
-            FilterMask = Shift(logicalDevice, Cia401Objects.FilterMaskDigitalOutput8);
-            _logicalDevice = logicalDevice;
+            Write = new ProfileObject(logicalDevice, Cia401Objects.WriteDigitalOutput8);
+            Polarity = new ProfileObject(logicalDevice, Cia401Objects.ChangePolarityDigitalOutput8);
+            ErrorMode = new ProfileObject(logicalDevice, Cia401Objects.ErrorModeDigitalOutput8);
+            ErrorValue = new ProfileObject(logicalDevice, Cia401Objects.ErrorValueDigitalOutput8);
+            FilterMask = new ProfileObject(logicalDevice, Cia401Objects.FilterMaskDigitalOutput8);
         }
 
         internal int Channels { get; }
@@ -248,47 +245,47 @@ internal sealed partial class Cia401Device
         /// changed.</summary>
         internal byte[] Terminal => Volatile.Read(ref _terminal);
 
-        internal ushort Write { get; }
+        internal ProfileObject Write { get; }
 
-        internal ushort Polarity { get; }
+        internal ProfileObject Polarity { get; }
 
-        internal ushort ErrorMode { get; }
+        internal ProfileObject ErrorMode { get; }
 
-        internal ushort ErrorValue { get; }
+        internal ProfileObject ErrorValue { get; }
 
-        internal ushort FilterMask { get; }
+        internal ProfileObject FilterMask { get; }
 
         /// <summary>Declares <c>6200h</c>, <c>6202h</c>, <c>6206h</c>, <c>6207h</c> and <c>6208h</c>
         /// as the catalogue gives them, then takes the held values from <c>6200h</c> and the levels
         /// from those. Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.WriteDigitalOutput8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ChangePolarityDigitalOutput8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ErrorModeDigitalOutput8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.ErrorValueDigitalOutput8);
-            DeclareArray(od, _logicalDevice, Groups, Cia401Objects.FilterMaskDigitalOutput8);
+            DeclareArray(od, Write, Groups);
+            DeclareArray(od, Polarity, Groups);
+            DeclareArray(od, ErrorMode, Groups);
+            DeclareArray(od, ErrorValue, Groups);
+            DeclareArray(od, FilterMask, Groups);
             for (int g = 0; g < Groups; g++) LoadHeld(od, g);
             Publish(ComputeTerminal(od));
         }
 
         /// <summary>Held = <c>6200h</c>: after power-on and a reset the outputs are what the object
         /// holds, its default or a stored value (§6.2.5 NOTE).</summary>
-        internal void LoadHeld(ObjectDictionary od, int g) => Held[g] = Byte(od, Write, g);
+        internal void LoadHeld(ObjectDictionary od, int g) => Held[g] = Written(od, g);
 
         /// <summary>The received value of <c>6200h</c> in the bits <c>6208h</c> has set (§8.3.5).</summary>
         internal void TakeReceived(ObjectDictionary od, int g)
         {
-            int filter = Byte(od, FilterMask, g);
-            Held[g] = (byte)((Held[g] & ~filter) | (Byte(od, Write, g) & filter));
+            int filter = FilterMask.ReadByte(od, Sub(g));
+            Held[g] = (byte)((Held[g] & ~filter) | (Written(od, g) & filter));
         }
 
         /// <summary>The bits with <c>6206h</c> = 1 take <c>6207h</c>; the others keep their value
         /// (§8.3.3, §8.3.4).</summary>
         internal void ApplyErrorValue(ObjectDictionary od, int g)
         {
-            int mode = Byte(od, ErrorMode, g);
-            Held[g] = (byte)((Held[g] & ~mode) | (Byte(od, ErrorValue, g) & mode));
+            int mode = ErrorMode.ReadByte(od, Sub(g));
+            Held[g] = (byte)((Held[g] & ~mode) | (ErrorValue.ReadByte(od, Sub(g)) & mode));
         }
 
         /// <summary>Held XOR <c>6202h</c> (§8.3.2), the channels the device lacks at 0.</summary>
@@ -297,7 +294,7 @@ internal sealed partial class Cia401Device
             var levels = new byte[Groups];
             for (int g = 0; g < Groups; g++)
             {
-                levels[g] = (byte)((Held[g] ^ Byte(od, Polarity, g)) & GroupChannelMask(Channels, g));
+                levels[g] = (byte)((Held[g] ^ Polarity.ReadByte(od, Sub(g))) & GroupChannelMask(Channels, g));
             }
 
             return levels;
@@ -305,6 +302,9 @@ internal sealed partial class Cia401Device
 
         internal void Publish(byte[] levels) => Volatile.Write(ref _terminal, levels);
 
-        private static byte Byte(ObjectDictionary od, ushort index, int g) => od.ReadRaw(index, (byte)(g + 1))[0];
+        /// <summary>What <c>6200h</c> holds for group <paramref name="g"/> (0-based).</summary>
+        private byte Written(ObjectDictionary od, int g) => od.ReadRaw(Write.Index, Sub(g))[0];
+
+        private static byte Sub(int g) => (byte)(g + 1);
     }
 }

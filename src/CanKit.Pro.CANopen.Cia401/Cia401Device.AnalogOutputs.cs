@@ -107,12 +107,12 @@ internal sealed partial class Cia401Device
         int c = entry.Subindex - 1;
         var od = host.ObjectDictionary;
 
-        if (entry.Index == block.Write)
+        if (entry.Index == block.Write.Index)
         {
             if (_inErrorState) return;
             block.LoadHeld(od, c);
         }
-        else if (entry.Index == block.ErrorMode || entry.Index == block.ErrorValue)
+        else if (entry.Index == block.ErrorMode.Index || entry.Index == block.ErrorValue.Index)
         {
             if (!_inErrorState) return;
             block.ApplyErrorValue(od, c);
@@ -190,7 +190,7 @@ internal sealed partial class Cia401Device
     private bool IsReservedAnalogErrorMode(ushort index, byte subindex, byte[] value)
     {
         var block = _analogOutputs;
-        return block is not null && index == block.ErrorMode && subindex >= 1
+        return block is not null && index == block.ErrorMode.Index && subindex >= 1
             && value.Length == 1 && value[0] > AnalogErrorModeErrorValue;
     }
 
@@ -198,8 +198,6 @@ internal sealed partial class Cia401Device
     /// values, and the values at the terminals.</summary>
     private sealed class AnalogOutputBlock
     {
-        private readonly int _logicalDevice;
-
         // Published whole and never changed afterwards, so a reader on any thread sees one
         // consistent set of values.
         private short[] _terminal;
@@ -209,10 +207,9 @@ internal sealed partial class Cia401Device
             Channels = channels;
             Held = new short[channels];
             _terminal = new short[channels];
-            Write = Shift(logicalDevice, Cia401Objects.WriteAnalogOutput16);
-            ErrorMode = Shift(logicalDevice, Cia401Objects.AnalogOutputErrorMode);
-            ErrorValue = Shift(logicalDevice, Cia401Objects.AnalogOutputErrorValueInteger);
-            _logicalDevice = logicalDevice;
+            Write = new ProfileObject(logicalDevice, Cia401Objects.WriteAnalogOutput16);
+            ErrorMode = new ProfileObject(logicalDevice, Cia401Objects.AnalogOutputErrorMode);
+            ErrorValue = new ProfileObject(logicalDevice, Cia401Objects.AnalogOutputErrorValueInteger);
         }
 
         internal int Channels { get; }
@@ -225,35 +222,35 @@ internal sealed partial class Cia401Device
         /// changed.</summary>
         internal short[] Terminal => Volatile.Read(ref _terminal);
 
-        internal ushort Write { get; }
+        internal ProfileObject Write { get; }
 
-        internal ushort ErrorMode { get; }
+        internal ProfileObject ErrorMode { get; }
 
-        internal ushort ErrorValue { get; }
+        internal ProfileObject ErrorValue { get; }
 
         /// <summary>Declares <c>6411h</c>, <c>6443h</c> and <c>6444h</c> as the catalogue gives
         /// them, one sub-index per channel, then takes the held values from <c>6411h</c> and the
         /// terminals from those. Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.WriteAnalogOutput16);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogOutputErrorMode);
-            DeclareArray(od, _logicalDevice, Channels, Cia401Objects.AnalogOutputErrorValueInteger);
+            DeclareArray(od, Write, Channels);
+            DeclareArray(od, ErrorMode, Channels);
+            DeclareArray(od, ErrorValue, Channels);
             for (int c = 0; c < Channels; c++) LoadHeld(od, c);
             Publish((short[])Held.Clone());
         }
 
         /// <summary>Held = <c>6411h</c>: after power-on and Reset Node the outputs are what the
         /// object holds, its default or a stored value (§6.2.7 NOTE).</summary>
-        internal void LoadHeld(ObjectDictionary od, int c) => Held[c] = (short)od.ReadSigned(Write, (byte)(c + 1));
+        internal void LoadHeld(ObjectDictionary od, int c) => Held[c] = (short)od.ReadSigned(Write.Index, (byte)(c + 1));
 
         /// <summary>With <c>6443h</c> = 1h the upper word of <c>6444h</c>; with 0h the value is kept
         /// (§8.7.4, §8.7.5, Figure 7).</summary>
         internal void ApplyErrorValue(ObjectDictionary od, int c)
         {
             var sub = (byte)(c + 1);
-            if (od.ReadRaw(ErrorMode, sub)[0] != AnalogErrorModeErrorValue) return;
-            Held[c] = Cia401LeftAdjusted.Narrow(od.ReadSigned(ErrorValue, sub));
+            if (ErrorMode.ReadByte(od, sub) != AnalogErrorModeErrorValue) return;
+            Held[c] = Cia401LeftAdjusted.Narrow((int)ErrorValue.Read(od, sub));
         }
 
         internal void Publish(short[] values) => Volatile.Write(ref _terminal, values);
