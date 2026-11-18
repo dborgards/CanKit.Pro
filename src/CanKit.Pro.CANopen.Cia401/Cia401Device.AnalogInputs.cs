@@ -23,6 +23,10 @@ internal sealed partial class Cia401Device
     private const byte PositiveDeltaSelected = 0x10;
     private const byte ReservedSelectionBits = 0xE0;
 
+    // The two groups of 6421h that Figure 6 (§7.2.4) ANDs: the limits and the deltas.
+    private const byte LimitBits = UpperLimitSelected | LowerLimitSelected;
+    private const byte DeltaBits = DeltaSelected | NegativeDeltaSelected | PositiveDeltaSelected;
+
     // Null when the configuration has no analog inputs.
     private readonly AnalogInputBlock? _analogInputs;
 
@@ -35,26 +39,43 @@ internal sealed partial class Cia401Device
     /// given.</param>
     /// <remarks>
     /// <para>
-    /// <b>Interrupts.</b> A value that changes <c>6401h</c> is an interrupt for the channel when
-    /// <c>6423h</c> is TRUE (§8.6.4) and one of the conditions <c>6421h</c> selects for the channel
-    /// holds (§8.6.2): bit 0, the value is equal to or above the upper limit <c>6424h</c> (§8.6.5);
-    /// bit 1, it is below the lower limit <c>6425h</c> (§8.6.6); bit 2, it differs from the last
-    /// communicated value by more than <c>6426h</c> (§8.6.7); bit 3, it is more than <c>6427h</c>
-    /// below that value (§8.6.8); bit 4, more than <c>6428h</c> above it (§8.6.9). The selected
-    /// conditions combine in an OR: "If more than one interrupt condition is enabled; the PDO is
-    /// transmitted if one of these conditions is fulfilled" (§6.2.8). A channel with <c>6421h</c> = 0
-    /// never interrupts. A value equal to what <c>6401h</c> holds is no change and interrupts
-    /// nothing; while a limit holds, every change interrupts (§8.6.5, §8.6.6). With the defaults
-    /// (07h, limits and delta 0) every change interrupts: every value is at or above 0 or below it.
+    /// <b>Interrupts.</b> <c>6421h</c> selects, per channel, conditions of two groups (§8.6.2,
+    /// Table 148). The limits: bit 0, the value is equal to or above the upper limit <c>6424h</c>
+    /// (§8.6.5); bit 1, it is below the lower limit <c>6425h</c> (§8.6.6). The deltas, measured from
+    /// the last communicated value: bit 2, it differs by more than <c>6426h</c> (§8.6.7); bit 3, it
+    /// is more than <c>6427h</c> below (§8.6.8); bit 4, more than <c>6428h</c> above (§8.6.9). A
+    /// value that changes <c>6401h</c> is an interrupt for the channel when <c>6423h</c> is TRUE
+    /// (§8.6.4) and both groups are met: a group is met when one of its selected conditions holds,
+    /// or when none of its bits is selected. So the deltas restrict the limits: with upper limit and
+    /// delta selected, a change above the limit interrupts only when it is more than the delta, and
+    /// a change below the limit never does. One case is special, and is a choice of the device: a
+    /// channel with <c>6421h</c> = 0 never interrupts, although both groups, having nothing
+    /// selected, would count as met — the object "shall determine, which events shall cause an
+    /// interrupt" (§8.6.2), and with none selected, none does. A value equal to what <c>6401h</c>
+    /// holds is no change and interrupts nothing; while a limit alone is selected and holds, every
+    /// change interrupts (§8.6.5, §8.6.6). With the defaults (07h, limits and delta 0) every change
+    /// interrupts — every value is at or above 0 or below it, and every change is more than 0 — and
+    /// a master that writes only a delta gets "send when moved by more than the delta".
     /// </para>
     /// <para>
-    /// Figure 6 (§7.2.4) and one sentence of §8.6.5 and §8.6.6 read otherwise, and are not followed.
-    /// The figure joins the two limit comparisons in an XOR, ANDs the result with the delta and
-    /// shows no <c>6421h</c>; §8.6.5 and §8.6.6 say a limit interrupts on every change "if there is
-    /// no additional trigger condition, e.g. an input interrupt delta", which also implies an AND.
-    /// The device follows §6.2.8 and the per-channel selection of §8.6.2, which states the
-    /// combination explicitly: with upper limit and positive delta selected, a rise of more than
-    /// the delta interrupts below the limit too.
+    /// The norm is not of one voice here, and this is the reading taken. Figure 6 (§7.2.4) ANDs the
+    /// limit comparisons with the delta block, and §8.6.5 and §8.6.6 (and the float objects
+    /// §8.6.10, §8.6.11) say a limit interrupts on every change "if there is no additional trigger
+    /// condition, e.g. an input interrupt delta": the delta restricts the limit. §6.2.8, sentence 3,
+    /// "If more than one interrupt condition is enabled; the PDO is transmitted if one of these
+    /// conditions is fulfilled", read across the groups, contradicts both; it is read as applying
+    /// within a group. The defaults decide between the two: under a plain OR, 07h with limits 0
+    /// would interrupt on every change whatever delta is written, and the delta would do nothing
+    /// until <c>6421h</c> is rewritten. The limits are OR'd where the figure draws an XOR; the two
+    /// differ only for an inverted window, upper limit at or below lower limit, where a value
+    /// between them meets both limits and interrupts here, but meets neither under the XOR.
+    /// </para>
+    /// <para>
+    /// <b>Coalescing.</b> The node reports a write to <c>6423h</c> one actor job after it stored
+    /// it (<see cref="ICanOpenApplication.OnEntriesWritten"/>). A set applied between the two reads
+    /// <c>6423h</c> TRUE from the dictionary but finds the reference and <c>6422h</c> as they were
+    /// before the write: it is evaluated as enabled against a stale last communicated value. The
+    /// window holds at most the sets queued in that one job, and the next write report resyncs.
     /// </para>
     /// <para>
     /// <b>Limits, left adjusted.</b> §8.6.5 and §8.6.6 say the INTEGER32 limit "shall always be
@@ -69,10 +90,11 @@ internal sealed partial class Cia401Device
     /// limit, is followed.
     /// </para>
     /// <para>
-    /// <b>Deltas, plain.</b> §8.6.7 to §8.6.9 say nothing of left adjustment, where §8.6.5 and
-    /// §8.6.6, written to the same pattern beside them, say it each time; the NOTE they share with
-    /// the limits ("not scaled and not offset") puts them before the scaling, not into one number
-    /// format. So a delta is a difference of the 16-bit values: a delta of 50 counts is written 50.
+    /// <b>Deltas, plain: a choice.</b> The norm does not say in which format a delta is written:
+    /// §8.6.7 to §8.6.9 say nothing of left adjustment, where §8.6.5 and §8.6.6 beside them say it
+    /// of the limits each time. The device takes that silence literally and reads a delta as a
+    /// difference of the 16-bit values. The consequence: a limit is written left adjusted (1000
+    /// counts as <c>1000 · 2^16</c>), a delta in counts of the 16-bit value (50 counts as 50).
     /// "By more than" (Table 148) is strictly greater.
     /// </para>
     /// <para>
@@ -133,7 +155,8 @@ internal sealed partial class Cia401Device
     }
 
     /// <summary>Sets the values of the consecutive analog inputs from <paramref name="firstChannel"/>
-    /// on, all in one step: applied as <see cref="SetAnalogInput"/> is, and the interrupts they
+    /// on, all in one step: applied as <see cref="SetAnalogInput"/> is (its coalescing window around
+    /// a write to <c>6423h</c> included), and the interrupts they
     /// raise are one request, so a TPDO that maps several of them goes out once. Any thread; the
     /// values are copied before the call returns.</summary>
     /// <param name="firstChannel">The first input, <c>1</c> to the number of analog inputs.</param>
@@ -211,9 +234,11 @@ internal sealed partial class Cia401Device
         send.Add(new CanOpenObjectAddress(block.Read, sub));
     }
 
-    /// <summary>Whether <paramref name="value"/>, a change of channel <paramref name="sub"/>, meets
-    /// a condition <c>6421h</c> selects for it, the conditions in an OR (CiA 401-1 §6.2.8, §8.6.2 to
-    /// §8.6.9; the readings are on <see cref="SetAnalogInput"/>).</summary>
+    /// <summary>Whether <paramref name="value"/>, a change of channel <paramref name="sub"/>, raises
+    /// an interrupt under what <c>6421h</c> selects for it: the selected limits OR'd, the selected
+    /// deltas OR'd, the two groups ANDed, a group with nothing selected counting as met, and
+    /// <c>6421h</c> = 0 never (CiA 401-1 §7.2.4 Figure 6, §8.6.2 to §8.6.9; the reading is on
+    /// <see cref="SetAnalogInput"/>).</summary>
     private static bool AnalogInterrupt(ObjectDictionary od, AnalogInputBlock block, byte sub, short value, short last)
     {
         int selection = od.ReadRaw(block.TriggerSelection, sub)[0];
@@ -221,11 +246,14 @@ internal sealed partial class Cia401Device
 
         int leftAdjusted = LeftAdjusted.Widen(value);
         long change = (long)value - last;
-        return ((selection & UpperLimitSelected) != 0 && leftAdjusted >= od.ReadSigned(block.UpperLimit, sub))
-            || ((selection & LowerLimitSelected) != 0 && leftAdjusted < od.ReadSigned(block.LowerLimit, sub))
-            || ((selection & DeltaSelected) != 0 && Math.Abs(change) > od.ReadUnsigned(block.Delta, sub))
+        bool limitSelected = (selection & LimitBits) != 0;
+        bool deltaSelected = (selection & DeltaBits) != 0;
+        bool limitHolds = ((selection & UpperLimitSelected) != 0 && leftAdjusted >= od.ReadSigned(block.UpperLimit, sub))
+            || ((selection & LowerLimitSelected) != 0 && leftAdjusted < od.ReadSigned(block.LowerLimit, sub));
+        bool deltaHolds = ((selection & DeltaSelected) != 0 && Math.Abs(change) > od.ReadUnsigned(block.Delta, sub))
             || ((selection & NegativeDeltaSelected) != 0 && -change > od.ReadUnsigned(block.NegativeDelta, sub))
             || ((selection & PositiveDeltaSelected) != 0 && change > od.ReadUnsigned(block.PositiveDelta, sub));
+        return (!limitSelected || limitHolds) && (!deltaSelected || deltaHolds);
     }
 
     /// <summary>Sets channel <paramref name="sub"/>'s bit in its bank of <c>6422h</c> (§8.6.3).</summary>

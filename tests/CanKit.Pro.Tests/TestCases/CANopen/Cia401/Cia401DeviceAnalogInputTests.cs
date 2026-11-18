@@ -18,11 +18,12 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Cia401;
 /// </summary>
 /// <remarks>
 /// The readings the tests pin, each argued on the device's <c>SetAnalogInput</c>: the conditions
-/// selected in <c>6421h</c> combine in an OR (§6.2.8), so a test of one condition selects that one
-/// alone — under the defaults (07h, limits and delta 0) every change interrupts; a limit is compared
-/// with the input left adjusted in 32 bits, the input's 16-bit value times 2^16 (§8.6.5, §8.6.6); a
-/// delta is a plain difference of the 16-bit values (§8.6.7 to §8.6.9 say nothing of left
-/// adjustment).
+/// selected in <c>6421h</c> are OR'd within their group (limits, bits 0 and 1; deltas, bits 2 to 4),
+/// and the two groups are ANDed, a group with no bit selected counting as met (Figure 6, §8.6.5,
+/// §8.6.6); <c>6421h</c> = 0 never interrupts. Under the defaults (07h, limits and delta 0) every
+/// change interrupts. A limit is compared with the input left adjusted in 32 bits, the input's
+/// 16-bit value times 2^16 (§8.6.5, §8.6.6); a delta is a plain difference of the 16-bit values, a
+/// choice where §8.6.7 to §8.6.9 say nothing.
 /// </remarks>
 public class Cia401DeviceAnalogInputTests
 {
@@ -254,6 +255,37 @@ public class Cia401DeviceAnalogInputTests
     }
 
     [Fact]
+    public async Task Reset_Communication_Ends_The_Warning_Without_An_Emcy_And_The_Next_Entry_Raises_It_Again()
+    {
+        using var rig = new Cia401Rig(Analog(1));
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Emcy, 1);
+
+        await rig.ResetAsync(NmtCommand.ResetCommunication);
+        await rig.DrainEmcyAsync();
+
+        rig.Count(Cia401Rig.Emcy).Should().Be(1, "a reset ends a profile error at the node without an EMCY");
+        rig.Node.State.Should().Be(NmtState.PreOperational);
+        (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0, "6423h is still FALSE");
+
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Emcy, 2);
+        await rig.DrainEmcyAsync();
+        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(2);
+        rig.Payloads(Cia401Rig.Emcy)[1].Should().Equal(WarningEmcy, "entering Operational with 6423h FALSE again");
+    }
+
+    [Fact]
+    public async Task A_Write_Of_2_To_6423h_Is_Refused_With_The_Value_Range_Abort()
+    {
+        using var rig = new Cia401Rig(Analog(1));
+
+        Cia401Rig.AbortCode(await rig.DownloadU8Async(0x6423, 0x00, 0x02)).Should().Be(ValueRangeExceeded,
+            "a BOOLEAN is TRUE or FALSE (CiA 301 v4.2.0 §7.1.4.3)");
+        (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0);
+    }
+
+    [Fact]
     public async Task Reset_Node_Ends_The_Warning_Without_An_Emcy()
     {
         using var rig = new Cia401Rig(Analog(1));
@@ -326,10 +358,13 @@ public class Cia401DeviceAnalogInputTests
     public async Task Setting_The_Value_It_Has_Sends_Nothing()
     {
         using var rig = await WithTpdo2Async();
+        // The upper limit alone (at 0): no delta to turn a zero change down, so only the device's
+        // own "no change" check stands between a repeated value and an interrupt.
+        await rig.WriteU8Async(0x6421, 0x01, 0x01);
         await rig.WriteU8Async(0x6423, 0x00, 1);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
 
-        await ExpectSentAsync(rig, 1200, "under the defaults every change interrupts");
+        await ExpectSentAsync(rig, 1200, "1200 is above the upper limit 0");
         await ExpectNothingAsync(rig, 1200, "no change, no interrupt (§8.6.5: every change of the analog input data)");
     }
 
@@ -555,7 +590,7 @@ public class Cia401DeviceAnalogInputTests
     // ---- 6421h, the selection ---------------------------------------------------------------------------
 
     [Fact]
-    public async Task Any_One_Selected_Condition_Interrupts()
+    public async Task Either_Selected_Limit_Interrupts()
     {
         using var rig = await WithTpdo2Async();
         await rig.WriteU8Async(0x6421, 0x01, 0x03);
@@ -571,20 +606,98 @@ public class Cia401DeviceAnalogInputTests
         await ExpectSentAsync(rig, 400, "the lower limit holds");
     }
 
-    [Fact]
-    public async Task A_Delta_Interrupts_Without_The_Limit_That_Is_Selected_With_It()
+    [Fact] // C2
+    public async Task With_A_Limit_And_A_Delta_Selected_A_Change_Above_The_Limit_Needs_The_Delta()
     {
         using var rig = await WithTpdo2Async();
-        await rig.WriteU8Async(0x6421, 0x01, 0x11);
+        await rig.WriteU8Async(0x6421, 0x01, 0x05);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
-        await rig.WriteU32Async(0x6428, 0x01, 50);
+        await rig.WriteU32Async(0x6426, 0x01, 50);
+        await rig.WriteU8Async(0x6423, 0x00, 1);
+        rig.Device.SetAnalogInput(1, 1200);
+        await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2); // communicates 1200
+
+        // §8.6.5: every change above the limit interrupts "if there is no additional trigger
+        // condition, e.g. an input interrupt delta"; Figure 6 ANDs the limits with the delta.
+        await ExpectNothingAsync(rig, 1230, "above the limit, but 30 is not more than the delta");
+        await ExpectSentAsync(rig, 1260, "above the limit and 60 from 1200");
+    }
+
+    [Fact] // C3
+    public async Task With_A_Limit_And_A_Delta_Selected_A_Large_Change_Below_The_Limit_Does_Not_Interrupt()
+    {
+        using var rig = await WithTpdo2Async();
+        await rig.WriteU8Async(0x6421, 0x01, 0x05);
+        await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
+        await rig.WriteU32Async(0x6426, 0x01, 50);
         await rig.WriteU8Async(0x6423, 0x00, 1);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2); // communicates 0
 
-        // §6.2.8: "If more than one interrupt condition is enabled; the PDO is transmitted if one
-        // of these conditions is fulfilled." Figure 6 would AND the limits with the delta.
-        await ExpectNothingAsync(rig, 30, "30 is below the limit and not 50 above 0");
-        await ExpectSentAsync(rig, 100, "100 is 100 above 0: the positive delta holds on its own");
+        await ExpectNothingAsync(rig, 100, "100 from 0 is more than the delta, but below the limit");
+        await ExpectNothingAsync(rig, 900, "900 from 0 likewise");
+        await ExpectSentAsync(rig, 1200, "above the limit and 1200 from 0");
+    }
+
+    [Fact] // C5
+    public async Task Under_The_Factory_Settings_Every_Change_Interrupts()
+    {
+        using var rig = await WithTpdo2Async();
+        await rig.WriteU8Async(0x6423, 0x00, 1);
+        await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
+
+        // 6421h = 07h, limits 0: every value is at or above 0 or below it; delta 0: every change
+        // is more than 0.
+        await ExpectSentAsync(rig, 1, "a change of one count");
+        await ExpectSentAsync(rig, -1, "a change into the negative range");
+        await ExpectSentAsync(rig, 0, "and back");
+        await ExpectSentAsync(rig, 30000, "a large step");
+    }
+
+    [Fact]
+    public async Task At_The_Default_Selection_A_Delta_Alone_Throttles_The_Interrupts()
+    {
+        using var rig = await WithTpdo2Async();
+        await rig.WriteU32Async(0x6426, 0x01, 50); // 6421h stays 07h, the limits stay 0
+        await rig.WriteU8Async(0x6423, 0x00, 1);
+        rig.Device.SetAnalogInput(1, 1200);
+        await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2); // communicates 1200
+
+        await ExpectNothingAsync(rig, 1230, "the limits hold for every value, but 30 is not more than 50");
+        await ExpectSentAsync(rig, 1260, "60 from 1200");
+    }
+
+    [Fact]
+    public async Task Negative_And_Positive_Delta_Selected_Together_Interrupt_Each_In_Its_Direction()
+    {
+        using var rig = await WithTpdo2Async();
+        await rig.WriteU8Async(0x6421, 0x01, 0x18);
+        await rig.WriteU32Async(0x6427, 0x01, 50);
+        await rig.WriteU32Async(0x6428, 0x01, 50);
+        await rig.WriteU8Async(0x6423, 0x00, 1);
+        rig.Device.SetAnalogInput(1, 1200);
+        await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2); // communicates 1200
+
+        await ExpectNothingAsync(rig, 1230, "30 above 1200");
+        await ExpectSentAsync(rig, 1260, "60 above 1200: the positive delta");
+        await ExpectNothingAsync(rig, 1220, "40 below 1260");
+        await ExpectSentAsync(rig, 1200, "60 below 1260: the negative delta");
+    }
+
+    [Fact]
+    public async Task An_Inverted_Window_Is_Two_Limits_In_An_Or_Not_The_Xor_Of_Figure_6()
+    {
+        using var rig = await WithTpdo2Async();
+        await rig.WriteU8Async(0x6421, 0x01, 0x03);
+        await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(500));
+        await rig.WriteI32Async(0x6425, 0x01, LeftAdjusted(1000));
+        await rig.WriteU8Async(0x6423, 0x00, 1);
+        await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
+
+        // Upper 500 at or below lower 1000: 700 is at or above the one and below the other, both
+        // hold; an XOR of them would hold for neither.
+        await ExpectSentAsync(rig, 700, "both limits hold");
+        await ExpectSentAsync(rig, 300, "below the lower limit only");
+        await ExpectSentAsync(rig, 1200, "above the upper limit only");
     }
 
     [Fact]
