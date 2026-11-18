@@ -87,7 +87,10 @@ internal interface ICanOpenApplicationHost
     /// until the boot-up has been ordered, and every one held there goes out behind it in the order
     /// raised; <c>1001h</c> shows the error from that EMCY on.
     /// </para>
-    /// <para>An NMT reset ends every error without an EMCY.</para>
+    /// <para>An NMT reset ends every error without an EMCY. An EMCY held in Initialisation that has
+    /// not been transmitted when the reset comes is dropped with its error, frame and <c>1001h</c>
+    /// alike: one still held, and one already released behind the boot-up but still waiting for its
+    /// turn (a master that resets the node as soon as it sees the boot-up).</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>,
     /// the error reset, which <see cref="ClearError"/> sends.</exception>

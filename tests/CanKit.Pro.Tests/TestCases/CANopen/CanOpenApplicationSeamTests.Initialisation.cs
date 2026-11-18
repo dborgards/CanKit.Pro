@@ -128,6 +128,79 @@ public partial class CanOpenApplicationSeamTests
         ErrorRegister(rig.Node).Should().Be(0x21, "the error that ended before the boot-up left nothing behind");
     }
 
+    /// <summary>
+    /// A profile raises an error in the first reset's <c>OnReset</c>; its EMCY is released behind that
+    /// reset's boot-up, and the boot-up is kept from the wire until the EMCY chain waits for it. With
+    /// <paramref name="resetAgain"/> a second Reset Node is handled in that window, as from a master
+    /// that resets the node when it sees the boot-up; then the boot-up is let go. Returns the rig and
+    /// where on the wire the first reset began.
+    /// </summary>
+    private static async Task<(EntryRig Rig, int Mark)> ReleaseBehindAHeldBootUpAsync(bool resetAgain)
+    {
+        var app = Profile();
+        int resets = 0;
+        app.WhenReset = _ =>
+        {
+            if (Interlocked.Increment(ref resets) == 1) app.Host!.RaiseError(0x5000, 0x04);
+        };
+        var rig = new EntryRig(With(app));
+        try
+        {
+            await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+            Settle(rig.Node);
+            var chainWaits = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bootUpMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            rig.Node.HeldEmcysWaitForBootUpForTests = () => chainWaits.TrySetResult(true);
+            // Off the actor: the boot-up's send waits here, the actor stays free to handle a reset.
+            rig.Node.BeforeControlFrameSendForTests = id => id == SlaveHeartbeat ? bootUpMayLeave.Task : Task.CompletedTask;
+            int mark = rig.Wire.Sequence.Length;
+            int bootUps = rig.Wire.Count(SlaveHeartbeat);
+
+            rig.Wire.Transmit(0x000, ResetCommand(NmtCommand.ResetNode));
+            await chainWaits.Task.WithTimeoutAsync(ShortTimeout);
+            if (resetAgain)
+            {
+                rig.Wire.Transmit(0x000, ResetCommand(NmtCommand.ResetNode));
+                await WaitUntilAsync(() => Volatile.Read(ref resets) == 2, "the second reset");
+                Settle(rig.Node);
+            }
+            bootUpMayLeave.SetResult(true);
+
+            await rig.Wire.WaitForCountAsync(SlaveHeartbeat, bootUps + (resetAgain ? 2 : 1));
+            Settle(rig.Node);
+            await EmcyChainSettledAsync(rig.Node);
+            return (rig, mark);
+        }
+        catch
+        {
+            rig.Dispose();
+            throw;
+        }
+    }
+
+    [Fact]
+    public async Task A_Released_Emcy_Goes_Out_Behind_A_Held_Boot_Up()
+    {
+        var (rig, mark) = await ReleaseBehindAHeldBootUpAsync(resetAgain: false);
+        using (rig)
+        {
+            ShouldBeBootUpThenEmcy(BootUpsAndEmcys(rig.Wire, mark), Emcy(0x5000, 0x05));
+            ErrorRegister(rig.Node).Should().Be(0x05);
+        }
+    }
+
+    [Fact]
+    public async Task A_Reset_Before_A_Released_Emcy_Goes_Out_Drops_It()
+    {
+        var (rig, mark) = await ReleaseBehindAHeldBootUpAsync(resetAgain: true);
+        using (rig)
+        {
+            BootUpsAndEmcys(rig.Wire, mark).Select(f => f.CobId).Should().Equal(new[] { SlaveHeartbeat, SlaveHeartbeat },
+                "the second reset ended the error before its EMCY's turn came: two boot-ups and nothing else");
+            ErrorRegister(rig.Node).Should().Be(0, "a reset ends a profile error without an EMCY, and nothing writes it back");
+        }
+    }
+
     // -----------------------------------------------------------------------------------------
     // An LSS slave without a node-id.
     // -----------------------------------------------------------------------------------------

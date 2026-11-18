@@ -589,8 +589,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         return link;
     }
 
+    // profileResetGeneration: set for a profile EMCY released behind a boot-up, the reset generation
+    // of its release. A reset handled before the turn that would transmit it drops it, frame and
+    // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Null for
+    // every other EMCY, which therefore behaves as it did before profiles existed.
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
-        byte? applicationErrorRegister = null)
+        byte? applicationErrorRegister = null, int? profileResetGeneration = null)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
@@ -605,6 +609,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         Func<Task> transmit = () =>
         {
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+            // Here, on the actor in the turn that transmits, after every wait ahead of it on the chain.
+            if (profileResetGeneration is { } released && released != _profileResetGeneration) return Task.CompletedTask;
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid)
             {

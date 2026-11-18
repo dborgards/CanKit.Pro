@@ -470,16 +470,23 @@ internal sealed partial class CanOpenNode
         EmitErrorReset();
     }
 
+    // Counts the NMT resets that ended the profile errors. A profile EMCY released behind a boot-up
+    // carries the count of its release, and its step on the EMCY chain sends and writes nothing when
+    // the count has moved on (ReleaseProfileEmcysAfterBootUp, EmitEmcy). Actor loop only.
+    private int _profileResetGeneration;
+
     /// <summary>NMT reset: the profile errors end with the communication errors, without an EMCY, and
-    /// an EMCY still held from an earlier Initialisation is dropped with them. A profile whose cause
+    /// so do the EMCYs of profile errors raised in an earlier Initialisation that have not gone out:
+    /// one still held is dropped from the list, and one that <see cref="ReleaseProfileEmcysAfterBootUp"/>
+    /// has already put on the EMCY chain behind a boot-up, but not yet transmitted, finds the reset
+    /// generation changed when its turn comes and sends and writes nothing. A profile whose cause
     /// persists raises its error again from <c>OnReset</c>; in Initialisation, its EMCY then follows
-    /// the boot-up. Held means not yet released: an EMCY that <see cref="ReleaseProfileEmcysAfterBootUp"/>
-    /// has already put on the EMCY chain behind a boot-up is no longer in the list, and a later reset
-    /// does not drop it through the list.</summary>
+    /// the boot-up.</summary>
     private void EndProfileErrorsForReset()
     {
         _profileErrors.Clear();
         _heldProfileEmcys = null;
+        _profileResetGeneration++;
     }
 
     /// <summary>
@@ -493,6 +500,13 @@ internal sealed partial class CanOpenNode
     /// other on the actor does not order them on the bus. The EMCY chain therefore waits for the
     /// boot-up's send first: that task completes once the driver has confirmed the frame
     /// (SendControlFrame), or once it was dropped, failed or cancelled, which ends the wait too.
+    /// <para>
+    /// A master can send an NMT reset as soon as it sees the boot-up, before the released EMCYs have
+    /// had their turn. That reset ends their errors (<see cref="EndProfileErrorsForReset"/>), so each
+    /// released EMCY carries the reset generation of its release, and is decided on the actor in the
+    /// turn that would transmit it, after the wait: a reset handled before that turn drops it, frame
+    /// and <c>1001h</c> write alike.
+    /// </para>
     /// </remarks>
     private void ReleaseProfileEmcysAfterBootUp(Task bootUp)
     {
@@ -505,8 +519,9 @@ internal sealed partial class CanOpenNode
             return bootUp.ContinueWith(static sent => { _ = sent.Exception; },
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         });
+        int generation = _profileResetGeneration;
         foreach (var (_, code, manufacturer) in held)
-            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer));
+            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation);
     }
 
     /// <summary>Test seam: runs on the actor when the EMCY chain starts waiting for the boot-up
