@@ -2,7 +2,7 @@ namespace CanKit.Pro.CANopen.Cia401;
 
 /// <summary>
 /// The one reading of "left adjusted" for the INTEGER32 objects that stand for a 16-bit analog value
-/// (CiA 401-1 §8.4.2, §8.4.3, §8.6.5, §8.6.6, and Figure 7's legend for <c>6444h</c>): the 16-bit
+/// (CiA 401-1 v3.1.0 §8.4.2, §8.4.3, §8.6.5, §8.6.6, and the legend of Figure 7 in §7.2.5 for <c>6444h</c>): the 16-bit
 /// value <c>v</c> is the INTEGER32 <c>v · 2^16</c>, its low 16 bits zero, as §8.4.3 defines a
 /// left-adjusted 32-bit input. Used by the device and the peer alike.
 /// </summary>
@@ -11,7 +11,7 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// (<see cref="Cia401Device.SetAnalogInput"/>). A value that has to become a 16-bit output
 /// (<c>6444h</c>, the analog output error value; <see cref="Cia401Device.ReadAnalogOutput"/>) is
 /// narrowed to its upper word, and the low bits, which a 16-bit value cannot carry, are dropped.
-/// §8.7.5 does not call <c>6444h</c> left adjusted; Figure 7 does, and the figure is
+/// CiA 401-1 v3.1.0 §8.7.5 does not call <c>6444h</c> left adjusted; Figure 7 (§7.2.5) does, and the figure is
 /// followed.</remarks>
 internal static class Cia401LeftAdjusted
 {

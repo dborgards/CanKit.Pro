@@ -47,7 +47,7 @@ internal readonly record struct Cia401Observation(ForeignPdoObserveResult Result
 /// <para><b>Blocks.</b> <see cref="DigitalInputs"/>, <see cref="DigitalOutputs"/>,
 /// <see cref="AnalogInputs"/> and <see cref="AnalogOutputs"/> exist when bit 16, 17, 18 or 19 of the
 /// device type of the logical device is set, and are <see langword="null"/> otherwise (CiA 401-1
-/// §6.2.1, Table 2). The M bit (bit 23, a manufacturer-specific PDO mapping, Table 3) changes nothing
+/// v3.1.0 §6.2.1, Table 2). The M bit (bit 23, a manufacturer-specific PDO mapping, CiA 401-1 v3.1.0 Table 3) changes nothing
 /// here: the peer reads and writes over SDO, and <see cref="Interpret"/> names the entries a PDO
 /// really carried, whatever its mapping.</para>
 /// <para><b>Indices.</b> Every index comes from <see cref="Cia401Objects"/> and is shifted for the
@@ -97,16 +97,16 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     /// <inheritdoc />
     public CanOpenLogicalDevice LogicalDevice { get; }
 
-    /// <summary>The digital inputs, when bit 16 of the device type is set (CiA 401-1 §6.2.1).</summary>
+    /// <summary>The digital inputs, when bit 16 of the device type is set (CiA 401-1 v3.1.0 §6.2.1).</summary>
     public ICia401DigitalInputs? DigitalInputs { get; }
 
-    /// <summary>The digital outputs, when bit 17 of the device type is set (CiA 401-1 §6.2.1).</summary>
+    /// <summary>The digital outputs, when bit 17 of the device type is set (CiA 401-1 v3.1.0 §6.2.1).</summary>
     public ICia401DigitalOutputs? DigitalOutputs { get; }
 
-    /// <summary>The analog inputs, when bit 18 of the device type is set (CiA 401-1 §6.2.1).</summary>
+    /// <summary>The analog inputs, when bit 18 of the device type is set (CiA 401-1 v3.1.0 §6.2.1).</summary>
     public ICia401AnalogInputs? AnalogInputs { get; }
 
-    /// <summary>The analog outputs, when bit 19 of the device type is set (CiA 401-1 §6.2.1).</summary>
+    /// <summary>The analog outputs, when bit 19 of the device type is set (CiA 401-1 v3.1.0 §6.2.1).</summary>
     public ICia401AnalogOutputs? AnalogOutputs { get; }
 
     /// <summary>Uploads sub-index <paramref name="subindex"/> of any catalogue object, in the logical
@@ -165,6 +165,8 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="signals"/> is null.</exception>
     /// <exception cref="ArgumentException">A signal comes from another node than this peer.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A signal has a bit length outside 1 to 64.</exception>
+    /// <exception cref="InvalidDataException">A signal has fewer bytes than its bit length needs.</exception>
     public Cia401PdoValue[] Interpret(IReadOnlyList<ForeignPdoSignal> signals)
     {
         if (signals is null) throw new ArgumentNullException(nameof(signals));
@@ -204,8 +206,14 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     /// <param name="peerDescription">EDS or DCF of the peer, as the core method takes it.</param>
     /// <param name="cancellationToken">Cancels an in-flight mapping upload.</param>
     /// <exception cref="ArgumentNullException"><paramref name="peerDescription"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">As for the core method: <paramref name="cobId"/>
-    /// is not a valid PDO key, or <paramref name="payload"/> is longer than 8 bytes.</exception>
+    /// <remarks>What the core delivered to the peer's sink before it threw — a cancellation during
+    /// the live reads, a transport failure — is discarded: the exception propagates and nothing is
+    /// returned.</remarks>
+    /// <exception cref="ArgumentOutOfRangeException">As for the core method, in the returned task:
+    /// <paramref name="cobId"/> is not a valid PDO key, or <paramref name="payload"/> is longer than
+    /// 8 bytes.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
+    /// cancelled, in the returned task, as the core reports it.</exception>
     public Task<Cia401Observation> ObserveAsync(uint cobId, ReadOnlyMemory<byte> payload,
         CanOpenDeviceDescription peerDescription, CancellationToken cancellationToken = default)
     {

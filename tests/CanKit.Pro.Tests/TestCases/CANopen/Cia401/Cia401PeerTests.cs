@@ -98,7 +98,7 @@ public class Cia401PeerTests
 
         var peer = tool.Peer(type);
 
-        (peer.DigitalInputs is not null).Should().Be(di > 0, "bit 16 is the digital inputs (CiA 401-1 §6.2.1)");
+        (peer.DigitalInputs is not null).Should().Be(di > 0, "bit 16 is the digital inputs (CiA 401-1 v3.1.0 §6.2.1)");
         (peer.DigitalOutputs is not null).Should().Be(@do > 0, "bit 17 is the digital outputs");
         (peer.AnalogInputs is not null).Should().Be(ai > 0, "bit 18 is the analog inputs");
         (peer.AnalogOutputs is not null).Should().Be(ao > 0, "bit 19 is the analog outputs");
@@ -240,7 +240,7 @@ public class Cia401PeerTests
         await ai.WriteInterruptPositiveDeltaAsync(1, 0x00ABCDEF).WithTimeoutAsync(HangGuard);
 
         var od = rig.Rig.Od;
-        od.ReadUnsigned(0x6421, 0x01).Should().Be(0x05u, "upper limit is bit 0, delta bit 2 (CiA 401-1 §8.6.2)");
+        od.ReadUnsigned(0x6421, 0x01).Should().Be(0x05u, "upper limit is bit 0, delta bit 2 (CiA 401-1 v3.1.0 §8.6.2)");
         od.ReadRaw(0x6423, 0x00).Should().Equal(1);
         od.ReadSigned(0x6424, 0x01).Should().Be(0x12345678);
         od.ReadSigned(0x6424, 0x02).Should().Be(-1000 * 65536, "a 16-bit limit is left adjusted in the INTEGER32");
@@ -254,7 +254,7 @@ public class Cia401PeerTests
             .Should().Be(Cia401AnalogInterruptTrigger.UpperLimit | Cia401AnalogInterruptTrigger.Delta);
         (await ai.ReadInterruptTriggerAsync(2).WithTimeoutAsync(HangGuard))
             .Should().Be(Cia401AnalogInterruptTrigger.UpperLimit | Cia401AnalogInterruptTrigger.LowerLimit
-                | Cia401AnalogInterruptTrigger.Delta, "07h is the default (CiA 401-1 §8.6.2)");
+                | Cia401AnalogInterruptTrigger.Delta, "07h is the default (CiA 401-1 v3.1.0 §8.6.2)");
         (await ai.ReadGlobalInterruptEnableAsync().WithTimeoutAsync(HangGuard)).Should().BeTrue();
         (await ai.ReadInterruptUpperLimitAsync(1).WithTimeoutAsync(HangGuard)).Should().Be(0x12345678);
         (await ai.ReadInterruptUpperLimitAsync(2).WithTimeoutAsync(HangGuard)).Should().Be(-1000 * 65536);
@@ -272,7 +272,7 @@ public class Cia401PeerTests
         var ao = rig.Peer().AnalogOutputs!;
 
         (await ao.ReadChannelCountAsync().WithTimeoutAsync(HangGuard)).Should().Be(2);
-        (await ao.ReadErrorModeAsync(1).WithTimeoutAsync(HangGuard)).Should().BeTrue("01h is the default (CiA 401-1 §8.7.4)");
+        (await ao.ReadErrorModeAsync(1).WithTimeoutAsync(HangGuard)).Should().BeTrue("01h is the default (CiA 401-1 v3.1.0 §8.7.4)");
         await ao.WriteAsync(1, -300).WithTimeoutAsync(HangGuard);
         await ao.WriteErrorModeAsync(2, false).WithTimeoutAsync(HangGuard);
         await ao.WriteErrorValueAsync(1, 0x7F00_1234).WithTimeoutAsync(HangGuard);
@@ -316,7 +316,7 @@ public class Cia401PeerTests
         Func<Task> reserved = () => ai.WriteInterruptTriggerAsync(1, (Cia401AnalogInterruptTrigger)0x20).WithTimeoutAsync(HangGuard);
 
         var abort = (await reserved.Should().ThrowExactlyAsync<SdoAbortException>()).Which;
-        abort.AbortCode.Should().Be(ValueRangeExceeded, "bits 5 to 7 are reserved (CiA 401-1 §8.6.2)");
+        abort.AbortCode.Should().Be(ValueRangeExceeded, "bits 5 to 7 are reserved (CiA 401-1 v3.1.0 §8.6.2)");
         abort.Index.Should().Be(0x6421);
         abort.Subindex.Should().Be(0x01);
         abort.Origin.Should().Be(SdoAbortOrigin.Peer);
@@ -375,7 +375,7 @@ public class Cia401PeerTests
 
         await input.Should().ThrowExactlyAsync<InvalidOperationException>();
         await source.Should().ThrowExactlyAsync<InvalidOperationException>();
-        await highest.Should().ThrowExactlyAsync<InvalidOperationException>("sub-index 0 of an array is const (CiA 301 §7.4.5)");
+        await highest.Should().ThrowExactlyAsync<InvalidOperationException>("sub-index 0 of an array is const (CiA 301 v4.2.0 §7.4.5)");
         await AssertOnlyTheBarrierWentOutAsync(rig);
     }
 
@@ -395,7 +395,7 @@ public class Cia401PeerTests
         await zero.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>();
         await high.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>();
         await channel.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>();
-        await bank.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>("an interrupt source has at most eight banks (CiA 401-1 §8.6.3)");
+        await bank.Should().ThrowExactlyAsync<ArgumentOutOfRangeException>("an interrupt source has at most eight banks (CiA 401-1 v3.1.0 §8.6.3)");
         await nullDefinition.Should().ThrowExactlyAsync<ArgumentNullException>();
         await nullValue.Should().ThrowExactlyAsync<ArgumentNullException>();
         await AssertOnlyTheBarrierWentOutAsync(rig);
