@@ -114,6 +114,38 @@ public class Cia401DeviceDescriptionTests
     }
 
     [Fact]
+    public void An_Optional_Array_Declared_Empty_Is_Accepted()
+    {
+        using var rig = Open(Eds.Of("cia401-digital.eds").Truncate(0x6006, 0));
+
+        rig.Od.ReadRaw(0x6006, 0x00).Should().Equal(new byte[] { 0x00 });
+        rig.Od.TryGet(0x6006, 0x01, out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task An_Optional_Array_Declared_Empty_Behaves_As_Not_Supported()
+    {
+        using var rig = Open(Eds.Of("cia401-digital.eds").Truncate(0x6006, 0));
+
+        // 6007h and 6008h are 0: only 6006h at its default FFh makes the change an interrupt.
+        await rig.StartAndTakeFirstTpdoAsync();
+        int before = rig.Count(Cia401Rig.Tpdo1);
+        rig.Device.SetDigitalInput(2, true);
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo1, before + 1);
+        rig.Payloads(Cia401Rig.Tpdo1)[before].Should().Equal(0x02, 0x00);
+    }
+
+    [Fact]
+    public void A_Mandatory_Object_Declared_Empty_Fails_The_Open_For_A_Block_Without_A_Channel()
+    {
+        var open = () => Open(Eds.Of("cia401-digital.eds").Truncate(0x6000, 0));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6000h") && e.Message.Contains("no channel"));
+    }
+
+    [Fact]
     public void A_Sub_Index_00h_Above_The_Maximum_Fails_The_Open()
     {
         var open = () => Open(Eds.Of("cia401-digital.eds").Set("6000sub0", "DefaultValue", "255"));
@@ -258,6 +290,22 @@ public class Cia401DeviceDescriptionTests
 
         model.Calls.Should().Be(1);
         model.FirstLevels.Should().Be(0x0A);
+    }
+
+    // ---- a configuration device on a described node, the device-type object ------------------------
+
+    [Fact]
+    public void A_Described_Device_Type_Object_Alone_Does_Not_Refuse_A_Configuration_Device()
+    {
+        // device.eds: 1000h 00030191h and nothing in 6000h-67FFh; 67FFh added.
+        var description = Eds.Of("device.eds")
+            .Add("[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x00030191\nPDOMapping=0\n")
+            .Parse();
+        using var rig = new Cia401Rig(new Cia401Device(new Cia401Configuration { DigitalInputs = 8, DigitalOutputs = 8 }), description);
+
+        rig.Od.ReadUnsigned(0x67FF, 0x00).Should().Be(0x0003_0191u, "the node keeps the described object");
+        rig.Od.ReadUnsigned(0x1000, 0x00).Should().Be(0x0003_0191u);
+        rig.Od.ReadRaw(0x6006, 0x01).Should().Equal(new byte[] { 0xFF }, "the configuration declares its objects");
     }
 
     // ---- the digital fixture ------------------------------------------------------------------------
@@ -543,7 +591,7 @@ public class Cia401DeviceDescriptionTests
     [Fact]
     public void An_Array_Declared_As_A_Variable_Fails_The_Open()
     {
-        var open = () => Open(Eds.Of("cia401-digital.eds").Remove(0x6002).Add(VariableSection(0x6002, "Polarity digital input 8-bit", "0x0005", "0")));
+        var open = () => Open(Eds.Of("cia401-digital.eds").Remove(0x6002).Add(VariableSection(0x6002, "Polarity digital input 8-bit", "0x0005", "0x0F")));
 
         open.Should().Throw<ArgumentException>()
             .Where(e => e.ParamName == "options")

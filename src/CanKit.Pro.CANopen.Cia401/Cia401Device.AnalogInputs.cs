@@ -145,8 +145,10 @@ internal sealed partial class Cia401Device
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an analog
-    /// input of the device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// input of the device; a device built from a configuration also throws this when it has no
+    /// analog inputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no analog inputs (its description declares none).</exception>
     public void SetAnalogInput(int channel, short value)
     {
         var block = RequireAnalogInput(channel, nameof(channel));
@@ -164,8 +166,10 @@ internal sealed partial class Cia401Device
     /// <param name="values">The values of <paramref name="firstChannel"/> and the inputs after it;
     /// empty sets nothing.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="firstChannel"/> is not an analog
-    /// input of the device, or <paramref name="values"/> runs past the last one.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// input of the device, or <paramref name="values"/> runs past the last one; a device built from
+    /// a configuration also throws this when it has no analog inputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no analog inputs (its description declares none).</exception>
     public void SetAnalogInputs(int firstChannel, ReadOnlySpan<short> values)
     {
         var block = RequireAnalogInput(firstChannel, nameof(firstChannel));
@@ -188,8 +192,10 @@ internal sealed partial class Cia401Device
     /// <see cref="OnReset"/> (one actor job), a reader on another thread can briefly see the restored
     /// value, a default or what <c>1010h</c> stored.</remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an analog
-    /// input of the device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// input of the device; a device built from a configuration also throws this when it has no
+    /// analog inputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no analog inputs (its description declares none).</exception>
     public short ReadAnalogInput(int channel)
     {
         var block = RequireAnalogInput(channel, nameof(channel));

@@ -68,8 +68,10 @@ internal sealed partial class Cia401Device
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="group"/> is not a group of the
-    /// device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// device; a device built from a configuration also throws this when it has no
+    /// digital outputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no digital outputs (its description declares none).</exception>
     public byte ReadDigitalOutputs(int group)
     {
         var block = RequireOutputGroup(group);
@@ -81,8 +83,10 @@ internal sealed partial class Cia401Device
     /// shows it. Any thread.</summary>
     /// <param name="channel">The output, <c>1</c> to the number of digital outputs.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an output of
-    /// the device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// the device; a device built from a configuration also throws this when it has no
+    /// digital outputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no digital outputs (its description declares none).</exception>
     public bool ReadDigitalOutput(int channel)
     {
         var block = ApplicationBlock(ref _digitalOutputs, "digital outputs");

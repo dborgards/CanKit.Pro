@@ -79,8 +79,10 @@ internal sealed partial class Cia401Device
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an analog
-    /// output of the device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// output of the device; a device built from a configuration also throws this when it has no
+    /// analog outputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no analog outputs (its description declares none).</exception>
     public short ReadAnalogOutput(int channel)
     {
         var block = ApplicationBlock(ref _analogOutputs, "analog outputs");

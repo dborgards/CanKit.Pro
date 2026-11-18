@@ -26,15 +26,21 @@ internal sealed partial class Cia401Device
     /// <c>6000h</c>, the digital outputs with <c>6200h</c>, the analog inputs with <c>6401h</c>,
     /// the analog outputs with <c>6411h</c> (the 8-bit and 16-bit access of the first slice). The
     /// channels are what sub-index 00h announces: eight per sub-index for a digital block, one for
-    /// an analog block (CiA 401-1 §7.2.1.3), and each sub-index up to it must be declared. A file
-    /// with none of the four fails the open: CiA 401-1 §6.2.1 asks for at least one I/O function.
+    /// an analog block (CiA 401-1 §7.2.1.3). It must be 1 to <c>FEh</c>, and each sub-index up to
+    /// it must be declared: a mandatory object with 0 gives a block without a channel and fails the
+    /// open. A file with none of the four fails the open: CiA 401-1 §6.2.1 asks for at least one I/O
+    /// function.
     /// </para>
     /// <para>
     /// <b>The file's objects.</b> Every object the file declares in the logical device's range is
-    /// kept as the file has it: value, access and number of sub-indices. An object the catalogue
-    /// knows (<see cref="Cia401Objects"/>) is checked first: an array must be one, with an UNSIGNED8
+    /// kept as the file has it: access, number of sub-indices, and value, but for the input objects,
+    /// whose value is the application's (see <b>Values</b>). An object the catalogue knows
+    /// (<see cref="Cia401Objects"/>) is checked first: an array must be one, with an UNSIGNED8
     /// sub-index 00h and the catalogue's data type in every element; a variable must be one, of the
-    /// catalogue's data type. Access is not checked: the norm's <c>rw</c> allows <c>wo</c>,
+    /// catalogue's data type. An optional array declared empty, sub-index 00h = 0 and no element, is
+    /// accepted and behaves as an object that is not supported: every channel at the default. Since
+    /// the dictionary keeps no object code, an UNSIGNED8 variable holding 0 is taken for such an
+    /// array. Access is not checked: the norm's <c>rw</c> allows <c>wo</c>,
     /// <c>ro</c> and <c>const</c>, its <c>ro</c> allows <c>const</c> (CiA 401-1 §8.1). The device's
     /// own writes to its input objects pass a read-only entry, as they pass the read-only
     /// <c>6000h</c> of a configured device.
@@ -49,8 +55,10 @@ internal sealed partial class Cia401Device
     /// sub-indices stored and ignored.
     /// </para>
     /// <para>
-    /// <b>Values.</b> The outputs and every parameter power on with the file's values, a DCF's
-    /// ParameterValue over its DefaultValue (§6.2.5 NOTE), and Reset Node returns them there. The
+    /// <b>Values.</b> The outputs and every parameter power on with the file's values (CiA 401-1
+    /// §6.2.5 NOTE, §6.2.7 NOTE), and Reset Node returns them there. Of a DCF the node's loader takes
+    /// the ParameterValue, which "shall indicate the object value" (CiA 306-1 v1.4.0 §7.3.1), and
+    /// the DefaultValue where there is none. The
     /// input objects (<c>6000h</c>, <c>6401h</c>, <c>6422h</c>) show the application's levels from
     /// the start, as after every Reset Node (see <see cref="Attach"/>), whatever value the file gives
     /// them.
@@ -59,9 +67,11 @@ internal sealed partial class Cia401Device
     /// <b>Device type and PDOs.</b> The file's <c>1000h</c> stays, and the node checks that its
     /// profile number is 401; function bits (16 to 19) that disagree with the blocks found are left
     /// as the file has them and reported nowhere: the file wins. Without a <c>1000h</c> in the file,
-    /// the node composes the one the blocks give (§6.2.1). The PDOs are the file's too: a description
-    /// gives the node every PDO record it has, so the device sets no default PDO (see
-    /// <see cref="ICanOpenApplicationHost.SetDefaultTpdo"/>), and it asks the node for no PDO count.
+    /// the node composes the one the blocks give (§6.2.1). The PDOs are the file's too, none
+    /// included: a description gives the node every PDO record it has and no other, so the device
+    /// sets no default PDO (see <see cref="ICanOpenApplicationHost.SetDefaultTpdo"/>) and asks the
+    /// node for no PDO count. A file without PDO records gives a device without PDOs: it is read and
+    /// written over SDO, and what it asks to transmit goes nowhere.
     /// </para>
     /// <para>
     /// <b>Objects the device shows and does not act on.</b> The file may declare objects of the
@@ -144,12 +154,15 @@ internal sealed partial class Cia401Device
 
     /// <summary>A device built from a configuration declares its objects with the catalogue's
     /// defaults, which would replace what a description declared: it refuses a node whose
-    /// description declares any object of its logical device, <c>67FFh</c> included, instead of
-    /// replacing it. At Attach such an entry can only come from the description (see
-    /// <see cref="AdoptDescription"/>). Constructing thread, in Attach.</summary>
+    /// description declares any object of its logical device instead of replacing it. At Attach
+    /// such an entry can only come from the description (see <see cref="AdoptDescription"/>). The
+    /// device-type object <c>67FFh</c> (shifted) does not count: the device never declares it, the
+    /// node composes it from <see cref="ICanOpenApplicationHost.SetDeviceType"/> and keeps a
+    /// described one, checking its profile number. Constructing thread, in Attach.</summary>
     private void RefuseDescribedObjects(ObjectDictionary od)
     {
-        foreach (var (index, _) in ClaimedObjects(od))
+        var deviceTypeObject = Shift(_logicalDevice, Cia401Objects.DeviceType);
+        foreach (var (index, _) in ClaimedObjects(od).Where(o => o.Index != deviceTypeObject))
         {
             throw OptionsError(string.Format(CultureInfo.InvariantCulture,
                 "The device description declares CiA 401 objects for logical device {0} ({1:X4}h among them), and {2} is " +
@@ -171,7 +184,10 @@ internal sealed partial class Cia401Device
     /// UNSIGNED8 sub-index 00h (CiA 301 v4.2.0 §7.4.5) and the catalogue's type in every element
     /// (for a manufacturer-specific type, any), or a variable at sub-index 00h of the catalogue's
     /// type. The dictionary keeps no object code, so it is told from the shape: an array has
-    /// elements above sub-index 00h, a variable has none.
+    /// elements above sub-index 00h, a variable has none. An array without elements is an array
+    /// only when its sub-index 00h says so, with 0: an empty array, which leaves every channel at the
+    /// default (or, for a mandatory object, fails in <see cref="Elements"/>); one that announces
+    /// elements it does not have is taken for a variable.
     /// </summary>
     private void CheckAgainstCatalogue(ObjectDictionary od, ushort index, List<byte> subindices, Cia401ObjectDefinition definition)
     {
@@ -180,7 +196,12 @@ internal sealed partial class Cia401Device
             if (!od.TryGet(index, 0x00, out var count))
                 throw ShapeError(index, definition, "without its sub-index 00h, the highest sub-index supported of an array");
             if (count.DataType != OdDataType.Unsigned8) throw TypeError(index, 0x00, OdDataType.Unsigned8, count.DataType, definition);
-            if (subindices.All(subindex => subindex == 0x00)) throw ShapeError(index, definition, "as a variable, where the catalogue has an array");
+            if (subindices.All(subindex => subindex == 0x00))
+            {
+                if (od.ReadRaw(index, 0x00)[0] == 0) return;
+                throw ShapeError(index, definition, "as a variable, where the catalogue has an array");
+            }
+
             if (definition.IsManufacturerSpecific) return;
             foreach (var subindex in subindices.Where(subindex => subindex != 0x00))
             {
@@ -204,7 +225,14 @@ internal sealed partial class Cia401Device
         var index = Shift(_logicalDevice, definition);
         if (!od.ContainsIndex(index)) return 0;
         int count = od.ReadRaw(index, 0x00)[0];
-        if (count < 1 || count > definition.MaxSubindex)
+        if (count == 0)
+        {
+            throw OptionsError(string.Format(CultureInfo.InvariantCulture,
+                "The device description declares {0:X4}h ({1}) with 0 in sub-index 00h: the block it makes has no channel " +
+                "(logical device {2}).", index, definition.Name, _logicalDevice));
+        }
+
+        if (count > definition.MaxSubindex)
         {
             throw OptionsError(string.Format(CultureInfo.InvariantCulture,
                 "The device description declares {0:X4}h ({1}) with {2} in sub-index 00h: a function block has 1 to {3} " +

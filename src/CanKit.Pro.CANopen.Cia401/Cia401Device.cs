@@ -364,15 +364,20 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     private InvalidOperationException AttachedAlready()
         => new($"{Name} is attached to a node already: one device, one node.");
 
-    /// <summary>Refuses a write to an entry the device declared read-only, with the abort code an SDO
-    /// download gets for it (<c>06010002h</c>, CiA 301 v4.2.0 Table 22): the SDO server refuses such a
-    /// download before the device is asked, but a local write through the dictionary asks the device.
-    /// Refuses a value other than 0 and 1 for a BOOLEAN entry (<c>6005h</c>), which is TRUE or FALSE
-    /// and nothing else (CiA 301 v4.2.0 §7.1.4.3), with <c>06090030h</c>, "invalid value for
-    /// parameter" (Table 22). Refuses an analog interrupt trigger selection (<c>6421h</c>) with a
-    /// reserved bit set (CiA 401-1 §8.6.2), and an analog output error mode (<c>6443h</c>) other than
-    /// 0h and 1h (§8.7.4: "others = reserved"), with the same code. The device's own writes pass.
-    /// Every other write is accepted.</summary>
+    /// <summary>Refuses a write to an entry whose own access is read-only, the catalogue's on a
+    /// device built from a configuration and the file's on one built with
+    /// <see cref="FromDescription"/>, with the abort code an SDO download gets for it
+    /// (<c>06010002h</c>, CiA 301 v4.2.0 Table 22): the SDO server refuses such a download before the
+    /// device is asked, but a local write through the dictionary asks the device. Refuses a value
+    /// other than 0 and 1 for a BOOLEAN entry (<c>6005h</c>), which is TRUE or FALSE and nothing else
+    /// (CiA 301 v4.2.0 §7.1.4.3), with <c>06090030h</c>, "invalid value for parameter" (Table 22).
+    /// Refuses an analog interrupt trigger selection (<c>6421h</c>) with a reserved bit set (CiA
+    /// 401-1 §8.6.2), and an analog output error mode (<c>6443h</c>) other than 0h and 1h (§8.7.4:
+    /// "others = reserved"), with the same code; these two rules hold for the blocks the device has.
+    /// An index in the claimed range the catalogue does not know, and a parameter object of a block
+    /// the device does not have, both of which only a description can declare, are stored as their
+    /// access allows, without the reserved-value rules. The device's own writes pass. Every other
+    /// write is accepted.</summary>
     public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
     {
         // Nobody writes a claimed entry before Attach has declared it.

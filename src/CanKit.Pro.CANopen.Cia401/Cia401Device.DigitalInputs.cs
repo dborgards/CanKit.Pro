@@ -35,9 +35,10 @@ internal sealed partial class Cia401Device
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an input of
-    /// the device.</exception>
+    /// the device; a device built from a configuration also throws this when it has no
+    /// digital inputs.</exception>
     /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
-    /// built from a description has no digital inputs.</exception>
+    /// built from a description has no digital inputs (its description declares none).</exception>
     public void SetDigitalInput(int channel, bool level)
     {
         var block = ApplicationBlock(ref _digitalInputs, "digital inputs");
@@ -61,8 +62,10 @@ internal sealed partial class Cia401Device
     /// <param name="levels">The physical levels. The bits of channels the device does not have (21 to
     /// 24 of a device with 20) are ignored: such a channel's physical level is always 0.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="group"/> is not a group of the
-    /// device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// device; a device built from a configuration also throws this when it has no
+    /// digital inputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no digital inputs (its description declares none).</exception>
     public void SetDigitalInputs(int group, byte levels)
     {
         var block = RequireGroup(group);
@@ -79,8 +82,10 @@ internal sealed partial class Cia401Device
     /// <see cref="OnReset"/> (one actor job), a reader on another thread can briefly see the restored
     /// value, a default or what <c>1010h</c> stored.</remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="group"/> is not a group of the
-    /// device.</exception>
-    /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
+    /// device; a device built from a configuration also throws this when it has no
+    /// digital inputs.</exception>
+    /// <exception cref="InvalidOperationException">No node has attached the device yet, or a device
+    /// built from a description has no digital inputs (its description declares none).</exception>
     public byte ReadDigitalInputs(int group)
     {
         var block = RequireGroup(group);
