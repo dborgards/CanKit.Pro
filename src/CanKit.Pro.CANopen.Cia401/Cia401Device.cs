@@ -114,11 +114,10 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// records has no PDOs, the default ones included, where §6.1 has a device that supports an I/O
 /// function "support the related default PDOs": the file wins (see
 /// <see cref="FromDescription"/>).</description></item>
-/// <item><description>The other way round, one file is not taken as it stands: a file that declares
-/// <c>6401h</c> without <c>6423h</c>, which §8.6.4 makes mandatory with the analog inputs, fails
-/// the open instead of giving a device whose analog interrupts could never be enabled (see
-/// <see cref="FromDescription"/>).</description></item>
 /// </list>
+/// <para>
+/// Which objects a description must declare per function block: see <see cref="FromDescription"/>.
+/// </para>
 /// <para>
 /// <b>Readings and choices where the norm is silent or not of one voice.</b> Each is argued where
 /// it is used:
