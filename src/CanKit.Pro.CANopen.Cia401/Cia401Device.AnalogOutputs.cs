@@ -50,7 +50,7 @@ internal sealed partial class Cia401Device
     /// <b>The error value.</b> <c>6444h</c> is an INTEGER32, the output a 16-bit value. §8.7.5 does
     /// not say how the one becomes the other; Figure 7 marks the <c>6444h</c> input of the error
     /// switch "(1) *", INTEGER32 left adjusted, and the figure decides: the output takes the upper
-    /// word of <c>6444h</c> (<see cref="LeftAdjusted.Narrow"/>), the reading the analog input limits
+    /// word of <c>6444h</c> (<see cref="Cia401LeftAdjusted.Narrow"/>), the reading the analog input limits
     /// rest on (§8.6.5, §8.6.6). So 1234h is written <c>1234_0000h</c>, and the low word, a fraction
     /// a 16-bit output cannot show, is ignored: <c>1234_5678h</c> drives 1234h.
     /// </para>
@@ -253,7 +253,7 @@ internal sealed partial class Cia401Device
         {
             var sub = (byte)(c + 1);
             if (od.ReadRaw(ErrorMode, sub)[0] != AnalogErrorModeErrorValue) return;
-            Held[c] = LeftAdjusted.Narrow(od.ReadSigned(ErrorValue, sub));
+            Held[c] = Cia401LeftAdjusted.Narrow(od.ReadSigned(ErrorValue, sub));
         }
 
         internal void Publish(short[] values) => Volatile.Write(ref _terminal, values);

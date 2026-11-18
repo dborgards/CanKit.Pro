@@ -480,9 +480,9 @@ public class Cia401DeviceAnalogInputTests
     [InlineData(short.MinValue, int.MinValue)]
     public void Left_Adjustment_Widens_To_The_Upper_Word_And_Narrows_Back(short value, int widened)
     {
-        Cia401Device.LeftAdjusted.Widen(value).Should().Be(widened);
-        Cia401Device.LeftAdjusted.Narrow(widened).Should().Be(value);
-        Cia401Device.LeftAdjusted.Narrow(widened | 0xFFFF).Should().Be(value, "narrowing drops the low 16 bits");
+        Cia401LeftAdjusted.Widen(value).Should().Be(widened);
+        Cia401LeftAdjusted.Narrow(widened).Should().Be(value);
+        Cia401LeftAdjusted.Narrow(widened | 0xFFFF).Should().Be(value, "narrowing drops the low 16 bits");
     }
 
     // ---- the deltas, §8.6.7 to §8.6.9 ------------------------------------------------------------------

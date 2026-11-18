@@ -68,8 +68,6 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     private const int AnalogInputsBit = 18;
     private const int AnalogOutputsBit = 19;
 
-    private const int LeftAdjustShift = 16;
-
     private readonly ICanOpenNode _node;
 
     internal Cia401Peer(ICanOpenProfile profile, ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice)
@@ -215,9 +213,6 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
     // ---- shared by the blocks ---------------------------------------------------------------------
 
     private static bool HasBit(uint value, int bit) => (value & (1u << bit)) != 0;
-
-    /// <summary>The 16-bit value left adjusted in an INTEGER32 (CiA 401-1 §8.4.3).</summary>
-    private static int LeftAdjusted(short value) => value << LeftAdjustShift;
 
     private ushort Shift(Cia401ObjectDefinition definition)
         => CanOpenLogicalDeviceAddressing.Index(LogicalDevice.Index, definition.Index);
@@ -420,7 +415,7 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptUpperLimitInteger, channel, Channel, limit, cancellationToken);
 
         public Task WriteInterruptUpperLimitLeftAdjustedAsync(int channel, short threshold, CancellationToken cancellationToken = default)
-            => WriteInterruptUpperLimitAsync(channel, LeftAdjusted(threshold), cancellationToken);
+            => WriteInterruptUpperLimitAsync(channel, Cia401LeftAdjusted.Widen(threshold), cancellationToken);
 
         public async Task<int> ReadInterruptLowerLimitAsync(int channel, CancellationToken cancellationToken = default)
             => (int)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptLowerLimitInteger, channel, Channel, cancellationToken).ConfigureAwait(false);
@@ -429,7 +424,7 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
             => _peer.WriteElementAsync(Cia401Objects.AnalogInputInterruptLowerLimitInteger, channel, Channel, limit, cancellationToken);
 
         public Task WriteInterruptLowerLimitLeftAdjustedAsync(int channel, short threshold, CancellationToken cancellationToken = default)
-            => WriteInterruptLowerLimitAsync(channel, LeftAdjusted(threshold), cancellationToken);
+            => WriteInterruptLowerLimitAsync(channel, Cia401LeftAdjusted.Widen(threshold), cancellationToken);
 
         public async Task<uint> ReadInterruptDeltaAsync(int channel, CancellationToken cancellationToken = default)
             => (uint)await _peer.ReadElementAsync(Cia401Objects.AnalogInputInterruptDeltaUnsigned, channel, Channel, cancellationToken).ConfigureAwait(false);
@@ -480,6 +475,6 @@ internal sealed class Cia401Peer : ICanOpenProfilePeer
             => _peer.WriteElementAsync(Cia401Objects.AnalogOutputErrorValueInteger, channel, Channel, value, cancellationToken);
 
         public Task WriteErrorValueLeftAdjustedAsync(int channel, short value, CancellationToken cancellationToken = default)
-            => WriteErrorValueAsync(channel, LeftAdjusted(value), cancellationToken);
+            => WriteErrorValueAsync(channel, Cia401LeftAdjusted.Widen(value), cancellationToken);
     }
 }

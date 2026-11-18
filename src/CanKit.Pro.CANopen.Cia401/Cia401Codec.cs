@@ -4,9 +4,10 @@ using System.IO;
 namespace CanKit.Pro.CANopen.Cia401;
 
 /// <summary>
-/// The one place the tool side turns a value of the catalogue into the bytes an SDO transfer or a PDO
-/// carries and back: little-endian, in the width of the data type, two's complement for the signed
-/// types (CiA 301 v4.2.0 §7.1.4.4, §7.1.4.5, and §7.1.2: the least significant byte first).
+/// The one place a value of the catalogue becomes the bytes the dictionary, an SDO transfer or a PDO
+/// holds, and back, for the device and the peer alike: little-endian, in the width of the data type,
+/// two's complement for the signed types (CiA 301 v4.2.0 §7.1.4.4, §7.1.4.5, and §7.1.2: the least
+/// significant byte first).
 /// </summary>
 internal static class Cia401Codec
 {

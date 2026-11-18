@@ -83,7 +83,7 @@ internal sealed partial class Cia401Device
     /// representation of the input, in which the 16-bit value <c>v</c> is <c>v · 2^16</c>, its
     /// low 16 bits zero (§8.4.3 defines the left-adjusted 32-bit input that way). So the comparison
     /// is <c>v · 2^16 ≥ 6424h</c> and <c>v · 2^16 &lt; 6425h</c>, as INTEGER32 numbers
-    /// (<see cref="LeftAdjusted.Widen"/>): a limit of 1000 counts is written <c>1000 · 2^16</c>
+    /// (<see cref="Cia401LeftAdjusted.Widen"/>): a limit of 1000 counts is written <c>1000 · 2^16</c>
     /// (<c>03E8_0000h</c>), and the low 16 bits of a limit take part, so an upper limit of
     /// <c>03E8_0001h</c> is first reached at 1001. Figure 6 marks only the 16-bit value mapped into
     /// the TPDO as left adjusted and taps the comparators before it; the clause, which names the
@@ -229,7 +229,7 @@ internal sealed partial class Cia401Device
     {
         block.Physical[sub - 1] = value;
         if (ReadAnalogValue(host, block, sub) == value) return;
-        WriteOwn(host, block.Read, sub, Encode(OdDataType.Integer16, value));
+        WriteOwn(host, block.Read, sub, Cia401Codec.Encode(OdDataType.Integer16, value));
         if (!enabled || !AnalogInterrupt(host.ObjectDictionary, block, sub, value, block.LastCommunicated[sub - 1])) return;
 
         block.LastCommunicated[sub - 1] = value;
@@ -247,7 +247,7 @@ internal sealed partial class Cia401Device
         int selection = od.ReadRaw(block.TriggerSelection, sub)[0];
         if (selection == 0) return false;
 
-        int leftAdjusted = LeftAdjusted.Widen(value);
+        int leftAdjusted = Cia401LeftAdjusted.Widen(value);
         long change = (long)value - last;
         bool limitSelected = (selection & LimitBits) != 0;
         bool deltaSelected = (selection & DeltaBits) != 0;
@@ -265,7 +265,7 @@ internal sealed partial class Cia401Device
         var bank = (byte)(((sub - 1) / ChannelsPerSourceBank) + 1);
         uint bit = 1u << ((sub - 1) % ChannelsPerSourceBank);
         uint bits = host.ObjectDictionary.ReadUnsigned(block.InterruptSource, bank);
-        if ((bits & bit) == 0) WriteOwn(host, block.InterruptSource, bank, Encode(OdDataType.Unsigned32, bits | bit));
+        if ((bits & bit) == 0) WriteOwn(host, block.InterruptSource, bank, Cia401Codec.Encode(OdDataType.Unsigned32, bits | bit));
     }
 
     /// <summary>Clears every bank of <c>6422h</c>: the deviation from §8.6.3 described on
@@ -275,7 +275,7 @@ internal sealed partial class Cia401Device
         for (int bank = 1; bank <= block.Banks; bank++)
         {
             if (host.ObjectDictionary.ReadUnsigned(block.InterruptSource, (byte)bank) != 0)
-                WriteOwn(host, block.InterruptSource, (byte)bank, Encode(OdDataType.Unsigned32, 0));
+                WriteOwn(host, block.InterruptSource, (byte)bank, Cia401Codec.Encode(OdDataType.Unsigned32, 0));
         }
     }
 
@@ -340,7 +340,7 @@ internal sealed partial class Cia401Device
             {
                 short value = block.Physical[c - 1];
                 if (ReadAnalogValue(host, block, (byte)c) != value)
-                    WriteOwn(host, block.Read, (byte)c, Encode(OdDataType.Integer16, value));
+                    WriteOwn(host, block.Read, (byte)c, Cia401Codec.Encode(OdDataType.Integer16, value));
             }
         }
 
@@ -357,27 +357,6 @@ internal sealed partial class Cia401Device
         var block = _analogInputs;
         return block is not null && index == block.TriggerSelection && subindex >= 1
             && value.Length == 1 && (value[0] & ReservedSelectionBits) != 0;
-    }
-
-    /// <summary>
-    /// The one reading of "left adjusted" for the INTEGER32 objects that stand for a 16-bit analog
-    /// value (CiA 401-1 §8.4.2, §8.4.3, §8.6.5, §8.6.6, and Figure 7's legend for <c>6444h</c>): the
-    /// 16-bit value <c>v</c> is the INTEGER32 <c>v · 2^16</c>, its low 16 bits zero, as §8.4.3
-    /// defines a left-adjusted 32-bit input.
-    /// </summary>
-    /// <remarks>What the low 16 bits of an INTEGER32 do depends on the use. A limit is compared
-    /// with the widened input as an INTEGER32, so its low bits take part (see
-    /// <see cref="SetAnalogInput"/>). A value that has to become a 16-bit output (<c>6444h</c>, the
-    /// analog output error value) is narrowed to its upper word, and the low bits, which a 16-bit
-    /// value cannot carry, are dropped.</remarks>
-    internal static class LeftAdjusted
-    {
-        /// <summary><paramref name="value"/> · 2^16: the 16-bit value left adjusted in 32 bits.</summary>
-        internal static int Widen(short value) => value << 16;
-
-        /// <summary>The upper word of <paramref name="value"/>: the 16-bit value a left-adjusted
-        /// INTEGER32 stands for, its low 16 bits dropped.</summary>
-        internal static short Narrow(int value) => (short)(value >> 16);
     }
 
     /// <summary>The analog inputs of one device: their indices in its logical device, and the

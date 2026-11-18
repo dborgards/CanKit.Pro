@@ -670,29 +670,12 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     {
         var index = Shift(logicalDevice, definition);
         od.AddU8(index, 0x00, (byte)elements, OdAccess.ReadOnly, pdoMappable: false);
-        var initial = Encode(definition.DataType, definition.DefaultValue ?? 0);
+        var initial = Cia401Codec.Encode(definition.DataType, definition.DefaultValue ?? 0);
         for (int sub = 1; sub <= elements; sub++)
         {
             od.AddRaw(index, (byte)sub, definition.DataType, initial, definition.Access,
                 definition.PdoMapping != Cia401PdoMapping.No);
         }
-    }
-
-    /// <summary>The little-endian bytes of <paramref name="value"/> in the width of
-    /// <paramref name="type"/>, one of the integer types of the catalogue's 8-, 16- and 32-bit
-    /// objects (CiA 301 v4.2.0 §7.1.4.4, §7.1.4.5: two's complement for the signed ones).</summary>
-    private static byte[] Encode(OdDataType type, long value)
-    {
-        int width = type switch
-        {
-            OdDataType.Boolean or OdDataType.Unsigned8 or OdDataType.Integer8 => 1,
-            OdDataType.Unsigned16 or OdDataType.Integer16 => 2,
-            OdDataType.Unsigned32 or OdDataType.Integer32 => 4,
-            _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Not an integer type of the catalogue."),
-        };
-        var bytes = new byte[width];
-        for (int i = 0; i < width; i++) bytes[i] = unchecked((byte)(value >> (8 * i)));
-        return bytes;
     }
 
     /// <summary>Declares a one-byte variable with what the catalogue gives it. Constructing thread,
