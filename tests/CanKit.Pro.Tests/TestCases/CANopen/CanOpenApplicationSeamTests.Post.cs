@@ -358,6 +358,61 @@ public partial class CanOpenApplicationSeamTests
         Volatile.Read(ref ran).Should().Be(0, "the failed open ended the actor, and the held callback with it");
     }
 
+    [Fact] // #561, Codecov on #567
+    public async Task A_Deadline_The_Actor_Fires_Only_After_The_Open_Failed_Is_Dropped_Quietly()
+    {
+        // The first application keeps the actor busy from its Attach, so the deadline the second arms,
+        // due at once, is not fired while the node is being opened. The third fails the open. Only once
+        // the failed open has closed the held work is the actor let go: it fires the deadline as it
+        // shuts down (its due timers are drained), and the callback must be dropped without a trace.
+        using var bus = Open(NewSession(), 1);
+        using var service = new CanBusService(bus);
+        using var busy = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        int ran = 0;
+        var reported = new List<Exception>();
+        CanOpenNode? opening = null;
+        var blocker = new RecordingApplication("blocker")
+        {
+            OnAttach = host =>
+            {
+                opening = NodeOf(host);
+                opening.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+                _ = opening.PostToActorAsync(() =>
+                {
+                    started.Set();
+                    busy.Wait(ShortTimeout);
+                });
+                started.Wait(ShortTimeout).Should().BeTrue("the actor runs the blocking job");
+            },
+        };
+        var early = new RecordingApplication("early")
+        {
+            OnAttach = host => host.Arm(TimeSpan.Zero, () => Interlocked.Increment(ref ran)),
+        };
+        var broken = new RecordingApplication("broken") { OnAttach = _ => throw new InvalidOperationException("no device") };
+        var closed = typeof(CanOpenNode).GetField("_applicationPostsClosed", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var letGo = Task.Run(async () =>
+        {
+            await WaitUntilAsync(() => opening is not null && (bool)closed.GetValue(opening)!, "the failed open to close the held work");
+            busy.Set();
+        });
+
+        Assert.Throws<InvalidOperationException>(() => new CanOpenNode(service, Slave, With(blocker, early, broken), ownsService: false, new ManualTimeSource()));
+        await letGo.WithTimeoutAsync(ShortTimeout);
+        // The constructor's failure path joined the actor, whose shutdown drained the due deadline; a
+        // marker behind every background report made so far is delivered after the last of them.
+        var dispatcher = (CanKit.Pro.Actor.BackgroundExceptionDispatcher)typeof(CanOpenNode)
+            .GetField("_backgroundReports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(opening!)!;
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        dispatcher.Post(() => delivered.TrySetResult(true));
+        await delivered.Task.WithTimeoutAsync(ShortTimeout);
+
+        Volatile.Read(ref ran).Should().Be(0, "a deadline of an open that failed is dropped");
+        lock (reported) reported.Should().BeEmpty("it is dropped quietly, not refused by an actor that is shutting down");
+    }
+
     [Fact]
     public void A_Post_Held_By_An_Open_That_Fails_Is_Dropped()
     {
