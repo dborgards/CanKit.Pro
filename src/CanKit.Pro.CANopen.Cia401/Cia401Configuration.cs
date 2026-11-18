@@ -5,13 +5,11 @@ using CanKit.Pro.CANopen.Application;
 namespace CanKit.Pro.CANopen.Cia401;
 
 /// <summary>One default PDO of CiA 401-1 v3.1.0 §6.2.5 to §6.2.12: which PDO, in which direction,
-/// whether it is enabled, and what it maps.</summary>
+/// and what it maps. Every one is valid by default (<see cref="Cia401Configuration.DefaultPdos"/>).</summary>
 /// <param name="Number">The absolute PDO number, <c>1</c> to <c>512</c>: already shifted by
 /// <c>n·64</c> for logical device <c>n</c> (CiA 301 v4.2.0 §7.2.2.1).</param>
 /// <param name="IsTpdo"><see langword="true"/> for a transmit PDO, <see langword="false"/> for a
 /// receive PDO.</param>
-/// <param name="Enabled">Whether the PDO is valid by default: the receive PDOs and TPDO 1 are, the
-/// TPDOs that carry analog inputs are not (<see cref="Cia401Configuration.DefaultPdos"/>).</param>
 /// <param name="Entries">The mapped entries in mapping order: absolute object index (already
 /// shifted by <c>n·800h</c> for logical device <c>n</c>, CiA 301 v4.2.0 §7.4.1), sub-index and
 /// length in bits. A read-only view, so the caller cannot change a default; it compares by
@@ -19,7 +17,6 @@ namespace CanKit.Pro.CANopen.Cia401;
 internal readonly record struct Cia401DefaultPdo(
     int Number,
     bool IsTpdo,
-    bool Enabled,
     IReadOnlyList<(ushort Index, byte Subindex, byte Bits)> Entries);
 
 /// <summary>
@@ -169,10 +166,13 @@ internal sealed class Cia401Configuration
     /// analog channels 1 to 4, 5 to 8 and 9 to 12 as 16-bit values, each only if a channel in it
     /// exists (§6.2.7 to §6.2.12); channels beyond twelve have no default PDO (§6.1). A function
     /// with no channel has no default PDO (§6.1).</para>
-    /// <para>The receive PDOs and TPDO 1 are enabled. TPDOs 2 to 4, which carry analog inputs, are
-    /// disabled: the scope record reads CiA 401-1 §1 as "default TPDOs containing analog inputs are
-    /// disabled", while §6.2.8 only disables the interrupt source (<c>6423h</c>) and leaves the
-    /// COB-ID valid. The device does both, so the stricter reading holds.</para>
+    /// <para>Every default PDO is valid, the TPDOs that carry analog inputs included: §6.2.8,
+    /// §6.2.10 and §6.2.12 give TPDOs 2 to 4 a default COB-ID with bit 31 clear and transmission
+    /// type 255 (Tables 18, 26, 34), and §6.1 sends every TPDO of that type on entering
+    /// Operational. What is disabled by default is the analog interrupt, globally, by <c>6423h</c>
+    /// FALSE (§6.2.8, §8.6.4, Table 154): with it, a changed analog input sends no TPDO, and the
+    /// node warns with EMCY <c>0080h</c> on entering Operational (§5.3). §1's "Therefore, default
+    /// TPDOs containing analog inputs are disabled" is read as that interrupt gate (#556).</para>
     /// </remarks>
     public IReadOnlyList<Cia401DefaultPdo> DefaultPdos
     {
@@ -232,10 +232,8 @@ internal sealed class Cia401Configuration
             entries.Add((index, (byte)subindex, DigitalBits));
         }
 
-        // Receive PDOs are enabled, and so is TPDO 1 (§6.2.6): digital inputs are not the analog
-        // inputs whose default TPDOs are disabled.
         pdos.Add(new Cia401DefaultPdo(
-            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, 1), isTpdo, true, entries.AsReadOnly()));
+            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, 1), isTpdo, entries.AsReadOnly()));
     }
 
     private void AddAnalog(List<Cia401DefaultPdo> pdos, int pdoInDevice0, bool isTpdo, int channels, ushort indexInDevice0)
@@ -254,9 +252,8 @@ internal sealed class Cia401Configuration
             entries.Add((index, (byte)(firstChannel + i), AnalogBits));
         }
 
-        // Receive PDOs are enabled; the TPDOs with analog inputs are not (see DefaultPdos).
         pdos.Add(new Cia401DefaultPdo(
-            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, pdoInDevice0), isTpdo, !isTpdo, entries.AsReadOnly()));
+            CanOpenLogicalDeviceAddressing.PdoNumber(LogicalDevice, pdoInDevice0), isTpdo, entries.AsReadOnly()));
     }
 
     private static void CheckRange(int value, int max, string name)

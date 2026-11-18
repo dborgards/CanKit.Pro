@@ -44,7 +44,7 @@ internal sealed class Cia401Rig : IDisposable
     internal const uint Rpdo1 = 0x200 + DeviceId;
 
     /// <summary>TPDO 2 of the device, the default TPDO of its analog inputs 1 to 4 (CiA 401-1
-    /// §6.2.8), disabled by default: <see cref="EnableTpdoAsync"/> creates it.</summary>
+    /// §6.2.8), valid by default with transmission type 255 (Table 18).</summary>
     internal const uint Tpdo2 = 0x280 + DeviceId;
 
     /// <summary>RPDO 2 of the device, the default RPDO of its analog outputs 1 to 4 (CiA 401-1
@@ -69,7 +69,7 @@ internal sealed class Cia401Rig : IDisposable
     private readonly List<(uint CobId, byte[] Data)> _sequence = new();
 
     /// <summary>Options under which a master may write the PDO records over SDO, which
-    /// <see cref="EnableTpdoAsync"/> needs: they are read-only on the bus otherwise.</summary>
+    /// <see cref="DisableTpdoAsync"/> needs: they are read-only on the bus otherwise.</summary>
     internal static CanOpenNodeOptions WritablePdoRecords => new() { WritableCommunicationParameters = true };
 
     /// <summary>Opens the device for <paramref name="configuration"/>. <paramref name="options"/> are
@@ -302,16 +302,16 @@ internal sealed class Cia401Rig : IDisposable
     }
 
     /// <summary>
-    /// Creates TPDO <paramref name="pdo"/> (1 to 4) the way a master does over SDO (CiA 301 v4.2.0
-    /// §7.5.2.37): bit 31 of its COB-ID, "PDO exists / is valid", from 1 to 0, the CAN-ID left as
-    /// the device has it. Its mapping is the default the device set, so the re-mapping procedure of
-    /// §7.5.2.38 has nothing to do. Needs a rig opened with <see cref="WritablePdoRecords"/>.
+    /// Takes TPDO <paramref name="pdo"/> (1 to 4) out of service the way a master does over SDO
+    /// before it changes the PDO (CiA 301 v4.2.0 §7.5.2.37): bit 31 of its COB-ID, "PDO exists / is
+    /// valid", from 0 to 1, the CAN-ID left as the device has it. Needs a rig opened with
+    /// <see cref="WritablePdoRecords"/>.
     /// </summary>
-    internal async Task EnableTpdoAsync(int pdo)
+    internal async Task DisableTpdoAsync(int pdo)
     {
         var index = (ushort)(0x1800 + pdo - 1);
         uint cobId = await ReadU32Async(index, 0x01);
-        await WriteU32Async(index, 0x01, cobId & ~0x8000_0000u);
+        await WriteU32Async(index, 0x01, cobId | 0x8000_0000u);
     }
 
     // ---- SDO, expedited, from the master side -----------------------------------------------------

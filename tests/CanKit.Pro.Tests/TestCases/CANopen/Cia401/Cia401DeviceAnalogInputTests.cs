@@ -42,23 +42,6 @@ public class Cia401DeviceAnalogInputTests
     /// (CiA 301 v4.2.0 §7.2.7.1, Table 25): on a node without an error the register byte is 00h.</summary>
     private static readonly byte[] WarningEmcy = { 0x80, 0x00, 0x00, 0, 0, 0, 0, 0 };
 
-    /// <summary>A device with <paramref name="channels"/> analog inputs whose TPDO 2 the master has
-    /// created over SDO (it is disabled by default, §6.2.8 and the scope record).</summary>
-    private static async Task<Cia401Rig> WithTpdo2Async(int channels = 1)
-    {
-        var rig = new Cia401Rig(Analog(channels), Cia401Rig.WritablePdoRecords);
-        try
-        {
-            await rig.EnableTpdoAsync(2);
-            return rig;
-        }
-        catch
-        {
-            rig.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>Sets channel 1 and expects exactly one TPDO 2 more, carrying the value.</summary>
     private static async Task ExpectSentAsync(Cia401Rig rig, short value, string because)
     {
@@ -143,7 +126,7 @@ public class Cia401DeviceAnalogInputTests
     }
 
     [Fact]
-    public void Attach_Sets_The_Device_Type_And_The_Disabled_Analog_Tpdos()
+    public void Attach_Sets_The_Device_Type_And_The_Valid_Analog_Tpdos()
     {
         using var rig = new Cia401Rig(Analog(12));
 
@@ -152,8 +135,9 @@ public class Cia401DeviceAnalogInputTests
         {
             var communication = (ushort)(0x1800 + pdo - 1);
             var mapping = (ushort)(0x1A00 + pdo - 1);
-            rig.Od.ReadUnsigned(communication, 0x01).Should().Be(0x8000_0000u + (uint)(0x80 + (pdo * 0x100)) + Cia401Rig.DeviceId,
-                $"TPDO {pdo} on its pre-defined COB-ID and not valid (§6.2.8 and the scope record)");
+            rig.Od.ReadUnsigned(communication, 0x01).Should().Be((uint)(0x80 + (pdo * 0x100)) + Cia401Rig.DeviceId,
+                $"TPDO {pdo} on its pre-defined COB-ID, bit 31 clear (§6.2.8, §6.2.10, §6.2.12: Tables 18, 26, 34)");
+            rig.Od.ReadUnsigned(communication, 0x02).Should().Be(255u, "transmission type 255 (Tables 18, 26, 34)");
             rig.Od.ReadUnsigned(mapping, 0x00).Should().Be(4u, "four 16-bit channels per PDO (§6.2.8)");
             for (byte e = 1; e <= 4; e++)
             {
@@ -163,23 +147,86 @@ public class Cia401DeviceAnalogInputTests
         }
     }
 
-    [Fact] // entering Operational asks for every entry the device owns; a TPDO that is not valid stays silent
-    public async Task Entering_Operational_With_6423h_False_Sends_No_Disabled_Analog_Tpdo()
+    [Fact] // entering Operational asks for every entry the device owns: each valid type-255 TPDO goes out once
+    public async Task Entering_Operational_With_6423h_False_Sends_Each_Analog_Tpdo_Once()
     {
         using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 12 });
-        rig.Device.SetAnalogInput(1, 77);
+        rig.Device.SetAnalogInputs(1, new short[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
         (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0x00, "FALSE by default (§8.6.4)");
 
         await rig.StartAsync();
         await rig.WaitForCountAsync(Cia401Rig.Tpdo1, 1);
+        for (int pdo = 2; pdo <= 4; pdo++) await rig.WaitForCountAsync(AnalogTpdo(pdo), 1);
         await rig.DrainAsync();
 
         rig.Count(Cia401Rig.Tpdo1).Should().Be(1, "TPDO 1, the digital inputs, is valid by default (§6.2.6)");
         for (int pdo = 2; pdo <= 4; pdo++)
         {
-            rig.Count((uint)(0x80 + (pdo * 0x100)) + Cia401Rig.DeviceId).Should().Be(0,
-                $"TPDO {pdo} is disabled by default (§6.2.8 and the scope record)");
+            int first = (pdo - 2) * 4;
+            rig.Payloads(AnalogTpdo(pdo)).Should().ContainSingle(
+                    $"TPDO {pdo} is valid with type 255 and goes out on entering Operational (§6.1), whatever 6423h says (§8.6.4)")
+                .Which.Should().Equal(I16((short)(first + 1), (short)(first + 2), (short)(first + 3), (short)(first + 4)));
         }
+    }
+
+    /// <summary>The COB-ID of default TPDO <paramref name="pdo"/>, 2 to 4, of the device (CiA 301
+    /// v4.2.0 §7.3.3, Table 39).</summary>
+    private static uint AnalogTpdo(int pdo) => (uint)(0x80 + (pdo * 0x100)) + Cia401Rig.DeviceId;
+
+    // ---- #556: the analog TPDOs, the warning and the interrupt gate at NMT Start ---------------------
+
+    [Fact] // #556, its acceptance
+    public async Task With_6423h_False_Each_Start_Sends_The_Analog_Tpdo_And_The_Warning_And_A_Change_In_Between_Sends_Nothing()
+    {
+        // The node's change-of-state automatism is on (the default, written out). The test catches any
+        // TPDO 2 the analog change puts on the wire, by whatever route: the device's interrupt rule or
+        // the node's automatism. It does not tell the two guards of the automatism apart: the device
+        // writes 6401h on the actor, which the automatism passes over before it asks who claims it.
+        using var rig = new Cia401Rig(Analog(4), new CanOpenNodeOptions { EnableChangeOfStateTpdo = true });
+
+        // What the device advertises, read over SDO as a master does.
+        (await rig.ReadU32Async(0x1801, 0x01)).Should().Be(Cia401Rig.Tpdo2,
+            "TPDO 2's default COB-ID has bit 31 clear (CiA 401-1 v3.1.0 §6.2.8, Table 18)");
+        (await rig.ReadU8Async(0x1801, 0x02)).Should().Be(255, "transmission type 255 (Table 18)");
+        (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0x00, "the interrupt gate is FALSE by default (§8.6.4, Table 154)");
+        rig.Device.SetAnalogInputs(1, new short[] { 100, 200, 300, 400 });
+        rig.Settle();
+
+        // First entry into Operational: the TPDO once (§6.1), the warning once (§5.3), a healthy register.
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo2, 1);
+        await rig.WaitForCountAsync(Cia401Rig.Emcy, 1);
+        await rig.DrainAsync();
+        await rig.DrainEmcyAsync();
+        rig.Payloads(Cia401Rig.Tpdo2).Should().ContainSingle().Which.Should().Equal(I16(100, 200, 300, 400));
+        rig.Payloads(Cia401Rig.Emcy).Should().ContainSingle().Which.Should().Equal(WarningEmcy,
+            "0080h with the register byte 00h: the warning is no error (CiA 301 v4.2.0 Table 25)");
+        (await rig.ReadU8Async(0x1001, 0x00)).Should().Be(0x00, "a node with no fault keeps a healthy error register");
+
+        // Between the entries an analog change sends nothing: 6423h gates the interrupt (§6.2.8, §8.6.4).
+        rig.Device.SetAnalogInput(1, 1200);
+        await rig.DrainAsync();
+        await rig.DrainEmcyAsync();
+        rig.Count(Cia401Rig.Tpdo2).Should().Be(1, "with 6423h FALSE a changed analog input triggers no TPDO");
+        rig.Device.ReadAnalogInput(1).Should().Be(1200);
+
+        // Start -> Pre-operational -> Start: the second entry sends both again.
+        await rig.EnterPreOperationalAsync();
+        await rig.DrainAsync();
+        await rig.DrainEmcyAsync();
+        rig.Count(Cia401Rig.Tpdo2).Should().Be(1, "no PDO in Pre-operational (CiA 301 v4.2.0 Table 37)");
+        rig.Count(Cia401Rig.Emcy).Should().Be(1, "leaving Operational sends nothing");
+
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo2, 2);
+        await rig.WaitForCountAsync(Cia401Rig.Emcy, 2);
+        await rig.DrainAsync();
+        await rig.DrainEmcyAsync();
+        rig.Payloads(Cia401Rig.Tpdo2).Should().HaveCount(2, "the initial TPDO once more, at the second entry");
+        rig.Payloads(Cia401Rig.Tpdo2)[1].Should().Equal(I16(1200, 200, 300, 400));
+        rig.Payloads(Cia401Rig.Emcy).Should().HaveCount(2, "the warning at each entry into Operational (§5.3)");
+        rig.Payloads(Cia401Rig.Emcy)[1].Should().Equal(WarningEmcy);
+        (await rig.ReadU8Async(0x1001, 0x00)).Should().Be(0x00);
     }
 
     // ---- §5.3, the analog input disable warning ------------------------------------------------------
@@ -326,7 +373,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task With_6423h_False_The_Value_Updates_And_Nothing_Is_Sent()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
 
         await ExpectNothingAsync(rig, 1200, "6423h is FALSE by default: no analog input interrupts (§8.6.4)");
@@ -338,7 +385,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Entering_Operational_Sends_Tpdo_2_Once_With_The_Current_Values_Whatever_6423h_Says()
     {
-        using var rig = await WithTpdo2Async(4);
+        using var rig = new Cia401Rig(Analog(4));
         rig.Device.SetAnalogInput(1, 100);
         rig.Device.SetAnalogInput(2, -2);
         rig.Device.SetAnalogInput(3, 300);
@@ -358,7 +405,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Entering_Operational_With_6423h_True_Sends_Tpdo_2_And_No_Warning()
     {
-        using var rig = await WithTpdo2Async(4);
+        using var rig = new Cia401Rig(Analog(4));
         await rig.WriteU8Async(0x6423, 0x00, 1);
         rig.Device.SetAnalogInputs(1, new short[] { 1, 2, 3, 4 });
         rig.Settle();
@@ -374,7 +421,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Setting_The_Value_It_Has_Sends_Nothing()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         // The upper limit alone (at 0): no delta to turn a zero change down, so only the device's
         // own "no change" check stands between a repeated value and an interrupt.
         await rig.WriteU8Async(0x6421, 0x01, 0x01);
@@ -390,7 +437,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Upper_Limit_Interrupts_At_And_Above_The_Left_Adjusted_Limit()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x01);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -405,7 +452,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Above_The_Upper_Limit_Every_Change_Interrupts()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x01);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -421,7 +468,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Lower_Limit_Interrupts_Below_The_Left_Adjusted_Limit_Only()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x02);
         await rig.WriteI32Async(0x6425, 0x01, LeftAdjusted(500));
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -437,7 +484,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task A_Negative_Value_Below_A_Negative_Lower_Limit_Interrupts()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x02);
         await rig.WriteI32Async(0x6425, 0x01, LeftAdjusted(-400));
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -450,7 +497,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Low_16_Bits_Of_A_Limit_Take_Part_In_The_Comparison()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x01);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000) | 1);
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -465,7 +512,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Low_16_Bits_Of_A_Lower_Limit_Take_Part_In_The_Comparison()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x02);
         await rig.WriteI32Async(0x6425, 0x01, LeftAdjusted(500) | 1);
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -479,7 +526,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task A_Limit_Written_As_A_Plain_Count_Is_A_Fraction_Of_One_Step_Of_The_Input()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x01);
         await rig.WriteI32Async(0x6424, 0x01, 1000);
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -507,7 +554,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Delta_Is_Measured_From_The_Last_Communicated_Value()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x04);
         await rig.WriteU32Async(0x6426, 0x01, 50);
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -524,7 +571,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Negative_Delta_Interrupts_On_A_Fall_Only()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x08);
         await rig.WriteU32Async(0x6427, 0x01, 50);
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -541,7 +588,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task The_Positive_Delta_Interrupts_On_A_Rise_Only()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x10);
         await rig.WriteU32Async(0x6428, 0x01, 50);
         await rig.WriteU8Async(0x6423, 0x00, 1);
@@ -558,7 +605,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Entering_Operational_Takes_The_Current_Value_As_The_Last_Communicated()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x00);
         await rig.WriteU8Async(0x6423, 0x00, 1); // the reference is 0 from here
         rig.Device.SetAnalogInput(1, 1200);      // nothing selected: no interrupt, the reference stays 0
@@ -574,7 +621,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Writing_6423h_True_Takes_The_Current_Value_As_The_Last_Communicated()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x04);
         await rig.WriteU32Async(0x6426, 0x01, 50);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2); // communicates 0
@@ -589,12 +636,11 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Reset_Node_Restores_6423h_And_The_Next_Enable_Takes_The_Current_Value()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6423, 0x00, 1);
         await rig.ResetAsync(NmtCommand.ResetNode);
         (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0, "Reset Node restores the default FALSE");
 
-        await rig.EnableTpdoAsync(2);
         await rig.WriteU8Async(0x6421, 0x01, 0x04);
         await rig.WriteU32Async(0x6426, 0x01, 50);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2); // communicates 0
@@ -609,7 +655,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Either_Selected_Limit_Interrupts()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x03);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
         await rig.WriteI32Async(0x6425, 0x01, LeftAdjusted(500));
@@ -626,7 +672,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact] // C2
     public async Task With_A_Limit_And_A_Delta_Selected_A_Change_Above_The_Limit_Needs_The_Delta()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x05);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
         await rig.WriteU32Async(0x6426, 0x01, 50);
@@ -643,7 +689,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact] // C3
     public async Task With_A_Limit_And_A_Delta_Selected_A_Large_Change_Below_The_Limit_Does_Not_Interrupt()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x05);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(1000));
         await rig.WriteU32Async(0x6426, 0x01, 50);
@@ -658,7 +704,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact] // C5
     public async Task Under_The_Factory_Settings_Every_Change_Interrupts()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6423, 0x00, 1);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
 
@@ -673,7 +719,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task At_The_Default_Selection_A_Delta_Alone_Throttles_The_Interrupts()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU32Async(0x6426, 0x01, 50); // 6421h stays 07h, the limits stay 0
         await rig.WriteU8Async(0x6423, 0x00, 1);
         rig.Device.SetAnalogInput(1, 1200);
@@ -686,7 +732,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Negative_And_Positive_Delta_Selected_Together_Interrupt_Each_In_Its_Direction()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x18);
         await rig.WriteU32Async(0x6427, 0x01, 50);
         await rig.WriteU32Async(0x6428, 0x01, 50);
@@ -703,7 +749,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task An_Inverted_Window_Is_Two_Limits_In_An_Or_Not_The_Xor_Of_Figure_6()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x03);
         await rig.WriteI32Async(0x6424, 0x01, LeftAdjusted(500));
         await rig.WriteI32Async(0x6425, 0x01, LeftAdjusted(1000));
@@ -720,7 +766,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task A_Channel_With_No_Condition_Selected_Never_Interrupts()
     {
-        using var rig = await WithTpdo2Async();
+        using var rig = new Cia401Rig(Analog(1));
         await rig.WriteU8Async(0x6421, 0x01, 0x00);
         await rig.WriteU8Async(0x6423, 0x00, 1);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
@@ -831,7 +877,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task Several_Channels_Set_At_Once_Send_One_Tpdo()
     {
-        using var rig = await WithTpdo2Async(4);
+        using var rig = new Cia401Rig(Analog(4));
         await rig.WriteU8Async(0x6423, 0x00, 1);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
 
@@ -931,8 +977,7 @@ public class Cia401DeviceAnalogInputTests
     [Fact]
     public async Task A_Device_With_Digital_And_Analog_Inputs_Sends_Both_Tpdos_On_Entering_Operational()
     {
-        using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 }, Cia401Rig.WritablePdoRecords);
-        await rig.EnableTpdoAsync(2);
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 });
         rig.Device.SetDigitalInputs(1, 0x5A);
         rig.Device.SetAnalogInput(1, 77);
         rig.Settle();

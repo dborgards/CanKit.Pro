@@ -140,9 +140,11 @@ internal sealed partial class Cia401Device
     /// <b>Entering Operational</b> sends every TPDO of transmission type 255 that maps an entry of
     /// the device, every channel's <c>6401h</c> among them, whatever <c>6423h</c> says: §6.1 sends
     /// every such TPDO then, and <c>6423h</c> governs interrupts only (§8.6.4); the request is the
-    /// device's one for all its entries (see <see cref="OnNmtStateChanged"/>). TPDOs 2 to 4 are
-    /// disabled by default (<see cref="Cia401Configuration.DefaultPdos"/>), so the analog inputs
-    /// reach the bus then only once a master has created them.
+    /// device's one for all its entries (see <see cref="OnNmtStateChanged"/>). On a device built
+    /// from a configuration TPDOs 2 to 4 are valid by default with transmission type 255 (§6.2.8,
+    /// §6.2.10, §6.2.12; <see cref="Cia401Configuration.DefaultPdos"/>), so the analog inputs reach
+    /// the bus at every entry into Operational; on one built from a description the file's PDO
+    /// records decide. Between entries, with <c>6423h</c> FALSE, a changed value sends nothing.
     /// </para>
     /// <para>
     /// Not built in this slice: the 8-bit, 32-bit, float and manufacturer-specific inputs

@@ -185,8 +185,10 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// given.</description></item>
 /// <item><description><b>Entering Operational</b> sends every TPDO of transmission type
 /// <c>FFh</c> that maps an entry of the device (§6.1), an input, an output or a parameter,
-/// whatever <c>6005h</c> and <c>6423h</c> say (see <see cref="OnNmtStateChanged"/>). TPDOs 2 to 4
-/// are disabled by default (see <see cref="Cia401Configuration.DefaultPdos"/>).</description></item>
+/// whatever <c>6005h</c> and <c>6423h</c> say (see <see cref="OnNmtStateChanged"/>): TPDOs 2 to 4,
+/// valid by default (see <see cref="Cia401Configuration.DefaultPdos"/>), go out then, while a
+/// changed analog input sends them only once <c>6423h</c> is TRUE and the condition <c>6421h</c>
+/// selects for the channel holds.</description></item>
 /// <item><description><b>Value ranges</b> (see <see cref="ValidateWrite"/>):
 /// <list type="bullet">
 /// <item><description>A BOOLEAN takes 0 and 1 only.</description></item>
@@ -370,7 +372,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
             {
                 var mapping = new PdoMapping();
                 foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
-                if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping, pdo.Enabled);
+                if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping);
                 else host.SetDefaultRpdo(pdo.Number, mapping);
             }
         }

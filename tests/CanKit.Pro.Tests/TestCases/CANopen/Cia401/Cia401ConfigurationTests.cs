@@ -72,7 +72,6 @@ public class Cia401ConfigurationTests
     {
         var tpdo = Pdo(Config(di: 20), number: 1, isTpdo: true);
 
-        tpdo.Enabled.Should().BeTrue();
         tpdo.Entries.Should().Equal(
             ((ushort)0x6000, (byte)1, (byte)8),
             ((ushort)0x6000, (byte)2, (byte)8),
@@ -115,7 +114,6 @@ public class Cia401ConfigurationTests
     {
         var rpdo = Pdo(Config(@do: 20), number: 1, isTpdo: false);
 
-        rpdo.Enabled.Should().BeTrue();
         rpdo.Entries.Should().Equal(
             ((ushort)0x6200, (byte)1, (byte)8),
             ((ushort)0x6200, (byte)2, (byte)8),
@@ -148,12 +146,11 @@ public class Cia401ConfigurationTests
     // ---- analog inputs, TPDO 2 to 4, §6.2.8, §6.2.10, §6.2.12 -----------------------------------
 
     [Fact]
-    public void Five_Analog_Inputs_Fill_The_Second_TPDO_And_Start_The_Third_Both_Disabled()
+    public void Five_Analog_Inputs_Fill_The_Second_TPDO_And_Start_The_Third()
     {
         var configuration = Config(ai: 5);
 
         var tpdo2 = Pdo(configuration, number: 2, isTpdo: true);
-        tpdo2.Enabled.Should().BeFalse();
         tpdo2.Entries.Should().Equal(
             ((ushort)0x6401, (byte)1, (byte)16),
             ((ushort)0x6401, (byte)2, (byte)16),
@@ -161,7 +158,6 @@ public class Cia401ConfigurationTests
             ((ushort)0x6401, (byte)4, (byte)16));
 
         var tpdo3 = Pdo(configuration, number: 3, isTpdo: true);
-        tpdo3.Enabled.Should().BeFalse();
         tpdo3.Entries.Should().Equal(((ushort)0x6401, (byte)5, (byte)16));
 
         Has(configuration, 4, isTpdo: true).Should().BeFalse();
@@ -192,7 +188,6 @@ public class Cia401ConfigurationTests
             }
 
             var tpdo = Pdo(configuration, number, isTpdo: true);
-            tpdo.Enabled.Should().BeFalse($"TPDO {number} carries analog inputs");
             tpdo.Entries.Should().HaveCount(expected[i]);
             tpdo.Entries.Select(e => e.Subindex).Should().Equal(
                 Enumerable.Range(1 + (4 * i), expected[i]).Select(s => (byte)s));
@@ -211,7 +206,7 @@ public class Cia401ConfigurationTests
     [InlineData(12, 4, 4, 4)]
     [InlineData(13, 4, 4, 4)]
     [InlineData(254, 4, 4, 4)]
-    public void Analog_Outputs_Spread_Over_Up_To_Three_RPDOs_Of_Four_Channels_All_Enabled(
+    public void Analog_Outputs_Spread_Over_Up_To_Three_RPDOs_Of_Four_Channels(
         int outputs, int out2, int out3, int out4)
     {
         var configuration = Config(ao: outputs);
@@ -227,7 +222,6 @@ public class Cia401ConfigurationTests
             }
 
             var rpdo = Pdo(configuration, number, isTpdo: false);
-            rpdo.Enabled.Should().BeTrue();
             rpdo.Entries.Should().HaveCount(expected[i]);
             rpdo.Entries.Select(e => e.Subindex).Should().Equal(
                 Enumerable.Range(1 + (4 * i), expected[i]).Select(s => (byte)s));
@@ -247,9 +241,6 @@ public class Cia401ConfigurationTests
             (2, false), (2, true),
             (3, false), (3, true),
             (4, false), (4, true));
-        configuration.DefaultPdos.Where(p => !p.IsTpdo).Should().OnlyContain(p => p.Enabled);
-        configuration.DefaultPdos.Where(p => p.IsTpdo && p.Number == 1).Should().OnlyContain(p => p.Enabled);
-        configuration.DefaultPdos.Where(p => p.IsTpdo && p.Number > 1).Should().OnlyContain(p => !p.Enabled);
     }
 
     [Fact]
@@ -292,21 +283,18 @@ public class Cia401ConfigurationTests
         var configuration = Config(di: 8, @do: 8, ai: 5, ao: 5, logicalDevice: 1);
 
         var tpdo1 = Pdo(configuration, number: 65, isTpdo: true);
-        tpdo1.Enabled.Should().BeTrue();
         tpdo1.Entries.Should().Equal(((ushort)0x6800, (byte)1, (byte)8));
 
         Pdo(configuration, number: 65, isTpdo: false).Entries.Should()
             .Equal(((ushort)0x6A00, (byte)1, (byte)8));
 
         var tpdo2 = Pdo(configuration, number: 66, isTpdo: true);
-        tpdo2.Enabled.Should().BeFalse();
         tpdo2.Entries.Select(e => e.Index).Should().OnlyContain(i => i == 0x6C01);
         tpdo2.Entries.Should().HaveCount(4);
         Pdo(configuration, number: 67, isTpdo: true).Entries.Should()
             .Equal(((ushort)0x6C01, (byte)5, (byte)16));
 
         var rpdo2 = Pdo(configuration, number: 66, isTpdo: false);
-        rpdo2.Enabled.Should().BeTrue();
         rpdo2.Entries.Select(e => e.Index).Should().OnlyContain(i => i == 0x6C11);
         Pdo(configuration, number: 67, isTpdo: false).Entries.Should()
             .Equal(((ushort)0x6C11, (byte)5, (byte)16));

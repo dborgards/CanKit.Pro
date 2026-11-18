@@ -113,7 +113,7 @@ public class Cia401DeviceDigitalInputTests
         od.ReadUnsigned(0x1400, 0x01).Should().Be(Cia401Rig.Rpdo1, "RPDO 1, digital outputs (§6.2.5)");
         od.ReadUnsigned(0x1401, 0x01).Should().Be(Cia401Rig.Rpdo2, "RPDO 2, analog outputs (§6.2.7)");
         od.ReadUnsigned(0x1800, 0x01).Should().Be(Cia401Rig.Tpdo1, "TPDO 1, digital inputs (§6.2.6)");
-        od.ReadUnsigned(0x1801, 0x01).Should().Be(0x8000_0000u | Cia401Rig.Tpdo2, "TPDO 2, analog inputs, disabled");
+        od.ReadUnsigned(0x1801, 0x01).Should().Be(Cia401Rig.Tpdo2, "TPDO 2, analog inputs, valid (§6.2.8, Table 18)");
         rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
         rig.Device.ReadAnalogOutput(4).Should().Be(0);
 

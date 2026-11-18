@@ -147,6 +147,24 @@ public class Cia401DeviceDescriptionTests
         (await rig.ReadU8Async(0x6443, 0x01)).Should().Be(0x05);
     }
 
+    [Fact] // #556: a configured device's default TPDO 2 is valid, but a description that declares the PDO wins
+    public void A_Configured_Device_Leaves_The_Tpdo_Records_A_Description_Declares_As_The_File_Has_Them()
+    {
+        // cia401.eds without its profile objects, which a configured device refuses to find in its
+        // range, and with TPDO 2 declared invalid: the node keeps the file's PDO records, and the
+        // device's default for TPDO 2, valid with its mapping, has no effect (the seam's rule for a
+        // described PDO). The file's mapping of TPDO 2 names 6401h, which does not exist when the node
+        // loads the file, so the record comes up empty: whether such a TPDO would be silent at Start
+        // cannot be shown on this combination, and the test does not claim it.
+        var eds = Eds.Of("cia401.eds").Set("1801sub1", "DefaultValue", "$NODEID+0x80000280");
+        foreach (var index in Cia401ToolRig.FixtureDescription.Objects.Objects.Keys.Where(i => i is >= 0x6000 and <= 0x67FF).ToList())
+            eds.Remove(index);
+        using var rig = new Cia401Rig(new Cia401Device(Cia401ToolRig.FixtureConfiguration), eds.Parse());
+
+        rig.Od.ReadUnsigned(0x1801, 0x01).Should().Be(0x8000_0000u | Cia401Rig.Tpdo2, "the file's COB-ID, bit 31 set, not the device's valid default");
+        rig.Od.ReadUnsigned(0x1A01, 0x00).Should().Be(0u, "the file's mapping record, not the device's default mapping of analog inputs 1 and 2");
+    }
+
     [Fact]
     public async Task An_Index_Of_The_Range_The_Catalogue_Does_Not_Know_Is_Stored_As_Its_Access_Allows()
     {

@@ -159,9 +159,8 @@ public class Cia401EndToEndTests
     [Fact]
     public async Task An_Analog_Interrupt_The_Peer_Configures_Fires_The_Tpdo_It_Is_Observed_In()
     {
-        using var rig = new Cia401ToolRig(Cia401Rig.WritablePdoRecords);
+        using var rig = new Cia401ToolRig();
         var peer = await ConnectAsync(rig);
-        await rig.Rig.EnableTpdoAsync(2); // a PDO is not a profile object: the peer has no call for it
         var ai = peer.AnalogInputs!;
         await ai.WriteInterruptTriggerAsync(1, Cia401AnalogInterruptTrigger.Delta).WithTimeoutAsync(HangGuard);
         await ai.WriteInterruptDeltaAsync(1, 50).WithTimeoutAsync(HangGuard);

@@ -28,9 +28,6 @@ public class Cia401DeviceResetTests
         AnalogOutputs = 4,
     };
 
-    /// <summary>TPDO 2's COB-ID as the device sets it: the pre-defined CAN-ID, bit 31 set, "PDO does
-    /// not exist / is not valid" (CiA 301 v4.2.0 §7.5.2.37).</summary>
-    private const uint Tpdo2Disabled = 0x8000_0000u | Cia401Rig.Tpdo2;
 
     /// <summary>Every entry of the PDO records (<c>1400h</c> to <c>1BFFh</c>) and of the logical
     /// device's application area (<c>6000h</c> to <c>67FFh</c>), as raw bytes.</summary>
@@ -97,8 +94,8 @@ public class Cia401DeviceResetTests
         rig.Settle();
         var poweredOn = Snapshot(rig, 0x1400, 0x67FF);
         await WriteEverythingAsync(rig);
+        await rig.DisableTpdoAsync(2);
         await rig.WriteU8Async(0x1801, 0x02, 0xFE);
-        await rig.EnableTpdoAsync(2);
         await rig.StartAndTakeFirstTpdoAsync();
         await rig.SendRpdo1Async(0xA5);
         await rig.SendRpdo2Async(Cia401Rig.Words(100, 200, 300, 400));
@@ -114,7 +111,7 @@ public class Cia401DeviceResetTests
         (await rig.ReadU8Async(0x6443, 0x01)).Should().Be(0x01, "the catalogue default of 6443h (§8.7.4)");
         (await rig.ReadU8Async(0x6206, 0x01)).Should().Be(0xFF, "the catalogue default of 6206h (§8.3.3)");
         (await rig.ReadU8Async(0x6423, 0x00)).Should().Be(0x00, "the catalogue default of 6423h (§8.6.4)");
-        (await rig.ReadU32Async(0x1801, 0x01)).Should().Be(Tpdo2Disabled, "TPDO 2 is disabled again");
+        (await rig.ReadU32Async(0x1801, 0x01)).Should().Be(Cia401Rig.Tpdo2, "TPDO 2 is valid again (§6.2.8, Table 18)");
         (await rig.ReadU8Async(0x1801, 0x02)).Should().Be(0xFF, "the default transmission type (§6.2.8)");
         rig.Device.OutputsInErrorState.Should().BeFalse("the reset ended Stopped");
         rig.Device.ReadDigitalOutputs(1).Should().Be(0x00, "the held output values are gone: 6200h is 00h (§6.2.5 NOTE)");
@@ -122,8 +119,9 @@ public class Cia401DeviceResetTests
             "the held analog values are gone: 6411h is 0000h (§6.2.7 NOTE)");
 
         await rig.StartAndTakeFirstTpdoAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo2, tpdo2Before + 1);
         await rig.DrainAsync();
-        rig.Count(Cia401Rig.Tpdo2).Should().Be(tpdo2Before, "a disabled TPDO 2 is not sent on entering Operational");
+        rig.Count(Cia401Rig.Tpdo2).Should().Be(tpdo2Before + 1, "the restored TPDO 2 is valid and goes out once on entering Operational (§6.1)");
         await rig.SendRpdo1Async(0x0F);
         rig.Device.ReadDigitalOutputs(1).Should().Be(0x0F, "the filter mask is FFh again and no polarity inverts");
     }
@@ -135,8 +133,8 @@ public class Cia401DeviceResetTests
         rig.Settle();
         var pdoRecordsPoweredOn = PdoRecords(rig);
         await WriteEverythingAsync(rig);
+        await rig.DisableTpdoAsync(2);
         await rig.WriteU8Async(0x1801, 0x02, 0xFE);
-        await rig.EnableTpdoAsync(2);
         await rig.StartAndTakeFirstTpdoAsync();
         await rig.SendRpdo1Async(0xA5);
         await rig.SendRpdo2Async(Cia401Rig.Words(100, 200, 300, 400));
@@ -148,7 +146,7 @@ public class Cia401DeviceResetTests
 
         Differences(applicationBefore, ApplicationObjects(rig)).Should().BeEmpty("the application objects keep their values");
         Differences(pdoRecordsPoweredOn, PdoRecords(rig)).Should().BeEmpty("the PDO records are back at their defaults");
-        (await rig.ReadU32Async(0x1801, 0x01)).Should().Be(Tpdo2Disabled, "TPDO 2 is disabled again");
+        (await rig.ReadU32Async(0x1801, 0x01)).Should().Be(Cia401Rig.Tpdo2, "TPDO 2 is valid again (§6.2.8, Table 18)");
         rig.Device.ReadDigitalOutputs(1).Should().Be(digitalBefore, "the outputs stay where they are");
         Enumerable.Range(1, 4).Select(c => rig.Device.ReadAnalogOutput(c)).Should().Equal(new short[] { 100, 200, 300, 400 });
     }
@@ -158,8 +156,7 @@ public class Cia401DeviceResetTests
     [Fact]
     public async Task Reset_Node_Shows_The_Applications_Input_Levels_Not_The_Restored_Ones()
     {
-        using var rig = new Cia401Rig(
-            new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 4 }, Cia401Rig.WritablePdoRecords);
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 4 });
         await rig.WriteU8Async(0x6002, 0x01, 0xFF);
         rig.Device.SetDigitalInputs(1, 0x0F);
         rig.Device.SetAnalogInput(1, 1234);
@@ -176,7 +173,6 @@ public class Cia401DeviceResetTests
 
         int tpdo1 = rig.Count(Cia401Rig.Tpdo1);
         int tpdo2 = rig.Count(Cia401Rig.Tpdo2);
-        await rig.EnableTpdoAsync(2);
         await rig.StartAsync();
         await rig.WaitForCountAsync(Cia401Rig.Tpdo1, tpdo1 + 1);
         await rig.WaitForCountAsync(Cia401Rig.Tpdo2, tpdo2 + 1);
