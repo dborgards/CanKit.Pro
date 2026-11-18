@@ -218,6 +218,76 @@ public partial class CanOpenApplicationSeamTests
         DeviceTypeOf(rig.SlaveNode, 0x6FFF).Should().Be(Profile408, "1011h load returns the chain to what Attach composed");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // 1000h composed by the node is the node's power-on value: restorable like the chain.
+    // -----------------------------------------------------------------------------------------
+
+    private const uint Overwritten = 0x00070123;
+
+    [Theory]
+    [InlineData(NmtCommand.ResetNode)]
+    [InlineData(NmtCommand.ResetCommunication)]
+    public async Task A_Reset_Restores_The_Composed_1000h_After_It_Was_Overwritten(NmtCommand reset)
+    {
+        using var rig = new ResetRig(Typed("one", (0, Profile401)));
+        await rig.Bootups.First;
+        rig.Od.WriteUnsigned(0x1000, 0x00, Overwritten);
+
+        await rig.ResetAsync(reset);
+
+        DeviceTypeOf(rig.SlaveNode).Should().Be(Profile401,
+            "the node composed 1000h, so the composed word is its power-on value, and 1000h lies in the area both resets restore");
+    }
+
+    [Fact]
+    public async Task A_Stored_Overwrite_Of_The_Composed_1000h_Survives_Reset_Node()
+    {
+        // The rule of every restorable object: 1010h stores what the dictionary holds at the "save",
+        // and Reset Node returns to the last stored values.
+        using var rig = new ResetRig(Typed("one", (0, Profile401)));
+        await rig.Bootups.First;
+        rig.Od.WriteUnsigned(0x1000, 0x00, Overwritten);
+        rig.SlaveNode.StoreParameters();
+        rig.Od.WriteUnsigned(0x1000, 0x00, 0);
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        DeviceTypeOf(rig.SlaveNode).Should().Be(Overwritten, "the save stored it");
+    }
+
+    [Fact]
+    public async Task Restoring_Defaults_Returns_1000h_To_The_Composed_Word()
+    {
+        using var rig = new ResetRig(Typed("one", (0, Profile401)));
+        await rig.Bootups.First;
+        rig.Od.WriteUnsigned(0x1000, 0x00, Overwritten);
+        rig.SlaveNode.StoreParameters();
+        rig.SlaveNode.RestoreDefaultParameters();
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        DeviceTypeOf(rig.SlaveNode).Should().Be(Profile401, "1011h load returns 1000h to what Attach composed");
+    }
+
+    [Fact]
+    public async Task An_Applications_Own_1000h_Stays_Across_A_Reset()
+    {
+        // No SetDeviceType: the application put the word there itself, so the node has no power-on
+        // value for 1000h, as without applications (FR-CO-019).
+        const uint Own = 0x00030191;
+        var app = new RecordingApplication("writer", CanOpenIndexRange.ForLogicalDevice(0))
+        {
+            OnAttach = host => host.ObjectDictionary.WriteUnsigned(0x1000, 0x00, Own),
+        };
+        using var rig = new ResetRig(app);
+        await rig.Bootups.First;
+        rig.Od.WriteUnsigned(0x1000, 0x00, Overwritten);
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        DeviceTypeOf(rig.SlaveNode).Should().Be(Overwritten, "the node did not compose 1000h, so it does not restore it");
+    }
+
     [Fact]
     public void A_Chain_Object_The_Application_Declared_Itself_Fails_The_Open()
     {

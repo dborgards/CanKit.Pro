@@ -21,6 +21,12 @@ internal sealed partial class CanOpenNode
     // thread only.
     private List<(int LogicalDevice, CanOpenDeviceType DeviceType, ApplicationSlot Setter)>? _deviceTypes;
 
+    // Whether the node wrote 1000h from what the applications set (no device description declared
+    // it). Written once, on the constructing thread, before the power-on values are taken and before
+    // anything else reads it: IsRestorableObject reads it on the actor and, for a 1010h save, on the
+    // writer's thread.
+    private bool _composedDeviceType;
+
     /// <summary>
     /// Records the device type <paramref name="slot"/>'s application gives one of its logical
     /// devices. Only the attaching application may, and only for a device whose <c>67FFh + n·800h</c>
@@ -95,6 +101,10 @@ internal sealed partial class CanOpenNode
                 ? types[0].Value
                 : types[0].ProfileNumber | ((uint)CanOpenDeviceType.FurtherLogicalDevices << 16);
             _od.WriteRawUnchecked(Co.DeviceType, 0x00, ObjectDictionary.EncodeU32(word));
+            // The node holds this identity now, and for a single logical device 1000h is the only
+            // place it lives: 1000h is restorable from here on (IsRestorableObject). Before
+            // AttachApplications retakes the power-on values, so the composed word is among them.
+            _composedDeviceType = true;
         }
 
         for (int device = 0; device < count; device++)

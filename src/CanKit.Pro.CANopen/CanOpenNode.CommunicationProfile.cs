@@ -45,7 +45,11 @@ namespace CanKit.Pro.CANopen;
 /// <see cref="ICanOpenNode.ApplicationReset"/>, which runs before the boot-up goes out. A device
 /// description makes every object it declares restorable, and an attached application every index
 /// it claims, its power-on value being what it declared in <c>Attach</c>; Reset Node returns those
-/// to their power-on values, Reset Communication leaves the ones above <c>1FFFh</c> alone.
+/// to their power-on values, Reset Communication leaves the ones above <c>1FFFh</c> alone. When the
+/// node composed <c>1000h</c> itself from the device types the applications set (and no description
+/// declared it), <c>1000h</c> is restorable too, its power-on value the composed word; both commands
+/// restore it, as it lies in the communication profile area. A "save" stores it like any other
+/// restorable object, and a "load" returns it to the composed word.
 /// </para>
 /// </remarks>
 internal sealed partial class CanOpenNode
@@ -294,13 +298,16 @@ internal sealed partial class CanOpenNode
     /// (1001h, 1003h) and the constant records (1010h/1011h capabilities, 1200h) — and every object a
     /// device description declared, the placeholders 1000h/1018h and the application objects
     /// among them, and every index an attached application claims, whose power-on value is what it
-    /// declared in <c>Attach</c>. Outside those the node has no power-on source: what the
-    /// application put into 1000h, 1018h or an object neither described nor claimed stays across a
-    /// reset, as FR-CO-019 and the README say. Reset Communication restores the communication
-    /// profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
+    /// declared in <c>Attach</c>, and 1000h when the node composed it from what the applications set
+    /// with <c>SetDeviceType</c> (no description declared it), its power-on value being the composed
+    /// word. Outside those the node has no power-on source: what the application put into 1000h
+    /// itself, 1018h or an object neither described nor claimed stays across a reset, as FR-CO-019
+    /// and the README say. Reset Communication restores the communication profile area
+    /// (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
     /// </summary>
     private bool IsRestorableObject(ushort index)
-        => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index) || IsClaimed(index))
+        => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index) || IsClaimed(index)
+               || (index == Co.DeviceType && _composedDeviceType))
            && index is not (Co.ErrorRegister or Co.ErrorHistory or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
 
     // The objects a device description declared and the loader created or took over; empty
