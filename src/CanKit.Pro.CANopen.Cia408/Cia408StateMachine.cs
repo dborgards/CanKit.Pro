@@ -20,26 +20,29 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// <c>0111b</c> in INIT takes D2, D3 and D4 and ends in ACTIVE, <c>0000b</c> in ACTIVE takes D5, D6
 /// and D7 and ends in INIT. The conditions overlap — D5 (<c>x0xx</c>) and D6 (<c>x00x</c>) and D7
 /// (<c>x000</c>) — but never within one state, so the order of evaluation does not matter.</description></item>
-/// <item><description><b>A fault reset is an edge of bit 3.</b> Table 7 gives D10, D11 and D14 as a
-/// change "from" a word with R = 0 "to" one with R = 1 and marks them "toggle bit 3" (NOTE 2), with
-/// bits 2..0 equal to the fault state's own pattern: <c>001</c> for FAULT_DISABLED, <c>011</c> for
-/// FAULT_HOLD, <c>000</c> for FAULT_INIT. Bit 3 held at 1 does nothing in a fault state. After a
-/// reset the same control word is followed on as above; since it carries the pattern of the state
+/// <item><description><b>A fault reset is a change between two words, as Table 7 writes it.</b>
+/// Table 7 gives D10, D11 and D14 as a change from one word to another and marks them only "toggle
+/// bit 3" (NOTE 2); its rows fix both words: the previous one with R = 0 and bits 2..0 at the fault
+/// state's own pattern, the written one with R = 1 and the same pattern — <c>0001b</c> to
+/// <c>1001b</c> for FAULT_DISABLED (D10), <c>0011b</c> to <c>1011b</c> for FAULT_HOLD (D11),
+/// <c>0000b</c> to <c>1000b</c> for FAULT_INIT (D14). The note alone would ask for no more than a
+/// rising bit 3; the rows are read literally, so both words must match (FAULT_HOLD with
+/// <c>0000b</c> then <c>1011b</c> does not reset), and bit 3 held at 1 does nothing in a fault
+/// state. Table 8 gives D14's written word as <c>x000</c>, contradicting the toggle; Table 7's
+/// <c>1000</c> is taken.</description></item>
+/// <item><description><b>A reset is evaluated once, in the state the write arrives in, before any
+/// level transition.</b> Tables 7 and 8 give each transition's condition and no order between
+/// them; the norm is silent on whether one write may take a fall within the fault states and then
+/// a reset. Here it may not: <c>0001b</c> then <c>1001b</c> in FAULT_HOLD takes D15 only and stays
+/// in FAULT_DISABLED, where a following <c>0001b</c>, <c>1001b</c> pair resets. After a reset taken
+/// on arrival the written word is followed on as above; since it carries the pattern of the state
 /// the reset leads to, it never moves further (<c>1011b</c> after D11 stays in HOLD; ACTIVE would
-/// need bit 2). Table 8 gives D14's second word as <c>x000</c>, contradicting the toggle; Table 7's
-/// <c>1000</c> is taken. Which bits of the <i>previous</i> word count is open: Table 7's "from" row
-/// fixes bits 2..0 of the previous word as well, the reading in force checks only its bit 3 (see
-/// <see cref="Transition.Matches"/>).</description></item>
+/// need bit 2).</description></item>
 /// <item><description><b>Down within the fault states by level</b>, bit 3 ignored: D15
 /// (FAULT_HOLD to FAULT_DISABLED, <c>x001b</c>) and D16 (FAULT_DISABLED to FAULT_INIT,
 /// <c>x000b</c>), from Tables 7 and 8. Table 6 gives both the same event, a command leading to INIT
 /// after FAULT_INIT, which fits neither; the tables and Figure 1 are taken. FAULT_HOLD with <c>x000b</c> takes
 /// no transition: D15 needs <c>x001b</c> and Table 7 has nothing else from FAULT_HOLD.</description></item>
-/// <item><description><b>A reset can follow a fall within one write.</b> Following to the stable
-/// state, <c>1001b</c> with a rising bit 3 in FAULT_HOLD takes D15 and then D10 (ending in
-/// DISABLED), and <c>1000b</c> with a rising bit 3 in FAULT_DISABLED takes D16 and then D14 (ending
-/// in INIT). Within one state a reset and a fall never apply to the same words; across the
-/// cascade they do, and the norm says nothing against it.</description></item>
 /// <item><description><b>Leaving FAULT_REACTION is the device's decision.</b> Table 4 makes the
 /// resulting fault state manufacturer-specific and Table 9 bounds it by the state the fault came
 /// from; Table 7 also lists control-word patterns for D12 and D13 and Table 8 alone one for D9.
@@ -58,7 +61,8 @@ internal sealed class Cia408StateMachine
 
     /// <summary>The transitions caused by a control word (CiA 408 v2.2.0 §7.7, Table 7), one row
     /// each: from, to, and the bits 3..0 of the current word under a mask. A reset row also needs
-    /// a rising bit 3 (<see cref="Transition.Matches"/>).</summary>
+    /// the previous word at its pattern with bit 3 at 0 (<see cref="Transition.Matches"/>) and is
+    /// evaluated only in the state a write arrives in.</summary>
     internal static IReadOnlyList<Transition> ControlWordTransitions { get; } = new Transition[]
     {
         //  D    from                         to                           mask    value   reset edge
@@ -108,18 +112,25 @@ internal sealed class Cia408StateMachine
         return [0, 1];
     }
 
-    /// <summary>Applies a write of the control word (<c>6040h</c> or <c>6044h</c>): the
-    /// transitions of Table 7 (CiA 408 v2.2.0 §7.7) whose conditions <paramref name="previous"/>
-    /// and <paramref name="current"/> meet, followed until none applies (see the remarks on this
-    /// class). Only bits 3..0 count. In NOT_READY nothing happens. The machine keeps no copy of
-    /// the control word: the caller passes the one it replaces.</summary>
+    /// <summary>Applies a write of the control word (<c>6040h</c> or <c>6044h</c>): a fault reset
+    /// of Table 7 (CiA 408 v2.2.0 §7.7) if <paramref name="previous"/> and
+    /// <paramref name="current"/> make one in the state the write arrives in, then the level
+    /// transitions of Table 7 that <paramref name="current"/> meets, followed until none applies
+    /// (see the remarks on this class). Only bits 3..0 count. In NOT_READY nothing happens. The
+    /// machine keeps no copy of the control word: the caller passes the one it replaces.</summary>
     /// <param name="previous">The control word before this write.</param>
     /// <param name="current">The control word written.</param>
     /// <returns>The D-numbers taken, in order; empty when the write moves nothing.</returns>
     public IReadOnlyList<int> ApplyControlWord(uint previous, uint current)
     {
         List<int>? taken = null;
-        while (Next(previous, current) is { } transition)
+        if (Next(previous, current, reset: true) is { } reset)
+        {
+            taken = [reset.Number];
+            State = reset.To;
+        }
+
+        while (Next(previous, current, reset: false) is { } transition)
         {
             taken ??= new List<int>();
             if (taken.Count == ControlWordTransitions.Count)
@@ -135,11 +146,11 @@ internal sealed class Cia408StateMachine
         return taken is null ? Array.Empty<int>() : taken;
     }
 
-    private Transition? Next(uint previous, uint current)
+    private Transition? Next(uint previous, uint current, bool reset)
     {
         foreach (var transition in ControlWordTransitions)
         {
-            if (transition.From == State && transition.Matches(previous, current)) return transition;
+            if (transition.ResetEdge == reset && transition.From == State && transition.Matches(previous, current)) return transition;
         }
 
         return null;
@@ -247,18 +258,17 @@ internal sealed class Cia408StateMachine
         /// <summary>Their required values.</summary>
         public uint Value { get; }
 
-        /// <summary>A fault reset: bit 3 must rise from <c>previous</c> to <c>current</c>.</summary>
+        /// <summary>A fault reset: bit 3 must rise from <c>previous</c> to <c>current</c>, both
+        /// words carrying the fault state's pattern in bits 2..0.</summary>
         public bool ResetEdge { get; }
 
         /// <summary>Whether a write from <paramref name="previous"/> to <paramref name="current"/>
-        /// meets this row. For a reset row the previous word is checked for bit 3 at 0 only.
-        /// Table 7's "from" row also shows bits 2..0 of the previous word at the fault state's
-        /// pattern; whether that binds is an open question, and this is the one place to change if
-        /// it does.</summary>
+        /// meets this row. A reset row needs the previous word's bits 3..0 as Table 7's first word
+        /// gives them: bit 3 at 0, bits 2..0 at the pattern of <see cref="Value"/>.</summary>
         public bool Matches(uint previous, uint current)
         {
             if ((current & MachineBits & Mask) != Value) return false;
-            return !ResetEdge || (previous & ResetFaultBit) == 0;
+            return !ResetEdge || (previous & MachineBits) == (Value & ~ResetFaultBit);
         }
     }
 }

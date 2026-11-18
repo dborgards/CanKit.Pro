@@ -74,19 +74,19 @@ public class Cia408StateMachineTests
 
     // ---- Review Focus 4: the 9 x 16 x 2 table ---------------------------------------------------
 
-    // One line per (start state, bits 3..0 of the current control word, R M H D). The two columns
-    // are the outcome with bit 3 of the previous control word at 0 and at 1: successor state and
-    // the D-numbers taken, in order. The previous word's bits 2..0 equal the current word's in
-    // every row — the table varies the R edge only, and is silent on what the previous low bits
-    // must be (an open question of Table 7, see the state machine's documentation).
-    //
-    // Read from Table 7 (CiA 408 v2.2.0 §7.7, p26-27) with the transitions followed until none
-    // applies:
+    // Read from Table 7 (CiA 408 v2.2.0 §7.7, p26-27). A reset is evaluated once, in the state the
+    // write arrives in, and needs both words as Table 7 writes them; then the level transitions are
+    // followed until none applies:
     //   D2 INIT->DISABLED xxx1   D3 DISABLED->HOLD xx11   D4 HOLD->ACTIVE x111
     //   D5 ACTIVE->HOLD x0xx     D6 HOLD->DISABLED x00x   D7 DISABLED->INIT x000
     //   D10 FAULT_DISABLED->DISABLED 0001 to 1001   D11 FAULT_HOLD->HOLD 0011 to 1011
     //   D14 FAULT_INIT->INIT 0000 to 1000           D15 FAULT_HOLD->FAULT_DISABLED x001
     //   D16 FAULT_DISABLED->FAULT_INIT x000
+    //
+    // Outside the fault states: one line per (start state, bits 3..0 of the written control word,
+    // R M H D). The two columns are the outcome with bit 3 of the previous control word at 0 and at
+    // 1: successor state and the D-numbers taken, in order. The previous word's bits 2..0 equal the
+    // written word's; no transition from these states looks at the previous word.
     private static readonly string[] ControlWordTable =
     {
         // state          bits   previous bit 3 = 0         previous bit 3 = 1
@@ -174,61 +174,79 @@ public class Cia408StateMachineTests
         "Active           1101   Active []                  Active []",
         "Active           1110   Active []                  Active []",
         "Active           1111   Active []                  Active []",
+    };
 
-        "FaultInit        0000   FaultInit []               FaultInit []",
-        "FaultInit        0001   FaultInit []               FaultInit []",
-        "FaultInit        0010   FaultInit []               FaultInit []",
-        "FaultInit        0011   FaultInit []               FaultInit []",
-        "FaultInit        0100   FaultInit []               FaultInit []",
-        "FaultInit        0101   FaultInit []               FaultInit []",
-        "FaultInit        0110   FaultInit []               FaultInit []",
-        "FaultInit        0111   FaultInit []               FaultInit []",
-        "FaultInit        1000   Init [14]                  FaultInit []",
-        "FaultInit        1001   FaultInit []               FaultInit []",
-        "FaultInit        1010   FaultInit []               FaultInit []",
-        "FaultInit        1011   FaultInit []               FaultInit []",
-        "FaultInit        1100   FaultInit []               FaultInit []",
-        "FaultInit        1101   FaultInit []               FaultInit []",
-        "FaultInit        1110   FaultInit []               FaultInit []",
-        "FaultInit        1111   FaultInit []               FaultInit []",
+    // The fault states: one line per (start state, bits 3..0 of the written word). A reset looks
+    // at the previous word as well, so it varies in bits 3..0 here: bit 3 at 0 or 1, and bits 2..0
+    // at the state's own pattern P or at another pattern Q (see FaultPatterns). Columns: previous
+    // 0P, 1P, 0Q, 1Q. Q is the pattern a fall from the state would leave behind where there is one
+    // (FAULT_HOLD -> 001, FAULT_DISABLED -> 000), so the rows also show that a fall and a reset are
+    // never taken by one write; FAULT_INIT has no fall and takes 001.
+    private static readonly string[] FaultStateTable =
+    {
+        // state          bits   0P                     1P                     0Q                     1Q
+        "FaultInit        0000   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0001   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0010   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0011   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0100   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0101   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0110   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        0111   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1000   Init [14]              FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1001   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1010   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1011   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1100   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1101   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1110   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
+        "FaultInit        1111   FaultInit []           FaultInit []           FaultInit []           FaultInit []",
 
-        "FaultDisabled    0000   FaultInit [16]             FaultInit [16]",
-        "FaultDisabled    0001   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    0010   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    0011   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    0100   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    0101   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    0110   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    0111   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    1000   Init [16,14]               FaultInit [16]",
-        "FaultDisabled    1001   Disabled [10]              FaultDisabled []",
-        "FaultDisabled    1010   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    1011   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    1100   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    1101   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    1110   FaultDisabled []           FaultDisabled []",
-        "FaultDisabled    1111   FaultDisabled []           FaultDisabled []",
+        "FaultDisabled    0000   FaultInit [16]         FaultInit [16]         FaultInit [16]         FaultInit [16]",
+        "FaultDisabled    0001   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    0010   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    0011   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    0100   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    0101   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    0110   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    0111   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1000   FaultInit [16]         FaultInit [16]         FaultInit [16]         FaultInit [16]",
+        "FaultDisabled    1001   Disabled [10]          FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1010   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1011   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1100   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1101   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1110   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
+        "FaultDisabled    1111   FaultDisabled []       FaultDisabled []       FaultDisabled []       FaultDisabled []",
 
-        "FaultHold        0000   FaultHold []               FaultHold []",
-        "FaultHold        0001   FaultDisabled [15]         FaultDisabled [15]",
-        "FaultHold        0010   FaultHold []               FaultHold []",
-        "FaultHold        0011   FaultHold []               FaultHold []",
-        "FaultHold        0100   FaultHold []               FaultHold []",
-        "FaultHold        0101   FaultHold []               FaultHold []",
-        "FaultHold        0110   FaultHold []               FaultHold []",
-        "FaultHold        0111   FaultHold []               FaultHold []",
-        "FaultHold        1000   FaultHold []               FaultHold []",
-        "FaultHold        1001   Disabled [15,10]           FaultDisabled [15]",
-        "FaultHold        1010   FaultHold []               FaultHold []",
-        "FaultHold        1011   Hold [11]                  FaultHold []",
-        "FaultHold        1100   FaultHold []               FaultHold []",
-        "FaultHold        1101   FaultHold []               FaultHold []",
-        "FaultHold        1110   FaultHold []               FaultHold []",
-        "FaultHold        1111   FaultHold []               FaultHold []",
+        "FaultHold        0000   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        0001   FaultDisabled [15]     FaultDisabled [15]     FaultDisabled [15]     FaultDisabled [15]",
+        "FaultHold        0010   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        0011   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        0100   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        0101   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        0110   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        0111   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1000   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1001   FaultDisabled [15]     FaultDisabled [15]     FaultDisabled [15]     FaultDisabled [15]",
+        "FaultHold        1010   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1011   Hold [11]              FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1100   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1101   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1110   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
+        "FaultHold        1111   FaultHold []           FaultHold []           FaultHold []           FaultHold []",
 
         // FAULT_REACTION is not reachable as a resting state: Fault() resolves it within the same
         // call (Table 9), so no control word ever meets it. Pinned by
         // No_Public_Call_Leaves_The_Machine_In_Fault_Reaction below.
+    };
+
+    // P and Q of each fault state, bits 2..0 (Table 7: D14 000, D10 001, D11 011).
+    private static readonly Dictionary<Cia408State, (uint Pattern, uint Other)> FaultPatterns = new()
+    {
+        [Cia408State.FaultInit] = (0b000, 0b001),
+        [Cia408State.FaultDisabled] = (0b001, 0b000),
+        [Cia408State.FaultHold] = (0b011, 0b001),
     };
 
     public static TheoryData<string, int> ControlWordRows()
@@ -243,10 +261,21 @@ public class Cia408StateMachineTests
         return data;
     }
 
+    public static TheoryData<string, int> FaultStateRows()
+    {
+        var data = new TheoryData<string, int>();
+        foreach (var line in FaultStateTable)
+        {
+            for (var column = 0; column < 4; column++) data.Add(line, column);
+        }
+
+        return data;
+    }
+
     [Fact]
     public void The_Table_Covers_Every_Resting_State_And_Every_Value_Of_Bits_3_To_0()
     {
-        var keys = ControlWordTable
+        var keys = ControlWordTable.Concat(FaultStateTable)
             .Select(line => line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
             .Select(cells => (Parse(cells[0]), Convert.ToUInt32(cells[1], 2)))
             .ToList();
@@ -267,6 +296,26 @@ public class Cia408StateMachineTests
         var expectedState = Parse(cells[2 + 2 * previousBit3]);
         var expectedSteps = ParseSteps(cells[3 + 2 * previousBit3]);
         var previous = ((uint)previousBit3 << 3) | (current & 0b0111);
+
+        var machine = In(start);
+        var taken = machine.ApplyControlWord(previous, current);
+
+        taken.Should().Equal(expectedSteps);
+        machine.State.Should().Be(expectedState);
+    }
+
+    [Theory]
+    [MemberData(nameof(FaultStateRows))]
+    public void A_Control_Word_In_A_Fault_State_Takes_Exactly_The_Transitions_Of_Table_7(string row, int column)
+    {
+        // state, bits, then (successor, D-list) for the previous words 0P, 1P, 0Q, 1Q.
+        var cells = row.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        var start = Parse(cells[0]);
+        var current = Convert.ToUInt32(cells[1], 2);
+        var expectedState = Parse(cells[2 + 2 * column]);
+        var expectedSteps = ParseSteps(cells[3 + 2 * column]);
+        var (pattern, other) = FaultPatterns[start];
+        var previous = (column % 2 == 1 ? 0b1000u : 0u) | (column < 2 ? pattern : other);
 
         var machine = In(start);
         var taken = machine.ApplyControlWord(previous, current);
@@ -331,19 +380,62 @@ public class Cia408StateMachineTests
         // FAULT_HOLD resets with 011 in bits 2..0 only (Table 7, D11); 111 is not its pattern.
         var machine = In(Cia408State.FaultHold);
 
-        machine.ApplyControlWord(0b0111, 0b1111).Should().BeEmpty();
+        machine.ApplyControlWord(0b0011, 0b1111).Should().BeEmpty();
         machine.State.Should().Be(Cia408State.FaultHold);
+    }
+
+    [Fact]
+    public void A_Fault_Reset_Needs_The_Previous_Word_At_The_Pattern_Too()
+    {
+        // Table 7 writes D11 as 0011 to 1011: the first word is part of the condition.
+        var machine = In(Cia408State.FaultHold);
+
+        machine.ApplyControlWord(0b0000, 0b1011).Should().BeEmpty();
+        machine.State.Should().Be(Cia408State.FaultHold);
+
+        machine.ApplyControlWord(0b0011, 0b1011).Should().Equal(11);
+        machine.State.Should().Be(Cia408State.Hold);
+    }
+
+    [Fact]
+    public void Fault_Disabled_Is_Acknowledged_By_0001h_Then_0009h()
+    {
+        // Issue #557: the two writes in order reset FAULT_DISABLED (D10, 0001 to 1001).
+        var machine = In(Cia408State.FaultDisabled);
+
+        machine.ApplyControlWord(0x0003, 0x0001).Should().BeEmpty();
+        machine.ApplyControlWord(0x0001, 0x0009).Should().Equal(10);
+        machine.State.Should().Be(Cia408State.Disabled);
+    }
+
+    [Fact]
+    public void A_Reset_Is_Not_Taken_After_A_Fall_In_The_Same_Write()
+    {
+        // 0001 then 1001 in FAULT_HOLD: D15 falls to FAULT_DISABLED, whose reset D10 the same
+        // write would meet; the reset is evaluated only in the state the write arrived in.
+        var machine = In(Cia408State.FaultHold);
+
+        machine.ApplyControlWord(0b0001, 0b1001).Should().Equal(15);
+        machine.State.Should().Be(Cia408State.FaultDisabled);
+
+        machine.ApplyControlWord(0b1001, 0b0001).Should().BeEmpty();
+        machine.ApplyControlWord(0b0001, 0b1001).Should().Equal(10);
+        machine.State.Should().Be(Cia408State.Disabled);
     }
 
     [Theory]
     [InlineData("FaultDisabled", 0b1001u, "Disabled", 10)]
     [InlineData("FaultHold", 0b1011u, "Hold", 11)]
     [InlineData("FaultInit", 0b1000u, "Init", 14)]
-    public void Each_Fault_State_Resets_On_Its_Own_Edge(string fault, uint current, string successor, int transition)
+    public void Each_Fault_State_Resets_On_Its_Own_Edge_And_Goes_No_Further(string fault, uint current, string successor, int transition)
     {
         var machine = In(Parse(fault));
 
+        // The written word is followed on after the reset, but it carries the pattern of the
+        // reset's target, so no level transition of Table 7 applies to it there.
         machine.ApplyControlWord(current & 0b0111, current).Should().Equal(transition);
+        machine.State.Should().Be(Parse(successor));
+        machine.ApplyControlWord(current, current).Should().BeEmpty();
         machine.State.Should().Be(Parse(successor));
     }
 
@@ -372,8 +464,9 @@ public class Cia408StateMachineTests
     public void In_One_State_No_Two_Transitions_Of_The_Table_Can_Apply_To_The_Same_Words()
     {
         // In particular a reset edge and a down transition of the same fault state never meet: the
-        // patterns differ (D10 001 vs D16 000; D11 011 vs D15 001). Across states they can, which
-        // is what the FaultHold 1001 and FaultDisabled 1000 rows of the table show.
+        // patterns differ (D10 001 vs D16 000; D11 011 vs D15 001). Across states they could
+        // (FAULT_HOLD 0001 to 1001 meets D15, then D10), which is why a reset is evaluated only in
+        // the state a write arrives in.
         foreach (var state in Enum.GetValues(typeof(Cia408State)).Cast<Cia408State>())
         {
             var from = Cia408StateMachine.ControlWordTransitions.Where(t => t.From == state).ToList();
@@ -392,23 +485,27 @@ public class Cia408StateMachineTests
     public void Bits_4_To_31_Never_Change_An_Outcome()
     {
         // Tables 7 and 8 give bits 7..4 as "0 or 1" in every row, and bits 8 and up are not part
-        // of either table.
+        // of either table. Every resting state and every pair of low nibbles, so each reset pair is
+        // met, each with random high bits on both words.
         var random = new Random(408);
-        for (var i = 0; i < 400; i++)
+        foreach (var state in RestingStates)
         {
-            var state = RestingStates[random.Next(RestingStates.Length)];
-            var previousLow = (uint)random.Next(16);
-            var currentLow = (uint)random.Next(16);
-            var previousHigh = (uint)random.Next() << 4;
-            var currentHigh = (uint)random.Next() << 4;
+            for (uint previousLow = 0; previousLow < 16; previousLow++)
+            {
+                for (uint currentLow = 0; currentLow < 16; currentLow++)
+                {
+                    var previousHigh = (uint)random.Next() << 4;
+                    var currentHigh = (uint)random.Next() << 4;
 
-            var plain = In(state);
-            var plainTaken = plain.ApplyControlWord(previousLow, currentLow);
-            var noisy = In(state);
-            var noisyTaken = noisy.ApplyControlWord(previousLow | previousHigh, currentLow | currentHigh);
+                    var plain = In(state);
+                    var plainTaken = plain.ApplyControlWord(previousLow, currentLow);
+                    var noisy = In(state);
+                    var noisyTaken = noisy.ApplyControlWord(previousLow | previousHigh, currentLow | currentHigh);
 
-            noisyTaken.Should().Equal(plainTaken, $"{state}, {previousLow}->{currentLow}");
-            noisy.State.Should().Be(plain.State);
+                    noisyTaken.Should().Equal(plainTaken, $"{state}, {previousLow}->{currentLow}");
+                    noisy.State.Should().Be(plain.State);
+                }
+            }
         }
     }
 
