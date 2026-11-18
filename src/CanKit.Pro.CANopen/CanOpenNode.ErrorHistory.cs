@@ -60,10 +60,15 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The EMCY in <paramref name="frame"/> is being transmitted: <c>1001h</c> gets the
     /// register the frame carries and <c>1003h</c> its error, as one write. Actor loop only.</summary>
-    private void NoteTransmittedEmcy(byte[] frame, byte? applicationErrorRegister, byte nodeBits)
+    /// <remarks>With applications the two can differ by the profile errors: the frame carries the
+    /// node's bits of the moment the EMCY was decided (<paramref name="nodeBits"/>), <c>1001h</c>
+    /// the profile errors as they are now (<see cref="UpdateErrorRegister"/>, #550). On a node
+    /// without applications <paramref name="nodeBits"/> is <paramref name="communicationBits"/>,
+    /// and both are the one register.</remarks>
+    private void NoteTransmittedEmcy(byte[] frame, byte? applicationErrorRegister, byte communicationBits, byte nodeBits)
         => _od.Transaction(() =>
         {
-            frame[2] = UpdateErrorRegister(applicationErrorRegister, nodeBits);
+            frame[2] = (byte)(UpdateErrorRegister(applicationErrorRegister, communicationBits) | nodeBits);
             EnterInErrorHistory(frame);
         });
 

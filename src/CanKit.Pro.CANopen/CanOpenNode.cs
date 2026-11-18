@@ -548,7 +548,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // register a master reads is the one the last EMCY on the bus carried, so it is written
     // inside the chain, right before its frame is transmitted — not when the call was posted,
     // nor for an EMCY that is disabled, held or cancelled and never reaches the bus (Codex on
-    // #133). Actor loop only.
+    // #133). The errors of an attached profile are the exception: 1001h shows them from their
+    // raise to their clear, whatever the chain holds (ProfileErrorBits, #550). Actor loop only.
     private Task _emcySendChain = Task.CompletedTask;
 
     // Every frame of this node on 0x700 + id — boot-up, state change, producer tick, guarding
@@ -606,8 +607,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var frame = msg.Encode();
         // The node's bits are those of the moment the EMCY is decided; the application's part is
         // read when it is transmitted, so it is the part of the last application EMCY before it
-        // on this chain (#379). msg.ErrorRegister is not used.
+        // on this chain (#379). msg.ErrorRegister is not used. The frame carries all the node's
+        // bits; 1001h takes the communication bits from here and the profile errors as they are
+        // when it is written (UpdateErrorRegister, #550).
         byte nodeBits = NodeErrorBits;
+        byte communicationBits = CommunicationErrorBits;
         object inhibitEpoch = _emcyInhibitEpoch;
         _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
@@ -623,10 +627,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // No frame. An application EMCY that does not reach the bus leaves 1001h alone;
                 // the node's own still sets the register it decided, so an error that ended is
                 // not read on (Codex on #417).
-                if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
+                if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, communicationBits);
                 return Task.CompletedTask;
             }
-            NoteTransmittedEmcy(frame, applicationErrorRegister, nodeBits);
+            NoteTransmittedEmcy(frame, applicationErrorRegister, communicationBits, nodeBits);
             var send = SendControlFrame(cobId, frame, cancellationToken);
             return _options.EnableEmcyInhibit ? RecordEmcyCompletionAsync(send, inhibitEpoch) : send;
         };

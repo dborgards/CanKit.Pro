@@ -506,16 +506,36 @@ internal sealed partial class CanOpenNode
     /// error "shall be signaled at any error situation"). An EMCY carries it ORed with the
     /// application's part. Equal to <see cref="CommunicationErrorBits"/> on a node without
     /// applications.</summary>
-    private byte NodeErrorBits
+    private byte NodeErrorBits => (byte)(CommunicationErrorBits | ProfileErrorBits);
+
+    /// <summary>The bits of every profile error that is active, and bit 0 while any is: 0 on a node
+    /// without applications. Unlike the communication errors, which <c>1001h</c> shows from the EMCY
+    /// that reports them, these are what <c>1001h</c> shows at every moment: every write of the
+    /// register takes them as they are then (<see cref="UpdateErrorRegister"/>), and a raise or a
+    /// clear writes it at once (<see cref="ShowProfileErrorsInRegister"/>), so neither an EMCY waiting
+    /// for its inhibit time nor an older one transmitted later hides or brings back a profile error
+    /// (#550).</summary>
+    private byte ProfileErrorBits
     {
         get
         {
-            byte bits = CommunicationErrorBits;
-            if (_profileErrors.Count == 0) return bits;
-            bits |= GenericErrorBit;
+            if (_profileErrors.Count == 0) return 0;
+            byte bits = GenericErrorBit;
             foreach (var profile in _profileErrors.Values) bits |= profile;
             return bits;
         }
+    }
+
+    /// <summary>A profile error began or ended: <c>1001h</c> shows it now (CiA 301 v4.2.0 §7.5.2.2:
+    /// "If a specific error occurs the corresponding bit shall be set"), not when its EMCY gets its
+    /// turn on the chain. The communication bits stay those of the last register write on the
+    /// chain, and the application's part is taken as at any step (the notice of its own writes,
+    /// #417). Actor loop.</summary>
+    private void ShowProfileErrorsInRegister()
+    {
+        // From here on a reset writes the register it leaves behind (EndCommunicationErrorsForReset).
+        _errorRegisterQueued = true;
+        UpdateErrorRegister(passed: null, _registerCommunicationBits);
     }
 
     // The EMCYs of profile errors raised in Initialisation, oldest first, not yet ordered: in that
@@ -552,6 +572,7 @@ internal sealed partial class CanOpenNode
         var key = (slot, errorCode);
         if (_profileErrors.ContainsKey(key)) return;
         _profileErrors[key] = errorRegisterBits;
+        ShowProfileErrorsInRegister();
         var manufacturer = manufacturerSpecific.ToArray();
         if (_state == NmtState.Initializing)
         {
@@ -570,6 +591,7 @@ internal sealed partial class CanOpenNode
     {
         RequireActor(nameof(ApplicationHost.ClearError));
         if (!_profileErrors.Remove((slot, errorCode))) return;
+        ShowProfileErrorsInRegister();
         if (_state == NmtState.Initializing)
         {
             _heldProfileEmcys?.RemoveAll(held => ReferenceEquals(held.Slot, slot) && held.Code == errorCode);

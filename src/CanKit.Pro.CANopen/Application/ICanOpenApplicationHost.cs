@@ -199,21 +199,26 @@ internal interface ICanOpenApplicationHost
     /// <remarks>
     /// <para>
     /// Once per error event: raising an error code that is active already does nothing, whatever the
-    /// bits. The EMCY carries the node's part of the register as of the moment the EMCY is ordered
-    /// (for a held one, its release) and the application's part as of its transmission, and follows
-    /// the node's rules. With the EMCY switched off (bit 31 of <c>1014h</c>) the error is still recorded and
-    /// written to <c>1001h</c>, without a frame. In Stopped the EMCY is held, and only the most
+    /// bits. <c>1001h</c> shows the error from this call until <see cref="ClearError"/> or a reset ends
+    /// it, in every NMT state and whatever its EMCY still waits for — the inhibit time of
+    /// <c>1015h</c>, Stopped, the boot-up: "If a specific error occurs the corresponding bit shall be
+    /// set" (CiA 301 v4.2.0 §7.5.2.2, Table 54). No EMCY transmitted later, an older one included,
+    /// writes an ended error back. The EMCY carries the node's part of the register as of the moment
+    /// the EMCY is ordered (for a held one, its release) and the application's part as of its
+    /// transmission, and follows the node's rules for its frame: the inhibit time spaces it as any
+    /// other. With the EMCY switched off (bit 31 of <c>1014h</c>) the error is still recorded and
+    /// shown in <c>1001h</c>, without a frame. In Stopped the EMCY is held, and only the most
     /// recent EMCY the node holds goes out when it leaves Stopped. In Initialisation the EMCY is held
     /// until the boot-up has been ordered, and every one held there goes out behind it in the order
-    /// raised; <c>1001h</c> shows the error from that EMCY on. Such an EMCY is sent once the boot-up's
-    /// send has completed; when its turn comes and the node has been stopped meanwhile, it waits until
-    /// the node leaves Stopped and goes out then, whatever the options (CiA 301 v4.2.0 §7.3.2.2.4,
-    /// Table 37: no EMCY in Stopped).
+    /// raised. Such an EMCY is sent once the boot-up's send has completed; when its turn comes and the
+    /// node has been stopped meanwhile, it waits until the node leaves Stopped and goes out then,
+    /// whatever the options (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY in Stopped).
     /// </para>
-    /// <para>An NMT reset ends every error without an EMCY. An EMCY held in Initialisation that has
-    /// not been transmitted when the reset comes is dropped with its error, frame and <c>1001h</c>
-    /// alike: one still held, and one already released behind the boot-up but still waiting for its
-    /// turn (a master that resets the node as soon as it sees the boot-up), in Stopped included.</para>
+    /// <para>An NMT reset ends every error without an EMCY, and <c>1001h</c> loses its bits. An EMCY
+    /// held in Initialisation that has not been transmitted when the reset comes is dropped with its
+    /// error, frame and <c>1001h</c> write alike: one still held, and one already released behind the
+    /// boot-up but still waiting for its turn (a master that resets the node as soon as it sees the
+    /// boot-up), in Stopped included.</para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>,
     /// the error reset, which <see cref="ClearError"/> sends.</exception>
@@ -223,10 +228,11 @@ internal interface ICanOpenApplicationHost
     void RaiseError(ushort errorCode, byte errorRegisterBits, ReadOnlySpan<byte> manufacturerSpecific = default);
 
     /// <summary>Ends an error raised with <see cref="RaiseError"/>. Actor loop.</summary>
-    /// <remarks>Nothing when the error is not active. Otherwise the node orders error code
-    /// <c>0000h</c>, carrying what the register still holds, under the same rules as the EMCY of
-    /// <see cref="RaiseError"/>: in Stopped it is held like any other (and replaces an EMCY held
-    /// there), and with the EMCY switched off it updates <c>1001h</c> without a frame. In
+    /// <remarks>Nothing when the error is not active. Otherwise <c>1001h</c> loses the error's bits
+    /// at once, the generic bit with them unless another error keeps it (CiA 301 v4.2.0 §7.5.2.2),
+    /// and the node orders error code <c>0000h</c>, carrying what the register still holds, under
+    /// the same rules as the EMCY of <see cref="RaiseError"/>: in Stopped it is held like any other
+    /// (and replaces an EMCY held there), and with the EMCY switched off there is no frame. In
     /// Initialisation the error's own EMCY is still held: it is dropped instead, and nothing is
     /// sent.</remarks>
     /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>

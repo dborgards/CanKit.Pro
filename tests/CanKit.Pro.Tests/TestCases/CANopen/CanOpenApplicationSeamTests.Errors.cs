@@ -275,6 +275,122 @@ public partial class CanOpenApplicationSeamTests
     }
 
     // -----------------------------------------------------------------------------------------
+    // 1001h during the EMCY inhibit time (#550).
+    // -----------------------------------------------------------------------------------------
+
+    private static readonly TimeSpan LongestInhibit = TimeSpan.FromTicks(0xFFFF * 1000L); // 6.5535 s
+
+    /// <summary>A node with the EMCY inhibit time at its longest, <c>FFFFh</c>, whose interval has just
+    /// been started by an EMCY of the application.</summary>
+    private static async Task<EntryRig> InsideTheInhibitIntervalAsync(RecordingApplication app, ManualTimeSource clock)
+    {
+        var rig = new EntryRig(new CanOpenNodeOptions { EnableEmcyInhibit = true }.WithApplication(app), clock);
+        try
+        {
+            rig.Od.WriteUnsigned(0x1015, 0, 0xFFFF);
+            Settle(rig.Node);
+            await rig.Node.SendEmcyAsync(0x1000, 0x00).WithTimeoutAsync(ShortTimeout);
+            await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+            return rig;
+        }
+        catch
+        {
+            rig.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>What a remote expedited SDO upload of <c>1001h:00</c> returns.</summary>
+    private static async Task<byte> UploadErrorRegisterAsync(EntryRig rig)
+    {
+        var response = await rig.Wire.UploadAsync(0x1001, 0x00);
+        response[0].Should().Be(0x4F, "an expedited upload of one byte");
+        return response[4];
+    }
+
+    /// <summary>Waits until the head of the EMCY chain waits for its slot: decided, not transmitted.</summary>
+    private static async Task UntilEmcyParkedAsync(CanOpenNode node)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!await EmcyParkedAsync(node))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The EMCY never waited for its slot.");
+            await Task.Delay(1);
+        }
+    }
+
+    [Fact] // #550
+    public async Task A_Profile_Error_Shows_In_1001h_While_Its_Emcy_Waits_For_The_Inhibit_Time()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await UntilEmcyParkedAsync(rig.Node);
+        Advance(clock, rig.Node, TimeSpan.FromMilliseconds(6500));
+
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05,
+            "an active error sets its bits and the generic bit (CiA 301 v4.2.0 §7.5.2.2, Table 54), inhibit time or not");
+        (await EmcyParkedAsync(rig.Node)).Should().BeTrue("the EMCY still waits for the end of the interval");
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "the inhibit time still spaces the frames (§7.5.2.18)");
+
+        Advance(clock, rig.Node, LongestInhibit - TimeSpan.FromMilliseconds(6500));
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x5000, 0x05));
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+    }
+
+    [Fact] // #550
+    public async Task An_Error_Cleared_During_The_Inhibit_Time_Leaves_1001h_At_Once_And_No_Older_Frame_Puts_It_Back()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await UntilEmcyParkedAsync(rig.Node);
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+
+        await OnActor(rig.Node, () => app.Host!.ClearError(0x5000));
+
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "the cause is gone: the register shows it at once");
+
+        // The raise's EMCY goes out at the end of the interval and carries what it was ordered with; the
+        // reset behind it waits for another interval. Between the two, 1001h stays what is true now.
+        Advance(clock, rig.Node, LongestInhibit);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await UntilEmcyParkedAsync(rig.Node);
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x5000, 0x05), "the frames keep their order and content");
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "the older frame does not write the ended error back");
+
+        Advance(clock, rig.Node, LongestInhibit);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 3);
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Wire.Payloads(SlaveEmcy)[2].Should().Equal(Emcy(0x0000, 0x00));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Fact] // #550
+    public async Task A_Reset_During_The_Inhibit_Time_Ends_The_Error_In_1001h()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await UntilEmcyParkedAsync(rig.Node);
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        await EmcyChainSettledAsync(rig.Node);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "a reset ends the error");
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "the reset dropped the EMCY that was waiting, and sent none");
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Communication failure.
     // -----------------------------------------------------------------------------------------
 

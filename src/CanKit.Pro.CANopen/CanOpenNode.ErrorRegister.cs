@@ -31,13 +31,16 @@ namespace CanKit.Pro.CANopen;
 // host: those are the node's part of 1001h too, not the application's, and are kept beside the
 // communication errors (NodeErrorBits). A profile error is recorded even while the EMCY is
 // switched off, because the register must show it; it ends when the profile clears it, and its
-// EMCY and its 0000h go out through the same chain and the same Stopped rule as the rest. A profile
-// error raised in Initialisation — from a reset's callbacks, or while an LSS slave waits for its
-// node-id — is recorded at once, but its EMCY is held until the boot-up is ordered and then goes
-// out behind it, with the register of that moment (CanOpenNode.Application.cs,
-// ReleaseProfileEmcysAfterBootUp): in Initialisation only the boot-up object exists (§7.3.2.2.1).
-// The register shows it from that EMCY on, as it shows an EMCY held in Stopped from its release.
-// An error the profile clears while its EMCY is still held leaves nothing on the bus. The node's
+// EMCY and its 0000h go out through the same chain and the same Stopped rule as the rest. Unlike a
+// communication error, 1001h shows it from its raise to its clear, not from its EMCY: the raise and
+// the clear write the register at once, and every later write takes the profile errors as they
+// are then, so an EMCY waiting for its inhibit time neither hides it nor brings it back once it
+// ended (ProfileErrorBits, #550). A profile error raised in Initialisation — from a reset's
+// callbacks, or while an LSS slave waits for its node-id — is recorded and shown at once, but its
+// EMCY is held until the boot-up is ordered and then goes out behind it, with the register of that
+// moment (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp): in Initialisation only the
+// boot-up object exists (§7.3.2.2.1). An error the profile clears while its EMCY is still held
+// leaves nothing on the bus. The node's
 // communication errors are not held this way, so a node without applications holds nothing in
 // Initialisation.
 // A reset (transition 5, then 0) ends every communication error and every profile error without
@@ -205,7 +208,7 @@ internal sealed partial class CanOpenNode
         // A held node EMCY that the application's replaced still updates 1001h, ahead of it on
         // the chain: with the EMCY switched off meanwhile, the application's sends nothing and
         // writes nothing, and an error that ended in Stopped would be read on (Codex on #417).
-        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(NodeErrorBits);
+        if (applications && _heldNodeEmcy) QueueErrorRegisterWrite(CommunicationErrorBits);
         _heldNodeEmcy = false;
         _ = EmitEmcy(pending, applicationErrorRegister: applications ? pending.ErrorRegister : null);
     }
@@ -221,34 +224,43 @@ internal sealed partial class CanOpenNode
         InvalidateControllerOverrunMonitoring();
         InvalidateControllerErrorBaseline();
         _heldNodeEmcy = false;
-        if (_errorRegisterQueued) QueueErrorRegisterWrite(nodeBits: 0);
+        // What a profile error raised from the reset's callbacks writes before the step below runs.
+        _registerCommunicationBits = 0;
+        if (_errorRegisterQueued) QueueErrorRegisterWrite(communicationBits: 0);
     }
 
+    // The communication bits of the last write of 1001h on the EMCY chain: what the register shows of
+    // the communication errors until the next EMCY step writes it. A profile error's raise or clear
+    // writes the register between two steps (ShowProfileErrorsInRegister) and keeps these. Actor
+    // loop only.
+    private byte _registerCommunicationBits;
+
     /// <summary>Writes the application's part, as of its place on the EMCY chain, ORed with
-    /// <paramref name="nodeBits"/> to <c>1001h</c> without a frame, so an EMCY queued before it
-    /// cannot overwrite it afterwards.</summary>
-    private void QueueErrorRegisterWrite(byte nodeBits)
+    /// <paramref name="communicationBits"/> and the profile errors active then to <c>1001h</c>
+    /// without a frame, so an EMCY queued before it cannot overwrite it afterwards.</summary>
+    private void QueueErrorRegisterWrite(byte communicationBits)
     {
         _errorRegisterQueued = true;
         _ = AppendToEmcyChain(() =>
         {
-            UpdateErrorRegister(passed: null, nodeBits);
+            UpdateErrorRegister(passed: null, communicationBits);
             return Task.CompletedTask;
         });
     }
 
-    /// <summary>One step of the EMCY chain on <c>1001h</c>: the application's part — the register
+    /// <summary>One write of <c>1001h</c>: the application's part — the register
     /// <paramref name="passed"/> by its EMCY, which replaces a dictionary write before it, else
-    /// the part taken so far — ORed with <paramref name="nodeBits"/> and written. All of it runs
-    /// as one dictionary transaction, so an application write cannot land between the take and
-    /// the write and be overwritten while its notice is consumed later for the composed value
-    /// (Codex and Bugbot on #417). Returns the register written. Actor loop only.</summary>
-    private byte UpdateErrorRegister(byte? passed, byte nodeBits)
+    /// the part taken so far — ORed with <paramref name="communicationBits"/>, the communication
+    /// errors as of the EMCY this step belongs to, and with the profile errors as they are now
+    /// (<see cref="ProfileErrorBits"/>, 0 without applications). All of it runs as one dictionary
+    /// transaction, so an application write cannot land between the take and the write and be
+    /// overwritten while its notice is consumed later for the composed value (Codex and Bugbot on
+    /// #417). Returns the application's part it took. Actor loop only.</summary>
+    private byte UpdateErrorRegister(byte? passed, byte communicationBits)
     {
-        byte composed = 0;
+        byte application = 0;
         _od.Transaction(() =>
         {
-            byte application;
             if (passed is { } register)
             {
                 Interlocked.Exchange(ref _applicationWroteErrorRegister, 0);
@@ -259,10 +271,10 @@ internal sealed partial class CanOpenNode
                 application = TakeApplicationErrorRegister();
             }
             _applicationErrorRegister = application;
-            composed = (byte)(application | nodeBits);
-            WriteErrorRegister(composed);
+            _registerCommunicationBits = communicationBits;
+            WriteErrorRegister((byte)(application | communicationBits | ProfileErrorBits));
         });
-        return composed;
+        return application;
     }
 
     /// <summary>The application's part at this step of the EMCY chain. A value in <c>1001h</c>
