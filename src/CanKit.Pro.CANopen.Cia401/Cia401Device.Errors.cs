@@ -1,0 +1,133 @@
+using CanKit.Pro.CANopen.Application;
+using CanKit.Pro.CANopen.Nmt;
+
+namespace CanKit.Pro.CANopen.Cia401;
+
+// The error state of the outputs (CiA 401-1 §5.2, §6.2.4, §8.3.3, §8.3.4) and the device failure
+// the application reports.
+internal sealed partial class Cia401Device
+{
+    /// <summary><c>1029h</c>, error behavior: a CiA 301 object (v4.2.0 §7.5.2.32), whose sub-index
+    /// 01h CiA 401-1 §6.2.4 gives the values for. The core keeps its own name for it private to the
+    /// node.</summary>
+    private const ushort ErrorBehaviorIndex = 0x1029;
+
+    // The causes of the error state, each a level. Actor loop.
+    private bool _communicationFailure;
+    private bool _stopped;
+    private bool _deviceFailure;
+
+    // Whether any cause is active: written on the actor loop, read from any thread.
+    private volatile bool _inErrorState;
+
+    /// <summary>Whether the outputs are in the error state. Any thread.</summary>
+    /// <remarks>
+    /// <para>
+    /// The error state has three causes, and lasts while any of them does: a communication failure
+    /// (bus-off, a heartbeat or life guarding event: §5.2, the node's
+    /// <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/>); the NMT state Stopped, the
+    /// "'Stop Remote Node' indication" of §8.3.3, however the node got there; and a device failure
+    /// the application reports with <see cref="ReportDeviceFailure"/>. A failure that begins while
+    /// the node is Stopped keeps the outputs in the error state when the node is started again.
+    /// </para>
+    /// <para>
+    /// Entering it, each output with <c>6206h</c> = 1 takes the value of <c>6207h</c> and each with
+    /// <c>6206h</c> = 0 keeps its value (§8.3.3, §8.3.4); <see cref="ReadDigitalOutputs"/> shows the
+    /// result. <c>6200h</c> keeps the value last written: Figure 5 (§7.2.3) has the received value
+    /// enter <c>6200h</c> before the error switch, which does not write back into it. So a master
+    /// reads what it wrote, and the application reads what the terminals drive.
+    /// </para>
+    /// <para>
+    /// While it lasts, a write to <c>6200h</c> is stored there and reaches no terminal, not even
+    /// one with <c>6206h</c> = 0: in Figure 5 the error switch takes <c>6200h</c> off the output
+    /// path, and the <c>6206h</c> = 0 branch feeds back the output's own value, which is the "kept"
+    /// of §8.3.3. Leaving the error state changes no output by itself (the figure would switch
+    /// <c>6200h</c> back at once; the device does not, so that an output the master never wrote does
+    /// not move when a failure ends): the next accepted write to <c>6200h</c> does, through the
+    /// filter mask, whatever value it carries. What decides is the state when the device applies a
+    /// write, which is one actor job after the write is stored
+    /// (<see cref="ICanOpenApplication.OnEntriesWritten"/>): a write stored just before the error
+    /// state begins can be applied inside it, and so not reach the terminal, and one stored just
+    /// before it ends can be applied after it, and so reach the terminal.
+    /// </para>
+    /// <para>
+    /// An NMT reset ends the communication failure and Stopped; a device failure outlasts it,
+    /// since it is the application's statement about its hardware, until
+    /// <see cref="ReportDeviceFailure"/>(<see langword="false"/>). Reset Node also returns the
+    /// outputs to what <c>6200h</c> holds after it, the application being reset (§6.2.5 NOTE);
+    /// Reset Communication leaves them where they are.
+    /// </para>
+    /// <para>
+    /// What this slice leaves out is listed in the remarks on <see cref="Cia401Device"/>.
+    /// </para>
+    /// <para>
+    /// <see langword="false"/> before the device is attached, and for a device without outputs.
+    /// </para>
+    /// </remarks>
+    public bool OutputsInErrorState => _digitalOutputs is not null && _inErrorState;
+
+    /// <summary>Reports that a device failure began (<see langword="true"/>) or ended: one of the
+    /// "device internal failures" of CiA 401-1 §5.2, which the application detects in its hardware.
+    /// Any thread; applied on the node's actor loop, at once when called from inside one of the
+    /// device's callbacks.</summary>
+    /// <remarks>
+    /// <para>
+    /// A level: reporting what is reported already does nothing. While it lasts the outputs are in
+    /// the error state (<see cref="OutputsInErrorState"/>), across NMT resets too.
+    /// </para>
+    /// <para>
+    /// When it begins, the device asks the node for the NMT state <c>1029h:01</c> names (§5.2,
+    /// §6.2.4): 00h Pre-operational, only when the node is Operational; 01h no change; 02h Stopped.
+    /// A node without <c>1029h</c> behaves as for 00h (§6.2.4 NOTE); the reserved values change
+    /// nothing, as the node treats them for a communication failure. The communication failures
+    /// themselves are the node's to act on, and the device asks nothing for them. That is all: a
+    /// master that starts the node while the failure lasts is not refused, and the outputs stay in
+    /// the error state; and when the failure ends, the node stays where it is.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="System.InvalidOperationException">No node has attached the device yet.</exception>
+    public void ReportDeviceFailure(bool active)
+    {
+        var host = RequireHost();
+        host.Post(() => ApplyDeviceFailure(host, active));
+    }
+
+    /// <summary>Actor loop, in a callback of the device: the state first, then the NMT request
+    /// (which can tell this device the change at once, nested), then the event.</summary>
+    private void ApplyDeviceFailure(ICanOpenApplicationHost host, bool active)
+    {
+        if (active == _deviceFailure) return;
+        _deviceFailure = active;
+        UpdateErrorState(host);
+        if (active) RequestDeviceFailureState(host);
+        RaiseOutputsChanged();
+    }
+
+    /// <summary>Enters the error state when a cause is active and the state is not; leaves it, and
+    /// changes no output, when none is. Actor loop.</summary>
+    private void UpdateErrorState(ICanOpenApplicationHost host)
+    {
+        bool active = _communicationFailure || _stopped || _deviceFailure;
+        if (active == _inErrorState) return;
+        _inErrorState = active;
+        if (active) DigitalOutputsEnterErrorState(host);
+    }
+
+    /// <summary>The NMT state <c>1029h:01</c> names for a device failure (CiA 401-1 §6.2.4). Actor
+    /// loop.</summary>
+    private static void RequestDeviceFailureState(ICanOpenApplicationHost host)
+    {
+        byte behavior = host.ObjectDictionary.TryReadRaw(ErrorBehaviorIndex, 0x01, out var raw) && raw.Length == 1
+            ? raw[0]
+            : (byte)0;
+        switch (behavior)
+        {
+            case 0:
+                if (host.State == NmtState.Operational) host.RequestNmtState(NmtState.PreOperational);
+                break;
+            case 2:
+                host.RequestNmtState(NmtState.Stopped);
+                break;
+        }
+    }
+}

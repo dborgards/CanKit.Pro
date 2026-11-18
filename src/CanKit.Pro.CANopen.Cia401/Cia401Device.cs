@@ -42,6 +42,16 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// nothing (the post is dropped) and a reader shows the last value, from the dictionary the device
 /// still holds.
 /// </para>
+/// <para>
+/// <b>Outputs.</b> The digital outputs follow <c>6200h</c> through the filter mask, the error state
+/// and the polarity, and the application reads the levels at the terminals and is told when they
+/// change (<see cref="ReadDigitalOutputs"/>, <see cref="OutputsChanged"/>); the error state and its
+/// causes are described on <see cref="OutputsInErrorState"/>. Not built in this slice: NOTE 1 of
+/// CiA 401-1 §7.2.3, under which outputs are accepted only once the first heartbeat of the device
+/// that sets them has been received, or the master has guarded the node; the device accepts them
+/// from the start. Nor the sub-indices 02h and 03h of <c>1029h</c> (§6.2.4): a device failure follows
+/// sub-index 01h.
+/// </para>
 /// </remarks>
 internal sealed partial class Cia401Device : ICanOpenApplication
 {
@@ -68,15 +78,15 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// (<see cref="Cia401Configuration.Validate"/>).</exception>
     /// <exception cref="ArgumentException">The configuration has no I/O function
     /// (<see cref="Cia401Configuration.Validate"/>), or one this device does not implement yet:
-    /// digital outputs, analog inputs and analog outputs arrive with their own partials.</exception>
+    /// analog inputs and analog outputs arrive with their own partials.</exception>
     public Cia401Device(Cia401Configuration configuration)
     {
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
         configuration.Validate();
-        if (configuration.DigitalOutputs > 0 || configuration.AnalogInputs > 0 || configuration.AnalogOutputs > 0)
+        if (configuration.AnalogInputs > 0 || configuration.AnalogOutputs > 0)
         {
             throw new ArgumentException(
-                "The CiA 401 device implements digital inputs only so far: digital outputs, analog inputs and analog "
+                "The CiA 401 device implements digital inputs and outputs only so far: analog inputs and analog "
                 + "outputs are not built yet, and a device that declared their default PDOs without their objects "
                 + "could not open.", nameof(configuration));
         }
@@ -95,6 +105,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
 
         _digitalInputs = configuration.DigitalInputs > 0
             ? new DigitalInputBlock(configuration.DigitalInputs, _logicalDevice)
+            : null;
+        _digitalOutputs = configuration.DigitalOutputs > 0
+            ? new DigitalOutputBlock(configuration.DigitalOutputs, _logicalDevice)
             : null;
     }
 
@@ -133,6 +146,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         if (Volatile.Read(ref _host) is not null) throw AttachedAlready();
 
         _digitalInputs?.Declare(host.ObjectDictionary);
+        _digitalOutputs?.Declare(host.ObjectDictionary);
 
         host.SetDeviceType(_logicalDevice, _deviceType);
         foreach (var pdo in _defaultPdos)
@@ -168,7 +182,8 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     }
 
     /// <summary>Hands each written entry to the block that owns it, then asks for one transmission
-    /// of whatever the blocks found worth sending. Actor loop.</summary>
+    /// of whatever the blocks found worth sending, then tells the application of the outputs that
+    /// changed. Actor loop.</summary>
     public void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries)
     {
         var host = AttachedHost();
@@ -176,31 +191,54 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         foreach (var entry in entries)
         {
             DigitalInputsWritten(host, entry, send);
+            DigitalOutputsWritten(host, entry);
         }
         RequestTransmission(host, send);
+        RaiseOutputsChanged();
     }
 
-    /// <summary>Entering Operational sends every TPDO of transmission type <c>FFh</c> (CiA 401-1
-    /// §6.1): the device asks for every entry its blocks transmit, in one request, whatever the
-    /// interrupt masks say. Actor loop.</summary>
+    /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).
+    /// Entering Operational sends every TPDO of transmission type <c>FFh</c> (§6.1): the device asks
+    /// for every entry its blocks transmit, in one request, whatever the interrupt masks say. Actor
+    /// loop.</summary>
     public void OnNmtStateChanged(NmtState previous, NmtState current)
     {
-        if (current != NmtState.Operational) return;
         var host = AttachedHost();
-        var send = new List<CanOpenObjectAddress>();
-        DigitalInputsToSendOnStart(send);
-        RequestTransmission(host, send);
+        _stopped = current == NmtState.Stopped;
+        UpdateErrorState(host);
+        if (current == NmtState.Operational)
+        {
+            var send = new List<CanOpenObjectAddress>();
+            DigitalInputsToSendOnStart(send);
+            RequestTransmission(host, send);
+        }
+        RaiseOutputsChanged();
     }
 
-    /// <summary>Nothing yet: what a reset does to the process values is decided with the reset
-    /// behaviour of the device.</summary>
+    /// <summary>A reset ends the communication failure and Stopped as causes of the error state
+    /// (the node has told both by now); a device failure the application reported outlasts it. Reset
+    /// Node, the application reset, also drops the held output values for what <c>6200h</c> holds
+    /// after it (CiA 401-1 §6.2.5 NOTE); Reset Communication resets no application and leaves the
+    /// outputs as they are. The physical input levels the application set are kept. Actor
+    /// loop.</summary>
     public void OnReset(NmtCommand command)
     {
+        var host = AttachedHost();
+        _communicationFailure = false;
+        _stopped = false;
+        UpdateErrorState(host);
+        if (command == NmtCommand.ResetNode) DigitalOutputsReset(host);
+        RaiseOutputsChanged();
     }
 
-    /// <summary>Nothing yet: the error state of the outputs arrives with the digital outputs.</summary>
+    /// <summary>A communication failure puts the outputs in the error state while it lasts (CiA 401-1
+    /// §5.2, §8.3.3). The node acts on <c>1029h</c> itself, after this. Actor loop.</summary>
     public void OnCommunicationFailureChanged(bool active)
     {
+        var host = AttachedHost();
+        _communicationFailure = active;
+        UpdateErrorState(host);
+        RaiseOutputsChanged();
     }
 
     // ---- shared by the blocks -------------------------------------------------------------------
@@ -235,6 +273,42 @@ internal sealed partial class Cia401Device : ICanOpenApplication
 
     private static byte ReadByte(ICanOpenApplicationHost host, ushort index, byte subindex)
         => host.ObjectDictionary.ReadRaw(index, subindex)[0];
+
+    /// <summary>The index of a catalogue object in logical device <paramref name="logicalDevice"/>.</summary>
+    private static ushort Shift(int logicalDevice, Cia401ObjectDefinition definition)
+        => CanOpenLogicalDeviceAddressing.Index(logicalDevice, definition.Index);
+
+    /// <summary>The bits of group <paramref name="g"/> (0-based) that are channels of a digital
+    /// block with <paramref name="channels"/> channels: all eight but in a last group that is not
+    /// full.</summary>
+    private static byte GroupChannelMask(int channels, int g)
+    {
+        int inGroup = Math.Min(ChannelsPerGroup, channels - (g * ChannelsPerGroup));
+        return (byte)((1 << inGroup) - 1);
+    }
+
+    /// <summary>Declares an 8-bit digital array with the data type, access, PDO mapping and default
+    /// the catalogue gives it: sub-index 0, the const UNSIGNED8 "highest sub-index supported"
+    /// (CiA 301 §7.4.5) holding <paramref name="groups"/>, then one element per group; an object
+    /// without a default ("No", §8.2.1) starts at 0. Constructing thread, in Attach.</summary>
+    private static void DeclareGroupArray(ObjectDictionary od, int logicalDevice, int groups, Cia401ObjectDefinition definition)
+    {
+        var index = Shift(logicalDevice, definition);
+        od.AddU8(index, 0x00, (byte)groups, OdAccess.ReadOnly, pdoMappable: false);
+        var initial = (byte)(definition.DefaultValue ?? 0);
+        for (int sub = 1; sub <= groups; sub++)
+        {
+            od.AddRaw(index, (byte)sub, definition.DataType, new[] { initial }, definition.Access,
+                definition.PdoMapping != Cia401PdoMapping.No);
+        }
+    }
+
+    /// <summary>Declares a one-byte variable with what the catalogue gives it. Constructing thread,
+    /// in Attach.</summary>
+    private static void DeclareVariable(ObjectDictionary od, int logicalDevice, Cia401ObjectDefinition definition)
+        => od.AddRaw(Shift(logicalDevice, definition), 0x00, definition.DataType,
+            new[] { (byte)(definition.DefaultValue ?? 0) }, definition.Access,
+            definition.PdoMapping != Cia401PdoMapping.No);
 
     /// <summary>One request for everything collected: the node sends each TPDO that maps one of the
     /// entries once, however many of them it maps.</summary>

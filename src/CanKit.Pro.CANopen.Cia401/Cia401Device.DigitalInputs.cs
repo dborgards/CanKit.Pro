@@ -209,46 +209,20 @@ internal sealed partial class Cia401Device
 
         /// <summary>The bits of group <paramref name="g"/> (0-based) that are channels of the device:
         /// all eight but in a last group that is not full.</summary>
-        internal byte ChannelMask(int g)
-        {
-            int inGroup = Math.Min(ChannelsPerGroup, Channels - (g * ChannelsPerGroup));
-            return (byte)((1 << inGroup) - 1);
-        }
+        internal byte ChannelMask(int g) => GroupChannelMask(Channels, g);
 
         /// <summary>Declares <c>6000h</c>, <c>6002h</c>, <c>6003h</c>, <c>6005h</c> to <c>6008h</c> with
         /// the data type, access, PDO mapping and default the catalogue gives them, and the number of
         /// groups at sub-index 0 of each array. Constructing thread, in Attach.</summary>
         internal void Declare(ObjectDictionary od)
         {
-            DeclareArray(od, Cia401Objects.ReadDigitalInput8);
-            DeclareArray(od, Cia401Objects.PolarityDigitalInput8);
-            DeclareArray(od, Cia401Objects.DigitalFilterEnable8);
-            DeclareVariable(od, Cia401Objects.GlobalInterruptEnableDigital8);
-            DeclareArray(od, Cia401Objects.DigitalInterruptMaskAnyChange8);
-            DeclareArray(od, Cia401Objects.DigitalInterruptMaskLowToHigh8);
-            DeclareArray(od, Cia401Objects.DigitalInterruptMaskHighToLow8);
+            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.ReadDigitalInput8);
+            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.PolarityDigitalInput8);
+            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalFilterEnable8);
+            DeclareVariable(od, _logicalDevice, Cia401Objects.GlobalInterruptEnableDigital8);
+            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskAnyChange8);
+            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskLowToHigh8);
+            DeclareGroupArray(od, _logicalDevice, Groups, Cia401Objects.DigitalInterruptMaskHighToLow8);
         }
-
-        /// <summary>Sub-index 0, the const UNSIGNED8 "highest sub-index supported" (CiA 301 §7.4.5),
-        /// then one element per group; an input without a default ("No", §8.2.1) starts at 0.</summary>
-        private void DeclareArray(ObjectDictionary od, Cia401ObjectDefinition definition)
-        {
-            var index = Shift(_logicalDevice, definition);
-            od.AddU8(index, 0x00, (byte)Groups, OdAccess.ReadOnly, pdoMappable: false);
-            var initial = (byte)(definition.DefaultValue ?? 0);
-            for (int sub = 1; sub <= Groups; sub++)
-            {
-                od.AddRaw(index, (byte)sub, definition.DataType, new[] { initial }, definition.Access,
-                    definition.PdoMapping != Cia401PdoMapping.No);
-            }
-        }
-
-        private void DeclareVariable(ObjectDictionary od, Cia401ObjectDefinition definition)
-            => od.AddRaw(Shift(_logicalDevice, definition), 0x00, definition.DataType,
-                new[] { (byte)(definition.DefaultValue ?? 0) }, definition.Access,
-                definition.PdoMapping != Cia401PdoMapping.No);
-
-        private static ushort Shift(int logicalDevice, Cia401ObjectDefinition definition)
-            => CanOpenLogicalDeviceAddressing.Index(logicalDevice, definition.Index);
     }
 }

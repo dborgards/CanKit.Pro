@@ -37,8 +37,14 @@ internal sealed class Cia401Rig : IDisposable
     /// <summary>TPDO 1 of the device, the default TPDO of its digital inputs (CiA 401-1 §6.2.6).</summary>
     internal const uint Tpdo1 = 0x180 + DeviceId;
 
+    /// <summary>RPDO 1 of the device, the default RPDO of its digital outputs (CiA 401-1 §6.2.5).</summary>
+    internal const uint Rpdo1 = 0x200 + DeviceId;
+
     internal const uint SdoRequest = 0x600 + DeviceId;
     internal const uint SdoResponse = 0x580 + DeviceId;
+
+    /// <summary>The device's boot-up and heartbeat COB-ID.</summary>
+    internal const uint Heartbeat = 0x700 + DeviceId;
 
     private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(5);
 
@@ -138,6 +144,26 @@ internal sealed class Cia401Rig : IDisposable
         Node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
     }
 
+    /// <summary>An SDO round trip with the device, then <see cref="Settle"/>: every frame the master
+    /// sent before it has been handled on the device's actor (the reader hands frames to the actor
+    /// in wire order, and the response is sent from the job that handles the request), and what that
+    /// queued in turn, the device's <c>OnEntriesWritten</c> among it, has run. Not in Stopped, where
+    /// the device has no SDO server (CiA 301 v4.2.0 §7.3.2.2.5, Table 37).</summary>
+    internal async Task FenceAsync()
+    {
+        await SdoAsync(new byte[] { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 });
+        Settle();
+    }
+
+    /// <summary>Advances the manual clock with the device's actor settled before and after, so that
+    /// the deadlines it moves past have fired and their work has run.</summary>
+    internal void Advance(TimeSpan by)
+    {
+        Settle();
+        Clock.Advance(by);
+        Settle();
+    }
+
     // ---- NMT ----------------------------------------------------------------------------------
 
     /// <summary>NMT Start to the device, and waits until it is Operational.</summary>
@@ -145,6 +171,32 @@ internal sealed class Cia401Rig : IDisposable
     {
         Transmit(0x000, new[] { (byte)NmtCommand.Start, DeviceId });
         await WaitUntilAsync(() => Node.State == NmtState.Operational, "Operational");
+    }
+
+    /// <summary>NMT Stop to the device; waits until it is Stopped and its actor has settled.</summary>
+    internal async Task StopAsync()
+    {
+        Transmit(0x000, new[] { (byte)NmtCommand.Stop, DeviceId });
+        await WaitUntilAsync(() => Node.State == NmtState.Stopped, "Stopped");
+        Settle();
+    }
+
+    /// <summary>NMT <paramref name="command"/> (Reset Node or Reset Communication) to the device;
+    /// waits for its boot-up and settles its actor, so that the reset's callbacks have run.</summary>
+    internal async Task ResetAsync(NmtCommand command)
+    {
+        int before = Count(Heartbeat);
+        Transmit(0x000, new[] { (byte)command, DeviceId });
+        await WaitForCountAsync(Heartbeat, before + 1);
+        Settle();
+    }
+
+    /// <summary>RPDO 1 from the master with <paramref name="data"/>, then <see cref="FenceAsync"/>:
+    /// the device has handled it when this returns.</summary>
+    internal async Task SendRpdo1Async(params byte[] data)
+    {
+        Transmit(Rpdo1, data);
+        await FenceAsync();
     }
 
     /// <summary>Waits until the device is in <paramref name="state"/>.</summary>

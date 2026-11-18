@@ -97,7 +97,8 @@ public class Cia401DeviceDigitalInputTests
     {
         foreach (var configuration in new[]
         {
-            new Cia401Configuration { DigitalInputs = 8, DigitalOutputs = 8 },
+            new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 },
+            new Cia401Configuration { DigitalOutputs = 8, AnalogOutputs = 1 },
             new Cia401Configuration { AnalogInputs = 1 },
             new Cia401Configuration { AnalogOutputs = 1 },
         })
