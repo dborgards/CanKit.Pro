@@ -183,7 +183,9 @@ internal sealed partial class Cia401Device
     /// <summary>What <c>6401h</c> shows for one analog input (CiA 401-1 §8.4.2). Any thread.</summary>
     /// <remarks>The value last applied on the node's actor loop: a set that is still queued there,
     /// made from another thread a moment ago, is not visible yet; one made from inside a callback of
-    /// the device is. After the node is disposed it is the last value the node held.</remarks>
+    /// the device is. After the node is disposed it is the last value the node held. During Reset Node, between the node's restore and the device's rewrite in
+    /// <see cref="OnReset"/> (one actor job), a reader on another thread can briefly see the restored
+    /// value, a default or what <c>1010h</c> stored.</remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="channel"/> is not an analog
     /// input of the device.</exception>
     /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>

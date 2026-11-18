@@ -65,7 +65,7 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// What an NMT reset and a <c>1010h</c> save do to the device is on <see cref="OnReset"/>.
 /// </para>
 /// <para>
-/// <b>What is not built, and where the device departs from the norm.</b>
+/// <b>What is not built.</b>
 /// </para>
 /// <list type="bullet">
 /// <item><description>NOTE 1 of CiA 401-1 §7.2.3 and of §7.2.5: outputs are accepted only once the
@@ -75,15 +75,109 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// follows sub-index 01h.</description></item>
 /// <item><description>The digital input filter <c>6003h</c> is stored and has no effect: its type
 /// and constant are manufacturer-specific (§8.2.3).</description></item>
+/// <item><description>Access other than 8-bit digital and 16-bit analog: 16- and 32-bit digital;
+/// 8-bit, 32-bit, float and manufacturer-specific analog. Also not built: the float limits and deltas
+/// of the analog inputs (<c>6429h</c> to <c>642Dh</c>), and every offset, scaling and SI unit object
+/// (<c>642Eh</c> to <c>6432h</c>; <c>6441h</c>, <c>6442h</c>, <c>6446h</c>, <c>6447h</c>,
+/// <c>6450h</c>). The same goes for the float error value <c>6445h</c>, which §8.7.5 and §8.7.8
+/// couple to <c>6444h</c>. The device does not declare any of them.</description></item>
+/// </list>
+/// <para>
+/// <b>Where the device departs from the norm.</b>
+/// </para>
+/// <list type="bullet">
+/// <item><description>Leaving the error state does not put the write object (<c>6200h</c>,
+/// <c>6411h</c>) back onto the terminal, as the plain reading of Figures 5 and 7 would. The next
+/// accepted write does. This keeps an output the master never wrote from moving when a failure
+/// ends (see <see cref="OutputsInErrorState"/>).</description></item>
 /// <item><description><c>6422h</c> is not cleared after an SDO read or a transmission, as §8.6.3
-/// has it, but when <c>6423h</c> is written, on entering Operational and on every reset: the
-/// application seam reports neither moment (see <see cref="SetAnalogInput"/>).</description></item>
-/// <item><description>How the analog interrupt conditions combine. The limits are OR'd and the
-/// deltas are OR'd, and the two groups are ANDed. This is a reading of Figure 6, §8.6.5 and
-/// §8.6.6 against §6.2.8 (see <see cref="SetAnalogInput"/>).</description></item>
-/// <item><description>Access other than 8-bit digital and 16-bit analog (16- and 32-bit digital;
-/// 8-bit, 32-bit, float and manufacturer-specific analog), the float limits and deltas of the analog
-/// inputs, offset, scaling and SI unit. The device does not declare them.</description></item>
+/// has it. It is cleared when <c>6423h</c> is written, on entering Operational and on every reset,
+/// because the application seam reports neither an SDO read nor a transmission (see
+/// <see cref="SetAnalogInput"/>).</description></item>
+/// </list>
+/// <para>
+/// <b>Readings and choices where the norm is silent or not of one voice.</b> Each is argued where
+/// it is used:
+/// </para>
+/// <list type="bullet">
+/// <item><description><b>Digital inputs</b> (<see cref="SetDigitalInput"/>, the remarks on its
+/// interrupt evaluation): the directions of <c>6007h</c> (low to high) and <c>6008h</c> (high to
+/// low) follow §8.2.6 and §8.2.7, not the reversed labels of Figure 4.</description></item>
+/// <item><description><b>Digital outputs</b> (<see cref="ReadDigitalOutputs"/>):
+/// <list type="bullet">
+/// <item><description>The filter mask acts on received values, as §8.3.5 and §7.2.1.1 have it,
+/// not nearest the output as Figure 5 draws it.</description></item>
+/// <item><description>The error value <c>6207h</c> is a logical value that the polarity
+/// inverts.</description></item>
+/// </list>
+/// </description></item>
+/// <item><description><b>The error state</b> (<see cref="OutputsInErrorState"/>):
+/// <list type="bullet">
+/// <item><description>Writes received while it lasts are stored and reach no terminal, even
+/// with error mode 0, as Figures 5 and 7 have it.</description></item>
+/// <item><description>Stopped is a cause however the node got there.</description></item>
+/// <item><description>Figure 7's "Switch if Device Failure" gives way to §8.7.4, which adds the
+/// 'Stop remote node' indication.</description></item>
+/// <item><description>A device failure the application reports outlasts NMT resets. A master's
+/// Start during it is not refused.</description></item>
+/// <item><description>For a device failure, <c>1029h:01</c> = 02h requests Stopped from any state
+/// (§6.2.4; see <see cref="ReportDeviceFailure"/>).</description></item>
+/// </list>
+/// </description></item>
+/// <item><description><b>Analog inputs</b> (<see cref="SetAnalogInput"/>):
+/// <list type="bullet">
+/// <item><description>How the interrupt conditions combine: the limits are OR'd, the deltas are
+/// OR'd, and the two groups are ANDed. This follows Figure 6, §8.6.5 and §8.6.6 against §6.2.8.
+/// The limits are OR'd where the figure draws an XOR, and <c>6421h</c> = 0 never
+/// interrupts.</description></item>
+/// <item><description>The limits are left adjusted, compared with the input times 2^16, after
+/// §8.6.5 and §8.6.6 and over Figure 6.</description></item>
+/// <item><description>The deltas are plain counts of the 16-bit value, a choice where §8.6.7 to
+/// §8.6.9 say nothing.</description></item>
+/// <item><description>"By more than" means strictly greater.</description></item>
+/// <item><description>The last communicated value is reset at an interrupt, on entering
+/// Operational, on every reset, and when <c>6423h</c> goes from FALSE to TRUE.</description></item>
+/// <item><description>The warning of §5.3 ends when <c>6423h</c> is written TRUE or the node
+/// leaves Operational. The norm does not say when it ends.</description></item>
+/// </list>
+/// </description></item>
+/// <item><description><b>Analog outputs</b> (<see cref="ReadAnalogOutput"/>):
+/// <list type="bullet">
+/// <item><description><c>6444h</c> is read as left adjusted. Figure 7 marks it so, and §8.7.5
+/// is silent. The output takes the upper word and ignores the lower.</description></item>
+/// <item><description>Figure 7 draws offset and scaling after the error switch, against the
+/// NOTE of §8.7.5. Since neither offset nor scaling is built, nothing turns on
+/// it.</description></item>
+/// </list>
+/// </description></item>
+/// <item><description><b>Left adjustment of values narrower than 16 bits</b> (§8.4.2, §8.5.2) is
+/// the writer's business. The device stores and drives the 16-bit value it is
+/// given.</description></item>
+/// <item><description><b>Entering Operational</b> sends every TPDO of transmission type
+/// <c>FFh</c> (§6.1), whatever <c>6005h</c> and <c>6423h</c> say (see
+/// <see cref="OnNmtStateChanged"/>). TPDOs 2 to 4 are disabled by default (see
+/// <see cref="Cia401Configuration.DefaultPdos"/>).</description></item>
+/// <item><description><b>Value ranges</b> (see <see cref="ValidateWrite"/>):
+/// <list type="bullet">
+/// <item><description>A BOOLEAN takes 0 and 1 only.</description></item>
+/// <item><description>The reserved bits of <c>6421h</c> are refused.</description></item>
+/// <item><description><c>6443h</c> takes 0h and 1h only.</description></item>
+/// </list>
+/// </description></item>
+/// <item><description><b>Resets and stored values</b> (see <see cref="OnReset"/>):
+/// <list type="bullet">
+/// <item><description>Only Reset Node, the application reset, returns the outputs to the write
+/// objects (§6.2.5 NOTE). Reset Communication leaves them where they are.</description></item>
+/// <item><description>The stored output values come up after a <c>1010h</c> save and Reset Node.
+/// This follows §6.2.5 NOTE and §6.2.7 NOTE ("stored values overwrite default values"), against
+/// the "default state" of §7.2.3 NOTE 1 and §7.2.5 NOTE 1, which is read as the case without
+/// stored values.</description></item>
+/// <item><description>A save stores the input objects too, <c>6000h</c>, <c>6401h</c> and
+/// <c>6422h</c>, because the seam cannot exclude an entry. At Reset Node the device rewrites the
+/// inputs from the application's levels and clears <c>6422h</c>, so no stored input value is
+/// read over SDO after the reset.</description></item>
+/// </list>
+/// </description></item>
 /// </list>
 /// </remarks>
 internal sealed partial class Cia401Device : ICanOpenApplication
@@ -299,6 +393,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// default or a stored value (CiA 401-1 §6.2.5 NOTE, §6.2.7 NOTE), and a device failure that
     /// persists takes the error values again. All of it happens in Initialisation, before the node
     /// can enter Operational, so the TPDOs sent on entering it carry the application's levels.
+    /// The node restores and calls this in the same actor job, so no SDO transfer comes between;
+    /// but a reader on another thread (<see cref="ReadDigitalInputs"/>, <see cref="ReadAnalogInput"/>)
+    /// can, in that window, see the restored value, a default or a stored one.
     /// </para>
     /// <para>
     /// <b>Stored values.</b> A save through <c>1010h</c> stores every entry the device declared, the
@@ -407,11 +504,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// </list>
     /// <para>
     /// The inputs the model sets never call it again: the model is told of outputs, and a set input
-    /// changes none. Outputs the model changes itself (by <see cref="ReportDeviceFailure"/>) are
-    /// raised to the subscribers once the model returns, but do not call the model again: it sees
-    /// them in the readers as soon as the call it made returns, and a model that answers each call
-    /// with a change of the outputs would otherwise keep the actor in a loop. A model that throws is
-    /// reported as a throwing subscriber is, and is called again for the next change.
+    /// changes none. From the model the outputs can move only by <see cref="ReportDeviceFailure"/>
+    /// entering the error state. Such a change is raised to the subscribers once the model returns,
+    /// but does not call the model again: the model made the change itself, and sees its effect in
+    /// the readers as soon as the call it made returns, the call applying inline. A model that
+    /// throws is reported as a throwing subscriber is, and is called again for the next change.
     /// </para>
     /// </remarks>
     public event EventHandler<Cia401OutputsChangedEventArgs>? OutputsChanged;
