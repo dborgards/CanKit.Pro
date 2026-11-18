@@ -13,7 +13,8 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// </summary>
 /// <remarks>
 /// <para>Every index is that of logical device 0; a logical device <c>n</c> is shifted by
-/// <c>n·800h</c> (CiA 401-1 §6.2), which the core package does in one helper.</para>
+/// <c>n·800h</c> (each logical device has its own <c>800h</c> objects of the standardized profile area
+/// from <c>6000h</c>, CiA 301 v4.2.0 §7.4.1, Table 41), which the core package does in one helper.</para>
 /// <para><c>6420h</c> and <c>6440h</c> are "reserved for compatibility reason" (§8.6.1, §8.7.1)
 /// and have no definition here. The norm's digital objects with a range of 128 channels per index
 /// (<c>6020h</c> to <c>6027h</c> and their siblings) are one definition per index.</para>
@@ -108,7 +109,7 @@ internal static class Cia401Objects
     public static Cia401ObjectDefinition ReadDigitalInput32 { get; } = Digital(0x6120, "Read digital input 32-bit", Cia401FunctionBlock.DigitalInput, 32,
         OdAccess.ReadOnly, Cia401PdoMapping.Optional, null, "8.2.20");
 
-    /// <summary>Object <c>6122h</c>: Polarity digital input 32-bit (CiA 401-1 §8.2.21). The norm gives the PDO mapping "No" here, as against "Optional" for the 8-bit and 16-bit objects.</summary>
+    /// <summary>Object <c>6122h</c>: Polarity digital input 32-bit (CiA 401-1 §8.2.21). The norm gives the PDO mapping "No" here at sub-indices <c>01h</c> and <c>02h</c> and "Optional" at <c>FEh</c>, as against "Optional" throughout for the 8-bit and 16-bit objects.</summary>
     public static Cia401ObjectDefinition PolarityDigitalInput32 { get; } = Digital(0x6122, "Polarity digital input 32-bit", Cia401FunctionBlock.DigitalInput, 32,
         OdAccess.ReadWrite, Cia401PdoMapping.No, 0, "8.2.21");
 

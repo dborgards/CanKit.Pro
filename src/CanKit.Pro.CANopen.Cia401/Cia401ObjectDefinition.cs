@@ -32,7 +32,7 @@ internal enum Cia401PdoMapping
     /// <summary>"Optional": the entry can be mapped into a TPDO or an RPDO.</summary>
     Optional,
 
-    /// <summary>"Default": the entry is mapped by the default PDOs of the profile (§7.3).</summary>
+    /// <summary>"Default": the entry is mapped by the default PDOs of the profile (CiA 401-1 §6.2.5 to §6.2.12).</summary>
     Default,
 
     /// <summary>"TPDO": the entry can be mapped into a TPDO only.</summary>
@@ -88,10 +88,14 @@ internal sealed class Cia401ObjectDefinition
     }
 
     /// <summary>The object index in logical device 0 (shifted by <c>n·800h</c> for logical device
-    /// <c>n</c>, CiA 401-1 §6.2).</summary>
+    /// <c>n</c>: each logical device has its own <c>800h</c> objects of the standardized profile
+    /// area from <c>6000h</c>, CiA 301 v4.2.0 §7.4.1, Table 41).</summary>
     public ushort Index { get; }
 
-    /// <summary>The object name as the heading of its clause gives it.</summary>
+    /// <summary>The object name as the heading of its clause gives it. The name of a range object
+    /// (<c>6020h</c> to <c>6027h</c> and its siblings) is composed, not the clause heading, which
+    /// names the whole family: the heading base followed by the channels of the index, for example
+    /// "Read digital input bit 129 to 256" for <c>6021h</c>.</summary>
     public string Name { get; }
 
     /// <summary>The function block the object belongs to.</summary>
@@ -117,14 +121,18 @@ internal sealed class Cia401ObjectDefinition
     /// <summary>The PDO mapping of sub-index <c>01h</c>. Where an entry description lists several
     /// values, the others are in the clause: <c>6200h</c> maps sub-indices <c>01h</c> to
     /// <c>08h</c> by default and the rest optionally, <c>6401h</c> and <c>6411h</c> do so for
-    /// <c>01h</c> to <c>0Ch</c>, and <c>6302h</c> and <c>6322h</c> say "No" at <c>01h</c> and
-    /// "Optional" from <c>02h</c> on.</summary>
+    /// <c>01h</c> to <c>0Ch</c>, <c>6302h</c> and <c>6322h</c> say "No" at <c>01h</c> and
+    /// "Optional" from <c>02h</c> on, and <c>6122h</c> says "No" at <c>01h</c> and <c>02h</c> and
+    /// "Optional" at <c>FEh</c>.</summary>
     public Cia401PdoMapping PdoMapping { get; }
 
     /// <summary>The default value of the elements, or <see langword="null"/> where the norm says
     /// "No" (an input, a source) or "manufacturer-specific". BOOLEAN is 0 or 1; for the REAL32
     /// objects it is the numeric value of the real, which is integral wherever the norm gives
-    /// one (<c>0,0</c> and <c>1,0</c>). 32-bit masks are given as the unsigned value.</summary>
+    /// one (<c>0,0</c> and <c>1,0</c>). 32-bit masks are given as the unsigned value.
+    /// The value of a REAL32 object is not the bit pattern of the element: it must be converted
+    /// (<c>BitConverter.SingleToInt32Bits((float)value)</c> or the like) before it is written to
+    /// the element, and written raw <c>1</c> is the denormal <c>1.4E-45</c>, not <c>1.0</c>.</summary>
     public long? DefaultValue { get; }
 
     /// <summary>How many channels one sub-index carries: 1, 8, 16 or 32 for the digital objects,
