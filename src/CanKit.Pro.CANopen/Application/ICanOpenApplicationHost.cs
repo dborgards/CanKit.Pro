@@ -255,7 +255,9 @@ internal interface ICanOpenApplicationHost
     /// Stopped and goes out then, whatever the options (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY
     /// in Stopped).
     /// </para>
-    /// <para>An NMT reset ends every error without an EMCY, and <c>1001h</c> loses its bits. An EMCY of
+    /// <para>An NMT reset ends every error without an EMCY, and <c>1001h</c> loses its bits at once,
+    /// before the reset's <see cref="ICanOpenApplication.OnNmtStateChanged"/> into Initialisation,
+    /// whatever EMCYs are still on their way. An EMCY of
     /// the application, raise or <see cref="ClearError"/>, that has not been transmitted when the reset
     /// comes is dropped, frame and <c>1001h</c> write alike: one held in Initialisation, one already
     /// released behind the boot-up but still waiting for its turn (a master that resets the node as

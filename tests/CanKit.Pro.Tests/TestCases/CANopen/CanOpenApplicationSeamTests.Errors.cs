@@ -417,6 +417,49 @@ public partial class CanOpenApplicationSeamTests
         rig.Wire.Count(SlaveEmcy).Should().Be(1, "the reset dropped the EMCY that was waiting, and sent none");
     }
 
+    [Fact] // #550, Bugbot on #567
+    public async Task A_Reset_Takes_The_Profile_Errors_Out_Of_1001h_Before_The_Applications_Hear_Of_It()
+    {
+        // The error's EMCY is held in its send, so the EMCY chain is busy when the reset comes: whatever
+        // the reset queues there waits. The application reads 1001h in its reset callbacks, and the
+        // master uploads it as soon as it has seen the boot-up.
+        var app = Profile();
+        byte? inInitialisation = null;
+        byte? inOnReset = null;
+        app.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Initializing) inInitialisation = (byte)app.Host!.ObjectDictionary.ReadUnsigned(0x1001, 0);
+        };
+        app.WhenReset = _ => inOnReset = (byte)app.Host!.ObjectDictionary.ReadUnsigned(0x1001, 0);
+        using var rig = new EntryRig(With(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        var emcySending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var emcyMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BeforeControlFrameSendForTests = id =>
+        {
+            if (id != SlaveEmcy) return Task.CompletedTask;
+            emcySending.TrySetResult(true);
+            return emcyMayLeave.Task;
+        };
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await emcySending.Task.WithTimeoutAsync(ShortTimeout);
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        byte afterBootUp = await UploadErrorRegisterAsync(rig);
+        emcyMayLeave.SetResult(true);
+        await EmcyChainSettledAsync(rig.Node);
+
+        using (new AwesomeAssertions.Execution.AssertionScope())
+        {
+            inInitialisation.Should().Be(0x00, "a reset ends the profile errors, and 1001h shows that at once (#550)");
+            inOnReset.Should().Be(0x00);
+            afterBootUp.Should().Be(0x00, "a master that reacts to the boot-up reads the ended errors as ended");
+            ErrorRegister(rig.Node).Should().Be(0x00);
+        }
+    }
+
     // -----------------------------------------------------------------------------------------
     // Communication failure.
     // -----------------------------------------------------------------------------------------

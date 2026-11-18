@@ -233,12 +233,20 @@ internal sealed partial class CanOpenNode
     /// an EMCY). The application's bits stay, as <c>1001h</c> is not restored.</summary>
     private void EndCommunicationErrorsForReset()
     {
+        // Whether 1001h shows profile errors now: they end here, and so does their showing (below).
+        bool profileErrorsShown = _profileErrors.Count > 0;
         _communicationErrors.Clear();
         EndProfileErrorsForReset();
         _heartbeatEmcyTimeouts.Clear();
         InvalidateControllerOverrunMonitoring();
         InvalidateControllerErrorBaseline();
         _heldNodeEmcy = false;
+        // 1001h shows a profile error from its raise to its clear, and a reset is a clear (#550): its
+        // bits leave the register in this job, before the reset tells the applications and before a
+        // master can read the register after the boot-up, not when the step queued below gets its
+        // turn behind EMCYs still on the chain (Bugbot on #567). The communication bits and the
+        // application's part stay as they are until that step. Never on a node without applications.
+        if (profileErrorsShown) UpdateErrorRegister(passed: null, _registerCommunicationBits);
         // What a profile error raised from the reset's callbacks writes before the step below runs.
         _registerCommunicationBits = 0;
         if (_errorRegisterQueued) QueueErrorRegisterWrite(communicationBits: 0);
