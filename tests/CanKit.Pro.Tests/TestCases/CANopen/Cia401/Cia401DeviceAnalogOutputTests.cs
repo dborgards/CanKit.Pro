@@ -525,6 +525,28 @@ public class Cia401DeviceAnalogOutputTests
         rig.Device.ReadAnalogOutput(1).Should().Be(301);
     }
 
+    [Fact] // review 4d: Review Focus 2 for the analog outputs, the failure ended by a reset
+    public async Task Reset_Communication_Ending_A_Communication_Failure_Moves_No_Analog_Output()
+    {
+        using var rig = new Cia401Rig(AnalogOut(1));
+        var recorder = new Recorder(rig);
+        await rig.WriteI32Async(0x6444, 0x01, LeftAdjusted(7));
+        await rig.StartAsync();
+        await rig.SendRpdo2Async(Cia401Rig.Words(100));
+        HeartbeatTimeout(rig);
+        rig.Device.ReadAnalogOutput(1).Should().Be(7);
+        int before = recorder.Events.Count;
+
+        await rig.ResetAsync(NmtCommand.ResetCommunication);
+
+        rig.Device.OutputsInErrorState.Should().BeFalse("the reset ended the communication failure");
+        rig.Device.ReadAnalogOutput(1).Should().Be(7, "Reset Communication resets no application: nothing moves");
+        recorder.Events.Count.Should().Be(before, "no output moved");
+        await rig.StartAsync();
+        await rig.SendRpdo2Async(Cia401Rig.Words(200));
+        rig.Device.ReadAnalogOutput(1).Should().Be(200, "the next accepted write applies");
+    }
+
     // ---- channels, arguments, life cycle -------------------------------------------------------
 
     [Fact]

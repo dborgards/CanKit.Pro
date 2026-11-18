@@ -241,6 +241,51 @@ public class Cia401DeviceResetTests
         (await rig.ReadI16Async(0x6411, 0x01)).Should().Be(1234);
     }
 
+    [Fact] // review 4c: stored set-up objects come up after Reset Node, and the outputs follow them
+    public async Task Stored_Masks_Polarities_And_Error_Settings_Come_Up_After_Reset_Node()
+    {
+        using var rig = new Cia401Rig(new Cia401Configuration { DigitalInputs = 8, DigitalOutputs = 8, AnalogOutputs = 2 });
+        var stored = new (ushort Index, byte Sub, byte Value)[]
+        {
+            (0x6002, 0x01, 0xFF), (0x6006, 0x01, 0x0F), (0x6202, 0x01, 0x0F),
+            (0x6206, 0x01, 0x0F), (0x6207, 0x01, 0xAA), (0x6208, 0x01, 0xF0), (0x6443, 0x02, 0x00),
+        };
+        foreach (var (index, sub, value) in stored) await rig.WriteU8Async(index, sub, value);
+        await rig.WriteI32Async(0x6444, 0x01, 0x0123_0000);
+        await rig.WriteI16Async(0x6411, 0x02, 55);
+        await rig.WriteU8Async(0x1029, 0x01, 0x01);
+        await rig.SaveAsync();
+        // Back to the defaults, so that what comes up can only be what was stored.
+        foreach (var (index, sub, value) in new (ushort, byte, byte)[]
+        {
+            (0x6002, 0x01, 0x00), (0x6006, 0x01, 0xFF), (0x6202, 0x01, 0x00),
+            (0x6206, 0x01, 0xFF), (0x6207, 0x01, 0x00), (0x6208, 0x01, 0xFF), (0x6443, 0x02, 0x01),
+        })
+        {
+            await rig.WriteU8Async(index, sub, value);
+        }
+
+        await rig.WriteI32Async(0x6444, 0x01, 0);
+        await rig.WriteI16Async(0x6411, 0x02, 0);
+        rig.Settle();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
+        rig.Device.ReportDeviceFailure(true); // outlasts the reset: the analog outputs take their error settings
+        rig.Settle();
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        foreach (var (index, sub, value) in stored)
+            (await rig.ReadU8Async(index, sub)).Should().Be(value, $"{index:X4}h:{sub:X2}h comes up as stored");
+        (await rig.ReadU32Async(0x6444, 0x01)).Should().Be(0x0123_0000u);
+        (await rig.ReadU8Async(0x6000, 0x01)).Should().Be(0xFF, "physical 00h under the stored polarity FFh");
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x05,
+            "in the error state the low nibble (stored 6206h 0Fh) takes the stored 6207h AAh, the high one keeps 6200h's 0, "
+            + "and the stored 6202h 0Fh inverts the low nibble: 0Ah XOR 0Fh");
+        rig.Device.ReadAnalogOutput(1).Should().Be(0x0123, "the stored 6444h:01, 6443h:01 = 1");
+        rig.Device.ReadAnalogOutput(2).Should().Be(55, "the stored 6411h:02, kept by the stored 6443h:02 = 0");
+    }
+
     [Fact] // the interrupt state starts afresh from the application's value, not the restored one
     public async Task Reset_Node_Measures_The_Next_Delta_From_The_Applications_Value()
     {

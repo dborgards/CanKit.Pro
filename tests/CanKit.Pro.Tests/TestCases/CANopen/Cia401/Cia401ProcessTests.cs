@@ -250,6 +250,52 @@ public class Cia401ProcessTests
         model.Calls.Should().Be(2, "after attach, and for the RPDO, though the subscriber threw");
     }
 
+    [Fact] // review 4a: inputs set in the call after a reset
+    public async Task Inputs_The_Model_Sets_After_A_Reset_Are_Sent_On_The_Next_Start()
+    {
+        var model = new Model();
+        model.Body = (device, _) =>
+        {
+            if (model.Seen[^1].State != NmtState.Initializing) return;
+            device.SetDigitalInputs(1, 0x3C);
+            device.SetAnalogInputs(1, new short[] { 777 });
+        };
+        using var rig = Open(new Cia401Configuration { DigitalInputs = 8, AnalogInputs = 1 }, model);
+        rig.Settle();
+        int tpdo1 = rig.Count(Cia401Rig.Tpdo1);
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        model.Seen[^1].State.Should().Be(NmtState.Initializing, "the call after the reset is made in Initialisation");
+        await rig.DrainAsync();
+        rig.Count(Cia401Rig.Tpdo1).Should().Be(tpdo1, "in Initialisation and Pre-operational nothing is sent");
+        (await rig.ReadU8Async(0x6000, 0x01)).Should().Be(0x3C, "the values are in the dictionary");
+        (await rig.ReadI16Async(0x6401, 0x01)).Should().Be(777);
+
+        await rig.StartAsync();
+        await rig.WaitForCountAsync(Cia401Rig.Tpdo1, tpdo1 + 1);
+        rig.Payloads(Cia401Rig.Tpdo1)[tpdo1].Should().Equal(new byte[] { 0x3C }, "the TPDO on entering Operational carries them");
+    }
+
+    [Fact] // review 4b
+    public void Inputs_The_Application_Sets_Do_Not_Call_The_Model()
+    {
+        var model = new Model();
+        using var rig = Open(new Cia401Configuration { DigitalInputs = 8, DigitalOutputs = 8, AnalogInputs = 1 }, model);
+        rig.Settle();
+        model.Calls.Should().Be(1, "the call after attach");
+
+        rig.Device.SetDigitalInputs(1, 0x0F);
+        rig.Device.SetDigitalInput(8, true);
+        rig.Device.SetAnalogInput(1, 123);
+        rig.Device.SetAnalogInputs(1, new short[] { 456 });
+        rig.Settle();
+
+        rig.Device.ReadDigitalInputs(1).Should().Be(0x8F);
+        rig.Device.ReadAnalogInput(1).Should().Be(456);
+        model.Calls.Should().Be(1, "the model is told of outputs, and no output moved");
+    }
+
     [Fact] // a model that sets several analog inputs uses SetAnalogInputs: one TPDO
     public async Task A_Model_That_Mirrors_The_Analog_Outputs_Sends_One_Tpdo_For_Them()
     {
