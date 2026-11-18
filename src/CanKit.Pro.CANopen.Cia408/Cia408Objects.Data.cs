@@ -168,14 +168,14 @@ internal static partial class Cia408Objects
             Var(0x62A0, "actuator conditioning directional dependent gain type 32-bit", "9.7.11", ActuatorConditioning, Integer8, Acc.Rw, Pdo.TrROrNo, If("directional dependent gain function is implemented"), V(0)),
             Var(0x62A1, "actuator conditioning directional dependent gain factor 32-bit", "9.7.12", ActuatorConditioning, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("directional dependent gain factor type 1 is implemented"), V(65537)),
             Var(0x62A2, "actuator conditioning characteristic compensation type 32-bit", "9.7.13", ActuatorConditioning, Integer8, Acc.Rw, Pdo.TrROrNo, If("compensation function is implemented"), V(0)),
-            Rec(0x62A3, "actuator conditioning directional dependent gain factor 2 32-bit", "9.7.14", ActuatorConditioning, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("directional dependent gain factor type 2 is implemented"), V(1000), U(0x00), P(-6)), // prefix printed "FAh, mili"
+            Rec(0x62A3, "actuator conditioning directional dependent gain factor 2 32-bit", "9.7.14", ActuatorConditioning, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("directional dependent gain factor type 2 is implemented"), V(1000), U(0x00), P(-6)), // prefix printed "FAh, mili": the code is taken (see DefaultPrefix)
             Var(0x62B0, "actuator conditioning dead band compensation type 32-bit", "9.7.15", ActuatorConditioning, Integer8, Acc.Rw, Pdo.TrROrNo, If("dead band compensation function is implemented"), V(0)),
-            Rec(0x62B1, "actuator conditioning dead band compensation A side 32-bit", "9.7.16", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dead band compensation type is 1 or 2"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili"
-            Rec(0x62B2, "actuator conditioning dead band compensation B side 32-bit", "9.7.17", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dead band compensation type is 1 or 2"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili"
-            Rec(0x62B3, "actuator conditioning dead band compensation threshold 32-bit", "9.7.18", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dead band compensation type is 1 or 2"), Ds, U(0x00), P(-6)), // prefix printed "FAh, mili"
-            Rec(0x62C0, "actuator conditioning zero correction offset 32-bit", "9.7.19", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("zero correction function is implemented"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili"
+            Rec(0x62B1, "actuator conditioning dead band compensation A side 32-bit", "9.7.16", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dead band compensation type is 1 or 2"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili": the code is taken (see DefaultPrefix)
+            Rec(0x62B2, "actuator conditioning dead band compensation B side 32-bit", "9.7.17", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dead band compensation type is 1 or 2"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili": the code is taken (see DefaultPrefix)
+            Rec(0x62B3, "actuator conditioning dead band compensation threshold 32-bit", "9.7.18", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dead band compensation type is 1 or 2"), Ds, U(0x00), P(-6)), // prefix printed "FAh, mili": the code is taken (see DefaultPrefix)
+            Rec(0x62C0, "actuator conditioning zero correction offset 32-bit", "9.7.19", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("zero correction function is implemented"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili": the code is taken (see DefaultPrefix)
             Var(0x62D0, "actuator conditioning dither type 32-bit", "9.7.20", ActuatorConditioning, Integer8, Acc.Rw, Pdo.TrROrNo, If("dither function is implemented"), V(0)),
-            Rec(0x62D1, "actuator conditioning dither amplitude 32-bit", "9.7.21", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dither function type is 1, 2 or 3"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili"
+            Rec(0x62D1, "actuator conditioning dither amplitude 32-bit", "9.7.21", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("dither function type is 1, 2 or 3"), V(0), U(0x00), P(-6)), // prefix printed "FAh, mili": the code is taken (see DefaultPrefix)
             Rec(0x62D2, "actuator conditioning dither frequency 32-bit", "9.7.22", ActuatorConditioning, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("dither function type is 1, 2 or 3"), V(0), U(0x20), P(0)),
             Rec(0x62E0, "actuator conditioning upper limit 32-bit", "9.7.23", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("limit function is implemented"), V(0), Cms, Cms),
             Rec(0x62E1, "actuator conditioning lower limit 32-bit", "9.7.24", ActuatorConditioning, Integer32, Acc.Rw, Pdo.TrROrNo, If("limit function is implemented"), V(0), Cms, Cms),
@@ -263,7 +263,6 @@ internal static partial class Cia408Objects
             Rec(0x638A, "vprc demand value 32-bit", "9.12.7", ValvePressure, Integer32, Acc.Ro, Pdo.T, Optional, V(0), Cms, Cms), // Annex A: Conditional
             Rec(0x6390, "vprc setpoint conditioning demand value", "9.12.8", ValvePressure, Integer16, Acc.Ro, Pdo.T, Optional, V(0), Cms, Cms),
             Rec(0x63D0, "vprc control deviation", "9.12.9", ValvePressure, Integer16, Acc.Ro, Pdo.T, Optional, No, Cms, Cms),
-            Rec(0x63D8, "vprc control deviation 32-bit", "9.12.10", ValvePressure, Integer32, Acc.Ro, Pdo.T, Optional, No, Cms, Cms), // ruling: 9.12.10, not 9.14.19 (see the class doc)
 
             // ---- §9.13 vprc setpoint conditioning ----
             Rec(0x6391, "vprc setpoint conditioning reference value", "9.13.2", ValvePressure, Integer16, Acc.Rw, Pdo.TrROrNo, Optional, V(16384), Ir, P(0)),
@@ -296,6 +295,7 @@ internal static partial class Cia408Objects
             Rec(0x63D3, "vprc control monitoring symmetric threshold", "9.14.16", ValvePressure, Integer16, Acc.Rw, Pdo.TrROrNo, If("control monitoring type is 2"), Ds, Cms, Cms),
             Rec(0x63D4, "vprc control monitoring upper threshold", "9.14.17", ValvePressure, Integer16, Acc.Rw, Pdo.TrROrNo, If("control monitoring type is 1"), Ds, Cms, Cms),
             Rec(0x63D5, "vprc control monitoring lower threshold", "9.14.18", ValvePressure, Integer16, Acc.Rw, Pdo.TrROrNo, If("control monitoring type is 1"), Ds, Cms, Cms),
+            Rec(0x63D8, "vprc control monitoring threshold 32-bit", "9.14.19", ValvePressure, Integer32, Acc.Rw, Pdo.TrROrNo, If("control monitoring type is 2"), Ds, Cms, Cms), // ruling: 9.14.19, not 9.12.10 (see the class doc)
             Rec(0x63D9, "vprc control monitoring upper threshold 32-bit", "9.14.20", ValvePressure, Integer32, Acc.Rw, Pdo.TrROrNo, If("control monitoring type is 1"), Ds, Cms, Cms),
             Rec(0x63DA, "vprc control monitoring lower threshold 32-bit", "9.14.21", ValvePressure, Integer32, Acc.Rw, Pdo.TrROrNo, If("control monitoring type is 1"), Ds, Cms, Cms),
 

@@ -118,7 +118,7 @@ public class Cia408ObjectsTests
     [Fact]
     public void The_Indices_Kinds_And_Value_Types_Are_Exactly_Those_Of_Clause_9()
     {
-        // Document order, one line per object definition; 63D8h once (§9.12.10, see the ruling
+        // Document order, one line per object definition; 63D8h once (§9.14.19, see the ruling
         // below), 65D1h and 6605h by their headings.
         var expected = new (int Index, bool Record, OdDataType Type)[]
         {
@@ -358,7 +358,6 @@ public class Cia408ObjectsTests
             (0x638A, R, Integer32),
             (0x6390, R, Integer16),
             (0x63D0, R, Integer16),
-            (0x63D8, R, Integer32),
             // §9.13
             (0x6391, R, Integer16),
             (0x6394, R, Integer16),
@@ -389,6 +388,7 @@ public class Cia408ObjectsTests
             (0x63D3, R, Integer16),
             (0x63D4, R, Integer16),
             (0x63D5, R, Integer16),
+            (0x63D8, R, Integer32),
             (0x63D9, R, Integer32),
             (0x63DA, R, Integer32),
             // §9.15
@@ -718,7 +718,7 @@ public class Cia408ObjectsTests
     [InlineData(0x6388, "vprc setpoint 32-bit", "9.12.5", "ValvePressure", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "32-bit parameters and control mode is 3 or 4", "0", "ir32", "0")]
     [InlineData(0x6389, "vprc actual value 32-bit", "9.12.6", "ValvePressure", true, OdDataType.Integer32, OdAccess.ReadOnly, false, "Transmit/Transmit", "Conditional", "32-bit parameters and control mode is 3 or 4", "0", "ir", "0")]
     [InlineData(0x6394, "vprc setpoint conditioning hold setpoint", "9.13.3", "ValvePressure", true, OdDataType.Integer16, OdAccess.ReadWrite, false, "Both/No", "Optional", null, "0", "ir", "0")]
-    [InlineData(0x63D8, "vprc control deviation 32-bit", "9.12.10", "ValvePressure", true, OdDataType.Integer32, OdAccess.ReadOnly, false, "Transmit/Transmit", "Optional", null, "None", "ControlModeSpecific", "ControlModeSpecific")]
+    [InlineData(0x63D8, "vprc control monitoring threshold 32-bit", "9.14.19", "ValvePressure", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "control monitoring type is 2", "DeviceSpecific", "ControlModeSpecific", "ControlModeSpecific")]
     [InlineData(0x640D, "vpqc power limit factor", "9.16.2", "ValvePower", false, OdDataType.Unsigned32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "16-bit parameters and control mode is 5", "65537", "NotApplicable", "NotApplicable")]
     [InlineData(0x647A, "vpqc target window monitoring lower threshold 32-bit", "9.20.10", "ValvePower", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "target window monitoring type is 1", "DeviceSpecific", "ControlModeSpecific", "ControlModeSpecific")]
     [InlineData(0x6700, "vflc setpoint", "9.21.2", "ValveFlow", true, OdDataType.Integer16, OdAccess.ReadWrite, false, "Both/No", "Conditional", "16-bit parameters and control mode is 13, 14 or 15", "0", "A9h", "-3")]
@@ -743,6 +743,14 @@ public class Cia408ObjectsTests
     [InlineData(0x6603, "dpc Kp", "9.47.5", "DrivePosition", true, OdDataType.Unsigned32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "16-bit parameters and control mode is 9", "0", "A3h", "-3")]
     [InlineData(0x6605, "dpc T1", "9.47.7", "DrivePosition", true, OdDataType.Unsigned32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "16-bit parameters and control mode is 9", "0", "03h", "-3")]
     [InlineData(0x6614, "dpc setpoint conditioning hold setpoint", "9.47.16", "DrivePosition", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Optional", null, "0", "ControlModeSpecific", "ControlModeSpecific")]
+    [InlineData(0x62B1, "actuator conditioning dead band compensation A side 32-bit", "9.7.16", "ActuatorConditioning", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "dead band compensation type is 1 or 2", "0", "00h", "-6")]
+    [InlineData(0x62B2, "actuator conditioning dead band compensation B side 32-bit", "9.7.17", "ActuatorConditioning", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "dead band compensation type is 1 or 2", "0", "00h", "-6")]
+    [InlineData(0x62B3, "actuator conditioning dead band compensation threshold 32-bit", "9.7.18", "ActuatorConditioning", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "dead band compensation type is 1 or 2", "DeviceSpecific", "00h", "-6")]
+    [InlineData(0x62C0, "actuator conditioning zero correction offset 32-bit", "9.7.19", "ActuatorConditioning", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "zero correction function is implemented", "0", "00h", "-6")]
+    [InlineData(0x62D1, "actuator conditioning dither amplitude 32-bit", "9.7.21", "ActuatorConditioning", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "dither function type is 1, 2 or 3", "0", "00h", "-6")]
+    [InlineData(0x6324, "actuator conditioning zero correction offset", "9.7.26", "ActuatorConditioning", true, OdDataType.Integer16, OdAccess.ReadWrite, false, "Both/No", "Conditional", "zero correction function is implemented", "0", "ir", "0")]
+    [InlineData(0x670A, "vflc setpoint conditioning demand value 32-bit", "9.21.7", "ValveFlow", true, OdDataType.Integer32, OdAccess.ReadOnly, false, "Transmit/Transmit", "Optional", null, "None", "ControlModeSpecific", "ControlModeSpecific")]
+    [InlineData(0x677A, "vflc target window monitoring lower threshold 32-bit", "9.25.10", "ValveFlow", true, OdDataType.Integer32, OdAccess.ReadWrite, false, "Both/No", "Conditional", "target window monitoring type is 1", "DeviceSpecific", "ControlModeSpecific", "ControlModeSpecific")]
     public void A_Definition_Holds_What_The_Page_Shows(
         ushort index, string name, string clause, string area, bool isValueRecord, OdDataType valueType,
         OdAccess access, bool accessMayBeReadOnly, string pdo, string category, string? condition,
@@ -881,7 +889,7 @@ public class Cia408ObjectsTests
     {
         foreach (var d in Cia408Objects.All)
             (d.Condition != null).Should().Be(d.Category == Cia408Category.Conditional, $"{d.Index:X4}h");
-        Cia408Objects.All.Count(d => d.Category == Cia408Category.Conditional).Should().Be(312); // 313 tables, less the second 63D8h
+        Cia408Objects.All.Count(d => d.Category == Cia408Category.Conditional).Should().Be(313); // 63D8h counts once, as the Conditional §9.14.19 object
         Cia408Objects.All.Where(d => d.Category == Cia408Category.Mandatory).Select(d => (int)d.Index)
             .Should().Equal(0x6040, 0x6041, 0x6042, 0x6044, 0x6045);
     }
@@ -915,16 +923,32 @@ public class Cia408ObjectsTests
     // ---- the rulings on the norm's own defects ------------------------------------------------
 
     [Fact]
-    public void Index_63D8h_Is_The_Pressure_Control_Deviation_Of_Clause_9_12_10()
+    public void Index_63D8h_Is_The_Pressure_Control_Monitoring_Threshold_Of_Clause_9_14_19()
     {
-        // §9.12.10 and §9.14.19 both define 63D8h; CiA 408-B repeats both, CiA 408-C lists
-        // the index once (as rw/tr). The catalogue keeps the earlier clause (see the doc).
+        // §9.12.10 (control deviation 32-bit) and §9.14.19 (control monitoring threshold 32-bit)
+        // both define 63D8h. Annex A (Table 1027) and CiA 408-C Table A.2 give it the threshold's
+        // access, rw / TR: the catalogue holds §9.14.19.
         var d = Get(0x63D8);
-        d.Name.Should().Be("vprc control deviation 32-bit");
-        d.Clause.Should().Be("9.12.10");
-        d.Access.Should().Be(OdAccess.ReadOnly);
-        d.PdoAccess.Should().Be(Cia408PdoAccess.Transmit);
+        d.Name.Should().Be("vprc control monitoring threshold 32-bit");
+        d.Clause.Should().Be("9.14.19");
+        d.Category.Should().Be(Cia408Category.Conditional);
+        d.Access.Should().Be(OdAccess.ReadWrite);
+        d.PdoAccess.Should().Be(Cia408PdoAccess.Both);
         Cia408Objects.All.Should().ContainSingle(o => o.Index == 0x63D8);
+        Cia408Objects.All.Should().NotContain(o => o.Name == "vprc control deviation 32-bit");
+    }
+
+    [Fact]
+    public void The_Six_Prefixes_Printed_FAh_Mili_Hold_The_Printed_Code_Micro()
+    {
+        // 62A3h, 62B1h to 62B3h, 62C0h, 62D1h print "FAh, mili": the code is taken, FAh = -6.
+        foreach (ushort index in new ushort[] { 0x62A3, 0x62B1, 0x62B2, 0x62B3, 0x62C0, 0x62D1 })
+        {
+            Get(index).DefaultPrefixKind.Should().Be(Cia408DefaultKind.Value, $"{index:X4}h");
+            Get(index).DefaultPrefix.Should().Be(-6, $"{index:X4}h");
+        }
+
+        Get(0x6347).DefaultPrefix.Should().Be(-3); // the 16-bit sibling of 62A3h prints FDh (mili)
     }
 
     [Fact]

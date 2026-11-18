@@ -11,12 +11,19 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// </summary>
 /// <remarks>
 /// <para>The table itself is data, one line per object, in <c>Cia408Objects.Data.cs</c>,
-/// grouped by the sub-clauses of the norm. It was made outside the repository from two
-/// independent machine extractions of the norm (one from its text, one from the geometry of its
-/// tables) with Annex A as a third opinion, and every object the extractions disagreed on, every
-/// object of §9.3, every setpoint and actual value the default PDOs map and a random sample of
-/// the rest was checked by hand against the printed page. Nothing of the norm is copied into the
-/// repository but names, indices, types, defaults and paraphrased conditions.</para>
+/// grouped by the sub-clauses of the norm. It was made outside the repository by reconciling two
+/// independent machine extractions of the norm — one from its text, one from the geometry of its
+/// tables — with Annex A as a third opinion. 206 objects were checked by eye against
+/// the printed page: every object the extractions disagreed on or one of them missed, every
+/// object of §9.3, every setpoint and actual value the default PDOs map, every object under a
+/// ruling below, and a random sample of 40 of the objects both extractions agree on, which showed
+/// no error. The other 249 rest on the two extractions agreeing. Nothing of the norm is copied
+/// into the repository but names, indices, types, defaults and paraphrased conditions.</para>
+/// <para>What the tests pin: for every object the index, the object kind and the value type,
+/// derived there independently of this table, and the reserved set; default, access, PDO access,
+/// unit, prefix, category and condition only for the objects pinned in full (§9.3, the default-PDO
+/// setpoints and actual values, the rulings, and a selection per area), plus rules every
+/// definition has to satisfy.</para>
 /// <para>Every index is that of logical device 0 (see
 /// <see cref="Cia408ObjectDefinition.Index"/>). 455 objects are defined: 72 <c>VAR</c> and 383
 /// value records (clause 9 has 456 object tables, because it defines <c>63D8h</c> twice; see
@@ -26,13 +33,11 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// <list type="bullet">
 /// <item><description><c>63D8h</c> is defined twice: §9.12.10 "vprc control deviation 32-bit"
 /// (Optional, ro, T, no default) and §9.14.19 "vprc control monitoring threshold 32-bit"
-/// (Conditional on control monitoring type 2, rw, "TR, R or No", device specific). CiA 408-B
-/// v1.0.0 repeats both (6.12.10 on p. 176, 6.15.7 on p. 194); CiA 408-C v1.0.0 Annex A
-/// Table A.2 (p. 32) lists the index once with rw / tr, which is the threshold's access, and so
-/// does Annex A of CiA 408 (Table 1027, p. 396) — but neither defines the object, and the
-/// definition document 408-B does not decide. The catalogue therefore holds §9.12.10, the earlier
-/// clause, and the 32-bit threshold of the pressure control monitoring has no index here. This
-/// contradicts 408-C and Annex A and wants an issue against the norm.</description></item>
+/// (Conditional on control monitoring type 2, rw, "TR, R or No", device specific). What decided:
+/// Annex A of CiA 408 (Table 1027, p. 396) and CiA 408-C v1.0.0 Annex A Table A.2 (p. 32) both
+/// list the index once, with the threshold's access (rw / TR). The catalogue holds §9.14.19; the
+/// 32-bit control deviation of the pressure control has no index in this edition. CiA 408-B
+/// v1.0.0 repeats both definitions (6.12.10, 6.15.7) and does not decide.</description></item>
 /// <item><description>Two headings carry another index than their object table: §9.45.2
 /// "Object 65D1h: dfpc control monitoring type" over a table that says <c>63D1h</c>, and §9.47.7
 /// "Object 6605h: dpc T1" over a table that says <c>6604h</c>. Both <c>63D1h</c> and

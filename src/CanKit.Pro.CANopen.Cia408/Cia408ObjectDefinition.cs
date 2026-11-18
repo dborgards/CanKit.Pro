@@ -311,11 +311,13 @@ internal sealed class Cia408ObjectDefinition
 
     /// <summary>The default prefix, the power of ten of CiA 303-2 (<c>FDh</c> = −3, milli;
     /// <c>FAh</c> = −6, micro), where <see cref="DefaultPrefixKind"/> is
-    /// <see cref="Cia408DefaultKind.Value"/>. The code is taken as printed where the label beside
-    /// it disagrees: <c>62A3h</c>, <c>62B1h</c> to <c>62B3h</c>, <c>62C0h</c> and <c>62D1h</c>
-    /// print "FAh, mili", and the code <c>FAh</c> (micro) is held although the label says milli —
-    /// and although the 16-bit sibling of <c>62A3h</c>, <c>6347h</c>, has <c>FDh</c> with the same
-    /// default and value range, which suggests milli was meant.</summary>
+    /// <see cref="Cia408DefaultKind.Value"/>. Six objects print a code and a word that disagree:
+    /// <c>62A3h</c> (§9.7.14), <c>62B1h</c> to <c>62B3h</c> (§9.7.16 to §9.7.18), <c>62C0h</c>
+    /// (§9.7.19) and <c>62D1h</c> (§9.7.21) give "FAh, mili" — the code <c>FAh</c> is micro, the
+    /// word "mili" would be <c>FDh</c> — and the 16-bit sibling of <c>62A3h</c>, <c>6347h</c>
+    /// (§9.7.34), has <c>FDh</c> with the same default and value range. The reading taken is the
+    /// code, <c>FAh</c> = −6: it is what a device following the norm reports; the word is taken
+    /// for the norm's slip.</summary>
     public sbyte? DefaultPrefix { get; }
 
     /// <inheritdoc />
