@@ -82,8 +82,14 @@ internal sealed partial class Cia401Device
     /// <para>
     /// When it begins, the device asks the node for the NMT state <c>1029h:01</c> names (§5.2,
     /// §6.2.4): 00h Pre-operational, only when the node is Operational; 01h no change; 02h Stopped,
-    /// from whatever state the node is in, Pre-operational included, since §6.2.4 makes 02h
-    /// unconditional and only 00h conditional on Operational. The node itself acts on its own
+    /// from Pre-operational as from Operational, since §6.2.4 makes 02h unconditional and only 00h
+    /// conditional on Operational. In Initialisation the node takes no request
+    /// (<see cref="ICanOpenApplicationHost.RequestNmtState"/>), and a failure can begin there: in
+    /// the plant model's call after a reset, in its first call on an LSS slave still waiting for its
+    /// node-id, in an <see cref="OutputsChanged"/> handler during a reset. Such a failure, and one
+    /// that outlasts a reset, makes its request when the node leaves Initialisation, after the
+    /// boot-up: with 02h the node boots and then enters Stopped; with 00h, Pre-operational being
+    /// where the boot-up leaves it, nothing more happens. The node itself acts on its own
     /// communication errors only from Operational, for 02h too; for a device failure the device
     /// follows §6.2.4 instead. A node without <c>1029h</c> behaves as for 00h (§6.2.4 NOTE); the
     /// reserved values change nothing, as the node treats them for a communication failure. The

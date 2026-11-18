@@ -132,8 +132,10 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// 'Stop remote node' indication.</description></item>
 /// <item><description>A device failure the application reports outlasts NMT resets. A master's
 /// Start during it is not refused.</description></item>
-/// <item><description>For a device failure, <c>1029h:01</c> = 02h requests Stopped from any state
-/// (§6.2.4; see <see cref="ReportDeviceFailure"/>).</description></item>
+/// <item><description>For a device failure, <c>1029h:01</c> = 02h requests Stopped from
+/// Pre-operational and Operational alike (§6.2.4). A failure reported in Initialisation, where the
+/// node takes no request, or one that outlasts a reset, makes its request when the node leaves
+/// Initialisation (see <see cref="ReportDeviceFailure"/>).</description></item>
 /// </list>
 /// </description></item>
 /// <item><description><b>Analog inputs</b> (<see cref="SetAnalogInput"/>):
@@ -417,12 +419,20 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// for every entry its blocks transmit, in one request, whatever the interrupt masks and the
     /// global interrupt enables say; the analog inputs also start their interrupt state afresh and
     /// raise the warning of §5.3 when <c>6423h</c> is FALSE, which leaving Operational ends (see
-    /// <see cref="SetAnalogInput"/>). Actor loop.</summary>
+    /// <see cref="SetAnalogInput"/>). Leaving Initialisation with a device failure active asks the
+    /// node for the state <c>1029h:01</c> names (§6.2.4; see <see cref="ReportDeviceFailure"/>).
+    /// Actor loop.</summary>
     public void OnNmtStateChanged(NmtState previous, NmtState current)
     {
         var host = AttachedHost();
         _stopped = current == NmtState.Stopped;
         UpdateErrorState(host);
+
+        // The node takes no state request in Initialisation: a device failure reported there, or
+        // one that outlasted a reset, asks for its state as the node leaves it (see
+        // ReportDeviceFailure). Asked from here, the change follows once this round is told.
+        if (previous == NmtState.Initializing && _deviceFailure) RequestDeviceFailureState(host);
+
         if (current == NmtState.Operational)
         {
             var send = new List<CanOpenObjectAddress>();

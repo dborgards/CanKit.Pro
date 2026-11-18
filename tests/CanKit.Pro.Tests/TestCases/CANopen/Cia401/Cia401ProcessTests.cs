@@ -207,6 +207,57 @@ public class Cia401ProcessTests
         rig.Device.OutputsInErrorState.Should().BeTrue();
     }
 
+    [Fact] // final review M3: the node takes no state request in Initialisation
+    public async Task A_Device_Failure_Reported_After_A_Reset_With_1029h_2_Stops_The_Node_After_Its_Boot_Up()
+    {
+        var model = new Model();
+        model.Body = (device, _) =>
+        {
+            if (model.Seen[^1].State == NmtState.Initializing) device.ReportDeviceFailure(true);
+        };
+        using var rig = Open(Digital8, model);
+        await rig.WriteU8Async(0x1029, 0x01, 0x02);
+        await rig.WriteI16Async(0x1017, 0x00, 1000); // a heartbeat on every change of state
+        await rig.WriteU8Async(0x6200, 0x01, 0x5A);
+        await rig.SaveAsync(); // a reset restores 1000h to 1FFFh: what comes up is what was stored
+        int before = rig.Count(Cia401Rig.Heartbeat);
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        rig.Od.ReadRaw(0x1029, 0x01).Should().Equal(new byte[] { 0x02 }, "precondition: the stored 1029h:01 came up");
+        model.Seen[^1].State.Should().Be(NmtState.Initializing, "precondition: the failure was reported in the call after the reset");
+        await rig.WaitForStateAsync(NmtState.Stopped);
+        await Cia401Rig.WaitUntilAsync(() => rig.Payloads(Cia401Rig.Heartbeat).Skip(before).Any(p => p[0] == 0x04),
+            "the heartbeat of Stopped");
+        var states = rig.Payloads(Cia401Rig.Heartbeat).Skip(before).Select(p => p[0]).ToList();
+        states[0].Should().Be(0x00, "the boot-up goes out first");
+        states.Last().Should().Be(0x04, "then the node is Stopped (CiA 401-1 §6.2.4)");
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00, "6206h FFh puts every output to 6207h, 00h");
+    }
+
+    [Fact] // final review M3: 00h asks for Pre-operational only from Operational
+    public async Task A_Device_Failure_Reported_After_A_Reset_With_1029h_0_Leaves_The_Node_Pre_Operational()
+    {
+        var model = new Model();
+        model.Body = (device, _) =>
+        {
+            if (model.Seen[^1].State == NmtState.Initializing) device.ReportDeviceFailure(true);
+        };
+        using var rig = Open(Digital8, model);
+        await rig.WriteU8Async(0x6200, 0x01, 0x5A);
+        await rig.SaveAsync();
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        await rig.FenceAsync(); // an SDO round trip: the node is not Stopped, where it has no SDO server
+
+        rig.Od.ReadRaw(0x1029, 0x01).Should().Equal(new byte[] { 0x00 }, "precondition: the default 1029h:01");
+        model.Seen[^1].State.Should().Be(NmtState.Initializing, "precondition: the failure was reported in the call after the reset");
+        rig.Node.State.Should().Be(NmtState.PreOperational);
+        rig.Device.OutputsInErrorState.Should().BeTrue();
+        rig.Device.ReadDigitalOutputs(1).Should().Be(0x00);
+    }
+
     [Fact]
     public async Task A_Model_That_Throws_Does_Not_Break_The_Device()
     {
