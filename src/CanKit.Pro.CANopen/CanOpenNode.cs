@@ -1518,8 +1518,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // on purpose our own TPDO (#93); an explicitly configured consumer outranks the
             // range-based guesses below. Two valid RPDOs may share a COB-ID — the dictionary holds
             // both records and CiA 301 does not forbid it — and then each is actuated (Codex on #133).
+            // Not on an LSS slave without a node-id: it stays in Initialisation (CiA 305 §4.2), where
+            // an RPDO acts on nothing (HandleRpdo), and a default RPDO 4 of a profile sits on 5FFh
+            // there (CanOpenNode.Application.Pdo.cs), which is node 127's SDO response to this
+            // node's client below.
             bool consumed = false;
-            for (int n = 1; n <= _pdoCount; n++)
+            for (int n = 1; n <= _pdoCount && CanOpenCobId.IsActiveNodeId(_nodeId); n++)
             {
                 if (_rpdos[n] is { Valid: true } rpdo && rpdo.CobId == cobId)
                 {

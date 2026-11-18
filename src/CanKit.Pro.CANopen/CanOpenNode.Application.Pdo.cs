@@ -63,15 +63,18 @@ internal sealed partial class CanOpenNode
     /// </summary>
     /// <remarks>
     /// Each through <see cref="WritePdoRecords"/>, the re-mapping procedure <c>ConfigureTpdo</c>
-    /// runs: the mapping is validated as it would be over SDO. The transmission type is <c>FFh</c>,
-    /// the profile-specific event-driven type (CiA 301 Table 72), which CiA 401-1 §6.2.5 and §6.2.6
-    /// give the default PDOs, not the manufacturer-specific <c>FEh</c> of
-    /// <see cref="TpdoTransmission.EventDriven"/>. A PDO a device description declared (either of
-    /// its records) is left as the file has it: the description is the node's identity. A PDO the
-    /// description leaves out does not exist (§7.3.3), and a default for it fails the open.
+    /// runs (CiA 301 v4.2.0 §7.5.2.36 and §7.5.2.38): the mapping is validated as it would be over
+    /// SDO. The transmission type is <c>FFh</c>, event-driven and device-profile specific (CiA 301
+    /// v4.2.0 §7.5.2.35 Table 68, §7.5.2.37 Table 72), the default CiA 401-1 v3.1.0 §6.2.5 and
+    /// §6.2.6 give, not the manufacturer-specific <c>FEh</c> of <see cref="TpdoTransmission.EventDriven"/>.
+    /// The file wins: a PDO a device description declared (either of its records) is left as the
+    /// file has it, and a PDO the description leaves out, whose records the loader removed, is left
+    /// out (a CANopen device provides CAN-IDs only for the communication objects it supports, CiA 301
+    /// v4.2.0 §7.3.3).
     /// </remarks>
-    /// <exception cref="ArgumentException">Two applications set the same PDO, or the records refuse
-    /// the default; the parameter is <c>options</c> and the message names the application.</exception>
+    /// <exception cref="ArgumentException">Two applications set the same PDO, one sets it twice, or
+    /// the records refuse the default; the parameter is <c>options</c> and the message names the
+    /// application.</exception>
     private void ComposeDefaultPdos()
     {
         var set = _defaultPdos;
@@ -83,8 +86,11 @@ internal sealed partial class CanOpenNode
         {
             if (setters.TryGetValue((isTpdo, number), out var first))
             {
-                throw OptionsError($"{PdoKind(isTpdo)} {number} gets its default from both " +
-                    $"'{first.Application.Name}' and '{setter.Application.Name}': one application sets it, once.");
+                throw OptionsError(ReferenceEquals(first, setter)
+                    ? $"Application '{setter.Application.Name}' sets the default of {PdoKind(isTpdo)} {number} twice: " +
+                      "one application sets it, once."
+                    : $"{PdoKind(isTpdo)} {number} gets its default from both " +
+                      $"'{first.Application.Name}' and '{setter.Application.Name}': one application sets it, once.");
             }
             setters[(isTpdo, number)] = setter;
         }
@@ -94,13 +100,16 @@ internal sealed partial class CanOpenNode
             var comm = (ushort)((isTpdo ? Co.TpdoComm : Co.RpdoComm) + number - 1);
             var map = (ushort)((isTpdo ? Co.TpdoMap : Co.RpdoMap) + number - 1);
             if (_describedObjects.Contains(comm) || _describedObjects.Contains(map)) continue;
+            if (_deviceDescription is not null && (!_od.ContainsIndex(comm) || !_od.ContainsIndex(map))) continue;
             var cobId = DefaultApplicationPdoCobId(comm, number, isTpdo, enabled);
             // An LSS slave without a node-id: the pre-defined COB-ID names node-id FFh, and for RPDO 4
-            // (500h + FFh = 5FFh) that is a restricted CAN-ID, which the record refuses. The node has no
-            // PDOs on the bus before it is given a node-id, and ApplyActiveNodeId moves the COB-ID to
-            // the node-id it is given, as it does for the node's own placeholders. So the PDO is
-            // written invalid through the procedure, and made valid without the record's check. Only
-            // here and only then: the record's validation of every other write stays as it is.
+            // (500h + FFh = 5FFh) that is a restricted CAN-ID, which the record refuses. Such a slave
+            // stays in Initialisation until it is given a node-id (CiA 305 §4.2), PDOs exist only in
+            // Operational (CiA 301 §7.3.2.2.5, Table 37), its RPDOs take no frame meanwhile
+            // (HandleIncomingFrame), and ApplyActiveNodeId moves the COB-ID to the node-id it is
+            // given, as it does for the node's own placeholders. So the PDO is written invalid
+            // through the procedure and made valid without the record's check. Only here and only
+            // then: the record's validation of every other write stays as it is.
             bool validWithoutNodeId = number <= 4 && !CanOpenCobId.IsActiveNodeId(_nodeId)
                 && (cobId & CanOpenCobId.InvalidBit) == 0;
             try
@@ -111,25 +120,47 @@ internal sealed partial class CanOpenNode
             catch (ArgumentException ex)
             {
                 throw new ArgumentException(
-                    $"Application '{setter.Application.Name}' sets the default of {PdoKind(isTpdo)} {number}: {ex.Message}",
+                    $"Application '{setter.Application.Name}' sets the default of {PdoKind(isTpdo)} {number}, " +
+                    $"which the PDO records refuse: {WithoutParameterSuffix(InnermostArgumentException(ex))}",
                     "options", ex);
             }
             if (validWithoutNodeId) _od.WriteRawUnchecked(comm, 0x01, ObjectDictionary.EncodeU32(cobId));
         }
     }
 
+    /// <summary>The refusal that caused <paramref name="ex"/>: <see cref="WritePdoRecords"/> wraps the
+    /// dictionary's, whose message is the one that says what was refused.</summary>
+    private static ArgumentException InnermostArgumentException(ArgumentException ex)
+    {
+        var innermost = ex;
+        while (innermost.InnerException is ArgumentException inner) innermost = inner;
+        return innermost;
+    }
+
+    /// <summary>The message of <paramref name="ex"/> without the parameter suffix the runtime appends
+    /// to it, in the runtime's own wording, so a wrapping exception carries one suffix, its own.</summary>
+    private static string WithoutParameterSuffix(ArgumentException ex)
+    {
+        var message = ex.Message;
+        if (string.IsNullOrEmpty(ex.ParamName)) return message;
+        var suffix = new ArgumentException(string.Empty, ex.ParamName).Message;
+        return message.EndsWith(suffix, StringComparison.Ordinal)
+            ? message.Substring(0, message.Length - suffix.Length)
+            : message;
+    }
+
     /// <summary>
     /// The COB-ID word of a default PDO. Up to PDO 4 the pre-defined connection set of the node's
-    /// node-id (<see cref="DefaultPdoCobId"/>, as <c>ConfigureTpdo</c> uses), with bit 31 set when the
-    /// PDO is not enabled. Above PDO 4 there is no pre-defined COB-ID, so the PDO stays invalid on the
-    /// word the record holds, the node's placeholder without a CAN-ID: the record refuses any other
-    /// invalid word without a CAN-ID, as it would over SDO.
+    /// node-id (CiA 301 v4.2.0 §7.3.3, Table 39; <see cref="DefaultPdoCobId"/>, as <c>ConfigureTpdo</c>
+    /// uses), with bit 31 set when the PDO is not enabled. The set covers at most four RPDOs and four
+    /// TPDOs (§7.3.3), so above PDO 4 the PDO stays invalid on the word the record holds, the node's
+    /// placeholder without a CAN-ID: the record refuses any other invalid word without a CAN-ID, as it
+    /// would over SDO.
     /// </summary>
     private uint DefaultApplicationPdoCobId(ushort comm, int number, bool isTpdo, bool enabled)
     {
         if (number > 4)
         {
-            // An absent record (a description that leaves the PDO out) is refused by WritePdoRecords.
             return (_od.TryReadUnsigned(comm, 0x01, out var placeholder) ? placeholder : 0) | CanOpenCobId.InvalidBit;
         }
         var word = DefaultPdoCobId(number, isTpdo);

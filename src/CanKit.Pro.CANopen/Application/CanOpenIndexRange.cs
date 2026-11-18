@@ -27,8 +27,9 @@ internal readonly record struct CanOpenIndexRange
     /// <summary>Whether the two ranges have an index in common.</summary>
     public bool Overlaps(CanOpenIndexRange other) => First <= other.Last && other.First <= Last;
 
-    /// <summary>The profile area of a logical device: <c>6000h</c> to <c>67FFh</c> of logical device 0,
-    /// shifted through <see cref="CanOpenLogicalDeviceAddressing.Index"/>.</summary>
+    /// <summary>The standardized profile area of a logical device: <c>6000h</c> to <c>67FFh</c> for the
+    /// first (CiA 301 v4.2.0 §7.4.1, Table 41), shifted through
+    /// <see cref="CanOpenLogicalDeviceAddressing.Index"/>.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside <c>0</c> to <c>7</c>.</exception>
     public static CanOpenIndexRange ForLogicalDevice(int logicalDevice)
         => new(CanOpenLogicalDeviceAddressing.Index(logicalDevice, 0x6000),

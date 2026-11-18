@@ -130,8 +130,8 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    /// <summary>The device-type object of a logical device: <c>67FFh</c> of logical device 0, shifted
-    /// (§7.5.2.1).</summary>
+    /// <summary>The device-type object of a logical device: <c>67FFh + x·800h</c>, x the logical device
+    /// counted from 0 (CiA 301 v4.2.0 §7.5.2.1).</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
     /// <c>0</c> to <c>7</c>; the parameter is <c>logicalDevice</c>.</exception>
     private static ushort DeviceTypeObjectOf(int logicalDevice) => CanOpenLogicalDeviceAddressing.Index(logicalDevice, 0x67FF);

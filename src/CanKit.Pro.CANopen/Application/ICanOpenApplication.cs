@@ -54,9 +54,9 @@ internal interface ICanOpenApplication
     /// <summary>What the application needs from the node. Read when the node opens, once.</summary>
     CanOpenApplicationRequirements Requirements { get; }
 
-    /// <summary>The node is opening: declare the objects, set the device type and the default PDOs. Runs on the constructing
-    /// thread, before the node boots; what the application declared here is what an NMT reset
-    /// restores and what <c>1010h</c> stores.</summary>
+    /// <summary>The node is opening: declare the objects, set the device type and the default PDOs.
+    /// Runs on the constructing thread, before the node boots; what the application declared here is
+    /// what an NMT reset restores and what <c>1010h</c> stores.</summary>
     /// <remarks>A write the application makes here to an entry it claims is validated
     /// (<see cref="ValidateWrite"/>, on this thread) but not reported through
     /// <see cref="OnEntriesWritten"/>. The host's actor-loop members, <see cref="ICanOpenApplicationHost.RaiseError"/>

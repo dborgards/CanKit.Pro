@@ -222,12 +222,111 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public void Two_Applications_Setting_The_Same_Rpdo_Fail_The_Open()
+    {
+        var alpha = Defaults(host => host.SetDefaultRpdo(1, Map(0x6000, 0x02)), name: "alpha");
+        var beta = new RecordingApplication("beta", new CanOpenIndexRange(0x6800, 0x6FFF))
+        {
+            Requirements = new CanOpenApplicationRequirements { PdoCount = 1 },
+            OnAttach = host =>
+            {
+                host.ObjectDictionary.AddU8(0x6800, 0x01, 0);
+                host.SetDefaultRpdo(1, Map(0x6800, 0x01));
+            },
+        };
+
+        var failure = OptionsRefused(With(alpha, beta));
+
+        failure.Message.Should().Contain("alpha").And.Contain("beta").And.Contain("RPDO 1");
+    }
+
+    [Fact]
+    public void One_Application_Setting_The_Same_Pdo_Twice_Fails_The_Open()
+    {
+        var app = Defaults(host =>
+        {
+            host.SetDefaultTpdo(1, Map(0x6000, 0x01));
+            host.SetDefaultTpdo(1, Map(0x6000, 0x02));
+        }, name: "solo");
+
+        var failure = OptionsRefused(With(app));
+
+        failure.Message.Should().Contain("TPDO 1").And.Contain("twice");
+        failure.Message.Split("'solo'").Length.Should().Be(2, "it names the application once, not as two setters");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_Null_Mapping_Is_Refused(bool tpdo)
+    {
+        var app = Defaults(host =>
+        {
+            if (tpdo) host.SetDefaultTpdo(1, null!);
+            else host.SetDefaultRpdo(1, null!);
+        });
+
+        OpenThrows<ArgumentNullException>(With(app)).ParamName.Should().Be("mapping");
+    }
+
+    [Fact]
+    public void A_Mapping_The_Records_Refuse_Fails_The_Open_With_One_Clean_Message()
+    {
+        // 6000h:03 is the application's, but not mappable: the mapping record refuses it, as over SDO.
+        var app = Defaults(host =>
+        {
+            host.ObjectDictionary.AddU8(0x6000, 0x03, 0, pdoMappable: false);
+            host.SetDefaultTpdo(1, Map(0x6000, 0x03));
+        }, name: "unmappable");
+
+        var failure = OptionsRefused(With(app));
+
+        failure.Message.Should().Contain("unmappable").And.Contain("TPDO 1").And.Contain("1A00:01");
+        failure.InnerException.Should().BeAssignableTo<ArgumentException>("the record's refusal is kept as the cause");
+        // The suffix ArgumentException appends for a parameter, in this runtime's wording: only the
+        // one for "options" belongs in the message, not those of the exceptions it wraps.
+        failure.Message.Should().NotContain(new ArgumentException(string.Empty, "value").Message.Trim());
+    }
+
+    [Fact]
+    public void A_Default_Pdo_The_Description_Leaves_Out_Is_Skipped()
+    {
+        // device.eds declares TPDO 1 and no TPDO 2: the file describes a device without TPDO 2.
+        using var bus = Open(NewSession(), 1);
+        var description = CanOpenDeviceDescription.Load(CanOpenDeviceDescriptionTests.Fixture("device.eds"));
+        var app = Defaults(host => host.SetDefaultTpdo(2, Map(0x6000, 0x01)), pdoCount: 2);
+
+        using var node = OpenNode(bus, With(app), description: description);
+
+        node.ObjectDictionary.ContainsIndex(0x1801).Should().BeFalse("the file wins: there is no TPDO 2");
+        node.ObjectDictionary.ContainsIndex(0x1A01).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task A_Default_Rpdo_Of_A_Slave_Without_A_Node_Id_Does_Not_Take_The_Sdo_Response_Of_Node_127()
+    {
+        // Without a node-id RPDO 4's COB-ID is 5FFh, the CAN-ID node 127 answers an SDO request on.
+        // The RPDO cannot act before the node has a node-id, so the frame goes where it went before.
+        const byte Node127 = 0x7F;
+        var app = Defaults(host => host.SetDefaultRpdo(4, Map(0x6000, 0x02)), pdoCount: 4);
+        using var rig = new EntryRig(With(app).WithLss(new LssSlaveOptions()), nodeId: CanOpenCobId.UnconfiguredNodeId);
+        Settle(rig.Node);
+
+        var upload = rig.Node.SdoUploadAsync(Node127, 0x1000, 0x00);
+        await rig.Wire.WaitForCountAsync(0x600u + Node127, 1);
+        rig.Wire.Transmit(0x580u + Node127, new byte[] { 0x43, 0x00, 0x10, 0x00, 0x91, 0x01, 0x0F, 0x00 });
+
+        (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(0x91, 0x01, 0x0F, 0x00);
+    }
+
+    [Fact]
     public async Task Reset_Communication_Restores_The_Default_Tpdo()
     {
         var app = Defaults(host => host.SetDefaultTpdo(1, Map(0x6000, 0x01)));
         using var rig = new EntryRig(With(app), nodeId: Node22);
         await rig.Wire.WaitForCountAsync(BootUpOf22, 1);
         rig.Od.WriteUnsigned(0x1800, 0x02, 1);
+        rig.Od.ReadUnsigned(0x1800, 0x02).Should().Be(1u, "precondition: the local write took");
 
         rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.ResetCommunication, Node22 });
         await rig.Wire.WaitForCountAsync(BootUpOf22, 2);
@@ -237,8 +336,10 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
-    public async Task The_Default_Cob_Id_Follows_A_Node_Id_Assigned_By_Lss()
+    public async Task The_Default_Cob_Id_Follows_A_Node_Id_Assigned_By_Lss_At_Reset_Communication()
     {
+        // A configured slave keeps its active node-id until Reset Communication copies the pending
+        // one over (CiA 305 §4.2), so that is where the COB-ID moves.
         const byte NewNodeId = 0x23;
         var app = Defaults(host => host.SetDefaultTpdo(1, Map(0x6000, 0x01)));
         using var rig = new EntryRig(With(app).WithLss(new LssSlaveOptions()), nodeId: Node22);
@@ -260,7 +361,9 @@ public partial class CanOpenApplicationSeamTests
     public async Task An_Lss_Slave_Without_A_Node_Id_Takes_Its_Default_Pdos_To_The_Node_Id_It_Is_Given()
     {
         // Without a node-id the pre-defined COB-ID of RPDO 4 is 500h + FFh = 5FFh, a restricted
-        // CAN-ID: the default is written all the same, and follows the node-id LSS assigns.
+        // CAN-ID: the default is written all the same, and follows the node-id LSS assigns. An
+        // unconfigured slave takes the node-id as soon as it is given one (CiA 305 §4.2), and keeps
+        // the moved COB-IDs across a later Reset Communication.
         var app = Defaults(host =>
         {
             host.SetDefaultRpdo(4, Map(0x6000, 0x02));
@@ -275,6 +378,10 @@ public partial class CanOpenApplicationSeamTests
         rig.Wire.Transmit(CanOpenCobId.LssMasterMessage, new byte[] { LssCommand.ConfigureNodeId, Node22, 0, 0, 0, 0, 0, 0 });
         await rig.Wire.WaitForCountAsync(CanOpenCobId.LssSlaveMessage, replies + 1);
         await rig.Wire.WaitForCountAsync(BootUpOf22, 1);
+        Settle(rig.Node);
+        rig.Od.ReadUnsigned(0x1403, 0x01).Should().Be(0x00000522u, "moved when the node-id took effect, at the first boot-up");
+        rig.Od.ReadUnsigned(0x1800, 0x01).Should().Be(0x000001A2u, "moved when the node-id took effect, at the first boot-up");
+
         rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.ResetCommunication, Node22 });
         await rig.Wire.WaitForCountAsync(BootUpOf22, 2);
         Settle(rig.Node);

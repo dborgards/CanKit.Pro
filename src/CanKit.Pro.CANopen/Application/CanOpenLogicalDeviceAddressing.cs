@@ -4,13 +4,15 @@ namespace CanKit.Pro.CANopen.Application;
 
 /// <summary>
 /// Where a profile written for logical device 0 finds its objects and PDOs in logical device
-/// <c>n</c>: indices <c>n·800h</c> higher, PDO numbers <c>n·64</c> higher, the rule
-/// <see cref="CanOpenLogicalDevices"/> states. The one place the seam and the profiles shift by a
-/// logical device; the arithmetic itself is <see cref="CanOpenLogicalDevices"/>'s.
+/// <c>n</c>: indices <c>n·800h</c> higher, each logical device having its own <c>800h</c> objects
+/// of the standardized profile area from <c>6000h</c> (CiA 301 v4.2.0 §7.4.1, Table 41), and PDO
+/// numbers <c>n·64</c> higher (CiA 301 v4.2.0 §7.2.2.1, Table 3). The one place the seam and the
+/// profiles shift by a logical device; the arithmetic itself is <see cref="CanOpenLogicalDevices"/>'s.
 /// </summary>
 internal static class CanOpenLogicalDeviceAddressing
 {
-    /// <summary>The number of logical devices a node holds at most, <c>0</c> to <c>7</c>.</summary>
+    /// <summary>The number of logical devices a node holds at most, <c>0</c> to <c>7</c>: up to eight
+    /// (CiA 301 v4.2.0 §4.1).</summary>
     public const int MaxLogicalDevices = CanOpenLogicalDevices.MaxCount;
 
     /// <summary>The index <paramref name="indexInDevice0"/> of logical device 0 as logical device

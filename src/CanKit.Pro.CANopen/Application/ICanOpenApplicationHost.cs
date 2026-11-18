@@ -57,29 +57,40 @@ internal interface ICanOpenApplicationHost
     /// <remarks>
     /// <para>
     /// The node writes the default into the PDO records once every application has attached, through
-    /// the re-mapping procedure <see cref="ICanOpenNode.ConfigureTpdo"/> runs (CiA 301 §7.5.2.38),
-    /// so the mapping is checked as it would be over SDO and the PDO engine runs with what the
-    /// records hold. The transmission type is <c>FFh</c>, event-driven and profile-specific (CiA 301
-    /// Table 72), the type CiA 401-1 §6.2.6 gives a default TPDO; inhibit time and event timer are
-    /// 0. The mapping is copied when this is called.
+    /// the re-mapping procedure <see cref="ICanOpenNode.ConfigureTpdo"/> runs (CiA 301 v4.2.0
+    /// §7.5.2.38), so the mapping is checked as it would be over SDO and the PDO engine runs with
+    /// what the records hold. The transmission type is <c>FFh</c>, event-driven and device-profile
+    /// specific (CiA 301 v4.2.0 §7.5.2.37, Table 72), the default CiA 401-1 v3.1.0 §6.2.6 gives a
+    /// TPDO; inhibit time and event timer are 0. The mapping is copied when this is called.
     /// </para>
     /// <para>
-    /// The COB-ID of TPDO 1 to 4 is the pre-defined connection set of the node-id, with bit 31 set
-    /// when <paramref name="enabled"/> is <see langword="false"/>. Above TPDO 4 CiA 301 pre-defines no
-    /// COB-ID: the record gets the mapping and keeps the invalid COB-ID the node writes for an
-    /// unassigned TPDO, <c>C0000000h</c> (no CAN-ID, no RTR), whatever <paramref name="enabled"/>
-    /// says, for the master to assign one.
+    /// The COB-ID of TPDO 1 to 4 is the one the generic pre-defined connection set gives the node-id
+    /// (CiA 301 v4.2.0 §7.3.3, Table 39), with bit 31 set when <paramref name="enabled"/> is
+    /// <see langword="false"/>. That set covers at most four TPDOs (§7.3.3): above TPDO 4 the record
+    /// gets the mapping and keeps the invalid COB-ID the node writes for an unassigned TPDO,
+    /// <c>C0000000h</c> (no CAN-ID, no RTR), whatever <paramref name="enabled"/> says, for the master
+    /// to assign one.
     /// </para>
     /// <para>
     /// The default is part of the power-on values: an NMT reset returns the records to it, and
-    /// <c>1011h</c> restores it. When LSS gives the node another node-id, the node moves a COB-ID that
+    /// <c>1011h</c> restores it. When the node's active node-id changes, the node moves a COB-ID that
     /// still names the pre-defined connection set of the node-id it leaves to the new one, as it does
-    /// for its own default COB-IDs. On an LSS slave opened without a node-id the COB-ID names node-id
-    /// <c>FFh</c>, and is written even where that is a restricted CAN-ID (RPDO 4: <c>5FFh</c>): the
-    /// node has no PDOs on the bus until it is given a node-id, and then moves the COB-ID to it. Only
-    /// this call does so; a write to the record keeps its checks. A PDO a device description declares is left as the file has it:
-    /// the call has no effect on it. A PDO the description leaves out does not exist (CiA 301 §7.3.3),
-    /// and a default for it fails the open.
+    /// for its own default COB-IDs. Under LSS the active node-id changes when Reset Communication
+    /// copies the pending one over, and on a slave without a node-id as soon as it is given one
+    /// (CiA 305 v3.0.0 §4.2).
+    /// </para>
+    /// <para>
+    /// On an LSS slave opened without a node-id the COB-ID names node-id <c>FFh</c> and is written even
+    /// where that is a restricted CAN-ID (CiA 301 v4.2.0 §7.3.5, Table 40), as for RPDO 4 (<c>5FFh</c>).
+    /// Such a slave stays in Initialisation until it is given a node-id (CiA 305 v3.0.0 §4.2), and PDOs
+    /// exist only in Operational (CiA 301 v4.2.0 §7.3.2.2.5, Table 37); meanwhile the node lets no RPDO
+    /// take a frame, and then it moves the COB-ID to the node-id given. Only this call writes such a
+    /// COB-ID; a write to the record keeps its checks.
+    /// </para>
+    /// <para>
+    /// The device description wins. A PDO it declares is left as the file has it, and a PDO it leaves
+    /// out, which the node then does not have (CiA 301 v4.2.0 §7.3.3: CAN-IDs only for the supported
+    /// communication objects), stays out: for either the call has no effect.
     /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">Called outside the application's own
@@ -89,25 +100,29 @@ internal interface ICanOpenApplicationHost
     /// the <see cref="CanOpenApplicationRequirements.PdoCount"/> the application asks for.</exception>
     /// <exception cref="ArgumentException">An entry of <paramref name="mapping"/> other than a dummy
     /// entry lies in no range the application claims: a profile maps the objects it owns. Two
-    /// applications setting the same TPDO, and a mapping the records refuse, fail the open with an
-    /// <see cref="ArgumentException"/> for <c>options</c> once every application has attached.</exception>
+    /// applications setting the same TPDO, one application setting it twice, and a mapping the
+    /// records refuse fail the open with an <see cref="ArgumentException"/> for <c>options</c> once
+    /// every application has attached.</exception>
     void SetDefaultTpdo(int pdoNumber, PdoMapping mapping, bool enabled = true);
 
     /// <summary>Sets the default of RPDO <paramref name="pdoNumber"/>: its mapping, the transmission
     /// type <c>FFh</c> and its COB-ID. <see cref="ICanOpenApplication.Attach"/> only.</summary>
     /// <remarks>As <see cref="SetDefaultTpdo"/>, with <see cref="ICanOpenNode.ConfigureRpdo"/>'s
-    /// procedure, the type CiA 401-1 §6.2.5 gives a default RPDO, and the RPDO always enabled up to
-    /// RPDO 4. Above RPDO 4 the record keeps the invalid COB-ID the node writes for an unassigned
-    /// RPDO, <c>80000000h</c>. On an LSS slave without a node-id RPDO 4's COB-ID is <c>5FFh</c>, a
-    /// restricted CAN-ID, and is written all the same (see <see cref="SetDefaultTpdo"/>).</remarks>
+    /// procedure (CiA 301 v4.2.0 §7.5.2.36), the transmission type of §7.5.2.35 Table 68 that
+    /// CiA 401-1 v3.1.0 §6.2.5 gives an RPDO, and the RPDO always enabled up to RPDO 4. Above RPDO 4
+    /// the record keeps the invalid COB-ID the node writes for an unassigned RPDO,
+    /// <c>80000000h</c>. On an LSS slave without a node-id RPDO 4's COB-ID is <c>5FFh</c>, a
+    /// restricted CAN-ID (CiA 301 v4.2.0 §7.3.5, Table 40), and is written all the same (see
+    /// <see cref="SetDefaultTpdo"/>).</remarks>
     /// <exception cref="InvalidOperationException">Called outside the application's own
     /// <see cref="ICanOpenApplication.Attach"/>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="mapping"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="pdoNumber"/> is below 1 or above
     /// the <see cref="CanOpenApplicationRequirements.PdoCount"/> the application asks for.</exception>
     /// <exception cref="ArgumentException">An entry of <paramref name="mapping"/> other than a dummy
-    /// entry lies in no range the application claims. Two applications setting the same RPDO, and a
-    /// mapping the records refuse, fail the open as for <see cref="SetDefaultTpdo"/>.</exception>
+    /// entry lies in no range the application claims. Two applications setting the same RPDO, one
+    /// setting it twice, and a mapping the records refuse fail the open as for
+    /// <see cref="SetDefaultTpdo"/>.</exception>
     void SetDefaultRpdo(int pdoNumber, PdoMapping mapping);
 
     /// <summary>Asks the node to transmit what maps <paramref name="entries"/>. Actor loop.</summary>
