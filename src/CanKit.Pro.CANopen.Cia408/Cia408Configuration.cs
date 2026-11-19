@@ -192,7 +192,8 @@ internal sealed class Cia408Configuration
     /// <exception cref="ArgumentException">There is no control mode or no device mode, a mode appears
     /// twice, a drive control mode is given with <see cref="Cia408Resolution.Valve16"/>, whose
     /// dtprs code 01b says the device supports no drive (Table 53), or a device mode of 3 to 6 is
-    /// given without a drive control mode (§9.3.4, Table 79: "n.a." for valves).</exception>
+    /// given without a drive control mode (§9.3.4, Table 79: "n.a." for valves), or pQ or pFlow is given
+    /// with <see cref="Cia408Resolution.Valve32Drive32"/> (<see cref="IsMappedIn16BitOnly"/>).</exception>
     public void Validate()
     {
         if (Resolution is not (Cia408Resolution.Valve16 or Cia408Resolution.Valve32Drive32 or Cia408Resolution.Valve16Drive32))
@@ -250,6 +251,14 @@ internal sealed class Cia408Configuration
                 throw new ArgumentException(
                     $"{mode} is a drive control mode, and a device with resolution {nameof(Cia408Resolution.Valve16)} "
                     + "supports no drive (dtprs 01b, CiA 408 §8.6.2, Table 53).",
+                    nameof(ControlModes));
+            }
+
+            if (IsMappedIn16BitOnly(Resolution, mode))
+            {
+                throw new ArgumentException(
+                    $"{mode} has its setpoints and actual values mapped in 16 bit only (CiA 408 §8.4 Table 13, §8.5 Table 32), "
+                    + $"and a valve mode runs in 32 bit with resolution {nameof(Cia408Resolution.Valve32Drive32)} (Table 53, NOTE 2).",
                     nameof(ControlModes));
             }
 
@@ -362,8 +371,9 @@ internal sealed class Cia408Configuration
     /// "6045h in case of 32-bit" and the other two as 16-bit "in case of 16-bit or 32-bit value". The
     /// 32-bit variant that Table 31 implies would map <c>6045h:00</c> (32 bits), then
     /// <c>6701h:01</c> (16 bits), then <c>6381h:01</c> (16 bits). The reading taken is Table 13's,
-    /// so pFlow on a 32-bit valve has no TPDO 2. Table 32's RPDO mapping 10 and its entry
-    /// description (§8.5.11, Table 52) agree on 16 bit only.</para>
+    /// and <see cref="Validate"/> refuses pFlow (and pQ) on a 32-bit valve
+    /// (<see cref="IsMappedIn16BitOnly"/>). Table 32's RPDO mapping 10 and its entry description
+    /// (§8.5.11, Table 52) agree on 16 bit only.</para>
     /// <para><see cref="Cia408DefaultPdo"/> does not carry communication parameters. The norm defines
     /// no COB-IDs and no enable bits for these PDOs. Its one transmission rule is that a TPDO of
     /// transmission type 255 is sent immediately after the corresponding RPDO is received (§8.4.1).
@@ -445,6 +455,31 @@ internal sealed class Cia408Configuration
     /// resolution 00b (<see langword="null"/>) counts as no 32-bit valve.</remarks>
     internal static bool IsWide(Cia408Resolution? resolution, Cia408ControlMode mode)
         => IsDriveMode(mode) || resolution == Cia408Resolution.Valve32Drive32;
+
+    /// <summary>
+    /// Whether <paramref name="mode"/> would run in 32 bit on <paramref name="resolution"/>
+    /// (<see cref="IsWide(Cia408Resolution?, Cia408ControlMode)"/>) while the norm maps it in 16 bit only:
+    /// pQ (5) and pFlow (14) on <see cref="Cia408Resolution.Valve32Drive32"/>. Such a device has no
+    /// setpoint and no actual value for the mode, so a configuration and a device description that
+    /// give one are refused.
+    /// </summary>
+    /// <remarks>
+    /// <para>The reading, with both passages. Table 13 (TPDO mappings 4 and 9) and Table 32 (RPDO
+    /// mappings 4 and 10) give pQ and pFlow a 16-bit row and no 32-bit row, and their entry
+    /// descriptions agree (§8.4.5, Table 21; §8.5.5; §8.5.11, Table 52), with one exception: the entry
+    /// description of TPDO mapping 9 (§8.4.10, Table 31) gives its first object as "6045h in case of
+    /// 32-bit" while keeping the 16-bit flow and pressure actual values behind it. The objects agree with
+    /// the tables: the 32-bit q setpoint <c>6308h</c> is conditional on control mode 1 or 2 and the
+    /// 32-bit pressure setpoint <c>6388h</c> on 3 or 4, neither on 5 or 14 (§9.8.5, §9.12.5). A device
+    /// of resolution 10b has 32-bit parameters (§8.6.2, Table 53, NOTE 2), and for pQ and pFlow the norm
+    /// defines none; Table 31's lone "6045h" would mix a 32-bit status word with 16-bit parameters, which
+    /// the resolution rules out. So the combination is refused rather than given 16-bit records.</para>
+    /// <para>On resolution 11b a valve mode runs in 16 bit, so pQ and pFlow are fine there. Mode 15
+    /// (pFlow with power limitation) has no mapping in either width and is not refused; the device
+    /// declares no record for it, as for the drive modes 11 and 12.</para>
+    /// </remarks>
+    internal static bool IsMappedIn16BitOnly(Cia408Resolution? resolution, Cia408ControlMode mode)
+        => mode is Cia408ControlMode.PQControl or Cia408ControlMode.PFlowControl && IsWide(resolution, mode);
 
     /// <summary>Whether <paramref name="mode"/> is a drive mode, 6 to 12 of Table 82; the others are
     /// valve (or pump) modes.</summary>

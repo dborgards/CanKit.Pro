@@ -46,9 +46,11 @@ internal sealed partial class Cia408Device
     /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
     public void SetActualValue(Cia408ObjectDefinition definition, long value)
     {
+        // The host first: a device built from a description knows its records only once attached,
+        // and Attach fills them before it publishes the host.
+        var host = RequireHost();
         var index = Record(_actuals, definition, "actual value");
         CheckRange(definition, value);
-        var host = RequireHost();
         host.Post(() => WriteActual(host, index, definition, value));
     }
 

@@ -25,10 +25,10 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// setpoints and actual values, the rulings, and a selection per area), plus rules every
 /// definition has to satisfy.</para>
 /// <para>Every index is that of logical device 0 (see
-/// <see cref="Cia408ObjectDefinition.Index"/>). 455 objects are defined: 72 <c>VAR</c> and 383
-/// value records (clause 9 has 456 object tables, because it defines <c>63D8h</c> twice; see
-/// below). The 16 indices clause 9 marks reserved are listed in <see cref="Reserved"/> and have no
-/// definition.</para>
+/// <see cref="Cia408ObjectDefinition.Index"/>). How many objects are defined, of which kind, is
+/// stated where it is proven, in <c>Cia408ObjectsTests</c>; clause 9 has one object table more than
+/// it defines objects, because it defines <c>63D8h</c> twice (see below). The indices clause 9 marks
+/// reserved are listed in <see cref="Reserved"/> and have no definition.</para>
 /// <para>Rulings on the norm's own defects, each with both passages:</para>
 /// <list type="bullet">
 /// <item><description><c>63D8h</c> is defined twice: §9.12.10 "vprc control deviation 32-bit"

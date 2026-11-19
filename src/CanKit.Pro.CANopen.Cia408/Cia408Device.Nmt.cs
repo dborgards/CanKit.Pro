@@ -124,9 +124,19 @@ internal sealed partial class Cia408Device
             return;
         }
 
-        ForceFault(host);
+        // The forced D8 is raised first, and what its subscribers throw is kept, as Restart does: the
+        // causes still active after that round — a subscriber may have cleared one — raise their EMCY
+        // again however the round ended. (With a cause active the device rests in a fault state
+        // already, so nothing is raised today; the order does not rest on that.)
+        var before = _machine.State;
+        var taken = _machine.Fault(Cia408FaultState.FaultHold);
+        Changed(before, taken);
+        Publish(host, errorCodeChanged: false);
+        List<Exception>? failures = null;
+        bool changed = RaiseRound(ref failures);
         foreach (var cause in _faultCauses) host.RaiseError(cause.Code, cause.ErrorRegisterBits);
         _requestOnBoot |= _faultCauses.Count > 0;
+        CompleteChanges(host, changed, ref failures);
     }
 
     /// <summary>A communication failure began (<see langword="true"/>) or ended. When it begins it
@@ -183,9 +193,19 @@ internal sealed partial class Cia408Device
         List<Exception>? failures = null;
         Publish(host, errorCodeChanged: false);
         RaiseRound(ref failures);
-        if (persisting.Length > 0)
+        // A subscriber of the restart may have cleared a cause (ClearFaultCause runs inline in its
+        // handler): only those still active are entered again, or a cleared cause would raise an EMCY
+        // and register bits that no later ClearFaultCause could end.
+        bool reentered = false;
+        foreach (var cause in persisting)
         {
-            foreach (var cause in persisting) EnterFault(host, cause);
+            if (IndexOfCause(cause.Code) < 0) continue;
+            EnterFault(host, cause);
+            reentered = true;
+        }
+
+        if (reentered)
+        {
             _requestOnBoot = true;
             Publish(host, errorCodeChanged: false);
             RaiseRound(ref failures);

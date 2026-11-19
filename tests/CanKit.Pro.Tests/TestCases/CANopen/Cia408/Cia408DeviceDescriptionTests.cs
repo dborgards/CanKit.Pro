@@ -203,9 +203,21 @@ public class Cia408DeviceDescriptionTests
     }
 
     [Fact]
+    public void A_32_Bit_Device_Type_With_Pq_Fails_The_Open()
+    {
+        // dtprs 10b (§8.6.2, Table 53) with pQ, bit 25: the norm maps pQ in 16 bit only (Tables 13 and
+        // 32), so a 32-bit valve has no setpoint or actual value for it.
+        var open = () => Open(Fixture.Set("1000", "DefaultValue", "0x42000198"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("PQControl") && e.Message.Contains("16 bit"));
+    }
+
+    [Fact]
     public void A_32_Bit_Device_Type_Requires_The_32_Bit_Pair()
     {
-        // dtprs 10b (§8.6.2, Table 53) with pQ, whose mapping has no 32-bit row: nothing else is needed.
+        // dtprs 10b (§8.6.2, Table 53): the pair is required before the modes are looked at.
         var open = () => Open(Fixture.Set("1000", "DefaultValue", "0x42000198").Remove(0x6044));
 
         open.Should().Throw<ArgumentException>()

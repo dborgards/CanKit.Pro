@@ -352,6 +352,30 @@ public class Cia408DeviceNmtTests
     }
 
     [Fact]
+    public async Task A_Cause_Cleared_By_A_Subscriber_Of_The_Restart_Is_Not_Entered_Again()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        bool clear = false;
+        device.StateChanged += (_, e) =>
+        {
+            if (clear && e.Transitions.Contains(255)) device.ClearFaultCause(InputCurrentTooHigh);
+        };
+        using var rig = new Cia408Rig(device);
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultHold, errorRegisterBits: 0x02);
+        await rig.WaitForCountAsync(CanOpenProfileRig.Emcy, 1);
+        await rig.DrainEmcyAsync();
+        int emcys = rig.Count(CanOpenProfileRig.Emcy);
+        clear = true;
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        await rig.DrainEmcyAsync();
+
+        rig.Device.State.Should().Be(Cia408State.Init, "the cause was cleared before it could be entered again");
+        rig.Od.ReadRaw(0x1001, 0).Should().Equal(new byte[] { 0x00 });
+        rig.Count(CanOpenProfileRig.Emcy).Should().Be(emcys, "no EMCY for a cause the application cleared");
+    }
+
+    [Fact]
     public async Task Reset_Node_With_A_Cause_Raises_The_Restart_With_The_Status_Of_Init()
     {
         var device = new Cia408Device(Cia408Rig.Valve);

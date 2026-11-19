@@ -113,7 +113,7 @@ public class Cia408ConfigurationTests
     [InlineData("Valve16Drive32", new[] { 9 }, 0x60080198u)]       // dtprs 11b
     [InlineData("Valve16Drive32", new[] { 2, 9 }, 0x60880198u)]
     [InlineData("Valve16", new[] { 1, 2, 3, 4, 5, 13, 14, 15 }, 0x3F800198u)]
-    [InlineData("Valve32Drive32", new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, 0x5FFF0198u)]
+    [InlineData("Valve32Drive32", new[] { 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 15 }, 0x55FF0198u)] // no 5 and 14: no 32-bit mapping
     [InlineData("Valve16Drive32", new[] { 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 }, 0x7FFF0198u)]
     public void The_Device_Type_Names_Profile_408_The_Control_Modes_And_The_Resolution(
         string resolution, int[] modes, uint expected)
@@ -162,9 +162,7 @@ public class Cia408ConfigurationTests
     [InlineData(2, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, new uint[] { StatusWord32, 0x63090120 }, 4, 2)]
     [InlineData(3, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, null, 3, 2)]
     [InlineData(4, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, new uint[] { StatusWord32, 0x63890120 }, 4, 2)]
-    [InlineData(5, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
     [InlineData(13, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x67080120 }, new uint[] { StatusWord32, 0x67090120 }, 4, 2)]
-    [InlineData(14, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
     [InlineData(15, "Valve32Drive32", ControlWord32, StatusWord32, null, null, 2, 1)]
     // drive modes, 32-bit in both resolutions that have a drive
     [InlineData(6, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x64800120 }, null, 3, 2)]
@@ -303,6 +301,18 @@ public class Cia408ConfigurationTests
     }
 
     // ---- Validate ------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(5)]   // pQ: Table 13 mapping 4 and Table 32 mapping 4, 16 bit only
+    [InlineData(14)]  // pFlow: Table 13 mapping 9 and Table 32 mapping 10, 16 bit only
+    public void A_Valve_Mode_Mapped_In_16_Bit_Only_Is_Refused_On_A_32_Bit_Valve(int mode)
+    {
+        var act = () => Config("Valve32Drive32", [mode]).Validate();
+
+        act.Should().ThrowExactly<ArgumentException>().Which.ParamName.Should().Be("ControlModes");
+        ((Action)(() => Config("Valve16Drive32", [mode]).Validate())).Should().NotThrow("a valve mode runs in 16 bit on 11b");
+    }
+
 
     [Fact]
     public void The_Device_Modes_Default_To_Setpoint_Via_Bus()

@@ -117,7 +117,10 @@ internal sealed partial class Cia408Device
     /// <para>
     /// <b>1029h</b> is the CiA 408 record (§8.6.8, Table 56): the device asks for its layout
     /// (<see cref="ErrorBehaviorLayout"/>), and the node fails the open when the file declares
-    /// <c>1029h</c> without the internal device error at sub-index 02h.
+    /// <c>1029h</c> without the internal device error at sub-index 02h. A file that does not declare
+    /// <c>1029h</c> at all still gets the record, as laid out
+    /// (<see cref="CanOpenApplicationRequirements.ErrorBehavior"/>): the one object the device adds to
+    /// what the file describes.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
@@ -204,6 +207,16 @@ internal sealed partial class Cia408Device
         {
             Require(od, Cia408Objects.DeviceControlWord32);
             Require(od, Cia408Objects.DeviceStatusWord32);
+        }
+
+        foreach (var mode in modes)
+        {
+            if (!Cia408Configuration.IsMappedIn16BitOnly(resolution, mode)) continue;
+            throw OptionsError(string.Format(CultureInfo.InvariantCulture,
+                "The device description gives logical device {0} the control mode {1} with resolution {2}: the norm maps {1} " +
+                "in 16 bit only (CiA 408 §8.4 Table 13, §8.5 Table 32), and a valve mode runs in 32 bit on that resolution " +
+                "(Table 53, NOTE 2), so the device would have no setpoint or actual value for it.",
+                _logicalDevice, mode, resolution));
         }
 
         bool has44 = od.ContainsIndex(_controlWord32);

@@ -788,6 +788,45 @@ public class Cia408PeerTests
     }
 
     [Fact]
+    public async Task Without_6043h_A_Device_Of_Resolution_11b_Is_Driven_On_The_Pair_Of_Its_Lowest_Mode()
+    {
+        // 6043h is Optional (§9.3.5): a device without it runs its default control mode, which a device
+        // built from a description takes as the lowest mode its type announces, here mode 1, a 16-bit
+        // valve mode on 11b. The device of this test answers 6043h with 0602 0000h.
+        var mixed = new Cia408Configuration
+        {
+            Resolution = Cia408Resolution.Valve16Drive32,
+            ControlModes = new[] { Cia408ControlMode.SpoolPositionOpenLoop, Cia408ControlMode.PositionControlAxis },
+        };
+        using var rig = new Cia408ToolRig(new[] { new Cia408Device(mixed) }, BothPairs(mixed.DeviceType.Value));
+        rig.Rig.Od.Remove(0x6043, 0x00);
+        var peer = rig.Peer(configuration: mixed);
+        peer.UsesWideWords.Should().BeNull();
+
+        await peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        rig.Rig.Device.State.Should().Be(Cia408State.Active);
+        var requests = await RequestsAsync(rig);
+        Downloads(requests, ControlWord16).Should().Equal(0x0001u, 0x0003u, 0x0007u);
+        Downloads(requests, 0x6044).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task The_Default_Pause_Runs_On_The_Clock()
+    {
+        // The options' own delay, with the shortest pause there is: the refused reset reads twice and
+        // pauses once between, on Task.Delay. Nothing is asserted about time.
+        using var rig = new Cia408ToolRig(new[] { new Cia408Device(Cia408ToolRig.FixtureConfiguration) }, Cia408ToolRig.FixtureDescription);
+        var peer = rig.Peer(options: new Cia408PeerOptions { StatusReads = 2, StatusPause = TimeSpan.FromTicks(1) });
+        rig.Rig.Device.ReportFault(0x2110, Cia408FaultState.FaultInit);
+        rig.Rig.Settle();
+
+        Func<Task> reset = () => peer.ResetFaultAsync().WithTimeoutAsync(HangGuard);
+
+        (await reset.Should().ThrowExactlyAsync<Cia408CommandException>()).Which.Reason.Should().Be(Cia408CommandFailure.NotReached);
+    }
+
+    [Fact]
     public void The_Peer_Options_Are_Checked_By_The_Descriptor()
     {
         FluentActions.Invoking(() => new Cia408Profile(new Cia408PeerOptions { StatusReads = 0 }))

@@ -83,8 +83,11 @@ public class Cia408DeviceProcessTests
         rig.Od.ReadRaw(0x6701, 2).Should().Equal(new byte[] { 0xA9 });
     }
 
+    // The NMT role (an NMT slave, no virtual device application manager of §8.2) is a documented
+    // decision on Cia408Device; the norm defines no device-type bit for it, so no test can tell a
+    // device that claims it from one that does not.
     [Fact]
-    public void Both_Default_Pdos_Are_Set_And_The_Device_Type_Claims_No_Application_Manager()
+    public void Both_Default_Pdos_Are_Set()
     {
         using var rig = new Cia408Rig(TwoModes);
 
@@ -92,15 +95,14 @@ public class Cia408DeviceProcessTests
         rig.Od.ReadUnsigned(0x1601, 2).Should().Be(0x6300_0110u, "RPDO 2 maps the q setpoint (Table 32, mapping 2)");
         rig.Od.ReadUnsigned(0x1A01, 1).Should().Be(0x6041_0010u);
         rig.Od.ReadUnsigned(0x1A01, 2).Should().Be(0x6301_0110u, "TPDO 2 maps the spool position (Table 13, mapping 2)");
-        (rig.Od.ReadUnsigned(0x1000, 0) & 0x8000_0000u).Should().Be(0u,
-            "an NMT slave; the norm defines no bit for the virtual device application manager of §8.2");
     }
 
     // ---- modes ----------------------------------------------------------------------------------
 
-    /// <summary>Table 6: the device mode is not changeable in HOLD (D5), FAULT_HOLD (D9) and ACTIVE (D4,
-    /// Table 4); Table 5: the control mode only in INIT, DISABLED, FAULT_INIT and FAULT_DISABLED. Every
-    /// other write is accepted.</summary>
+    /// <summary>The device mode is not changeable in ACTIVE (Tables 4 and 5), nor in HOLD and FAULT_HOLD,
+    /// where Table 5 leaves it to the manufacturer and refusing is this device's choice; the control mode
+    /// only in INIT, DISABLED, FAULT_INIT and FAULT_DISABLED (Table 5). Every other write is
+    /// accepted.</summary>
     [Theory]
     [InlineData("Init", true, true)]
     [InlineData("Disabled", true, true)]
@@ -459,6 +461,15 @@ public class Cia408DeviceProcessTests
 
         (await rig.ReadI16Async(SpoolActual, 1)).Should().Be(55, "the value the device holds, not the stored 77");
         (await rig.ReadI16Async(QSetpoint, 1)).Should().Be(100, "a setpoint is a parameter and takes the stored value");
+    }
+
+    [Fact]
+    public void SetActualValue_Before_The_Attach_Says_So()
+    {
+        var device = Cia408Device.FromDescription();
+
+        ((Action)(() => device.SetActualValue(Cia408Objects.SpoolPositionActualValue, 1)))
+            .Should().Throw<InvalidOperationException>("no node has attached the device yet");
     }
 
     [Fact]

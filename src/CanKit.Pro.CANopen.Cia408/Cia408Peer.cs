@@ -169,7 +169,9 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// <summary>The control modes the device type announces with its capability bits (§8.6.2,
     /// Table 53), ascending; bits 23 and 24 each give two modes, and the drive bits of a 16-bit device
     /// type none (<see cref="Cia408Configuration.ControlModesOf"/>). What the device runs now is
-    /// <c>6043h</c> (<see cref="ReadControlModeAsync"/>).</summary>
+    /// <c>6043h</c> (<see cref="ReadControlModeAsync"/>). The modes are reported as the type
+    /// announces them, also pQ or pFlow on a 32-bit valve, which the norm maps in 16 bit only and a
+    /// device of this package refuses (<see cref="Cia408Configuration.IsMappedIn16BitOnly"/>).</summary>
     public IReadOnlyList<Cia408ControlMode> SupportedControlModes { get; }
 
     /// <summary>The resolution field dtprs of the device type (Table 53), or <see langword="null"/>
@@ -181,7 +183,11 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// <see cref="Cia408Configuration.IsWide(Cia408Resolution?, Cia408ControlMode)"/> for every mode the
     /// device type announces, the resolution's valve width where it announces none.
     /// <see langword="null"/> where the modes differ in width: the pair is then that of the mode in
-    /// <c>6043h</c>, read at the start of each call that touches the words.</summary>
+    /// <c>6043h</c>, read at the start of each call that touches the words. <c>6043h</c> is Optional
+    /// (§9.3.5); a device that answers it with <c>0602 0000h</c>, "object does not exist", runs its
+    /// default control mode, which the norm does not name: the peer takes the lowest mode the device
+    /// type announces (<see cref="SupportedControlModes"/>), the mode a device built with
+    /// <see cref="Cia408Device.FromDescription"/> runs without <c>6043h</c>.</summary>
     public bool? UsesWideWords { get; }
 
     // ---- the state machine ---------------------------------------------------------------------------
@@ -255,12 +261,25 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// that of the control mode in <c>6043h</c>, read now.</summary>
     private async Task<Words> WordsAsync(CancellationToken cancellationToken)
     {
-        bool wide = UsesWideWords ?? Cia408Configuration.IsWide(Resolution,
-            await ReadVariableAsync(Cia408Objects.DeviceControlMode, static value => (Cia408ControlMode)value, cancellationToken)
-                .ConfigureAwait(false));
+        bool wide = UsesWideWords ?? Cia408Configuration.IsWide(Resolution, await RunningModeAsync(cancellationToken).ConfigureAwait(false));
         return wide
             ? new Words(true, Cia408Objects.DeviceControlWord32, Cia408Objects.DeviceStatusWord32)
             : new Words(false, Cia408Objects.DeviceControlWord16, Cia408Objects.DeviceStatusWord16);
+    }
+
+    /// <summary>The control mode the device runs: <c>6043h</c>, or, where the device has no such
+    /// object, the lowest mode its type announces (see <see cref="UsesWideWords"/>).</summary>
+    private async Task<Cia408ControlMode> RunningModeAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadVariableAsync(Cia408Objects.DeviceControlMode, static value => (Cia408ControlMode)value, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (SdoAbortException abort) when (abort.AbortCode == (uint)SdoAbortCode.ObjectDoesNotExist && SupportedControlModes.Count > 0)
+        {
+            return SupportedControlModes[0];
+        }
     }
 
     /// <summary>Takes the device to ACTIVE, one transition of Table 7 at a time from the state it
