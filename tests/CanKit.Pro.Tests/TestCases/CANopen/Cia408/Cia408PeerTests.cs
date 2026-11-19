@@ -615,6 +615,49 @@ public class Cia408PeerTests
         rig.Rig.Od.ReadUnsigned(0x6841, 0x00).Should().Be(0x000Fu, "6041h of logical device 1 is 6841h (CiA 301 v4.2.0 §7.4.1)");
     }
 
+    [Fact]
+    public async Task A_32_Bit_Valve_Is_Driven_At_6044h_And_Read_At_6045h()
+    {
+        // dtprs 10b (§8.6.2, Table 53): the valve uses the 32-bit pair; 604Fh defaults to 0 for a valve.
+        var wide = new Cia408Configuration
+        {
+            Resolution = Cia408Resolution.Valve32Drive32,
+            ControlModes = new[] { Cia408ControlMode.SpoolPositionClosedLoop },
+        };
+        using var rig = new Cia408ToolRig(new[] { new Cia408Device(wide) }, WideWords());
+        var peer = rig.Peer(configuration: wide);
+        peer.UsesWideWords.Should().BeTrue();
+
+        await peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        rig.Rig.Device.State.Should().Be(Cia408State.Active);
+        var requests = await RequestsAsync(rig);
+        Downloads(requests, 0x6044).Should().Equal(0x0001u, 0x0003u, 0x0007u);
+        Downloads(requests, ControlWord16).Should().BeEmpty();
+        Uploads(requests, 0x6045).Should().BeGreaterThan(0);
+        Uploads(requests, StatusWord16).Should().Be(0, "the status is read from 6045h");
+        (await peer.ReadStatusAsync().WithTimeoutAsync(HangGuard)).Should().Be(new Cia408Status(0x0000_000F, Cia408State.Active));
+    }
+
+    /// <summary>The description of the 32-bit valve of <see cref="A_32_Bit_Valve_Is_Driven_At_6044h_And_Read_At_6045h"/>:
+    /// <c>1000h</c> and the 32-bit control and status words only, so a read of the 16-bit pair would be
+    /// refused by the gate.</summary>
+    private static CanOpenDeviceDescription WideWords()
+    {
+        var text = new StringBuilder();
+        text.Append("[FileInfo]\nFileName=wide.eds\nFileVersion=1\nFileRevision=0\nEDSVersion=4.0\n")
+            .Append("Description=A 32-bit CiA 408 valve\nCreationTime=10:00AM\nCreationDate=11-19-2026\nCreatedBy=CanKit.Pro tests\n")
+            .Append("[DeviceInfo]\nVendorName=CanKit.Pro\nVendorNumber=0\nProductName=Wide\nProductNumber=0\nRevisionNumber=0\n")
+            .Append("OrderCode=WIDE\nBaudRate_500=1\nSimpleBootUpMaster=0\nSimpleBootUpSlave=1\nGranularity=8\n")
+            .Append("DynamicChannelsSupported=0\nGroupMessaging=0\nNrOfRXPDO=0\nNrOfTXPDO=0\nLSS_Supported=0\n")
+            .Append("[MandatoryObjects]\nSupportedObjects=1\n1=0x1000\n")
+            .Append("[1000]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x40800198\nPDOMapping=0\n")
+            .Append("[OptionalObjects]\nSupportedObjects=2\n1=0x6044\n2=0x6045\n")
+            .Append("[6044]\nParameterName=Device control word 32-bit\nObjectType=0x7\nDataType=0x0007\nAccessType=rw\nDefaultValue=0\nPDOMapping=1\n")
+            .Append("[6045]\nParameterName=Device status word 32-bit\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0\nPDOMapping=1\n");
+        return CanOpenDeviceDescription.ParseEds(text.ToString());
+    }
+
     /// <summary>The description of the two-device node of
     /// <see cref="Logical_Device_1_Is_Driven_At_6840h_And_Read_At_6841h"/>: <c>1000h</c>, the device
     /// types <c>67FFh</c> and <c>6FFFh</c>, and the words of logical device 1.</summary>
