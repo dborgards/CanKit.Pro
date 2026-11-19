@@ -76,10 +76,15 @@ internal sealed partial class Cia408Device
     /// default PDO: the mode's other records (<see cref="Cia408Configuration.SetpointsOf"/>,
     /// <see cref="Cia408Configuration.ActualValuesOf"/>) are the device's where the file declares them,
     /// and absent otherwise. Without a
-    /// device type, the modes are those whose objects the file declares, at least one of them, in the
-    /// width the resolution gives them: a mode without such objects (11, 12, 15) cannot be found that
-    /// way, and every mode whose objects are there is taken (a file with <c>6300h</c> and <c>6301h</c>
-    /// supports modes 1 and 2). The default control mode is the
+    /// device type, the modes are inferred: a mode is taken where the file declares all its records
+    /// (<see cref="Cia408Configuration.SetpointsOf"/>, <see cref="Cia408Configuration.ActualValuesOf"/>)
+    /// in the width the resolution gives them, at least one. That is inference, not a requirement, and
+    /// it uses the full set because the clause-9 records alone do not tell the modes apart: 13 and 14
+    /// would look alike, as would 9 and 10, and 10 to 12 would never be found. So a mode without records
+    /// (11, 12) cannot be found that way; a file with only the clause-9 records of a mode whose full set
+    /// is larger (a drive with <c>6500h</c> and no <c>6501h</c>, pQ with <c>640Eh</c> alone) does not
+    /// show that mode and needs a device type; and every mode whose records are there is taken
+    /// (<c>6300h</c> and <c>6301h</c> give modes 1 and 2). The default control mode is the
     /// value of the file's <c>6043h</c>, which must be one of them, and the lowest mode where the file
     /// has no <c>6043h</c>.
     /// </para>
@@ -368,8 +373,10 @@ internal sealed partial class Cia408Device
         return (resolution, modes);
     }
 
-    /// <summary>Whether the file declares every setpoint and actual value of <paramref name="mode"/>'s
-    /// default mapping in <paramref name="shape"/>'s width, and there is at least one.</summary>
+    /// <summary>Whether the file declares every setpoint and actual value record a configured device
+    /// has for <paramref name="mode"/> in <paramref name="shape"/>'s width (its mapping records and the
+    /// clause-9 ones), and there is at least one: the inference of the remarks on
+    /// <see cref="FromDescription"/>, not a requirement.</summary>
     private bool Declares(ObjectDictionary od, Cia408Configuration shape, Cia408ControlMode mode)
     {
         var records = shape.SetpointsOf(mode).Concat(shape.ActualValuesOf(mode)).ToList();
