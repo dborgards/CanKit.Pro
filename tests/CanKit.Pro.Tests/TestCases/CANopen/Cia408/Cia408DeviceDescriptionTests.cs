@@ -593,6 +593,13 @@ public class Cia408DeviceDescriptionTests
         configured.State.Should().Be(Cia408State.Init, "logical device 0 is the configured one");
         rig.Od.ReadUnsigned(0x6841, 0x00).Should().Be(0x000Fu);
         rig.Od.ReadUnsigned(0x6041, 0x00).Should().Be(0x0008u);
+
+        // Its records are its own too: 6301h of logical device 1 is 6B01h.
+        configured.SetActualValue(Cia408Objects.SpoolPositionActualValue, 11);
+        described.SetActualValue(Cia408Objects.SpoolPositionActualValue, 22);
+        rig.Settle();
+        rig.Od.ReadSigned(0x6B01, 0x01).Should().Be(22);
+        rig.Od.ReadSigned(0x6301, 0x01).Should().Be(11);
     }
 
     // ---- fix round 1: resolution, drive bits, derived types, record shapes ---------------------------
