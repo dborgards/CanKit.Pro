@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Nmt;
 
@@ -196,10 +197,11 @@ internal sealed partial class Cia408Device
         // A subscriber of the restart may have cleared a cause (ClearFaultCause runs inline in its
         // handler): only those still active are entered again, or a cleared cause would raise an EMCY
         // and register bits that no later ClearFaultCause could end.
+        // Lazy on purpose: persisting is a snapshot array, and each cause is checked against the live
+        // set just before it is entered, after the causes ahead of it, as the loop did before.
         bool reentered = false;
-        foreach (var cause in persisting)
+        foreach (var cause in persisting.Where(c => IndexOfCause(c.Code) >= 0))
         {
-            if (IndexOfCause(cause.Code) < 0) continue;
             EnterFault(host, cause);
             reentered = true;
         }

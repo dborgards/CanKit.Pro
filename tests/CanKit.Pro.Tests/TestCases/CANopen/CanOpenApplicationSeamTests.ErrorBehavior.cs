@@ -310,7 +310,7 @@ public partial class CanOpenApplicationSeamTests
 
         await ResetFromWireAsync(rig, NmtCommand.ResetNode);
 
-        asked.Should().Equal(new[] { (NmtState.Initializing, (NmtState?)null) }, "02h asks for nothing where the node takes no request");
+        asked.Should().Equal(new (NmtState, NmtState?)[] { (NmtState.Initializing, null) }, "02h asks for nothing where the node takes no request");
     }
 
     [Fact]

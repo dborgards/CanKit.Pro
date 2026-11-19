@@ -445,12 +445,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
         if (subindex != 0x00) return OdWriteDecision.Accept;
 
-        if ((index == _controlWord16 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved16) != 0)
-            || (index == _controlWord32 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved32) != 0)
-            || (index == _local && value.Length == 1 && value[0] > 1))
-        {
-            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-        }
+        if (IsOutsideItsValueRange(index, value)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
 
         if (index == _deviceMode && value.Length == 1)
         {
@@ -467,6 +462,17 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         }
 
         return OdWriteDecision.Accept;
+    }
+
+    /// <summary>Whether <paramref name="value"/> for sub-index 00h of <paramref name="index"/> is outside
+    /// what the entry takes: a reserved bit of a control word (§9.3.2, Table 73; §9.3.6, Table 85), or
+    /// <c>604Fh</c> above 1 (Table 93; see <see cref="ValidateWrite"/>).</summary>
+    private bool IsOutsideItsValueRange(ushort index, byte[] value)
+    {
+        bool reservedBitOf16 = index == _controlWord16 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved16) != 0;
+        bool reservedBitOf32 = index == _controlWord32 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved32) != 0;
+        bool localAbove1 = index == _local && value.Length == 1 && value[0] > 1;
+        return reservedBitOf16 || reservedBitOf32 || localAbove1;
     }
 
     /// <summary>Nothing: the modes and the setpoints reported here are read when they are used — by

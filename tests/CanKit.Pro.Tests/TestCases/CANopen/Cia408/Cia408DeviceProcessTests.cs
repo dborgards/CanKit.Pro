@@ -451,6 +451,8 @@ public class Cia408DeviceProcessTests
                     {
                         c.SetActual(Cia408Objects.SpoolPositionActualValue, 1);
                     }
+                    // Everything, deliberately: the assertion below names the type that came, and an
+                    // exception escaping this worker thread would end the test host instead.
                     catch (Exception e)
                     {
                         caught = e;

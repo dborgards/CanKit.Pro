@@ -219,9 +219,8 @@ internal sealed partial class Cia408Device
             Require(od, Cia408Objects.DeviceStatusWord32);
         }
 
-        foreach (var mode in modes)
+        foreach (var mode in modes.Where(m => Cia408Configuration.IsMappedIn16BitOnly(resolution, m)))
         {
-            if (!Cia408Configuration.IsMappedIn16BitOnly(resolution, mode)) continue;
             throw OptionsError(string.Format(CultureInfo.InvariantCulture,
                 "The device description gives logical device {0} the control mode {1} with resolution {2}: the norm gives {1} " +
                 "its mappings and objects in 16 bit only (CiA 408 §8.4 Table 13, §8.5 Table 32, §9.16), and a valve mode runs in " +
@@ -314,9 +313,8 @@ internal sealed partial class Cia408Device
                 continue;
             }
 
-            foreach (var record in shape.MandatoryRecordsOf(mode))
+            foreach (var record in shape.MandatoryRecordsOf(mode).Where(r => !od.ContainsIndex(Shift(r))))
             {
-                if (od.ContainsIndex(Shift(record))) continue;
                 throw OptionsError(string.Format(CultureInfo.InvariantCulture,
                     "The device description gives logical device {0} the device type {1}, which announces control mode {2} " +
                     "({3}), and does not declare {4:X4}h ({5}), which {6} makes mandatory with it.",

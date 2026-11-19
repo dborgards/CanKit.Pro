@@ -256,19 +256,20 @@ public class Cia408DeviceDescriptionTests
             .Set("1000", "DefaultValue", string.Format(CultureInfo.InvariantCulture, "0x{0:X8}", deviceType))
             .Set("6043", "DefaultValue", mode.ToString(CultureInfo.InvariantCulture));
         var declared = records == "-" ? Array.Empty<string>() : records.Split(' ');
-        foreach (var record in declared)
+        foreach (var sections in declared.Select(record => record.Split(':'))
+                     .Select(parts => RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2])))
         {
-            var parts = record.Split(':');
-            eds = eds.Add(RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2]));
+            eds = eds.Add(sections);
         }
 
         using var rig = Open(eds);
 
         rig.Device.State.Should().Be(Cia408State.Init);
         rig.Od.ReadRaw(0x6043, 0x00).Should().Equal(new[] { (byte)mode });
-        foreach (ushort index in new ushort[] { 0x6300, 0x6301, 0x6380, 0x6381, 0x640E })
+        var leftOut = new ushort[] { 0x6300, 0x6301, 0x6380, 0x6381, 0x640E }
+            .Where(index => records.IndexOf(index.ToString("X4", CultureInfo.InvariantCulture), StringComparison.Ordinal) < 0);
+        foreach (ushort index in leftOut)
         {
-            if (records.IndexOf(index.ToString("X4", CultureInfo.InvariantCulture), StringComparison.Ordinal) >= 0) continue;
             rig.Od.ContainsIndex(index).Should().BeFalse("the device adds no record the file leaves out");
         }
     }
@@ -320,11 +321,10 @@ public class Cia408DeviceDescriptionTests
         var eds = Fixture.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381).Remove(0x640E)
             .Set("1000", "DefaultValue", string.Format(CultureInfo.InvariantCulture, "0x{0:X8}", deviceType))
             .Set("6043", "DefaultValue", mode.ToString(CultureInfo.InvariantCulture));
-        foreach (var record in records.Split(' '))
+        foreach (var sections in records.Split(' ').Select(record => record.Split(':')).Where(parts => parts[0] != removed)
+                     .Select(parts => RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2])))
         {
-            var parts = record.Split(':');
-            if (parts[0] == removed) continue;
-            eds = eds.Add(RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2]));
+            eds = eds.Add(sections);
         }
 
         var open = () => Open(eds);
