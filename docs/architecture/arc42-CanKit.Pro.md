@@ -1350,7 +1350,8 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   Tool-Seite. Beim Bauen ist die Naht um zwei Aufrufe gewachsen: Standard-PDOs und das Einreihen von
   Arbeit in die Schleife des Knotens. CiA 408 gibt es ebenso, als nicht paketiertes Projekt
   `CanKit.Pro.CANopen.Cia408`: Objektkatalog, Geräteseite (erste Scheibe: Gerätesteuerung,
-  Zustandsmaschine, Fehler, Betriebsarten, die Soll- und Istwerte der Standard-PDOs, ein
+  Zustandsmaschine, Fehler, Betriebsarten, die Soll- und Istwert-Records jeder Regelungsart — die ihre
+  Standard-PDOs abbilden und die Abschnitt 9 bei ihrer Breite verbindlich macht —, ein
   Prozessmodell, ein Gerät aus einer EDS/DCF) und Tool-Seite. Dafür ist die Naht gewachsen um die
   geordnete Zustellung jedes übernommenen Schreibzugriffs auf einen Kommandoeintrag (#557), die
   Meldung jedes empfangenen RPDO und das Senden eines TPDO nach Nummer (#558) sowie einen vom Profil

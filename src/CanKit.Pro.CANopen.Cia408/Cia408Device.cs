@@ -489,6 +489,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// values is no reception and is not answered.
     /// </para>
     /// <para>
+    /// A TPDO with no RPDO of its number is never an answer. On a 32-bit pFlow device TPDO 2 carries
+    /// Table 31 and there is no RPDO 2 (Table 32 has no 32-bit row for pFlow,
+    /// <see cref="Cia408Configuration.DefaultPdos"/>), so TPDO 2 goes out only when a value it maps
+    /// changes (<see cref="Publish"/>).
+    /// </para>
+    /// <para>
     /// An RPDO whose control word changes the state gets two TPDOs: the one every change asks for
     /// (<see cref="Publish"/>), and this answer. The device cannot tell a command write that came in an
     /// RPDO from one that came over SDO, so it cannot drop the first for the second, and the norm
