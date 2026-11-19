@@ -891,12 +891,10 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         /// <see cref="FromDescription"/> adds no parameter the file leaves out, and a parameter
         /// array shorter than its block leaves the channels beyond it at the default. An object
         /// without a default ("No") reads 0. The value is decoded with the catalogue's data type,
-        /// which an adopted entry has been checked to have.
+        /// which an adopted entry has been checked to have (<see cref="CanOpenProfileParameter.Read"/>).
         /// </remarks>
         internal long Read(ObjectDictionary od, byte subindex)
-            => od.TryReadRaw(Index, subindex, out var raw)
-                ? Cia401Codec.Decode(Definition.DataType, raw)
-                : Definition.DefaultValue ?? 0;
+            => CanOpenProfileParameter.Read(od, Index, subindex, Definition.DataType, Definition.DefaultValue ?? 0);
 
         /// <summary><see cref="Read"/> of a one-byte parameter.</summary>
         internal byte ReadByte(ObjectDictionary od, byte subindex) => unchecked((byte)Read(od, subindex));
