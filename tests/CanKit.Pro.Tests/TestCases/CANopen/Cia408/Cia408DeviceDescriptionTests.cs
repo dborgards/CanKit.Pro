@@ -273,6 +273,85 @@ public class Cia408DeviceDescriptionTests
         }
     }
 
+    /// <summary>The other half of <see cref="A_File_With_Only_The_Records_Clause_9_Makes_Mandatory_Opens"/>:
+    /// each of those cells with one of its records removed fails the open, naming the record, the mode
+    /// that needs it and the clause — the lowest announced mode, as the modes are checked in order — or,
+    /// for the actual value that splits bit 23 or 24 (§9.8.3, §9.8.6, §9.12.3), leaves the closed-loop
+    /// mode out, so that the file's 6043h names a mode it does not support. <paramref name="namedMode"/>
+    /// is 0 for that case.</summary>
+    [Theory]
+    [InlineData(0x2080_0198u, 1, "6300:3:rw", "6300", 1, "9.8.2")]
+    [InlineData(0x2080_0198u, 2, "6300:3:rw 6301:3:ro", "6300", 1, "9.8.2")]
+    [InlineData(0x2080_0198u, 2, "6300:3:rw 6301:3:ro", "6301", 0, "")]
+    [InlineData(0x2100_0198u, 3, "6380:3:rw", "6380", 3, "9.12.2")]
+    [InlineData(0x2100_0198u, 4, "6380:3:rw 6381:3:ro", "6380", 3, "9.12.2")]
+    [InlineData(0x2100_0198u, 4, "6380:3:rw 6381:3:ro", "6381", 0, "")]
+    [InlineData(0x2200_0198u, 5, "640E:3:ro", "640E", 5, "9.16.3")]
+    [InlineData(0x2400_0198u, 13, "6700:3:rw 6701:3:ro", "6700", 13, "9.21.2")]
+    [InlineData(0x2400_0198u, 13, "6700:3:rw 6701:3:ro", "6701", 13, "9.21.3")]
+    [InlineData(0x2800_0198u, 14, "6700:3:rw 6701:3:ro", "6700", 14, "9.21.2")]
+    [InlineData(0x2800_0198u, 14, "6700:3:rw 6701:3:ro", "6701", 14, "9.21.3")]
+    [InlineData(0x3000_0198u, 15, "6700:3:rw 6701:3:ro 6780:4:rw 6781:4:ro", "6700", 15, "9.21.2")]
+    [InlineData(0x3000_0198u, 15, "6700:3:rw 6701:3:ro 6780:4:rw 6781:4:ro", "6701", 15, "9.21.3")]
+    [InlineData(0x3000_0198u, 15, "6700:3:rw 6701:3:ro 6780:4:rw 6781:4:ro", "6780", 15, "9.31.2")]
+    [InlineData(0x3000_0198u, 15, "6700:3:rw 6701:3:ro 6780:4:rw 6781:4:ro", "6781", 15, "9.31.3")]
+    [InlineData(0x4080_0198u, 1, "6308:4:rw", "6308", 1, "9.8.5")]
+    [InlineData(0x4080_0198u, 2, "6308:4:rw 6309:4:ro", "6308", 1, "9.8.5")]
+    [InlineData(0x4080_0198u, 2, "6308:4:rw 6309:4:ro", "6309", 0, "")]
+    [InlineData(0x4100_0198u, 3, "6388:4:rw 6389:4:ro", "6388", 3, "9.12.5")]
+    [InlineData(0x4100_0198u, 3, "6388:4:rw 6389:4:ro", "6389", 3, "9.12.6")]
+    [InlineData(0x4100_0198u, 4, "6388:4:rw 6389:4:ro", "6388", 3, "9.12.5")]
+    [InlineData(0x4100_0198u, 4, "6388:4:rw 6389:4:ro", "6389", 3, "9.12.6")]
+    [InlineData(0x4001_0198u, 6, "6480:4:rw", "6480", 6, "9.32.2")]
+    [InlineData(0x4002_0198u, 7, "6500:4:rw", "6500", 7, "9.37.2")]
+    [InlineData(0x4004_0198u, 8, "6580:4:rw", "6580", 8, "9.42.2")]
+    [InlineData(0x4008_0198u, 9, "6600:4:rw", "6600", 9, "9.47.2")]
+    [InlineData(0x4400_0198u, 13, "6708:4:rw 6709:4:ro", "6708", 13, "9.21.5")]
+    [InlineData(0x4400_0198u, 13, "6708:4:rw 6709:4:ro", "6709", 13, "9.21.6")]
+    [InlineData(0x4800_0198u, 14, "6708:4:rw 6709:4:ro", "6708", 14, "9.21.5")]
+    [InlineData(0x4800_0198u, 14, "6708:4:rw 6709:4:ro", "6709", 14, "9.21.6")]
+    [InlineData(0x5000_0198u, 15, "6708:4:rw 6709:4:ro 6780:4:rw 6781:4:ro", "6708", 15, "9.21.5")]
+    [InlineData(0x5000_0198u, 15, "6708:4:rw 6709:4:ro 6780:4:rw 6781:4:ro", "6709", 15, "9.21.6")]
+    [InlineData(0x5000_0198u, 15, "6708:4:rw 6709:4:ro 6780:4:rw 6781:4:ro", "6780", 15, "9.31.2")]
+    [InlineData(0x5000_0198u, 15, "6708:4:rw 6709:4:ro 6780:4:rw 6781:4:ro", "6781", 15, "9.31.3")]
+    public void A_File_Without_A_Record_Clause_9_Makes_Mandatory_Fails_The_Open(
+        uint deviceType, int mode, string records, string removed, int namedMode, string clause)
+    {
+        var eds = Fixture.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381).Remove(0x640E)
+            .Set("1000", "DefaultValue", string.Format(CultureInfo.InvariantCulture, "0x{0:X8}", deviceType))
+            .Set("6043", "DefaultValue", mode.ToString(CultureInfo.InvariantCulture));
+        foreach (var record in records.Split(' '))
+        {
+            var parts = record.Split(':');
+            if (parts[0] == removed) continue;
+            eds = eds.Add(RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2]));
+        }
+
+        var open = () => Open(eds);
+
+        var thrown = open.Should().Throw<ArgumentException>().Where(e => e.ParamName == "options").Which;
+        if (namedMode == 0)
+            thrown.Message.Should().Contain("6043h").And.Contain(string.Format(CultureInfo.InvariantCulture, "value {0}", mode));
+        else
+            thrown.Message.Should().Contain(removed + "h")
+                .And.Contain(string.Format(CultureInfo.InvariantCulture, "control mode {0} (", namedMode))
+                .And.Contain("§" + clause);
+    }
+
+    [Fact]
+    public async Task At_32_Bit_Bit_24_Gives_Both_Pressure_Modes()
+    {
+        // 6388h and 6389h are mandatory with 32-bit parameters and mode 3 or 4 (§9.12.5, §9.12.6): at 32
+        // bit no object belongs to closed loop alone, so a file announcing bit 24 supports both.
+        using var rig = Open(Fixture.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381).Remove(0x640E)
+            .Set("1000", "DefaultValue", "0x41000198").Set("6043", "DefaultValue", "3").Set("6043", "AccessType", "rw")
+            .Add(RecordSections(0x6388, "vprc setpoint 32-bit", "0x0004", "rw"))
+            .Add(RecordSections(0x6389, "vprc actual value 32-bit", "0x0004", "ro")));
+
+        await rig.WriteU8Async(0x6043, 0x00, 4);
+        rig.Od.ReadRaw(0x6043, 0x00).Should().Equal(new byte[] { 0x04 });
+    }
+
     [Fact]
     public void A_Record_Clause_9_Does_Not_Make_Mandatory_Is_The_Devices_Where_Declared_Only()
     {
