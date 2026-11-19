@@ -5,7 +5,8 @@
 ; 6301h, 6380h, 6381h; clause 8.7.1, unit and prefix read-only), the CiA 408 error behaviour record
 ; 1029h (clause 8.6.8) and the default PDOs (mapping 1 in PDO 1, mapping 4 in PDO 2). Cia408PeerTests
 ; checks every object in 6000h-67FFh against the catalogue and against the device's dictionary,
-; and 1000h, 1029h and the PDO records against the device, so the file cannot drift from either.
+; with each entry's type, access and default value, and 1000h, 1029h and the PDO records against the
+; device, so the file cannot drift from either. The status words' defaults are INIT, as the device shows it.
 
 [FileInfo]
 FileName=cia408-pq-valve.eds
@@ -671,7 +672,7 @@ ParameterName=Device status word 16-bit
 ObjectType=0x7
 DataType=0x0006
 AccessType=ro
-DefaultValue=0
+DefaultValue=0x0008
 PDOMapping=1
 
 [6042]
@@ -703,7 +704,7 @@ ParameterName=Device status word 32-bit
 ObjectType=0x7
 DataType=0x0007
 AccessType=ro
-DefaultValue=0
+DefaultValue=0x00000008
 PDOMapping=1
 
 [604E]

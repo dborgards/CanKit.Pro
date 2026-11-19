@@ -907,9 +907,10 @@ public class Cia408PeerTests
         {
             Cia408Objects.TryGet(obj.Index, out var definition).Should().BeTrue($"{obj.Index:X4}h is a CiA 408 object");
             var subs = obj.SubObjects.Count == 0
-                ? new[] { (Sub: (byte)0, Type: obj.DataType, Access: obj.AccessType) }
-                : obj.SubObjects.Values.Select(s => (Sub: s.SubIndex, Type: (ushort?)s.DataType, Access: s.AccessType)).ToArray();
-            foreach (var (sub, type, access) in subs)
+                ? new[] { (Sub: (byte)0, Type: obj.DataType, Access: obj.AccessType, Default: obj.DefaultValue) }
+                : obj.SubObjects.Values.Select(s => (Sub: s.SubIndex, Type: (ushort?)s.DataType, Access: s.AccessType, Default: s.DefaultValue))
+                    .ToArray();
+            foreach (var (sub, type, access, defaultValue) in subs)
             {
                 // §8.7.1: 00h the count, 01h the value, 02h the unit (UNSIGNED8), 03h the prefix (INTEGER8).
                 var expected = !definition.IsValueRecord || sub == 1 ? definition.ValueType
@@ -917,8 +918,9 @@ public class Cia408PeerTests
                 type.Should().Be((ushort)expected, $"the type of {obj.Index:X4}h:{sub:X2}h");
                 od.TryGet(obj.Index, sub, out var entry).Should().BeTrue($"the device declares {obj.Index:X4}h:{sub:X2}h");
                 entry.DataType.Should().Be(expected);
-                entry.Access.Should().Be(access == AccessType.ReadOnly ? OdAccess.ReadOnly : OdAccess.ReadWrite,
-                    $"the device's access of {obj.Index:X4}h:{sub:X2}h is the fixture's");
+                entry.Access.Should().Be(OdAccessOf(access), $"the device's access of {obj.Index:X4}h:{sub:X2}h is the fixture's");
+                CanOpenValueCodec.Decode(expected, od.ReadRaw(obj.Index, sub)).Should().Be(ParseSigned(defaultValue!),
+                    $"the device's value of {obj.Index:X4}h:{sub:X2}h after opening is the fixture's default");
                 described++;
             }
         }
@@ -954,6 +956,22 @@ public class Cia408PeerTests
         records.Should().Be(3 + (2 * 5) + (2 * 6) + (4 * 9),
             "1029h of three entries, two RPDO communication records of five, two TPDO ones of six, four mapping records of nine");
     }
+
+    /// <summary>The dictionary access an EDS access type stands for, each its own rather than every
+    /// writable one taken for <c>rw</c>: <c>ro</c>, <c>wo</c>, <c>rw</c>; the fixture uses no other.</summary>
+    private static OdAccess OdAccessOf(AccessType access) => access switch
+    {
+        AccessType.ReadOnly => OdAccess.ReadOnly,
+        AccessType.WriteOnly => OdAccess.WriteOnly,
+        AccessType.ReadWrite => OdAccess.ReadWrite,
+        _ => throw new ArgumentOutOfRangeException(nameof(access), access, "The fixture uses ro, wo and rw only."),
+    };
+
+    /// <summary>A decimal (possibly negative) or <c>0x</c> hexadecimal default of the fixture.</summary>
+    private static long ParseSigned(string text)
+        => text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? long.Parse(text.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture)
+            : long.Parse(text, CultureInfo.InvariantCulture);
 
     /// <summary>A numeric value of the fixture: decimal or <c>0x</c> hexadecimal, optionally after
     /// <c>$NODEID+</c>, resolved for the device's node-id (CiA 306).</summary>

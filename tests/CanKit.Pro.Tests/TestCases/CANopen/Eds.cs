@@ -94,7 +94,7 @@ internal sealed class Eds
         _sections.Insert(_sections.FindIndex(s => s.Name == "DeviceInfo"), ("DeviceComissioning", new List<string>
         {
             "NodeID=0x" + nodeId.ToString("X2", CultureInfo.InvariantCulture),
-            "NodeName=CiA 401 test device",
+            "NodeName=Profile test device",
             "Baudrate=500",
             "NetNumber=1",
             "NetworkName=test",
