@@ -167,10 +167,10 @@ internal sealed partial class Cia408Device
 
         _controlWord = 0;
         WriteOwn(host, _controlWord16, Encode(0, 2));
-        WriteOwn(host, _controlWord32, Encode(0, 4));
-        _localSource = host.ObjectDictionary.ReadRaw(_local, 0x00)[0] == 1;
+        if (_has32) WriteOwn(host, _controlWord32, Encode(0, 4));
+        _localSource = (_hasLocal ? unchecked((sbyte)host.ObjectDictionary.ReadRaw(_local, 0x00)[0]) : _localDefault) == 1;
         ushort errorCode = _warnings.Count > 0 ? _warnings[_warnings.Count - 1] : (ushort)0;
-        WriteOwn(host, _errorCode, Encode(errorCode, 2));
+        if (_hasErrorCode) WriteOwn(host, _errorCode, Encode(errorCode, 2));
 
         RewriteActualValues(host);
 

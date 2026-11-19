@@ -77,8 +77,12 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// <para>
 /// <b>What is not built in this slice.</b> The hardware enable signal (§7.7, Table 8). The
 /// controllers and conditioning blocks of clauses 9.5 to 9.49 beyond the setpoints and actual values
-/// of the default PDOs. The behaviour of the mode-specific bits 6 to 11 of the control word. A device
-/// description that declares the device's objects.
+/// of the default PDOs. The behaviour of the mode-specific bits 6 to 11 of the control word.
+/// </para>
+/// <para>
+/// <b>From a device description.</b> A device built with <see cref="FromDescription"/> adopts the
+/// objects the node's EDS or DCF declares and takes its resolution and modes from them; one built from
+/// a configuration refuses a description that declares objects of its logical device.
 /// </para>
 /// <para>
 /// <b>Readings where the norm is silent.</b> Each is argued where it is used:
@@ -117,8 +121,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private readonly int _requiredPdoCount;
     private readonly CanOpenIndexRange[] _claims;
     private readonly sbyte _deviceModeDefault;
-    private readonly sbyte _controlModeDefault;
-    private readonly sbyte _localDefault;
+
+    // The default control mode and the default of 604Fh by device kind; a device built from a
+    // description learns them in Attach (AdoptDescription), where they stand in for an object the
+    // file leaves out.
+    private sbyte _controlModeDefault;
+    private sbyte _localDefault;
 
     // The indices of the eight objects in the device's logical device.
     private readonly ushort _controlWord16;
@@ -129,7 +137,10 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private readonly ushort _statusWord32;
     private readonly ushort _errorCode;
     private readonly ushort _local;
-    private readonly CanOpenObjectAddress[] _commandEntries;
+
+    // Built in the constructor, or in Attach for a device built from a description, which lists the
+    // command entries the file declares (AdoptDescription); the node reads them after Attach.
+    private CanOpenObjectAddress[] _commandEntries;
 
     // The device modes and control modes the configuration supports, as 6042h and 6043h carry them,
     // and whether 6043h is read-only (one control mode, §9.3.5).
@@ -318,6 +329,10 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">The device is attached to a node already.</exception>
+    /// <exception cref="ArgumentException">The node's device description and the device do not fit
+    /// (<see cref="FromDescription"/>; for a device built from a configuration, the description
+    /// declares an object of its logical device). The parameter is <c>options</c>, as for every
+    /// application that fails the open.</exception>
     public void Attach(ICanOpenApplicationHost host)
     {
         if (host is null) throw new ArgumentNullException(nameof(host));
@@ -329,29 +344,13 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             var od = host.ObjectDictionary;
             _machine.Start();
             _state = _machine.State;
-            Declare(od, Cia408Objects.DeviceControlWord16, Encode(0, 2));
-            Declare(od, Cia408Objects.DeviceControlWord32, Encode(0, 4));
-            Declare(od, Cia408Objects.DeviceMode, new[] { unchecked((byte)_deviceModeDefault) });
-            od.AddRaw(_controlMode, 0x00, Cia408Objects.DeviceControlMode.ValueType,
-                new[] { unchecked((byte)_controlModeDefault) },
-                _controlModeReadOnly ? OdAccess.ReadOnly : Cia408Objects.DeviceControlMode.Access,
-                Cia408Objects.DeviceControlMode.PdoAccess != Cia408PdoAccess.No);
-            foreach (var setpoint in _setpoints.Values) DeclareRecord(od, setpoint);
-            foreach (var actual in _actuals.Values) DeclareRecord(od, actual);
-            Declare(od, Cia408Objects.DeviceErrorCode, Encode(0, 2));
-            Declare(od, Cia408Objects.DeviceLocal, new[] { unchecked((byte)_localDefault) });
-            _localSource = _localDefault == 1;
-            var status = ComposeStatus();
-            Declare(od, Cia408Objects.DeviceStatusWord16, Encode(status, 2));
-            Declare(od, Cia408Objects.DeviceStatusWord32, Encode(status, 4));
-
-            host.SetDeviceType(_logicalDevice, _deviceType);
-            foreach (var pdo in _defaultPdos)
+            if (_fromDescription)
             {
-                var mapping = new PdoMapping();
-                foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
-                if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping);
-                else host.SetDefaultRpdo(pdo.Number, mapping);
+                host.SetDeviceType(_logicalDevice, AdoptDescription(host));
+            }
+            else
+            {
+                AttachConfigured(host, od);
             }
         }
         catch
@@ -370,6 +369,37 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             StartProcess(host);
             FinishChanges(host);
         });
+    }
+
+    /// <summary>The objects, device type and default PDOs of a device built from a configuration (see
+    /// <see cref="Attach"/>). Constructing thread, in Attach.</summary>
+    private void AttachConfigured(ICanOpenApplicationHost host, ObjectDictionary od)
+    {
+        RefuseDescribedObjects(od);
+        Declare(od, Cia408Objects.DeviceControlWord16, Encode(0, 2));
+        Declare(od, Cia408Objects.DeviceControlWord32, Encode(0, 4));
+        Declare(od, Cia408Objects.DeviceMode, new[] { unchecked((byte)_deviceModeDefault) });
+        od.AddRaw(_controlMode, 0x00, Cia408Objects.DeviceControlMode.ValueType,
+            new[] { unchecked((byte)_controlModeDefault) },
+            _controlModeReadOnly ? OdAccess.ReadOnly : Cia408Objects.DeviceControlMode.Access,
+            Cia408Objects.DeviceControlMode.PdoAccess != Cia408PdoAccess.No);
+        foreach (var setpoint in _setpoints.Values) DeclareRecord(od, setpoint);
+        foreach (var actual in _actuals.Values) DeclareRecord(od, actual);
+        Declare(od, Cia408Objects.DeviceErrorCode, Encode(0, 2));
+        Declare(od, Cia408Objects.DeviceLocal, new[] { unchecked((byte)_localDefault) });
+        _localSource = _localDefault == 1;
+        var status = ComposeStatus();
+        Declare(od, Cia408Objects.DeviceStatusWord16, Encode(status, 2));
+        Declare(od, Cia408Objects.DeviceStatusWord32, Encode(status, 4));
+
+        host.SetDeviceType(_logicalDevice, _deviceType);
+        foreach (var pdo in _defaultPdos)
+        {
+            var mapping = new PdoMapping();
+            foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
+            if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping);
+            else host.SetDefaultRpdo(pdo.Number, mapping);
+        }
     }
 
     /// <summary>Refuses a control word with a reserved bit set, and a value of <c>604Fh</c> other than

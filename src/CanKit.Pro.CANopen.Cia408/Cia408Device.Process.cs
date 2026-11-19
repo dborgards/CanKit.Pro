@@ -155,7 +155,7 @@ internal sealed partial class Cia408Device
         var now = host.Now;
         var context = new Cia408ProcessContext(this, _machine.State,
             (Cia408DeviceMode)unchecked((sbyte)od.ReadRaw(_deviceMode, 0x00)[0]),
-            (Cia408ControlMode)unchecked((sbyte)od.ReadRaw(_controlMode, 0x00)[0]),
+            (Cia408ControlMode)(_hasControlMode ? unchecked((sbyte)od.ReadRaw(_controlMode, 0x00)[0]) : _controlModeDefault),
             now - _lastStep);
         _lastStep = now;
         _stepping = true;

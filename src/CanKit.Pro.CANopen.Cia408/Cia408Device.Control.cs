@@ -150,7 +150,7 @@ internal sealed partial class Cia408Device
         var status16 = Encode(status, 2);
         var status32 = Encode(status, 4);
         bool changed16 = !Equal(od.ReadRaw(_statusWord16, 0x00), status16);
-        bool changed32 = !Equal(od.ReadRaw(_statusWord32, 0x00), status32);
+        bool changed32 = _has32 && !Equal(od.ReadRaw(_statusWord32, 0x00), status32);
         if (!changed16 && !changed32 && !errorCodeChanged && (more is null || more.Count == 0)) return;
 
         var send = new List<CanOpenObjectAddress>(3 + (more?.Count ?? 0));
