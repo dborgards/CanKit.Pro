@@ -90,6 +90,11 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// (<see cref="OnNmtStateChanged"/>).</description></item>
 /// <item><description>Reset Node follows Table 6 over Table 10 and Figure 2, and enters again the
 /// faults the application still reports (<see cref="OnReset"/>).</description></item>
+/// <item><description>Table 10 applies from every resting state, as Figure 2 draws it, not "in mode
+/// DEVICE_MODE_ACTIVE", a state the machine does not have (<see cref="OnNmtStateChanged"/>).</description></item>
+/// <item><description>A communication failure forces the fault reaction like Stopped and is a cause
+/// while it lasts; the norm does not tie it to the device state machine
+/// (<see cref="OnCommunicationFailureChanged"/>).</description></item>
 /// <item><description>The control word has one history across both objects and both sources, and
 /// is not mirrored from one object into the other (<see cref="ControlWord"/>).</description></item>
 /// <item><description><c>604Eh</c> keeps the code of the warning or fault that occurred last
@@ -356,7 +361,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         }
 
         // Queued before the host is published: a fault reported from another thread as soon as it is
-        // queues its change behind the start, whichever posted work runs first.
+        // queues its change behind the start, whichever posted work runs first (tested with a host
+        // whose posted work the test runs in its own order, Cia408DeviceAttachTests).
         _pendingChanges.Enqueue(new Cia408StateChangedEventArgs(Cia408State.NotReady, Cia408State.Init, new[] { 0, 1 }));
         Volatile.Write(ref _host, host);
         host.Post(() =>
@@ -550,7 +556,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         if (_nmtRequestPending)
         {
             _nmtRequestPending = false;
-            if (host.ErrorBehaviorTarget(InternalDeviceErrorClass) is { } target) host.RequestNmtState(target);
+
+            // The node takes no request in Initialisation: a fault reported there (from a handler of a
+            // reset's change, or on an LSS slave waiting for its node-id) asks once the node leaves it.
+            if (host.State == NmtState.Initializing) _requestOnBoot = true;
+            else if (host.ErrorBehaviorTarget(InternalDeviceErrorClass) is { } target) host.RequestNmtState(target);
         }
 
         ThrowIfAny(failures);

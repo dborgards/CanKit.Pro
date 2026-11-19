@@ -646,6 +646,21 @@ public class Cia408DeviceTests
     }
 
     [Fact]
+    public async Task A_Bus_Word_Written_After_The_Switch_To_Local_Control_Is_Ignored()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Settle();
+
+        await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
+            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU8(Local, 0, 0x01)),
+            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU16(ControlWord16, 0, 0x0001))));
+        rig.Settle();
+
+        rig.Device.State.Should().Be(Cia408State.Init, "the word was written under local control");
+        (await rig.ReadU16Async(StatusWord16, 0)).Should().Be(0x0018, "INIT, with L");
+    }
+
+    [Fact]
     public async Task A_Bus_Word_Written_Before_The_Switch_To_Bus_Control_Is_Ignored()
     {
         using var rig = new Cia408Rig(Cia408Rig.Drive);

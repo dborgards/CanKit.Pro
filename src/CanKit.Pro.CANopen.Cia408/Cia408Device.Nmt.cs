@@ -7,17 +7,27 @@ namespace CanKit.Pro.CANopen.Cia408;
 // Table 6).
 internal sealed partial class Cia408Device
 {
-    // A Reset Node re-entered a fault the application still reports: its 1029h:02 request waits until
-    // the node leaves Initialisation, where the node takes none. Actor loop.
+    // A fault asked for the 1029h:02 state while the node was in Initialisation, where the node takes
+    // no request — a reset raised a fault the application still reports, or a fault was reported
+    // there: the request waits until the node leaves Initialisation. Actor loop.
     private bool _requestOnBoot;
 
     /// <summary>
     /// NMT Stopped forces the fault reaction (§7.8, Table 10: C5 and C8 force D8), without an EMCY.
-    /// Leaving Initialisation after a Reset Node that re-entered a fault asks for the NMT state
-    /// <c>1029h:02</c> names (see <see cref="OnReset"/>). Every other change moves nothing. Actor
-    /// loop.
+    /// Leaving Initialisation after a fault asked for the NMT state <c>1029h:02</c> names while the
+    /// node was there makes that request now (see <see cref="OnReset"/>). Every other change moves
+    /// nothing. Actor loop.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>From which device states Table 10 applies.</b> §7.8 introduces Table 10 with "if the device
+    /// state machine is in mode DEVICE_MODE_ACTIVE, transitions in the communication state machine force
+    /// the reactions" — a state the device state machine does not have — while Figure 2 joins every
+    /// state but NOT_READY to the D8 line, and the rows of Table 10 name D8 without a state. The figure
+    /// is taken: Stopped, Reset Communication and a communication failure force D8 from every resting
+    /// state, and Reset Node restarts the machine from every state. The norm's sentence is read as
+    /// meaning "while the device state machine runs".
+    /// </para>
     /// <para>
     /// <b>The forced fault.</b> Table 10 forces D8 and names no error, so the device sends no EMCY,
     /// leaves <c>604Eh</c> as it is, and asks NMT for nothing — the event is NMT's own. The fault state
@@ -92,24 +102,41 @@ internal sealed partial class Cia408Device
     /// </para>
     /// <para>
     /// <b>Reset Communication</b> restores <c>1000h</c> to <c>1FFFh</c> only: the device's objects, the
-    /// history of the control word and <c>604Eh</c> stay as they are. A control word committed before
+    /// history of the control word and <c>604Eh</c> stay as they are. It ends every error of the
+    /// application as Reset Node does, so a fault the application still reports raises its EMCY again
+    /// (held until the boot-up), and its <c>1029h:02</c> request is made once the node has left
+    /// Initialisation; the state stays where the forced D8 left it, which is never above the cause's
+    /// reaction, since a fault reset is refused while the cause lasts. A control word committed before
     /// the reset and not yet told reaches the device after this call, in the fault state the reset
-    /// forced, and is judged by Table 7 there like any other.
+    /// forced, and is judged by Table 7 there like any other — so a reset edge whose two words were both
+    /// written before the reset (<c>0003h</c> then <c>000Bh</c> in HOLD, say) acknowledges the forced
+    /// D8, as an edge may run across a fault (see <see cref="ControlWord"/>).
     /// </para>
     /// </remarks>
     public void OnReset(NmtCommand command)
     {
         var host = AttachedHost();
-        if (command == NmtCommand.ResetNode) Restart(host);
-        else ForceFault(host);
+        if (command == NmtCommand.ResetNode)
+        {
+            Restart(host);
+            return;
+        }
+
+        ForceFault(host);
+        foreach (var cause in _faultCauses) host.RaiseError(cause.Code, cause.ErrorRegisterBits);
+        _requestOnBoot |= _faultCauses.Count > 0;
     }
 
     /// <summary>A communication failure began (<see langword="true"/>) or ended. When it begins it
-    /// forces the fault reaction, as Stopped does (see <see cref="OnNmtStateChanged"/>; §7.8: a
-    /// communication error is the NMT side of a fault), without an EMCY of the device's own; while it
-    /// lasts it is a cause for which a fault reset is refused (<see cref="ReportFault"/>). When it ends
-    /// the state stays until the master resets the fault. The node acts on <c>1029h:01</c> itself,
-    /// after this call. Actor loop.</summary>
+    /// forces the fault reaction, as Stopped does (see <see cref="OnNmtStateChanged"/>), without an
+    /// EMCY of the device's own; while it lasts it is a cause for which a fault reset is refused
+    /// (<see cref="ReportFault"/>). When it ends the state stays until the master resets the fault. The
+    /// node acts on <c>1029h:01</c> itself, after this call. Actor loop.</summary>
+    /// <remarks>The norm does not tie a communication failure to the device state machine: Table 10
+    /// names NMT transitions only. Treating the loss of the master's heartbeat or guarding like the
+    /// Stopped it often leads to is this device's reading — a valve that no longer hears its master
+    /// should not keep following the last setpoint — and so is keeping the fault reset refused while
+    /// the failure lasts.</remarks>
     public void OnCommunicationFailureChanged(bool active)
     {
         var host = AttachedHost();
@@ -133,6 +160,7 @@ internal sealed partial class Cia408Device
     /// <summary>Reset Node: see <see cref="OnReset"/>. Actor loop, in Initialisation.</summary>
     private void Restart(ICanOpenApplicationHost host)
     {
+        var persisting = _faultCauses.ToArray();
         var before = _machine.State;
         var taken = _machine.Restart();
         Changed(before, taken, evenWithoutMove: true);
@@ -145,9 +173,15 @@ internal sealed partial class Cia408Device
         WriteOwn(host, _errorCode, Encode(errorCode, 2));
 
         RewriteActualValues(host);
-        foreach (var cause in _faultCauses) EnterFault(host, cause);
-        _requestOnBoot = _faultCauses.Count > 0;
 
+        // The restart is published and raised on its own, so its subscribers read INIT; the faults that
+        // persist follow as changes of their own.
+        Publish(host, errorCodeChanged: false);
+        FinishChanges(host);
+
+        if (persisting.Length == 0) return;
+        foreach (var cause in persisting) EnterFault(host, cause);
+        _requestOnBoot = true;
         Publish(host, errorCodeChanged: false);
         FinishChanges(host);
     }

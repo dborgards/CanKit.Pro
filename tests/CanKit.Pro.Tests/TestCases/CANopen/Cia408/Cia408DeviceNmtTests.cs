@@ -31,51 +31,62 @@ public class Cia408DeviceNmtTests
 
     // ---- the table ------------------------------------------------------------------------------
 
-    /// <summary>Each NMT event from each resting state: the state after it and the changes it raised,
-    /// written out. Stopped, Reset Communication and a communication failure take D8 into the highest
-    /// fault state Table 9 allows from the state (§7.8 Table 10, §7.7 Table 9); Reset Node takes D255,
-    /// D0, D1 into INIT (Table 6); Start and Enter Pre-operational move nothing.</summary>
+    /// <summary>The state each resting state is forced into by Stopped, Reset Communication and a
+    /// communication failure: D8 and the highest fault state Table 9 allows (§7.8 Table 10, §7.7
+    /// Table 9), written out; a fault state stays and raises nothing.</summary>
+    private static readonly Dictionary<string, (string State, string Change)> Forced = new()
+    {
+        ["Init"] = ("FaultInit", "Init->FaultInit [8,13]"),
+        ["Disabled"] = ("FaultDisabled", "Disabled->FaultDisabled [8,12]"),
+        ["Hold"] = ("FaultHold", "Hold->FaultHold [8,9]"),
+        ["Active"] = ("FaultHold", "Active->FaultHold [8,9]"),
+        ["FaultInit"] = ("FaultInit", ""),
+        ["FaultDisabled"] = ("FaultDisabled", ""),
+        ["FaultHold"] = ("FaultHold", ""),
+    };
+
+    /// <summary>Every NMT event from every NMT state it can come from (CiA 301 v4.2.0 §7.3.2.2.1:
+    /// C3/C5 and C12 from Pre-operational, C4/C8 and C13 from Operational, C6/C7 and C14 from
+    /// Stopped, Reset Node from each) and the communication failure from Pre-operational and
+    /// Operational, crossed with every resting state of the device. Stop, Reset Communication and the
+    /// failure force <see cref="Forced"/>; Reset Node restarts into INIT, raised also from INIT;
+    /// Start and Enter Pre-operational move nothing.</summary>
+    public static IEnumerable<object[]> NmtEvents()
+    {
+        var events = new (string From, string Event)[]
+        {
+            ("PreOperational", "Start"), ("PreOperational", "Stop"), ("PreOperational", "ResetNode"),
+            ("PreOperational", "ResetCommunication"), ("PreOperational", "CommunicationFailure"),
+            ("Operational", "EnterPreOperational"), ("Operational", "Stop"), ("Operational", "ResetNode"),
+            ("Operational", "ResetCommunication"), ("Operational", "CommunicationFailure"),
+            ("Stopped", "Start"), ("Stopped", "EnterPreOperational"), ("Stopped", "ResetNode"),
+            ("Stopped", "ResetCommunication"),
+        };
+        foreach (var (from, nmtEvent) in events)
+        {
+            foreach (var state in Forced.Keys)
+            {
+                var (expected, change) = nmtEvent switch
+                {
+                    "Stop" or "ResetCommunication" or "CommunicationFailure" => Forced[state],
+                    "ResetNode" => ("Init", $"{state}->Init [255,0,1]"),
+                    _ => (state, ""),
+                };
+                yield return new object[] { from, state, nmtEvent, expected, change };
+            }
+        }
+    }
+
     [Theory]
-    [InlineData("Init", "Stop", "FaultInit", "Init->FaultInit [8,13]")]
-    [InlineData("Disabled", "Stop", "FaultDisabled", "Disabled->FaultDisabled [8,12]")]
-    [InlineData("Hold", "Stop", "FaultHold", "Hold->FaultHold [8,9]")]
-    [InlineData("Active", "Stop", "FaultHold", "Active->FaultHold [8,9]")]
-    [InlineData("FaultInit", "Stop", "FaultInit", "")]
-    [InlineData("FaultDisabled", "Stop", "FaultDisabled", "")]
-    [InlineData("FaultHold", "Stop", "FaultHold", "")]
-    [InlineData("Init", "ResetCommunication", "FaultInit", "Init->FaultInit [8,13]")]
-    [InlineData("Disabled", "ResetCommunication", "FaultDisabled", "Disabled->FaultDisabled [8,12]")]
-    [InlineData("Hold", "ResetCommunication", "FaultHold", "Hold->FaultHold [8,9]")]
-    [InlineData("Active", "ResetCommunication", "FaultHold", "Active->FaultHold [8,9]")]
-    [InlineData("FaultInit", "ResetCommunication", "FaultInit", "")]
-    [InlineData("FaultDisabled", "ResetCommunication", "FaultDisabled", "")]
-    [InlineData("FaultHold", "ResetCommunication", "FaultHold", "")]
-    [InlineData("Init", "CommunicationFailure", "FaultInit", "Init->FaultInit [8,13]")]
-    [InlineData("Disabled", "CommunicationFailure", "FaultDisabled", "Disabled->FaultDisabled [8,12]")]
-    [InlineData("Hold", "CommunicationFailure", "FaultHold", "Hold->FaultHold [8,9]")]
-    [InlineData("Active", "CommunicationFailure", "FaultHold", "Active->FaultHold [8,9]")]
-    [InlineData("FaultInit", "CommunicationFailure", "FaultInit", "")]
-    [InlineData("FaultDisabled", "CommunicationFailure", "FaultDisabled", "")]
-    [InlineData("FaultHold", "CommunicationFailure", "FaultHold", "")]
-    [InlineData("Init", "ResetNode", "Init", "Init->Init [255,0,1]")]
-    [InlineData("Disabled", "ResetNode", "Init", "Disabled->Init [255,0,1]")]
-    [InlineData("Hold", "ResetNode", "Init", "Hold->Init [255,0,1]")]
-    [InlineData("Active", "ResetNode", "Init", "Active->Init [255,0,1]")]
-    [InlineData("FaultInit", "ResetNode", "Init", "FaultInit->Init [255,0,1]")]
-    [InlineData("FaultDisabled", "ResetNode", "Init", "FaultDisabled->Init [255,0,1]")]
-    [InlineData("FaultHold", "ResetNode", "Init", "FaultHold->Init [255,0,1]")]
-    [InlineData("Init", "Start", "Init", "")]
-    [InlineData("Active", "Start", "Active", "")]
-    [InlineData("FaultHold", "Start", "FaultHold", "")]
-    [InlineData("Active", "EnterPreOperational", "Active", "")]
-    [InlineData("FaultDisabled", "EnterPreOperational", "FaultDisabled", "")]
-    public async Task Each_Nmt_Event_From_Each_Resting_State(string from, string nmtEvent, string expected, string changes)
+    [MemberData(nameof(NmtEvents))]
+    public async Task Each_Nmt_Event_From_Each_Resting_State(string nmtFrom, string from, string nmtEvent, string expected, string changes)
     {
         using var rig = new Cia408Rig(Cia408Rig.Valve);
-        await ReachAsync(rig, (Cia408State)Enum.Parse(typeof(Cia408State), from));
-        if (nmtEvent == "EnterPreOperational") await rig.StartAsync();
         if (nmtEvent == "CommunicationFailure") await WatchProducerAsync(rig);
-        rig.Settle();
+        if (nmtFrom == "Operational") await rig.StartAsync();
+        if (nmtFrom == "Stopped") await rig.StopAsync();
+        await ReachLocallyAsync(rig, (Cia408State)Enum.Parse(typeof(Cia408State), from));
+        rig.Node.State.ToString().Should().Be(nmtFrom);
         int before = rig.Changes.Count;
 
         await ApplyAsync(rig, nmtEvent);
@@ -260,51 +271,135 @@ public class Cia408DeviceNmtTests
         rig.Device.State.Should().Be(Cia408State.Init, "the stored local control is in force");
     }
 
+    [Fact]
+    public async Task Reset_Communication_Raises_A_Cause_That_Persists_Again()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        await rig.WriteU16Async(ControlWord16, 0, 0x0003);
+        rig.Settle();
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultHold, errorRegisterBits: 0x02);
+        await rig.WaitForCountAsync(CanOpenProfileRig.Emcy, 1);
+
+        await rig.ResetAsync(NmtCommand.ResetCommunication);
+        await rig.WaitForCountAsync(CanOpenProfileRig.Emcy, 2);
+
+        rig.Payloads(CanOpenProfileRig.Emcy)[1].Take(3).Should().Equal(new byte[] { 0x10, 0x21, 0x03 },
+            "the reset ended the error; the cause persists, so its EMCY goes out again after the boot-up");
+        rig.Od.ReadRaw(0x1001, 0).Should().Equal(new byte[] { 0x03 });
+        await rig.WriteU16Async(ControlWord16, 0, 0x0003);
+        await rig.WriteU16Async(ControlWord16, 0, 0x000B);
+        rig.Settle();
+        rig.Device.State.Should().Be(Cia408State.FaultHold, "the cause is still active");
+    }
+
+    [Fact]
+    public async Task Reset_Communication_With_A_Cause_Asks_For_What_1029h_02_Names_Once_The_Node_Has_Booted()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        await rig.WriteU8Async(0x1029, 0x02, 0x02);
+        await rig.SaveAsync();
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultInit);
+        await rig.WaitForStateAsync(NmtState.Stopped);
+
+        await rig.ResetAsync(NmtCommand.ResetCommunication);
+        await rig.WaitForStateAsync(NmtState.Stopped);
+    }
+
+    [Fact]
+    public async Task A_Fault_Reported_In_Initialisation_Asks_For_What_1029h_02_Names_Once_The_Node_Has_Booted()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        bool report = false;
+        device.StateChanged += (_, e) =>
+        {
+            if (report && e.Transitions.Contains(255)) device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultInit);
+        };
+        using var rig = new Cia408Rig(device);
+        await rig.WriteU8Async(0x1029, 0x02, 0x02);
+        await rig.SaveAsync();
+        report = true;
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        await rig.WaitForStateAsync(NmtState.Stopped);
+
+        rig.Device.State.Should().Be(Cia408State.FaultInit);
+    }
+
+    [Fact]
+    public async Task Reset_Node_With_A_Cause_Raises_The_Restart_With_The_Status_Of_Init()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        Cia408Rig? rigRef = null;
+        var seen = new List<string>();
+        device.StateChanged += (_, e) =>
+        {
+            if (rigRef is not null) seen.Add($"{Describe(e)} {rigRef.Od.ReadUnsigned(StatusWord16, 0):X4}");
+        };
+        using var rig = new Cia408Rig(device);
+        rig.Settle();
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultInit);
+        rig.Settle();
+        rigRef = rig;
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        seen.Should().Equal("FaultInit->Init [255,0,1] 0008", "Init->FaultInit [8,13] 0000");
+    }
+
     // ---- helpers --------------------------------------------------------------------------------
 
-    private static async Task ReachAsync(Cia408Rig rig, Cia408State state)
+    /// <summary>Reaches <paramref name="state"/> from whatever state the device rests in, with local
+    /// writes of the control word, which the node takes in every NMT state, Stopped included:
+    /// <c>0001h</c>, <c>0000h</c>, <c>0008h</c>, <c>0000h</c> bring every resting state to INIT (Table 7:
+    /// D15 then D16 then D14 from FAULT_HOLD, D16 then D14 from FAULT_DISABLED, D14 from FAULT_INIT,
+    /// D5 to D7 from the others), then walked from INIT to the state; a fault state is the fault
+    /// of its non-fault state, with its cause cleared.</summary>
+    private static Task ReachLocallyAsync(Cia408Rig rig, Cia408State state)
     {
+        foreach (ushort word in new ushort[] { 0x0001, 0x0000, 0x0008, 0x0000 }) Local(rig, word);
+        rig.Settle();
+        rig.Device.State.Should().Be(Cia408State.Init);
         switch (state)
         {
             case Cia408State.Init:
                 break;
             case Cia408State.Disabled:
-                await rig.WriteU16Async(ControlWord16, 0, 0x0001);
+                Local(rig, 0x0001);
                 break;
             case Cia408State.Hold:
-                await rig.WriteU16Async(ControlWord16, 0, 0x0003);
+                Local(rig, 0x0003);
                 break;
             case Cia408State.Active:
-                await rig.WriteU16Async(ControlWord16, 0, 0x0007);
+                Local(rig, 0x0007);
                 break;
             case Cia408State.FaultInit:
-                await FaultAsync(rig, Cia408FaultState.FaultInit);
+                rig.Settle();
+                Fault(rig, Cia408FaultState.FaultInit);
                 break;
             case Cia408State.FaultDisabled:
-                await rig.WriteU16Async(ControlWord16, 0, 0x0001);
-                await FaultAsync(rig, Cia408FaultState.FaultDisabled);
+                Local(rig, 0x0001);
+                rig.Settle();
+                Fault(rig, Cia408FaultState.FaultDisabled);
                 break;
             case Cia408State.FaultHold:
-                await rig.WriteU16Async(ControlWord16, 0, 0x0003);
-                await FaultAsync(rig, Cia408FaultState.FaultHold);
+                Local(rig, 0x0003);
+                rig.Settle();
+                Fault(rig, Cia408FaultState.FaultHold);
                 break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(state));
         }
 
         rig.Settle();
         rig.Device.State.Should().Be(state);
+        return Task.CompletedTask;
     }
 
-    /// <summary>A fault and the end of its cause: the device rests in the fault state with no cause
-    /// left.</summary>
-    private static Task FaultAsync(Cia408Rig rig, Cia408FaultState reaction)
+    private static void Local(Cia408Rig rig, ushort word) => rig.Od.WriteRaw(ControlWord16, 0, new[] { (byte)word, (byte)(word >> 8) });
+
+    private static void Fault(Cia408Rig rig, Cia408FaultState reaction)
     {
-        rig.Settle();
         rig.Device.ReportFault(InputCurrentTooHigh, reaction);
         rig.Device.ClearFaultCause(InputCurrentTooHigh);
         rig.Settle();
-        return Task.CompletedTask;
     }
 
     private static async Task ApplyAsync(Cia408Rig rig, string nmtEvent)
