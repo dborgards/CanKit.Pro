@@ -234,10 +234,14 @@ internal sealed partial class Cia408Device
     }
 
     /// <summary>Refuses a value outside the value range of the record's type
-    /// (<see cref="CanOpenValueCodec.IsInRange"/>).</summary>
+    /// (<see cref="CanOpenValueCodec.IsInRange"/>), naming the range in the message.</summary>
     private static void CheckRange(Cia408ObjectDefinition definition, long value)
     {
-        if (!CanOpenValueCodec.IsInRange(definition.ValueType, value))
-            throw new ArgumentOutOfRangeException(nameof(value), value, $"{definition} is {definition.ValueType}: the value does not fit.");
+        if (CanOpenValueCodec.IsInRange(definition.ValueType, value)) return;
+        int bits = OdEntryLayout.FixedSize(definition.ValueType) * 8;
+        string range = CanOpenValueCodec.IsSigned(definition.ValueType)
+            ? FormattableString.Invariant($"{-(1L << (bits - 1))} to {(1L << (bits - 1)) - 1}")
+            : FormattableString.Invariant($"0 to {(1L << bits) - 1}");
+        throw new ArgumentOutOfRangeException(nameof(value), value, $"{definition} is {definition.ValueType}: {range}.");
     }
 }

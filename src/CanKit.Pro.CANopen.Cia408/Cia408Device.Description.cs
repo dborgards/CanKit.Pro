@@ -47,7 +47,9 @@ internal sealed partial class Cia408Device
     /// pair is always there and the 32-bit pair where the resolution asks for it — dtprs 10b or 11b,
     /// both of which give 32-bit parameters to some function of the device — whether the file's device
     /// type gives the resolution or the objects do (below): the device type the device publishes says
-    /// it, and a tool reads the 32-bit pair for it. Any of the required objects missing fails the open.
+    /// it, and a tool reads the 32-bit pair for it. Any of the required objects missing fails the open,
+    /// and so does a file that declares one half of the 32-bit pair without the other (§9.3.6,
+    /// §9.3.7): the control word and the status word are one pair, and a device has both or neither.
     /// </para>
     /// <para>
     /// <b>The device type</b> is the file's: <c>67FFh + n·800h</c> when the file declares it, else

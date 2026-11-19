@@ -412,12 +412,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// present device state" (Table 22). The device's own writes pass; every other write is
     /// accepted.</summary>
     /// <remarks>
-    /// <para>The device mode is not changeable in ACTIVE, HOLD and FAULT_HOLD. Table 4 says so for
-    /// ACTIVE ("device mode cannot be changed"), and Table 6 for the others: D4, into ACTIVE, makes the
-    /// device mode no longer changeable, D5 (into HOLD) and D9 (into FAULT_HOLD) say "device mode is not
-    /// changeable", and D12 to D14 enable the change again. Table 5 gives the device mode as not
-    /// changeable in ACTIVE and as manufacturer-specific in every other state, which Table 6 decides
-    /// for HOLD and FAULT_HOLD. The control mode is changeable in INIT, DISABLED, FAULT_INIT and
+    /// <para>The device mode is not changeable in ACTIVE, HOLD and FAULT_HOLD. For ACTIVE the norm says
+    /// so: Table 4 ("device mode cannot be changed") and Table 5. For HOLD and FAULT_HOLD Table 5 leaves
+    /// it to the manufacturer, and refusing is this device's choice within those cells. It rests on
+    /// Table 6, which does not decide it: D5 (ACTIVE to HOLD) and D9 (into FAULT_HOLD) say "device mode
+    /// is not changeable", while D3 and D11, which enter HOLD too, say nothing, and D12 to D14 enable
+    /// the change again. The control mode is changeable in INIT, DISABLED, FAULT_INIT and
     /// FAULT_DISABLED only (Table 5). The state is the one the device rests in when the write is committed: a control
     /// word committed in the same RPDO is applied one actor job later (see
     /// <see cref="OnCommandWritten"/>), so it does not count for a mode the same frame

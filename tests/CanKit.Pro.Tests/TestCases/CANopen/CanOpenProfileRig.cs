@@ -231,9 +231,12 @@ internal abstract class CanOpenProfileRig : IDisposable
     /// <summary>NMT <paramref name="command"/> (Reset Node or Reset Communication) to the device;
     /// waits for its boot-up and settles its actor, so that the reset's callbacks have run. The
     /// boot-up is the frame <c>00h</c> on <see cref="Heartbeat"/>: a heartbeat of a state shares the
-    /// COB-ID and must not pass for it.</summary>
+    /// COB-ID and must not pass for it. The node's initial boot-up goes out on a continuation of its
+    /// own after the open, so the count is taken only once that one has been seen: a reset sent
+    /// before it would otherwise return on the initial boot-up, before the reset was handled.</summary>
     internal async Task ResetAsync(NmtCommand command)
     {
+        await WaitUntilAsync(() => BootUps() >= 1, "the node's initial boot-up");
         int before = BootUps();
         Transmit(0x000, new[] { (byte)command, DeviceId });
         await WaitUntilAsync(() => BootUps() > before, $"a boot-up after {before}, saw {BootUps()}");

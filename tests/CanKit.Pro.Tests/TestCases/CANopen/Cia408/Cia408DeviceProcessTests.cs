@@ -439,7 +439,8 @@ public class Cia408DeviceProcessTests
         ((Action)(() => rig.Device.SetActualValue(Cia408Objects.VflcActualValue, 1))).Should().Throw<ArgumentException>(
             "flow control is not supported");
         ((Action)(() => rig.Device.SetActualValue(Cia408Objects.SpoolPositionActualValue, 40000)))
-            .Should().Throw<ArgumentOutOfRangeException>("an INTEGER16");
+            .Should().Throw<ArgumentOutOfRangeException>("an INTEGER16")
+            .Which.Message.Should().Contain("-32768 to 32767", "the message names the range the value missed");
     }
 
     [Fact] // Review Focus 5 for the actual values: they come from the device, not from what was stored
