@@ -447,12 +447,16 @@ internal sealed class Cia408Configuration
     /// <summary>The control modes whose capability bit <paramref name="deviceType"/> sets, ascending:
     /// the reverse of <see cref="DeviceType"/>, with the same inferred pairing. Bit 23 names modes 1
     /// and 2 and bit 24 modes 3 and 4, so each gives both: the word cannot tell an open-loop device
-    /// from a closed-loop one. The profile number is not checked.</summary>
+    /// from a closed-loop one. With dtprs 01b the drive bits 16 to 22 are skipped, whatever they
+    /// hold: Table 53, NOTE 1 makes them "do not care" for a device that supports no drive. The
+    /// profile number is not checked.</summary>
     internal static IReadOnlyList<Cia408ControlMode> ControlModesOf(CanOpenDeviceType deviceType)
     {
+        bool noDrive = ResolutionOf(deviceType) == Cia408Resolution.Valve16;
         var modes = new List<Cia408ControlMode>();
         for (var mode = Cia408ControlMode.SpoolPositionOpenLoop; mode <= Cia408ControlMode.PFlowWithPowerLimitation; mode++)
         {
+            if (noDrive && IsDriveMode(mode)) continue;
             if ((deviceType.Value & CapabilityBit(mode)) != 0) modes.Add(mode);
         }
 

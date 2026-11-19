@@ -127,6 +127,8 @@ public class Cia408PeerTests
     [InlineData(0x2200_0198u, new[] { 5 }, 1, false)]
     // bit 23, spool position control, names modes 1 and 2; the word does not tell them apart.
     [InlineData(0x2080_0198u, new[] { 1, 2 }, 1, false)]
+    // dtprs 01b with bit 17 set: Table 53 NOTE 1 makes the drive bits "do not care" for a 16-bit valve.
+    [InlineData(0x2202_0198u, new[] { 5 }, 1, false)]
     // a 32-bit drive in velocity control: dtprs 10b, bit 17 is mode 7.
     [InlineData(0x4002_0198u, new[] { 7 }, 2, true)]
     // dtprs 11b with valve modes only (bit 24: modes 3 and 4): the 16-bit pair.

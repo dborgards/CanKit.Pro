@@ -44,10 +44,10 @@ internal sealed partial class Cia408Device
     /// <c>6040h</c>, <c>6041h</c> and <c>6042h</c> always, and the 32-bit pair <c>6044h</c> and
     /// <c>6045h</c> when the device has 32-bit parameters. The norm calls both pairs Mandatory although
     /// a device uses one resolution (§8.6.2, Table 53, NOTE 2); the reading taken is that the 16-bit
-    /// pair is always there and the 32-bit pair where the file's device type asks for it — dtprs 10b
-    /// or 11b, both of which give 32-bit parameters to some function of the device. A file without a
-    /// device type has no such statement, and the 32-bit pair is then adopted where it is declared and
-    /// required nowhere. Any of the required objects missing fails the open.
+    /// pair is always there and the 32-bit pair where the resolution asks for it — dtprs 10b or 11b,
+    /// both of which give 32-bit parameters to some function of the device — whether the file's device
+    /// type gives the resolution or the objects do (below): the device type the device publishes says
+    /// it, and a tool reads the 32-bit pair for it. Any of the required objects missing fails the open.
     /// </para>
     /// <para>
     /// <b>The device type</b> is the file's: <c>67FFh + n·800h</c> when the file declares it, else
@@ -63,7 +63,8 @@ internal sealed partial class Cia408Device
     /// </para>
     /// <para>
     /// <b>Control modes.</b> With a device type from the file, they are the modes its capability bits
-    /// announce (<see cref="Cia408Configuration.ControlModesOf"/>), where bit 23 (spool position) and
+    /// announce (<see cref="Cia408Configuration.ControlModesOf"/>, which skips the drive bits of a
+    /// 16-bit device type, "do not care" by Table 53 NOTE 1), where bit 23 (spool position) and
     /// bit 24 (pressure) each name an open-loop and a closed-loop mode the word cannot tell apart: the
     /// open-loop mode (1, 3) is taken always, the closed-loop mode (2, 4) when the file declares its
     /// actual value — the object the norm adds for closed loop (§9.8.3, §9.12.3: Conditional on mode 2,
@@ -189,15 +190,18 @@ internal sealed partial class Cia408Device
                 "The device description gives logical device {0} the device type {1}, whose resolution field dtprs is the " +
                 "reserved 00b (CiA 408 §8.6.2, Table 53).", _logicalDevice, described));
             modes = AnnouncedModes(od, Shape(resolution), described);
-            if (resolution != Cia408Resolution.Valve16)
-            {
-                Require(od, Cia408Objects.DeviceControlWord32);
-                Require(od, Cia408Objects.DeviceStatusWord32);
-            }
         }
         else
         {
             (resolution, modes) = DeclaredModes(od);
+        }
+
+        // The device type the device then publishes says this resolution, and a tool reads the 32-bit
+        // pair for it (Cia408Peer), so the pair is required whether the file or the objects gave it.
+        if (resolution != Cia408Resolution.Valve16)
+        {
+            Require(od, Cia408Objects.DeviceControlWord32);
+            Require(od, Cia408Objects.DeviceStatusWord32);
         }
 
         bool has44 = od.ContainsIndex(_controlWord32);

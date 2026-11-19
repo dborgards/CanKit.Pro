@@ -396,5 +396,126 @@ public class Cia408DeviceDescriptionTests
         rig.Od.ReadUnsigned(0x6041, 0x00).Should().Be(0x0008u);
     }
 
+    // ---- fix round 1: resolution, drive bits, derived types, record shapes ---------------------------
+
+    [Fact]
+    public void A_16_Bit_Device_Type_Leaves_Its_Drive_Bits_Undefined()
+    {
+        // dtprs 01b with bit 17 (velocity control) set: Table 53 NOTE 1 makes the drive bits "do not
+        // care" for a 16-bit valve, so the file needs no 32-bit drive objects and opens.
+        using var rig = Open(Fixture.Set("1000", "DefaultValue", "0x22020198"));
+
+        rig.Od.ReadUnsigned(0x1000, 0x00).Should().Be(0x2202_0198u, "the file's word stays as it is");
+        rig.Device.State.Should().Be(Cia408State.Init);
+        FluentActions.Invoking(() => rig.Device.SetActualValue(Cia408Objects.DscActualValue, 1))
+            .Should().Throw<ArgumentException>("speed control is not taken from a 16-bit device type");
+    }
+
+    [Fact]
+    public void Without_A_Device_Type_32_Bit_Valve_Objects_Make_A_32_Bit_Valve()
+    {
+        using var rig = Open(ThirtyTwoBitSpoolValve());
+
+        // Bit 23 (modes 1 and 2) and dtprs 10b (§8.6.2, Table 53).
+        rig.Od.ReadUnsigned(0x1000, 0x00).Should().Be(0x4080_0198u);
+    }
+
+    [Fact]
+    public void Without_A_Device_Type_A_Derived_32_Bit_Resolution_Requires_The_32_Bit_Pair()
+    {
+        // The device would publish dtprs 10b in 1000h, and a tool reads 6044h/6045h for that word.
+        var open = () => Open(ThirtyTwoBitSpoolValve().Remove(0x6044).Remove(0x6045));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6044h") && e.Message.Contains("§9.3.6"));
+    }
+
+    [Fact]
+    public void Without_A_Device_Type_16_Bit_Valve_And_Drive_Objects_Make_Resolution_11b()
+    {
+        using var rig = Open(Fixture.Remove(0x1000)
+            .Add(RecordSections(0x6500, "dsc setpoint", "0x0004", "rw"))
+            .Add(RecordSections(0x6501, "dsc actual value", "0x0004", "ro")));
+
+        // Bits 23, 24, 25 (modes 1 to 5), bit 17 (mode 7), dtprs 11b.
+        rig.Od.ReadUnsigned(0x1000, 0x00).Should().Be(0x6382_0198u);
+    }
+
+    [Fact]
+    public async Task Without_A_Device_Type_Drive_Objects_Alone_Make_A_Drive_That_Powers_On_In_Local_Control()
+    {
+        using var rig = Open(Drive());
+        rig.Settle();
+
+        // dtprs 10b with bit 17 (mode 7).
+        rig.Od.ReadUnsigned(0x1000, 0x00).Should().Be(0x4002_0198u);
+        rig.Od.ReadUnsigned(0x6041, 0x00).Should().Be(0x0018u, "no 604Fh: a drive takes its default 1, local (§9.3.9)");
+        await rig.WriteU16Async(0x6040, 0x00, 0x0001);
+        rig.Settle();
+        rig.Device.State.Should().Be(Cia408State.Init, "the bus control word is ignored under local control");
+    }
+
+    [Fact]
+    public async Task A_Writable_Device_Mode_Of_A_Drive_Takes_Table_79_Up_To_6()
+    {
+        using var rig = Open(Drive());
+
+        await rig.WriteU8Async(0x6042, 0x00, 5);
+        await rig.WriteU8Async(0x6042, 0x00, 6);
+        AbortCode(await rig.DownloadU8Async(0x6042, 0x00, 7)).Should().Be(ValueRangeExceeded, "7 to 127 are reserved (Table 79)");
+    }
+
+    [Fact]
+    public void A_Value_Record_With_A_Sub_Index_Above_03h_Fails_The_Open()
+    {
+        var open = () => Open(Fixture.Set("6300", "SubNumber", "5")
+            .Add("[6300sub4]\nParameterName=Extra\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=0\nPDOMapping=0\n"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6300h") && e.Message.Contains("sub-index 04h"));
+    }
+
+    [Fact]
+    public void A_Value_Record_Without_Sub_Index_00h_Fails_The_Open()
+    {
+        var open = () => Open(Fixture.RemoveSection("6300sub0").Set("6300", "SubNumber", "3"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6300h") && e.Message.Contains("sub-index 00h"));
+    }
+
+    /// <summary>The fixture without a device type, its 16-bit valve records and the PDOs that map them,
+    /// with the 32-bit q setpoint and spool position actual value (§9.8.5, §9.8.6) instead.</summary>
+    private static Eds ThirtyTwoBitSpoolValve()
+        => WithoutValveRecords(Fixture.Remove(0x1000))
+            .Set("6043", "DefaultValue", "2")
+            .Add(RecordSections(0x6308, "q setpoint 32-bit", "0x0004", "rw"))
+            .Add(RecordSections(0x6309, "Spool actual value 32-bit", "0x0004", "ro"));
+
+    /// <summary>The fixture without a device type, its valve records, PDO 2 and <c>604Fh</c>, with
+    /// the speed control setpoint and actual value (§9.37.2, §9.37.3): a drive in control mode 7.</summary>
+    private static Eds Drive()
+        => WithoutValveRecords(Fixture.Remove(0x1000)).Remove(0x604F)
+            .Set("6043", "DefaultValue", "7")
+            .Add(RecordSections(0x6500, "dsc setpoint", "0x0004", "rw"))
+            .Add(RecordSections(0x6501, "dsc actual value", "0x0004", "ro"));
+
+    private static Eds WithoutValveRecords(Eds eds)
+        => eds.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381)
+            .Remove(0x1401).Remove(0x1601).Remove(0x1801).Remove(0x1A01);
+
+    /// <summary>The sections of a value record (§8.7.1): count, value, unit and prefix.</summary>
+    private static string RecordSections(ushort index, string name, string valueType, string access)
+        => string.Format(System.Globalization.CultureInfo.InvariantCulture,
+            "[{0:X4}]\nParameterName={1}\nSubNumber=4\nObjectType=0x9\n\n"
+            + "[{0:X4}sub0]\nParameterName=Highest sub-index supported\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=3\nPDOMapping=0\n\n"
+            + "[{0:X4}sub1]\nParameterName=Value\nObjectType=0x7\nDataType={2}\nAccessType={3}\nDefaultValue=0\nPDOMapping=1\n\n"
+            + "[{0:X4}sub2]\nParameterName=Unit\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=0\nPDOMapping=0\n\n"
+            + "[{0:X4}sub3]\nParameterName=Prefix\nObjectType=0x7\nDataType=0x0002\nAccessType=ro\nDefaultValue=0\nPDOMapping=0\n\n",
+            index, name, valueType, access);
+
     private static uint AbortCode(byte[] response) => CanOpenProfileRig.AbortCode(response);
 }
