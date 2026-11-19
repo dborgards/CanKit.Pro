@@ -540,9 +540,8 @@ public class Cia408PeerTests
         (await controlMode.Should().ThrowExactlyAsync<SdoAbortException>()).Which.AbortCode
             .Should().Be(AttemptWriteReadOnly, "6043h is read-only with one control mode (§9.3.5)");
         (await deviceMode.Should().ThrowExactlyAsync<SdoAbortException>()).Which.AbortCode
-            .Should().Be(ValueRangeExceeded, "the device supports setpoint via bus only");
+            .Should().Be(AttemptWriteReadOnly, "6042h is read-only with one device mode (§9.3.4)");
 
-        await peer.WriteDeviceModeAsync(Cia408DeviceMode.SetpointViaBus).WithTimeoutAsync(HangGuard);
         await peer.WriteLocalAsync(true).WithTimeoutAsync(HangGuard);
         rig.Rig.Od.ReadRaw(0x604F, 0x00).Should().Equal(new byte[] { 0x01 });
         (await peer.ReadLocalAsync().WithTimeoutAsync(HangGuard)).Should().BeTrue();

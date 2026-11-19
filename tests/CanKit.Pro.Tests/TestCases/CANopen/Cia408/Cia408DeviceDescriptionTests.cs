@@ -470,6 +470,16 @@ public class Cia408DeviceDescriptionTests
         await rig.WriteU8Async(0x6042, 0x00, 0xFF);
     }
 
+    [Fact]
+    public async Task A_Read_Only_Device_Mode_In_The_File_Refuses_Every_Write()
+    {
+        // The fixture's 6042h is ro: one device mode (§9.3.4, Table 81, footnote a). The file wins.
+        using var rig = Open(Fixture);
+
+        AbortCode(await rig.DownloadU8Async(0x6042, 0x00, 1)).Should().Be(AttemptWriteReadOnly, "even the value it holds");
+        AbortCode(await rig.DownloadU8Async(0x6042, 0x00, 2)).Should().Be(AttemptWriteReadOnly);
+    }
+
     // ---- logical devices -------------------------------------------------------------------------------
 
     [Fact]

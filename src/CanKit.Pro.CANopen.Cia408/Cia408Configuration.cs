@@ -165,7 +165,8 @@ internal sealed class Cia408Configuration
     /// <summary>The supported device modes (<c>6042h</c>). None of them may appear twice. Modes 3 to
     /// 6 need a drive control mode in <see cref="ControlModes"/> (see <see cref="Cia408DeviceMode"/>). By
     /// default only <see cref="Cia408DeviceMode.SetpointViaBus"/>, the default of <c>6042h</c>
-    /// (§9.3.4).</summary>
+    /// (§9.3.4). With one device mode the device declares <c>6042h</c> read-only (§9.3.4, Table 81,
+    /// footnote a).</summary>
     public IReadOnlyList<Cia408DeviceMode> DeviceModes { get; init; } = new[] { Cia408DeviceMode.SetpointViaBus };
 
     /// <summary>The logical device the objects and PDOs belong to, <c>0</c> to <c>7</c>. Indices are

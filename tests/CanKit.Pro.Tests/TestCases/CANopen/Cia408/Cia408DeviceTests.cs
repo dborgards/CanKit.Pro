@@ -6,6 +6,7 @@ using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Cia408;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen.Cia408;
@@ -47,7 +48,7 @@ public class Cia408DeviceTests
 
         Entry(rig, ControlWord16).Should().Be((OdDataType.Unsigned16, OdAccess.ReadWrite, true));
         Entry(rig, StatusWord16).Should().Be((OdDataType.Unsigned16, OdAccess.ReadOnly, true));
-        Entry(rig, DeviceMode).Should().Be((OdDataType.Integer8, OdAccess.ReadWrite, true));
+        Entry(rig, DeviceMode).Should().Be((OdDataType.Integer8, OdAccess.ReadOnly, true), "§9.3.4: one device mode");
         Entry(rig, ControlMode).Should().Be((OdDataType.Integer8, OdAccess.ReadOnly, true), "§9.3.5: one control mode");
         Entry(rig, ControlWord32).Should().Be((OdDataType.Unsigned32, OdAccess.ReadWrite, true));
         Entry(rig, StatusWord32).Should().Be((OdDataType.Unsigned32, OdAccess.ReadOnly, true));
@@ -62,6 +63,33 @@ public class Cia408DeviceTests
         rig.Od.ReadRaw(Local, 0).Should().Equal(new byte[] { 0x00 }, "§9.3.9: a valve defaults to the control word over the bus");
         rig.Od.ReadUnsigned(StatusWord16, 0).Should().Be(0x0008u, "INIT (R = 1, Table 4), remote control");
         rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_0008u, "the 32-bit status word shows the same state");
+    }
+
+    [Fact]
+    public async Task With_One_Device_Mode_6042h_Refuses_A_Write_And_An_Rpdo_Mapping()
+    {
+        // §9.3.4, Table 81, footnote a: ro if only one device mode is supported.
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+
+        CanOpenProfileRig.AbortCode(await rig.DownloadU8Async(DeviceMode, 0x00, 0x01)).Should().Be(0x0601_0002u);
+        FluentActions.Invoking(() => rig.Node.ConfigureRpdo(1, new PdoMapping().Add(0x6042, 0x00, 8)))
+            .Should().Throw<ArgumentException>("an RPDO cannot write a read-only object (CiA 301 §7.5.2.36)");
+    }
+
+    [Fact]
+    public async Task With_Two_Device_Modes_6042h_Is_Written()
+    {
+        using var rig = new Cia408Rig(new Cia408Configuration
+        {
+            Resolution = Cia408Resolution.Valve16,
+            ControlModes = new[] { Cia408ControlMode.SpoolPositionClosedLoop },
+            DeviceModes = new[] { Cia408DeviceMode.SetpointViaBus, Cia408DeviceMode.SetpointLocal },
+        });
+
+        Entry(rig, DeviceMode).Should().Be((OdDataType.Integer8, OdAccess.ReadWrite, true));
+        rig.Node.ConfigureRpdo(1, new PdoMapping().Add(0x6042, 0x00, 8));
+        await rig.WriteU8Async(DeviceMode, 0x00, 0x02);
+        rig.Od.ReadRaw(DeviceMode, 0).Should().Equal(new byte[] { 0x02 });
     }
 
     [Theory]

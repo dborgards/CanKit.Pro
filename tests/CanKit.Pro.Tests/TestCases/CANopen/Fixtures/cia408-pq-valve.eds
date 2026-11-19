@@ -680,7 +680,7 @@ PDOMapping=1
 ParameterName=Device mode
 ObjectType=0x7
 DataType=0x0002
-AccessType=rw
+AccessType=ro
 DefaultValue=1
 PDOMapping=1
 

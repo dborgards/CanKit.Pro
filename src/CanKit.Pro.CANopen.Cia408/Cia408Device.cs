@@ -147,6 +147,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private readonly HashSet<sbyte> _deviceModes = new();
     private readonly HashSet<sbyte> _controlModes = new();
     private readonly bool _controlModeReadOnly;
+    private readonly bool _deviceModeReadOnly;
 
     // The state machine. Actor loop, and the constructing thread in Attach before the host is
     // published.
@@ -203,6 +204,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         }
 
         _controlModeReadOnly = configuration.ControlModes.Count == 1;
+        _deviceModeReadOnly = configuration.DeviceModes.Count == 1;
 
         _logicalDevice = configuration.LogicalDevice;
         _deviceType = configuration.DeviceType;
@@ -306,9 +308,10 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// <c>604Fh</c> by device kind (§9.3.9, see the remarks on the class); the status words composed
     /// from the state (<see cref="ComposeStatus"/>).
     /// <para>
-    /// <c>6043h</c> is read-only when the configuration has one control mode (§9.3.5, footnote a);
-    /// <c>6042h</c> stays writable with one device mode, which the norm allows ("rw or ro", §9.3.4),
-    /// and takes that mode only.
+    /// <c>6043h</c> is read-only when the configuration has one control mode (§9.3.5, footnote a),
+    /// and <c>6042h</c> when it has one device mode (§9.3.4, Table 81, footnote a: "ro, if only one
+    /// device mode is supported"); a read-only entry is no RPDO destination (CiA 301 v4.2.0
+    /// §7.5.2.36).
     /// </para>
     /// <para>
     /// The records (§8.7.1): for each supported control mode the setpoints and actual values that
@@ -379,7 +382,10 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         RefuseDescribedObjects(od);
         Declare(od, Cia408Objects.DeviceControlWord16, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
         Declare(od, Cia408Objects.DeviceControlWord32, CanOpenValueCodec.Encode(OdDataType.Unsigned32, 0));
-        Declare(od, Cia408Objects.DeviceMode, new[] { unchecked((byte)_deviceModeDefault) });
+        // ro with one device mode (§9.3.4, Table 81, footnote a), as 6043h with one control mode (§9.3.5).
+        od.AddRaw(_deviceMode, 0x00, Cia408Objects.DeviceMode.ValueType, new[] { unchecked((byte)_deviceModeDefault) },
+            _deviceModeReadOnly ? OdAccess.ReadOnly : Cia408Objects.DeviceMode.Access,
+            Cia408Objects.DeviceMode.PdoAccess != Cia408PdoAccess.No);
         od.AddRaw(_controlMode, 0x00, Cia408Objects.DeviceControlMode.ValueType,
             new[] { unchecked((byte)_controlModeDefault) },
             _controlModeReadOnly ? OdAccess.ReadOnly : Cia408Objects.DeviceControlMode.Access,
