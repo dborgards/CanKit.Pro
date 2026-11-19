@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -222,25 +223,69 @@ public class Cia408DeviceDescriptionTests
             .Where(e => e.Message.Contains("no control mode can be told"));
     }
 
-    [Fact]
-    public void A_32_Bit_Device_Type_With_PFlow_Opens()
+    /// <summary>For each control mode at each width a description declares, a file holding only the
+    /// value records clause 9 makes mandatory with that mode at that width opens: a mapping table is no
+    /// requirement on this path, where the device installs no default PDO. Each record is
+    /// "index:type:access" (type 3 = INTEGER16, 4 = INTEGER32); "-" for none.</summary>
+    [Theory]
+    [InlineData(0x2080_0198u, 1, "6300:3:rw")]                              // §9.8.2
+    [InlineData(0x2080_0198u, 2, "6300:3:rw 6301:3:ro")]                    // §9.8.2, §9.8.3
+    [InlineData(0x2100_0198u, 3, "6380:3:rw")]                              // §9.12.2
+    [InlineData(0x2100_0198u, 4, "6380:3:rw 6381:3:ro")]                    // §9.12.2, §9.12.3
+    [InlineData(0x2200_0198u, 5, "640E:3:ro")]                              // §9.16.3; 6300h to 6381h name 1 to 4
+    [InlineData(0x2400_0198u, 13, "6700:3:rw 6701:3:ro")]                   // §9.21.2, §9.21.3
+    [InlineData(0x2800_0198u, 14, "6700:3:rw 6701:3:ro")]                   // likewise; 6380h/6381h name 3 and 4
+    [InlineData(0x3000_0198u, 15, "6700:3:rw 6701:3:ro 6780:4:rw 6781:4:ro")] // and §9.31.2, §9.31.3
+    [InlineData(0x4080_0198u, 1, "6308:4:rw")]                              // §9.8.5
+    [InlineData(0x4080_0198u, 2, "6308:4:rw 6309:4:ro")]                    // §9.8.5, §9.8.6
+    [InlineData(0x4100_0198u, 3, "6388:4:rw 6389:4:ro")]                    // §9.12.5, §9.12.6: 3 or 4
+    [InlineData(0x4100_0198u, 4, "6388:4:rw 6389:4:ro")]
+    [InlineData(0x4001_0198u, 6, "6480:4:rw")]                              // §9.32.2
+    [InlineData(0x4002_0198u, 7, "6500:4:rw")]                              // §9.37.2; 6501h: 16 bit only
+    [InlineData(0x4004_0198u, 8, "6580:4:rw")]                              // §9.42.2; 6581h: 16 bit only
+    [InlineData(0x4008_0198u, 9, "6600:4:rw")]                              // §9.47.2; 6601h: 16 bit only
+    [InlineData(0x4010_0198u, 10, "-")]                                     // 6600h names mode 9 only
+    [InlineData(0x4020_0198u, 11, "-")]
+    [InlineData(0x4040_0198u, 12, "-")]
+    [InlineData(0x4400_0198u, 13, "6708:4:rw 6709:4:ro")]                   // §9.21.5, §9.21.6
+    [InlineData(0x4800_0198u, 14, "6708:4:rw 6709:4:ro")]                   // likewise; no 6380h, 6381h, 6701h
+    [InlineData(0x5000_0198u, 15, "6708:4:rw 6709:4:ro 6780:4:rw 6781:4:ro")]
+    public void A_File_With_Only_The_Records_Clause_9_Makes_Mandatory_Opens(uint deviceType, int mode, string records)
     {
-        // dtprs 10b with bit 27, pFlow: 6708h and 6709h (§9.21.5, §9.21.6) and what Table 31 maps
-        // behind 6045h, 6701h and 6381h, with the pressure setpoint 6380h.
-        static string Record(ushort index, string type, string access)
-            => string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "[{0:X4}]\nParameterName=R{0:X4}\nSubNumber=4\nObjectType=0x9\n\n"
-                + "[{0:X4}sub0]\nParameterName=Highest sub-index supported\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=3\nPDOMapping=0\n\n"
-                + "[{0:X4}sub1]\nParameterName=Value\nObjectType=0x7\nDataType={1}\nAccessType={2}\nDefaultValue=0\nPDOMapping=1\n\n"
-                + "[{0:X4}sub2]\nParameterName=Unit\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=169\nPDOMapping=0\n\n"
-                + "[{0:X4}sub3]\nParameterName=Prefix\nObjectType=0x7\nDataType=0x0002\nAccessType=ro\nDefaultValue=-3\nPDOMapping=0\n\n",
-                index, type, access);
+        var eds = Fixture.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381).Remove(0x640E)
+            .Set("1000", "DefaultValue", string.Format(CultureInfo.InvariantCulture, "0x{0:X8}", deviceType))
+            .Set("6043", "DefaultValue", mode.ToString(CultureInfo.InvariantCulture));
+        var declared = records == "-" ? Array.Empty<string>() : records.Split(' ');
+        foreach (var record in declared)
+        {
+            var parts = record.Split(':');
+            eds = eds.Add(RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2]));
+        }
 
-        using var rig = Open(Fixture.Set("1000", "DefaultValue", "0x48000198").Set("6043", "DefaultValue", "14")
-            .Add(Record(0x6708, "0x0004", "rw") + Record(0x6709, "0x0004", "ro") + Record(0x6701, "0x0003", "ro")));
+        using var rig = Open(eds);
 
         rig.Device.State.Should().Be(Cia408State.Init);
-        rig.Od.ReadUnsigned(0x1000, 0).Should().Be(0x4800_0198u);
+        rig.Od.ReadRaw(0x6043, 0x00).Should().Equal(new[] { (byte)mode });
+        foreach (ushort index in new ushort[] { 0x6300, 0x6301, 0x6380, 0x6381, 0x640E })
+        {
+            if (records.IndexOf(index.ToString("X4", CultureInfo.InvariantCulture), StringComparison.Ordinal) >= 0) continue;
+            rig.Od.ContainsIndex(index).Should().BeFalse("the device adds no record the file leaves out");
+        }
+    }
+
+    [Fact]
+    public void A_Record_Clause_9_Does_Not_Make_Mandatory_Is_The_Devices_Where_Declared_Only()
+    {
+        // pQ (5) in 16 bit: 6381h is mandatory with mode 4 only (§9.12.3). Left out, the file still
+        // opens, and the device has no such actual value; 6301h, declared, is the device's.
+        using var rig = Open(Fixture.Remove(0x6381));
+        rig.Settle();
+
+        FluentActions.Invoking(() => rig.Device.SetActualValue(Cia408Objects.VprcActualValue, 1))
+            .Should().Throw<ArgumentException>("the file declares no 6381h");
+        rig.Device.SetActualValue(Cia408Objects.SpoolPositionActualValue, 7);
+        rig.Settle();
+        rig.Od.ReadSigned(0x6301, 0x01).Should().Be(7);
     }
 
     [Fact]
@@ -340,12 +385,24 @@ public class Cia408DeviceDescriptionTests
     [Fact]
     public void A_Control_Mode_Announced_Without_Its_Objects_Fails_The_Open()
     {
-        // pQ (bit 25) needs the pressure setpoint 6380h with the flow setpoint (Table 32, mapping 4).
-        var open = () => Open(Fixture.Remove(0x6380));
+        // pQ (bit 25) in 16 bit needs the hydrostatic actual power 640Eh (§9.16.3).
+        var open = () => Open(Fixture.Remove(0x640E));
 
         open.Should().Throw<ArgumentException>()
             .Where(e => e.ParamName == "options")
-            .Where(e => e.Message.Contains("6380h") && e.Message.Contains("control mode 5"));
+            .Where(e => e.Message.Contains("640Eh") && e.Message.Contains("control mode 5") && e.Message.Contains("§9.16.3"));
+    }
+
+    [Fact]
+    public void A_32_Bit_PFlow_File_Without_Its_32_Bit_Flow_Actual_Value_Fails_The_Open()
+    {
+        var open = () => Open(Fixture.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381).Remove(0x640E)
+            .Set("1000", "DefaultValue", "0x48000198").Set("6043", "DefaultValue", "14")
+            .Add(RecordSections(0x6708, "vflc setpoint 32-bit", "0x0004", "rw")));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("6709h") && e.Message.Contains("control mode 14") && e.Message.Contains("§9.21.6"));
     }
 
     [Fact]
@@ -405,7 +462,7 @@ public class Cia408DeviceDescriptionTests
     [Fact]
     public async Task A_Writable_Device_Mode_Takes_What_Table_79_Gives_A_Valve_And_The_Files_Own_Value()
     {
-        using var rig = Open(Fixture.Set("6042", "DefaultValue", "-1"));
+        using var rig = Open(Fixture.Set("6042", "DefaultValue", "-1").Set("6042", "AccessType", "rw"));
 
         rig.Od.ReadRaw(0x6042, 0x00).Should().Equal(new byte[] { 0xFF }, "the file's value, a manufacturer-specific mode");
         await rig.WriteU8Async(0x6042, 0x00, 2);
@@ -512,7 +569,7 @@ public class Cia408DeviceDescriptionTests
     [Fact]
     public async Task A_Writable_Device_Mode_Of_A_Drive_Takes_Table_79_Up_To_6()
     {
-        using var rig = Open(Drive());
+        using var rig = Open(Drive().Set("6042", "AccessType", "rw"));
 
         await rig.WriteU8Async(0x6042, 0x00, 5);
         await rig.WriteU8Async(0x6042, 0x00, 6);

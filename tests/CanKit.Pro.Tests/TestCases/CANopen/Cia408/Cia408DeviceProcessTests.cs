@@ -97,20 +97,20 @@ public class Cia408DeviceProcessTests
     [InlineData(4, false, "6380", "6381")]
     [InlineData(4, true, "6388", "6389")]
     [InlineData(5, false, "6300 6380", "6301 6381 640E")] // §9.16.3: 640Eh mandatory for 16 bit and mode 5
-    [InlineData(5, true, "refused", "refused")]         // no 32-bit object for pQ
-    [InlineData(6, false, "refused", "refused")]        // drives have no 16-bit width
+    [InlineData(5, true, "refused", "16 bit only")]     // no 32-bit object for pQ
+    [InlineData(6, false, "refused", "drive control mode")] // drives have no 16-bit width
     [InlineData(6, true, "6480", "-")]
-    [InlineData(7, false, "refused", "refused")]
+    [InlineData(7, false, "refused", "drive control mode")]
     [InlineData(7, true, "6500", "6501")]
-    [InlineData(8, false, "refused", "refused")]
+    [InlineData(8, false, "refused", "drive control mode")]
     [InlineData(8, true, "6580", "6581")]
-    [InlineData(9, false, "refused", "refused")]
+    [InlineData(9, false, "refused", "drive control mode")]
     [InlineData(9, true, "6600", "6601")]
-    [InlineData(10, false, "refused", "refused")]
+    [InlineData(10, false, "refused", "drive control mode")]
     [InlineData(10, true, "6600", "6601")]
-    [InlineData(11, false, "refused", "refused")]
+    [InlineData(11, false, "refused", "drive control mode")]
     [InlineData(11, true, "-", "-")]                    // no object of §9 is mandatory with mode 11
-    [InlineData(12, false, "refused", "refused")]
+    [InlineData(12, false, "refused", "drive control mode")]
     [InlineData(12, true, "-", "-")]                    // nor with mode 12
     [InlineData(13, false, "6700", "6701")]
     [InlineData(13, true, "6708", "6709")]
@@ -127,7 +127,11 @@ public class Cia408DeviceProcessTests
         };
         if (setpoints == "refused")
         {
-            ((Action)(() => configuration.Validate())).Should().Throw<ArgumentException>();
+            // The refusal names the mode, the resolution and the reason (in the actuals column).
+            var refusal = ((Action)(() => configuration.Validate())).Should().ThrowExactly<ArgumentException>().Which;
+            refusal.ParamName.Should().Be("ControlModes");
+            refusal.Message.Should().Contain(((Cia408ControlMode)mode).ToString())
+                .And.Contain(configuration.Resolution.ToString()).And.Contain(actuals);
             return;
         }
 

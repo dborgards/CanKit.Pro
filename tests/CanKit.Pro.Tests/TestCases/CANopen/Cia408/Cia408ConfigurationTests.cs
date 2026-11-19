@@ -157,7 +157,8 @@ public class Cia408ConfigurationTests
     [InlineData(14, "Valve16Drive32", ControlWord16, StatusWord16, new uint[] { ControlWord16, 0x67000110, 0x63800110 }, new uint[] { StatusWord16, 0x67010110, 0x63810110 }, 4, 2)]
     [InlineData(15, "Valve16", ControlWord16, StatusWord16, null, null, 2, 1)]
     [InlineData(15, "Valve16Drive32", ControlWord16, StatusWord16, null, null, 2, 1)]
-    // valve modes, 32-bit; mappings 4 (pQ), TPDO 9 and RPDO 10 (pFlow) have no 32-bit row
+    // valve modes, 32-bit; mapping 4 (pQ) and RPDO mapping 10 (pFlow) have no 32-bit row; TPDO mapping 9
+    // (pFlow) takes the 32-bit status word of Table 31 (the row for 14 below)
     [InlineData(1, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, null, 3, 2)]
     [InlineData(2, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63080120 }, new uint[] { StatusWord32, 0x63090120 }, 4, 2)]
     [InlineData(3, "Valve32Drive32", ControlWord32, StatusWord32, new uint[] { ControlWord32, 0x63880120 }, null, 3, 2)]

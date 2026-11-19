@@ -70,9 +70,12 @@ internal sealed partial class Cia408Device
     /// bit 24 (pressure) each name an open-loop and a closed-loop mode the word cannot tell apart: the
     /// open-loop mode (1, 3) is taken always, the closed-loop mode (2, 4) when the file declares its
     /// actual value — the object the norm adds for closed loop (§9.8.3, §9.12.3: Conditional on mode 2,
-    /// mode 4). Every mode taken must have the setpoints and actual values of its default PDO mapping
-    /// declared (<see cref="Cia408Configuration.SetpointsOf"/>, <see cref="Cia408Configuration.ActualValuesOf"/>),
-    /// Conditional objects the norm makes mandatory with the mode; one missing fails the open. Without a
+    /// mode 4). Every mode taken must have the value records declared that the object definitions of §9
+    /// make mandatory with it at its width (<see cref="Cia408Configuration.MandatoryRecordsOf"/>); one
+    /// missing fails the open. A mapping table is no requirement here, since the device installs no
+    /// default PDO: the mode's other records (<see cref="Cia408Configuration.SetpointsOf"/>,
+    /// <see cref="Cia408Configuration.ActualValuesOf"/>) are the device's where the file declares them,
+    /// and absent otherwise. Without a
     /// device type, the modes are those whose objects the file declares, at least one of them, in the
     /// width the resolution gives them: a mode without such objects (11, 12, 15) cannot be found that
     /// way, and every mode whose objects are there is taken (a file with <c>6300h</c> and <c>6301h</c>
@@ -251,8 +254,9 @@ internal sealed partial class Cia408Device
         foreach (var mode in modes)
         {
             _controlModes.Add((sbyte)mode);
-            foreach (var setpoint in shape.SetpointsOf(mode)) AddRecord(_setpoints, setpoint);
-            foreach (var actual in shape.ActualValuesOf(mode)) AddRecord(_actuals, actual);
+            // The mandatory records are there (AnnouncedModes); the others of the mode, where declared.
+            foreach (var setpoint in shape.SetpointsOf(mode).Where(r => od.ContainsIndex(Shift(r)))) AddRecord(_setpoints, setpoint);
+            foreach (var actual in shape.ActualValuesOf(mode).Where(r => od.ContainsIndex(Shift(r)))) AddRecord(_actuals, actual);
         }
 
         var deviceMode = unchecked((sbyte)od.ReadRaw(_deviceMode, 0x00)[0]);
@@ -289,19 +293,21 @@ internal sealed partial class Cia408Device
     }
 
     /// <summary>The control modes the file's device type announces, bits 23 and 24 split by the
-    /// closed-loop actual value, each with its objects required (see <see cref="FromDescription"/>).</summary>
+    /// closed-loop actual value, each with the records §9 makes mandatory with it at its width required
+    /// (<see cref="Cia408Configuration.MandatoryRecordsOf"/>; see <see cref="FromDescription"/>). A
+    /// mapping table is no requirement here: a device from a description installs no default PDO.</summary>
     private List<Cia408ControlMode> AnnouncedModes(ObjectDictionary od, Cia408Configuration shape, CanOpenDeviceType deviceType)
     {
         var modes = new List<Cia408ControlMode>();
         foreach (var mode in Cia408Configuration.ControlModesOf(deviceType))
         {
             if (mode is Cia408ControlMode.SpoolPositionClosedLoop or Cia408ControlMode.PressureClosedLoop
-                && !shape.ActualValuesOf(mode).All(actual => od.ContainsIndex(Shift(actual))))
+                && !shape.MandatoryRecordsOf(mode).All(record => od.ContainsIndex(Shift(record))))
             {
                 continue;
             }
 
-            foreach (var record in shape.SetpointsOf(mode).Concat(shape.ActualValuesOf(mode)))
+            foreach (var record in shape.MandatoryRecordsOf(mode))
             {
                 if (od.ContainsIndex(Shift(record))) continue;
                 throw OptionsError(string.Format(CultureInfo.InvariantCulture,

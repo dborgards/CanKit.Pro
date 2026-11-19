@@ -115,7 +115,8 @@ internal static partial class Cia408Objects
     /// bus is not supported). The entry says "constant" although the object is writable.</summary>
     public static Cia408ObjectDefinition DeviceLocal { get; }
 
-    // ---- setpoints and actual values of the default PDOs (§8.4 Table 13, §8.5 Table 32) -----------
+    // ---- setpoint and actual value records: those the default PDOs map (§8.4 Tables 13 and 31, §8.5
+    // Table 32) and those §9 makes mandatory with a control mode ------------------------------------
 
     /// <summary>Object <c>6300h</c>: q setpoint (§9.8.2), RPDO mappings 2 and 4.</summary>
     public static Cia408ObjectDefinition QSetpoint { get; }

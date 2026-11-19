@@ -447,16 +447,21 @@ internal sealed class Cia408Configuration
     /// </summary>
     /// <remarks>
     /// <para>Where §9 adds to the mapping: pFlow (14) in 32 bit takes the 32-bit flow setpoint
-    /// <c>6708h</c>, "Mandatory, if 32-bit parameter and control mode is 13, 14, 15" (§9.21.5), and the
-    /// pressure setpoint <c>6380h</c>. No 32-bit pressure object is conditional on mode 14 (<c>6388h</c>
-    /// names 3 and 4, §9.12.5), and Table 32 has no 32-bit row for pFlow; the reading takes the 16-bit
-    /// pressure object that the 16-bit RPDO mapping 10 names and that Table 31 keeps "in case of 16-bit or
-    /// 32-bit value" on the TPDO side. pFlow with power limitation (15) has no mapping in either width
-    /// and takes what §9 makes mandatory with it: the flow setpoint of the width (<c>6700h</c> §9.21.2,
-    /// <c>6708h</c> §9.21.5) and the power limit <c>6780h</c> (§9.31.2).</para>
-    /// <para>The drive modes take the mapping's setpoint (Table 32), whose object is conditional on the
-    /// mode at any width (<c>6480h</c>, <c>6500h</c>, <c>6580h</c>, <c>6600h</c>); 11 and 12 have neither
-    /// a mapping nor an object conditional on them, and take none.</para>
+    /// <c>6708h</c>, "Mandatory, if 32-bit parameter and control mode is 13, 14, 15" (§9.21.5). pFlow with
+    /// power limitation (15) has no mapping in either width and takes what §9 makes mandatory with it: the
+    /// flow setpoint of the width (<c>6700h</c> §9.21.2, <c>6708h</c> §9.21.5) and the power limit
+    /// <c>6780h</c> (§9.31.2).</para>
+    /// <para>A reading, with no basis in the norm: pFlow (14) in 32 bit also takes the pressure setpoint
+    /// <c>6380h</c>. Neither §9 nor a mapping gives it — <c>6380h</c> is "Mandatory, if 16-bit parameter and
+    /// control mode is 3 or 4" (§9.12.2), <c>6388h</c> names 3 and 4 as well (§9.12.5), and Table 32 has no
+    /// 32-bit row for pFlow — but a configured pFlow device needs a pressure setpoint, and the norm names
+    /// none at 32 bit. The 16-bit one is taken because the 16-bit RPDO mapping 10 names it. A device built
+    /// from a description is not held to it (<see cref="MandatoryRecordsOf"/>).</para>
+    /// <para>The drive modes take the mapping's setpoint (Table 32). For 6, 7, 8 and 9 that object is also
+    /// mandatory with the mode at any width (<c>6480h</c> §9.32.2, <c>6500h</c> §9.37.2, <c>6580h</c>
+    /// §9.42.2, <c>6600h</c> §9.47.2). Mode 10 takes <c>6600h</c> from Table 32 mapping 8 only: §9.47.2
+    /// names mode 9. 11 and 12 have neither a mapping nor an object conditional on them, and take
+    /// none.</para>
     /// </remarks>
     private static Cia408ObjectDefinition[] SetpointRecords(Cia408ControlMode mode, bool wide) => (mode, wide) switch
     {
@@ -476,12 +481,19 @@ internal sealed class Cia408Configuration
     /// only, §9.12.3). pQ (5) in 16 bit takes the hydrostatic actual power <c>640Eh</c> (§9.16.3,
     /// "16-bit parameters and control mode 5") besides the mapping's. pFlow (14) in 32 bit takes the
     /// 32-bit flow actual value <c>6709h</c> (§9.21.6) and what Table 31 maps behind <c>6045h</c>, the
-    /// 16-bit <c>6701h</c> and <c>6381h</c>. Mode 15 takes the flow actual value of the width
+    /// 16-bit <c>6701h</c> and <c>6381h</c>; the basis for those two is Table 31 alone, the TPDO 2 a
+    /// configured device installs (<see cref="DefaultPdos"/>), since §9.12.3 and §9.21.3 make them
+    /// mandatory with 16-bit parameters only. Mode 15 takes the flow actual value of the width
     /// (<c>6701h</c> §9.21.3, <c>6709h</c> §9.21.6) and the power actual value <c>6781h</c>
     /// (§9.31.3).</para>
-    /// <para>Not declared: the VAR parameters §9 also makes mandatory with a mode — <c>640Dh</c>, the pQ
-    /// power limit factor (§9.16.2), and the drive controllers' gains (<c>6503h</c>, <c>6583h</c> and on)
-    /// — which belong to the controllers this slice does not build.</para>
+    /// <para>The drive modes take the mapping's actual value (Table 13): <c>6501h</c>, <c>6581h</c> and
+    /// <c>6601h</c> are "Mandatory, if 16-bit parameter and control mode is" 7, 8 and 9 (§9.37.3, §9.42.3,
+    /// §9.47.3), which no drive meets, so the mapping is their only basis.</para>
+    /// <para>Not declared: <c>640Dh</c>, the pQ power limit factor, a VAR mandatory with 16-bit parameters
+    /// and mode 5 (§9.16.2), which belongs to the pQ controller this slice does not build. The drive
+    /// controllers' parameters (<c>6503h</c>, <c>6504h</c>, <c>6583h</c> to <c>6587h</c>, <c>6603h</c> to
+    /// <c>6605h</c>) are not declared either; §9 makes them mandatory with 16-bit parameters and mode 7, 8
+    /// or 9, which no drive meets.</para>
     /// </remarks>
     private static Cia408ObjectDefinition[] ActualValueRecords(Cia408ControlMode mode, bool wide) => (mode, wide) switch
     {
@@ -493,6 +505,45 @@ internal sealed class Cia408Configuration
         (Cia408ControlMode.PFlowWithPowerLimitation, false) => [Cia408Objects.VflcActualValue, Cia408Objects.VpflcplPowerActualValue],
         (Cia408ControlMode.PFlowWithPowerLimitation, true) => [Cia408Objects.VflcActualValue32, Cia408Objects.VpflcplPowerActualValue],
         _ => TpdoValues(mode, wide) ?? Array.Empty<Cia408ObjectDefinition>(),
+    };
+
+    /// <summary>The value records the object definitions of §9 make mandatory with <paramref name="mode"/>
+    /// in the width it runs in on this resolution: what a device description must declare for the mode
+    /// (<see cref="Cia408Device.FromDescription"/>). Each is among <see cref="SetpointsOf"/> and
+    /// <see cref="ActualValuesOf"/>; the mapping tables add to them for a configured device, which installs
+    /// default PDOs, and a description device takes those others where the file declares them.</summary>
+    internal IReadOnlyList<Cia408ObjectDefinition> MandatoryRecordsOf(Cia408ControlMode mode) => MandatoryRecords(mode, IsWide(mode));
+
+    /// <summary>The records of <see cref="MandatoryRecordsOf"/>, by mode and width: each one's condition
+    /// names the mode and the width, or the mode at any width.</summary>
+    /// <remarks>None for mode 10 (<c>6600h</c> names 9 only, §9.47.2), 11 and 12. None of the drive
+    /// actual values: <c>6501h</c>, <c>6581h</c> and <c>6601h</c> name 16-bit parameters, and a drive runs
+    /// in 32 bit. pQ (5) in 16 bit has <c>640Eh</c> only: the spool and pressure records name modes 1 to
+    /// 4. pFlow (14) has the flow records of its width only: the pressure records name 3 and 4.</remarks>
+    private static Cia408ObjectDefinition[] MandatoryRecords(Cia408ControlMode mode, bool wide) => (mode, wide) switch
+    {
+        (Cia408ControlMode.SpoolPositionOpenLoop, false) => [Cia408Objects.QSetpoint], // §9.8.2
+        (Cia408ControlMode.SpoolPositionOpenLoop, true) => [Cia408Objects.QSetpoint32], // §9.8.5
+        (Cia408ControlMode.SpoolPositionClosedLoop, false) => [Cia408Objects.QSetpoint, Cia408Objects.SpoolPositionActualValue], // §9.8.3
+        (Cia408ControlMode.SpoolPositionClosedLoop, true) => [Cia408Objects.QSetpoint32, Cia408Objects.SpoolPositionActualValue32], // §9.8.6
+        (Cia408ControlMode.PressureOpenLoop, false) => [Cia408Objects.VprcSetpoint], // §9.12.2
+        (Cia408ControlMode.PressureOpenLoop or Cia408ControlMode.PressureClosedLoop, true)
+            => [Cia408Objects.VprcSetpoint32, Cia408Objects.VprcActualValue32], // §9.12.5, §9.12.6
+        (Cia408ControlMode.PressureClosedLoop, false) => [Cia408Objects.VprcSetpoint, Cia408Objects.VprcActualValue], // §9.12.3
+        (Cia408ControlMode.PQControl, false) => [Cia408Objects.VpqcHydrostaticActualPower], // §9.16.3
+        (Cia408ControlMode.FlowControl or Cia408ControlMode.PFlowControl, false)
+            => [Cia408Objects.VflcSetpoint, Cia408Objects.VflcActualValue], // §9.21.2, §9.21.3
+        (Cia408ControlMode.FlowControl or Cia408ControlMode.PFlowControl, true)
+            => [Cia408Objects.VflcSetpoint32, Cia408Objects.VflcActualValue32], // §9.21.5, §9.21.6
+        (Cia408ControlMode.PFlowWithPowerLimitation, false) => [Cia408Objects.VflcSetpoint, Cia408Objects.VflcActualValue,
+            Cia408Objects.VpflcplPowerLimit, Cia408Objects.VpflcplPowerActualValue], // and §9.31.2, §9.31.3
+        (Cia408ControlMode.PFlowWithPowerLimitation, true) => [Cia408Objects.VflcSetpoint32, Cia408Objects.VflcActualValue32,
+            Cia408Objects.VpflcplPowerLimit, Cia408Objects.VpflcplPowerActualValue],
+        (Cia408ControlMode.OpenLoopMovement, _) => [Cia408Objects.DcolSetpoint], // §9.32.2
+        (Cia408ControlMode.VelocityControlAxis, _) => [Cia408Objects.DscSetpoint], // §9.37.2
+        (Cia408ControlMode.PressureControlAxis, _) => [Cia408Objects.DfpcSetpoint], // §9.42.2
+        (Cia408ControlMode.PositionControlAxis, _) => [Cia408Objects.DpcSetpoint], // §9.47.2
+        _ => Array.Empty<Cia408ObjectDefinition>(),
     };
 
     /// <summary>Whether <paramref name="mode"/> runs in 32 bit on this configuration's resolution
@@ -527,9 +578,9 @@ internal sealed class Cia408Configuration
     /// is conditional on modes 1 and 2 only. One sentence of an object description does not make a 32-bit
     /// pQ device: no 32-bit pressure setpoint or actual value names mode 5, no mapping exists, and the
     /// power objects are 16-bit. So pQ on a 32-bit valve is refused rather than given a mix.</para>
-    /// <para>That an object's condition does not name a mode is not taken as proof by itself: <c>6380h</c>
-    /// is conditional on modes 3 and 4 and <c>6381h</c> on 4, yet Tables 13 and 32 map both for modes 5
-    /// and 14. pFlow (14) is not refused: §9.21.5 and §9.21.6 make <c>6708h</c> and <c>6709h</c> mandatory
+    /// <para>That an object's condition does not name a mode is not taken as proof of refusal by itself:
+    /// <c>6380h</c> is conditional on modes 3 and 4 and <c>6381h</c> on 4, yet Tables 13 and 32 map both for
+    /// modes 5 and 14. pFlow (14) is not refused: §9.21.5 and §9.21.6 make <c>6708h</c> and <c>6709h</c> mandatory
     /// with 32-bit parameters and mode 14 (see <see cref="SetpointRecords"/>). On resolution 11b a valve
     /// mode runs in 16 bit, so pQ is fine there.</para>
     /// </remarks>
