@@ -6,11 +6,16 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// What a step of the process model (<see cref="ICia408Process.Step"/>) sees and may change: the
 /// state of the device state machine, the device and control modes, the time since the previous
 /// step, the setpoints, and the actual values and status bits it writes. Valid during the step
-/// only; afterwards every member throws <see cref="InvalidOperationException"/>.
+/// only, and on the thread of the step, the node's actor loop; afterwards, and from another
+/// thread, every member throws <see cref="InvalidOperationException"/>. The application seam has no
+/// query for the actor loop, so the context checks the thread its step was given on: a model that
+/// hands the context to a worker thread during the step is refused there, rather than writing the
+/// dictionary and the device's state off the loop.
 /// </summary>
 internal sealed class Cia408ProcessContext
 {
     private readonly Cia408Device _device;
+    private readonly int _thread = Environment.CurrentManagedThreadId;
     private bool _valid = true;
 
     internal Cia408ProcessContext(Cia408Device device, Cia408State state, Cia408DeviceMode deviceMode,
@@ -81,6 +86,8 @@ internal sealed class Cia408ProcessContext
     private T Valid<T>(T value)
     {
         if (!_valid) throw new InvalidOperationException("The process context is valid during its step only.");
+        if (Environment.CurrentManagedThreadId != _thread)
+            throw new InvalidOperationException("The process context is used on the thread of its step only, the node's actor loop.");
         return value;
     }
 }

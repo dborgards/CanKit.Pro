@@ -23,9 +23,11 @@ internal sealed partial class Cia408Device
     // The status bits the process model set (7 to 23). Actor loop.
     private uint _processStatusBits;
 
-    // The time of the last step, and when the next periodic one is due, on the node's clock. Actor loop.
+    // The time of the last step, and when the next periodic one is due, on the node's clock; whether
+    // the model has been started (StartProcess). Actor loop.
     private TimeSpan _lastStep;
     private TimeSpan _nextDue;
+    private bool _processStarted;
 
     // True while the model steps; the actual values it set, to transmit once it has returned. Actor
     // loop.
@@ -55,7 +57,7 @@ internal sealed partial class Cia408Device
     internal long ReadSetpoint(Cia408ObjectDefinition definition)
     {
         var index = Record(_setpoints, definition, "setpoint");
-        return DecodeValue(definition.ValueType, AttachedHost().ObjectDictionary.ReadRaw(index, 0x01));
+        return CanOpenValueCodec.Decode(definition.ValueType, AttachedHost().ObjectDictionary.ReadRaw(index, 0x01));
     }
 
     /// <summary>For <see cref="Cia408ProcessContext.SetActual"/>: writes the actual value now and
@@ -64,14 +66,14 @@ internal sealed partial class Cia408Device
     {
         var index = Record(_actuals, definition, "actual value");
         CheckRange(definition, value);
-        WriteOwn(AttachedHost(), index, EncodeValue(definition.ValueType, value), 0x01);
+        WriteOwn(AttachedHost(), index, CanOpenValueCodec.Encode(definition.ValueType, value), 0x01);
         _actualValues[index] = value;
         _stepWrites.Add(new CanOpenObjectAddress(index, 0x01));
     }
 
     private void WriteActual(ICanOpenApplicationHost host, ushort index, Cia408ObjectDefinition definition, long value)
     {
-        WriteOwn(host, index, EncodeValue(definition.ValueType, value), 0x01);
+        WriteOwn(host, index, CanOpenValueCodec.Encode(definition.ValueType, value), 0x01);
         _actualValues[index] = value;
         Publish(host, errorCodeChanged: false, new[] { new CanOpenObjectAddress(index, 0x01) });
     }
@@ -108,8 +110,13 @@ internal sealed partial class Cia408Device
     /// <para>
     /// The model does not run in NOT_READY. The device leaves NOT_READY in <see cref="Attach"/>,
     /// before the model is started, and Reset Node passes through it within one call
-    /// (<see cref="Cia408StateMachine.Restart"/>), so the rule holds by construction; the step checks
-    /// it all the same.
+    /// (<see cref="Cia408StateMachine.Restart"/>), so the rule holds by construction and no step
+    /// checks it.
+    /// </para>
+    /// <para>
+    /// Nothing steps the model before this has run. A fault the application reported from another
+    /// thread can run ahead of the posted start and raise its change first; its step is left out, and
+    /// the start then steps once, in the state the device rests in, with no time elapsed.
     /// </para>
     /// <para>
     /// <b>A throwing model.</b> What the model throws is reported on
@@ -123,6 +130,7 @@ internal sealed partial class Cia408Device
     private void StartProcess(ICanOpenApplicationHost host)
     {
         if (_process is null) return;
+        _processStarted = true;
         _lastStep = host.Now;
         _nextDue = _lastStep + _interval;
         host.Arm(_interval, () => OnProcessDue(host));
@@ -143,13 +151,13 @@ internal sealed partial class Cia408Device
         ThrowIfAny(failures);
     }
 
-    /// <summary>One step of the model, if there is one, the machine is not in NOT_READY and no step is
-    /// running already (a step whose model reports a fault does not step again); then the status words
+    /// <summary>One step of the model, if there is one, it has been started and no step is running
+    /// already (a step whose model reports a fault does not step again); then the status words
     /// and the actual values it set are transmitted in one request. What the model throws is added to
     /// <paramref name="failures"/>. Actor loop.</summary>
     private void StepProcess(ICanOpenApplicationHost host, ref List<Exception>? failures)
     {
-        if (_process is null || _stepping || _machine.State == Cia408State.NotReady) return;
+        if (_process is null || !_processStarted || _stepping) return;
 
         var od = host.ObjectDictionary;
         var now = host.Now;
@@ -188,7 +196,7 @@ internal sealed partial class Cia408Device
         foreach (var pair in _actuals)
         {
             _actualValues.TryGetValue(pair.Key, out var value);
-            WriteOwn(host, pair.Key, EncodeValue(pair.Value.ValueType, value), 0x01);
+            WriteOwn(host, pair.Key, CanOpenValueCodec.Encode(pair.Value.ValueType, value), 0x01);
         }
     }
 
@@ -197,7 +205,7 @@ internal sealed partial class Cia408Device
     {
         var index = Shift(definition);
         od.AddU8(index, 0x00, 0x03, OdAccess.ReadOnly, pdoMappable: false);
-        od.AddRaw(index, 0x01, definition.ValueType, EncodeValue(definition.ValueType, definition.DefaultValue ?? 0),
+        od.AddRaw(index, 0x01, definition.ValueType, CanOpenValueCodec.Encode(definition.ValueType, definition.DefaultValue ?? 0),
             definition.Access, definition.PdoAccess != Cia408PdoAccess.No);
         od.AddU8(index, 0x02, definition.DefaultUnitKind == Cia408DefaultKind.Value ? definition.DefaultUnit ?? 0 : (byte)0,
             OdAccess.ReadOnly, pdoMappable: false);
@@ -225,40 +233,11 @@ internal sealed partial class Cia408Device
         return index;
     }
 
+    /// <summary>Refuses a value outside the value range of the record's type
+    /// (<see cref="CanOpenValueCodec.IsInRange"/>).</summary>
     private static void CheckRange(Cia408ObjectDefinition definition, long value)
     {
-        var (min, max) = definition.ValueType switch
-        {
-            OdDataType.Integer8 => ((long)sbyte.MinValue, (long)sbyte.MaxValue),
-            OdDataType.Integer16 => (short.MinValue, short.MaxValue),
-            OdDataType.Integer32 => (int.MinValue, int.MaxValue),
-            OdDataType.Unsigned8 => (0L, byte.MaxValue),
-            OdDataType.Unsigned16 => (0L, ushort.MaxValue),
-            OdDataType.Unsigned32 => (0L, uint.MaxValue),
-            _ => throw new ArgumentException($"{definition} has the value type {definition.ValueType}, which the device does not set.", nameof(definition)),
-        };
-        if (value < min || value > max)
-            throw new ArgumentOutOfRangeException(nameof(value), value, $"{definition} is {definition.ValueType}: {min} to {max}.");
-    }
-
-    /// <summary>The little-endian bytes of <paramref name="value"/> in <paramref name="type"/>, a fixed
-    /// width integer.</summary>
-    private static byte[] EncodeValue(OdDataType type, long value)
-    {
-        var bytes = new byte[OdEntryLayout.FixedSize(type)];
-        for (int i = 0; i < bytes.Length; i++) bytes[i] = (byte)(value >> (8 * i));
-        return bytes;
-    }
-
-    /// <summary>The value of the little-endian <paramref name="raw"/> in <paramref name="type"/>, sign
-    /// extended for a signed type.</summary>
-    private static long DecodeValue(OdDataType type, byte[] raw)
-    {
-        long value = 0;
-        for (int i = 0; i < raw.Length; i++) value |= (long)raw[i] << (8 * i);
-        bool signed = type is OdDataType.Integer8 or OdDataType.Integer16 or OdDataType.Integer32;
-        int bits = raw.Length * 8;
-        if (signed && bits < 64 && (value & (1L << (bits - 1))) != 0) value -= 1L << bits;
-        return value;
+        if (!CanOpenValueCodec.IsInRange(definition.ValueType, value))
+            throw new ArgumentOutOfRangeException(nameof(value), value, $"{definition} is {definition.ValueType}: the value does not fit.");
     }
 }

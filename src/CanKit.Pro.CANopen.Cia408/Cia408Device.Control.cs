@@ -64,7 +64,7 @@ internal sealed partial class Cia408Device
         }
 
         if (_localSource) return;
-        ApplyControlWord(host, Decode(value));
+        ApplyControlWord(host, ControlWordValue(entry.Index, value) ?? 0u);
     }
 
     /// <summary>The control word from the device's local source, used while <c>604Fh</c> is 1
@@ -147,8 +147,8 @@ internal sealed partial class Cia408Device
     {
         var status = ComposeStatus();
         var od = host.ObjectDictionary;
-        var status16 = Encode(status, 2);
-        var status32 = Encode(status, 4);
+        var status16 = CanOpenValueCodec.Encode(OdDataType.Unsigned16, status);
+        var status32 = CanOpenValueCodec.Encode(OdDataType.Unsigned32, status);
         bool changed16 = !Equal(od.ReadRaw(_statusWord16, 0x00), status16);
         bool changed32 = _has32 && !Equal(od.ReadRaw(_statusWord32, 0x00), status32);
         if (!changed16 && !changed32 && !errorCodeChanged && (more is null || more.Count == 0)) return;

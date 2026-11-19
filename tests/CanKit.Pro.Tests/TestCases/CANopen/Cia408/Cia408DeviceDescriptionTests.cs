@@ -213,6 +213,18 @@ public class Cia408DeviceDescriptionTests
             .Where(e => e.Message.Contains("6044h") && e.Message.Contains("§9.3.6"));
     }
 
+    [Theory]
+    [InlineData((ushort)0x6045, "6044h", "6045h")]
+    [InlineData((ushort)0x6044, "6045h", "6044h")]
+    public void A_File_That_Declares_One_Half_Of_The_32_Bit_Pair_Fails_The_Open(ushort removed, string kept, string missing)
+    {
+        var open = () => Open(Fixture.Remove(removed));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains(kept) && e.Message.Contains(missing) && e.Message.Contains("pair"));
+    }
+
     [Fact]
     public void A_16_Bit_Device_Type_Needs_No_32_Bit_Pair()
     {

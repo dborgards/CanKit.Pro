@@ -367,7 +367,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         host.Post(() =>
         {
             StartProcess(host);
-            FinishChanges(host);
+            FinishChanges(host, stepAnyway: true);
         });
     }
 
@@ -376,8 +376,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private void AttachConfigured(ICanOpenApplicationHost host, ObjectDictionary od)
     {
         RefuseDescribedObjects(od);
-        Declare(od, Cia408Objects.DeviceControlWord16, Encode(0, 2));
-        Declare(od, Cia408Objects.DeviceControlWord32, Encode(0, 4));
+        Declare(od, Cia408Objects.DeviceControlWord16, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
+        Declare(od, Cia408Objects.DeviceControlWord32, CanOpenValueCodec.Encode(OdDataType.Unsigned32, 0));
         Declare(od, Cia408Objects.DeviceMode, new[] { unchecked((byte)_deviceModeDefault) });
         od.AddRaw(_controlMode, 0x00, Cia408Objects.DeviceControlMode.ValueType,
             new[] { unchecked((byte)_controlModeDefault) },
@@ -385,12 +385,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             Cia408Objects.DeviceControlMode.PdoAccess != Cia408PdoAccess.No);
         foreach (var setpoint in _setpoints.Values) DeclareRecord(od, setpoint);
         foreach (var actual in _actuals.Values) DeclareRecord(od, actual);
-        Declare(od, Cia408Objects.DeviceErrorCode, Encode(0, 2));
+        Declare(od, Cia408Objects.DeviceErrorCode, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
         Declare(od, Cia408Objects.DeviceLocal, new[] { unchecked((byte)_localDefault) });
         _localSource = _localDefault == 1;
         var status = ComposeStatus();
-        Declare(od, Cia408Objects.DeviceStatusWord16, Encode(status, 2));
-        Declare(od, Cia408Objects.DeviceStatusWord32, Encode(status, 4));
+        Declare(od, Cia408Objects.DeviceStatusWord16, CanOpenValueCodec.Encode(OdDataType.Unsigned16, status));
+        Declare(od, Cia408Objects.DeviceStatusWord32, CanOpenValueCodec.Encode(OdDataType.Unsigned32, status));
 
         host.SetDeviceType(_logicalDevice, _deviceType);
         foreach (var pdo in _defaultPdos)
@@ -412,10 +412,13 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// present device state" (Table 22). The device's own writes pass; every other write is
     /// accepted.</summary>
     /// <remarks>
-    /// <para>The device mode is not changeable in ACTIVE (§7.6, Table 4: "device mode cannot be
-    /// changed"); Table 5 leaves HOLD and FAULT_HOLD to the manufacturer, where the device lets it
-    /// change. The control mode is changeable in INIT, DISABLED, FAULT_INIT and FAULT_DISABLED only
-    /// (Table 5). The state is the one the device rests in when the write is committed: a control
+    /// <para>The device mode is not changeable in ACTIVE, HOLD and FAULT_HOLD. Table 4 says so for
+    /// ACTIVE ("device mode cannot be changed"), and Table 6 for the others: D4, into ACTIVE, makes the
+    /// device mode no longer changeable, D5 (into HOLD) and D9 (into FAULT_HOLD) say "device mode is not
+    /// changeable", and D12 to D14 enable the change again. Table 5 gives the device mode as not
+    /// changeable in ACTIVE and as manufacturer-specific in every other state, which Table 6 decides
+    /// for HOLD and FAULT_HOLD. The control mode is changeable in INIT, DISABLED, FAULT_INIT and
+    /// FAULT_DISABLED only (Table 5). The state is the one the device rests in when the write is committed: a control
     /// word committed in the same RPDO is applied one actor job later (see
     /// <see cref="OnCommandWritten"/>), so it does not count for a mode the same frame
     /// carries. A value outside the supported modes is refused first, whatever the state.</para>
@@ -434,8 +437,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
         if (subindex != 0x00) return OdWriteDecision.Accept;
 
-        if ((index == _controlWord16 && (Decode(value) & Cia408ControlWord.Reserved16) != 0)
-            || (index == _controlWord32 && (Decode(value) & Cia408ControlWord.Reserved32) != 0)
+        if ((index == _controlWord16 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved16) is not (null or 0u))
+            || (index == _controlWord32 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved32) is not (null or 0u))
             || (index == _local && value.Length == 1 && value[0] > 1))
         {
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
@@ -444,7 +447,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         if (index == _deviceMode && value.Length == 1)
         {
             if (!_deviceModes.Contains(unchecked((sbyte)value[0]))) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-            if (_state == Cia408State.Active) return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferredDeviceState);
+            if (_state is Cia408State.Active or Cia408State.Hold or Cia408State.FaultHold)
+                return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferredDeviceState);
         }
 
         if (index == _controlMode && value.Length == 1)
@@ -478,10 +482,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// values is no reception and is not answered.
     /// </para>
     /// <para>
-    /// An RPDO whose control word changes the state also gets the transmission every change asks for
-    /// (<see cref="Publish"/>): with an inhibit time of 0 the master sees the TPDO twice, both frames
-    /// with the new status; an inhibit time merges them into one (CiA 301 v4.2.0 §7.5.2.37). The norm
-    /// asks for the answer and does not say that it replaces the change-driven frame.
+    /// An RPDO whose control word changes the state gets two TPDOs: the one every change asks for
+    /// (<see cref="Publish"/>), and this answer. The device cannot tell a command write that came in an
+    /// RPDO from one that came over SDO, so it cannot drop the first for the second, and the norm
+    /// forbids neither. Both frames carry the new status. With an inhibit time (CiA 301 v4.2.0
+    /// §7.5.2.37) the node sends the change-driven frame at once and holds the answer until the
+    /// inhibit time has elapsed; the answer is the one delayed, not merged away.
     /// </para>
     /// </remarks>
     public void OnRpdoReceived(int pdoNumber)
@@ -577,12 +583,31 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// Called from inside a running raise (a subscriber made a change), it does neither: the running
     /// call raises the change and then makes the request, so the NMT state changes only once every
     /// subscriber has seen the fault. Actor loop.</summary>
-    private void FinishChanges(ICanOpenApplicationHost host)
+    private void FinishChanges(ICanOpenApplicationHost host, bool stepAnyway = false)
     {
         if (_raising) return;
+        List<Exception>? failures = null;
+        bool changed = RaiseRound(ref failures);
+        CompleteChanges(host, changed || stepAnyway, ref failures);
+    }
+
+    /// <summary>Raises the pending changes (<see cref="RaisePendingChanges"/>) and adds what the
+    /// subscribers threw to <paramref name="failures"/>; whether a change was raised. A caller that
+    /// raises in several rounds within one callback (<see cref="Restart"/>) collects them all and
+    /// completes once. Actor loop, outside a running raise.</summary>
+    private bool RaiseRound(ref List<Exception>? failures)
+    {
         bool changed = _pendingChanges.Count > 0;
-        var failures = RaisePendingChanges();
-        if (changed) StepProcess(host, ref failures);
+        if (RaisePendingChanges() is { } thrown) (failures ??= new List<Exception>()).AddRange(thrown);
+        return changed;
+    }
+
+    /// <summary>The end of a callback's changes: one step of the process model when
+    /// <paramref name="step"/>, the NMT request a fault asked for, then what the subscribers and the
+    /// model threw, all of it at once. Actor loop.</summary>
+    private void CompleteChanges(ICanOpenApplicationHost host, bool step, ref List<Exception>? failures)
+    {
+        if (step) StepProcess(host, ref failures);
         if (_nmtRequestPending)
         {
             _nmtRequestPending = false;
@@ -644,20 +669,14 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private ushort Shift(Cia408ObjectDefinition definition)
         => CanOpenLogicalDeviceAddressing.Index(_logicalDevice, definition.Index);
 
-    /// <summary>The <paramref name="length"/> little-endian bytes of <paramref name="value"/>.</summary>
-    private static byte[] Encode(uint value, int length)
+    /// <summary>The value of a control word as written to <paramref name="index"/>, through the shared
+    /// codec (<see cref="CanOpenValueCodec"/>): <c>6040h</c> is UNSIGNED16, <c>6044h</c> UNSIGNED32;
+    /// <see langword="null"/> for a value of another length, which the dictionary refuses for its
+    /// size.</summary>
+    private uint? ControlWordValue(ushort index, byte[] value)
     {
-        var bytes = new byte[length];
-        for (int i = 0; i < length; i++) bytes[i] = (byte)(value >> (8 * i));
-        return bytes;
-    }
-
-    /// <summary>The unsigned value of up to four little-endian bytes.</summary>
-    private static uint Decode(byte[] value)
-    {
-        uint result = 0;
-        for (int i = 0; i < value.Length && i < 4; i++) result |= (uint)value[i] << (8 * i);
-        return result;
+        var type = index == _controlWord16 ? OdDataType.Unsigned16 : OdDataType.Unsigned32;
+        return value.Length == OdEntryLayout.FixedSize(type) ? (uint)CanOpenValueCodec.Decode(type, value) : null;
     }
 
     private static bool Contains(IReadOnlyList<Cia408DeviceMode> modes, Cia408DeviceMode mode)

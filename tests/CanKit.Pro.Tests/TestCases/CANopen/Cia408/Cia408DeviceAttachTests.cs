@@ -35,6 +35,46 @@ public class Cia408DeviceAttachTests
         changes.Should().Equal("NotReady->Init [0,1]", "Init->FaultInit [8,13]");
     }
 
+    [Fact]
+    public void A_Fault_Posted_Before_The_Start_Does_Not_Step_The_Model_Before_It_Was_Started()
+    {
+        var host = new HoldingHost { Now = TimeSpan.FromSeconds(5) };
+        var model = new Steps();
+        var device = new Cia408Device(Cia408Rig.Valve, model);
+
+        device.Attach(host);
+        device.ReportFault(0x2110, Cia408FaultState.FaultInit);
+        host.Posted[1]();
+        host.Posted[0]();
+
+        model.Seen.Should().Equal(new[] { (Cia408State.FaultInit, TimeSpan.Zero) },
+            "one step once the model has started, in the state the device rests in, with no time elapsed");
+    }
+
+    private sealed class Steps : ICia408Process
+    {
+        internal List<(Cia408State, TimeSpan)> Seen { get; } = new();
+
+        public void Step(Cia408ProcessContext context) => Seen.Add((context.State, context.Elapsed));
+    }
+
+    private sealed class NoDeadline : IDeadline
+    {
+        public bool IsExpired => false;
+
+        public bool IsCompleted => false;
+
+        public bool IsCancelled => false;
+
+        public bool Rearm(TimeSpan timeout) => true;
+
+        public bool Complete() => true;
+
+        public void Dispose()
+        {
+        }
+    }
+
     /// <summary>A host that keeps what is posted for the test to run, and does nothing else.</summary>
     private sealed class HoldingHost : ICanOpenApplicationHost
     {
@@ -44,11 +84,11 @@ public class Cia408DeviceAttachTests
 
         public NmtState State => NmtState.PreOperational;
 
-        public TimeSpan Now => TimeSpan.Zero;
+        public TimeSpan Now { get; set; }
 
         public bool CommunicationFailureActive => false;
 
-        public IDeadline Arm(TimeSpan delay, Action onExpired) => throw new NotSupportedException();
+        public IDeadline Arm(TimeSpan delay, Action onExpired) => new NoDeadline();
 
         public void Post(Action action) => Posted.Add(action);
 

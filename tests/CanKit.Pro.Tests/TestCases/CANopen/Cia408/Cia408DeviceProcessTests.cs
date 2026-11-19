@@ -98,16 +98,17 @@ public class Cia408DeviceProcessTests
 
     // ---- modes ----------------------------------------------------------------------------------
 
-    /// <summary>Table 4: the device mode is not changeable in ACTIVE; Table 5: the control mode only in
-    /// INIT, DISABLED, FAULT_INIT and FAULT_DISABLED. Every other write is accepted.</summary>
+    /// <summary>Table 6: the device mode is not changeable in HOLD (D5), FAULT_HOLD (D9) and ACTIVE (D4,
+    /// Table 4); Table 5: the control mode only in INIT, DISABLED, FAULT_INIT and FAULT_DISABLED. Every
+    /// other write is accepted.</summary>
     [Theory]
     [InlineData("Init", true, true)]
     [InlineData("Disabled", true, true)]
-    [InlineData("Hold", true, false)]
+    [InlineData("Hold", false, false)]
     [InlineData("Active", false, false)]
     [InlineData("FaultInit", true, true)]
     [InlineData("FaultDisabled", true, true)]
-    [InlineData("FaultHold", true, false)]
+    [InlineData("FaultHold", false, false)]
     public async Task The_Modes_Are_Changeable_Where_Tables_4_And_5_Allow(string state, bool deviceMode, bool controlMode)
     {
         using var rig = new Cia408Rig(TwoModes);
@@ -203,7 +204,6 @@ public class Cia408DeviceProcessTests
         rig.Advance(Interval);
 
         model.Steps.Skip(before).Select(s => s.Elapsed).Should().Equal(Interval, Interval, Interval);
-        model.Steps.Should().OnlyContain(s => s.State != Cia408State.NotReady, "the model does not run in NOT_READY");
     }
 
     [Fact]
@@ -254,6 +254,67 @@ public class Cia408DeviceProcessTests
         rig.Payloads(CanOpenProfileRig.Tpdo2).Skip(before).Select(p => BitConverter.ToString(p)).Should().Equal(
             new[] { $"08-00-{(byte)(next * 100):X2}-{(byte)((next * 100) >> 8):X2}" },
             "one TPDO 2 with the value of the periodic step");
+    }
+
+    [Fact]
+    public async Task Reset_Node_With_A_Cause_Steps_The_Model_Once_In_The_Final_State()
+    {
+        var model = new RecordingModel();
+        using var rig = new Cia408Rig(new Cia408Device(TwoModes, model));
+        rig.Device.ReportFault(0x2110, Cia408FaultState.FaultHold);
+        rig.Settle();
+        int before = model.Steps.Count;
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+
+        model.Steps.Skip(before).Select(s => s.State).Should().Equal(new[] { Cia408State.FaultInit },
+            "one step for the callback, after the restart and the fault entered again");
+    }
+
+    [Fact]
+    public async Task Rpdo2_Is_Answered_By_Tpdo2()
+    {
+        using var rig = new Cia408Rig(TwoModes);
+        await rig.WriteU16Async(ControlWord16, 0, 0x0001);
+        await rig.StartAsync();
+        await rig.DrainAsync();
+        int tpdo1 = rig.Count(CanOpenProfileRig.Tpdo1);
+        int tpdo2 = rig.Count(CanOpenProfileRig.Tpdo2);
+
+        await rig.SendRpdo2Async(0x01, 0x00, 0x10, 0x00); // DISABLED again, q setpoint 16: no change
+        await rig.DrainAsync();
+
+        rig.Count(CanOpenProfileRig.Tpdo2).Should().Be(tpdo2 + 1, "the answer to RPDO 2 is TPDO 2 (§8.4.1)");
+        rig.Count(CanOpenProfileRig.Tpdo1).Should().Be(tpdo1, "nothing changed, and RPDO 1 was not received");
+    }
+
+    [Fact]
+    public void The_Context_Refuses_Another_Thread()
+    {
+        Exception? caught = null;
+        var model = new RecordingModel
+        {
+            OnStep = c =>
+            {
+                var worker = new Thread(() =>
+                {
+                    try
+                    {
+                        c.SetActual(Cia408Objects.SpoolPositionActualValue, 1);
+                    }
+                    catch (Exception e)
+                    {
+                        caught = e;
+                    }
+                });
+                worker.Start();
+                worker.Join();
+            },
+        };
+        using var rig = new Cia408Rig(new Cia408Device(TwoModes, model));
+        rig.Settle();
+
+        caught.Should().BeOfType<InvalidOperationException>("the context belongs to the thread of its step");
     }
 
     [Fact]

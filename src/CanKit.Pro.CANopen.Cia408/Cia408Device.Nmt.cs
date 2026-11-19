@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Nmt;
 
@@ -166,23 +168,29 @@ internal sealed partial class Cia408Device
         Changed(before, taken, evenWithoutMove: true);
 
         _controlWord = 0;
-        WriteOwn(host, _controlWord16, Encode(0, 2));
-        if (_has32) WriteOwn(host, _controlWord32, Encode(0, 4));
+        WriteOwn(host, _controlWord16, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
+        if (_has32) WriteOwn(host, _controlWord32, CanOpenValueCodec.Encode(OdDataType.Unsigned32, 0));
         _localSource = (_hasLocal ? unchecked((sbyte)host.ObjectDictionary.ReadRaw(_local, 0x00)[0]) : _localDefault) == 1;
         ushort errorCode = _warnings.Count > 0 ? _warnings[_warnings.Count - 1] : (ushort)0;
-        if (_hasErrorCode) WriteOwn(host, _errorCode, Encode(errorCode, 2));
+        if (_hasErrorCode) WriteOwn(host, _errorCode, CanOpenValueCodec.Encode(OdDataType.Unsigned16, errorCode));
 
         RewriteActualValues(host);
 
         // The restart is published and raised on its own, so its subscribers read INIT; the faults that
-        // persist follow as changes of their own.
+        // persist follow as changes of their own. What the subscribers throw in either round is kept and
+        // thrown once both have run, so a throw on the restart cannot keep a persisting cause from being
+        // entered again; and the process model steps once, for the callback, in the state it ends in.
+        List<Exception>? failures = null;
         Publish(host, errorCodeChanged: false);
-        FinishChanges(host);
+        RaiseRound(ref failures);
+        if (persisting.Length > 0)
+        {
+            foreach (var cause in persisting) EnterFault(host, cause);
+            _requestOnBoot = true;
+            Publish(host, errorCodeChanged: false);
+            RaiseRound(ref failures);
+        }
 
-        if (persisting.Length == 0) return;
-        foreach (var cause in persisting) EnterFault(host, cause);
-        _requestOnBoot = true;
-        Publish(host, errorCodeChanged: false);
-        FinishChanges(host);
+        CompleteChanges(host, step: true, ref failures);
     }
 }

@@ -326,6 +326,32 @@ public class Cia408DeviceNmtTests
     }
 
     [Fact]
+    public async Task A_Subscriber_That_Throws_On_The_Restart_Keeps_The_Persisting_Cause_From_Nothing()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        device.StateChanged += (_, e) =>
+        {
+            if (e.Transitions.Contains(255)) throw new InvalidOperationException("subscriber");
+        };
+        using var rig = new Cia408Rig(device);
+        var reports = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (reports) reports.Add(e); };
+        await rig.WriteU16Async(ControlWord16, 0, 0x0007);
+        rig.Settle();
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultHold);
+        await rig.WaitForCountAsync(CanOpenProfileRig.Emcy, 1);
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        await rig.WaitForCountAsync(CanOpenProfileRig.Emcy, 2);
+        await rig.FlushBackgroundReportsAsync();
+
+        rig.Device.State.Should().Be(Cia408State.FaultInit, "the cause was entered again despite the throw");
+        rig.Payloads(CanOpenProfileRig.Emcy)[1].Take(2).Should().Equal(new byte[] { 0x10, 0x21 });
+        (await rig.ReadU16Async(ErrorCode, 0)).Should().Be(InputCurrentTooHigh);
+        lock (reports) reports.Should().ContainSingle().Which.ToString().Should().Contain("subscriber");
+    }
+
+    [Fact]
     public async Task Reset_Node_With_A_Cause_Raises_The_Restart_With_The_Status_Of_Init()
     {
         var device = new Cia408Device(Cia408Rig.Valve);

@@ -128,7 +128,7 @@ internal sealed partial class Cia408Device
     private void EnterFault(ICanOpenApplicationHost host, FaultCause cause)
     {
         host.RaiseError(cause.Code, cause.ErrorRegisterBits);
-        if (_hasErrorCode) WriteOwn(host, _errorCode, Encode(cause.Code, 2));
+        if (_hasErrorCode) WriteOwn(host, _errorCode, CanOpenValueCodec.Encode(OdDataType.Unsigned16, cause.Code));
         var before = _machine.State;
         var taken = _machine.Fault(cause.Reaction);
         Changed(before, taken);
@@ -201,7 +201,7 @@ internal sealed partial class Cia408Device
                 _warnings.Remove(errorCode);
             }
 
-            if (began && _hasErrorCode) WriteOwn(host, _errorCode, Encode(errorCode, 2));
+            if (began && _hasErrorCode) WriteOwn(host, _errorCode, CanOpenValueCodec.Encode(OdDataType.Unsigned16, errorCode));
             Publish(host, errorCodeChanged: began);
         });
     }

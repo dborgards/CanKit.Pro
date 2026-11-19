@@ -200,7 +200,17 @@ internal sealed partial class Cia408Device
             (resolution, modes) = DeclaredModes(od);
         }
 
-        _has32 = od.ContainsIndex(_controlWord32) && od.ContainsIndex(_statusWord32);
+        bool has44 = od.ContainsIndex(_controlWord32);
+        bool has45 = od.ContainsIndex(_statusWord32);
+        if (has44 != has45)
+        {
+            throw OptionsError(string.Format(CultureInfo.InvariantCulture,
+                "The device description declares {0:X4}h without {1:X4}h: the 32-bit control word and status word are one pair " +
+                "(§9.3.6, §9.3.7), and a device has both or neither (logical device {2}).",
+                has44 ? _controlWord32 : _statusWord32, has44 ? _statusWord32 : _controlWord32, _logicalDevice));
+        }
+
+        _has32 = has44;
         var shape = Shape(resolution);
 
         _hasControlMode = od.ContainsIndex(_controlMode);
@@ -247,12 +257,12 @@ internal sealed partial class Cia408Device
         _commandEntries = commands.ToArray();
 
         // What shows the device's state is the device's from the start (see FromDescription).
-        WriteOwn(host, _controlWord16, Encode(0, 2));
-        if (_has32) WriteOwn(host, _controlWord32, Encode(0, 4));
-        if (_hasErrorCode) WriteOwn(host, _errorCode, Encode(0, 2));
+        WriteOwn(host, _controlWord16, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
+        if (_has32) WriteOwn(host, _controlWord32, CanOpenValueCodec.Encode(OdDataType.Unsigned32, 0));
+        if (_hasErrorCode) WriteOwn(host, _errorCode, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
         var status = ComposeStatus();
-        WriteOwn(host, _statusWord16, Encode(status, 2));
-        if (_has32) WriteOwn(host, _statusWord32, Encode(status, 4));
+        WriteOwn(host, _statusWord16, CanOpenValueCodec.Encode(OdDataType.Unsigned16, status));
+        if (_has32) WriteOwn(host, _statusWord32, CanOpenValueCodec.Encode(OdDataType.Unsigned32, status));
         RewriteActualValues(host);
 
         if (fileType is { } kept) return kept;
