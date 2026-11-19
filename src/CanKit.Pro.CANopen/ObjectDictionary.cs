@@ -65,6 +65,21 @@ public sealed class ObjectDictionary
     internal event Action<ushort, byte>? EntryWritten;
 
     /// <summary>
+    /// Internal hook for <see cref="CanOpenNode"/>: raised for the same writes as
+    /// <see cref="EntryWritten"/>, and before any of its subscribers. The node captures there what
+    /// belongs to the write being reported — the reservation of a validated command write — before a
+    /// subscriber of <see cref="EntryWritten"/> can nest another write inside this one, whose
+    /// validation would otherwise take the reservation's place.
+    /// </summary>
+    internal event Action<ushort, byte>? EntryStored;
+
+    private void RaiseEntryWritten(ushort index, byte subindex)
+    {
+        EntryStored?.Invoke(index, subindex);
+        EntryWritten?.Invoke(index, subindex);
+    }
+
+    /// <summary>
     /// Internal hook for <see cref="CanOpenNode"/>: consulted before a value is stored. Returns
     /// the decision for the write — store, reject with an SDO abort code, or "handled, do not
     /// store" (used by the <c>1010h</c>/<c>1011h</c> signature objects, whose write is a command
@@ -317,7 +332,7 @@ public sealed class ObjectDictionary
             }
             entry.SetRawValue(copy);
         }
-        EntryWritten?.Invoke(index, subindex);
+        RaiseEntryWritten(index, subindex);
         return true;
     }
 
@@ -341,7 +356,7 @@ public sealed class ObjectDictionary
                     throw new KeyNotFoundException($"OD entry 0x{index:X4}:{subindex:X2} not found.");
                 entry.SetRawValue(copy);
             }
-            EntryWritten?.Invoke(index, subindex);
+            RaiseEntryWritten(index, subindex);
         }
     }
 
@@ -444,7 +459,7 @@ public sealed class ObjectDictionary
         {
             removed = _entries.Remove(Key(index, subindex));
         }
-        if (removed) EntryWritten?.Invoke(index, subindex);
+        if (removed) RaiseEntryWritten(index, subindex);
         return removed;
     }
 
@@ -467,7 +482,7 @@ public sealed class ObjectDictionary
                     throw new InvalidOperationException(refusal);
                 _entries[key] = entry;
             }
-            if (replaced) EntryWritten?.Invoke(index, subindex);
+            if (replaced) RaiseEntryWritten(index, subindex);
         }
         return entry;
     }
@@ -491,7 +506,7 @@ public sealed class ObjectDictionary
                 replaced = _entries.ContainsKey(key);
                 _entries[key] = entry;
             }
-            if (replaced) EntryWritten?.Invoke(index, subindex);
+            if (replaced) RaiseEntryWritten(index, subindex);
         }
         return entry;
     }

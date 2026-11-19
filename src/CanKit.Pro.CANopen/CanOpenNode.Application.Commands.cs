@@ -42,10 +42,13 @@ internal sealed partial class CanOpenNode
 
     // The command write that passed its validation and is about to be stored, as its CosKey; null for
     // none. Under the dictionary's write gate: set at the end of the validation
-    // (ReserveCommandWrite) and taken by the EntryWritten that follows it in the same hold of the
-    // gate (OnOdEntryWrittenForApplications), which every other EntryWritten clears. No other write
-    // can come between the two, as the gate serialises them, so at most one is outstanding, and one
-    // whose write was not stored after all is cleared by the next write, having taken no place.
+    // (ReserveCommandWrite) and taken by the notification that follows it in the same hold of the
+    // gate (OnOdEntryWrittenForApplications, on ObjectDictionary.EntryStored), which every other
+    // notification clears. No other write can come between the two: the gate serialises writers, and
+    // a write nested inside this one by a subscriber of EntryWritten (the gate is re-entrant on the
+    // writing thread) starts only after EntryStored has run, which is raised ahead of every
+    // EntryWritten subscriber. So at most one is outstanding, and one whose write was not stored after
+    // all is cleared by the next write, having taken no place.
     private uint? _reservedCommand;
 
     /// <summary>The command entries <paramref name="slot"/>'s application names, checked: in its

@@ -280,7 +280,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _od.EntryWritten += OnOdEntryWrittenForCoS;
 
         // After the attach phase: what an application writes while it attaches is not news to it.
-        _od.EntryWritten += OnOdEntryWrittenForApplications;
+        // On EntryStored, ahead of every EntryWritten subscriber: one an application added in its
+        // Attach may write a second command entry from inside this write, and the reservation this
+        // handler takes must still be this write's when it runs (ReserveCommandWrite).
+        _od.EntryStored += OnOdEntryWrittenForApplications;
 
         // The pump has to be running before the subscription exists: a frame can be dispatched
         // as soon as Subscribe returns, and construction failure below signals the pump to

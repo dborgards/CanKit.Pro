@@ -435,16 +435,19 @@ public partial class CanOpenApplicationSeamTests
     [Fact]
     public void A_Command_Entry_Gone_When_Its_Write_Is_Reported_Is_Told_As_Written_Not_As_A_Command()
     {
-        // The entry disappears between the store and the node's report of it: a subscriber to the
-        // dictionary's EntryWritten that was added in Attach runs before the node's own, and
-        // ObjectDictionary.Remove does not take the write gate. The write has no value left to tell.
+        // The entry disappears between the store and the node's report of it: ObjectDictionary.Remove
+        // does not take the write gate, so another thread can remove it in that window. Made
+        // deterministic with a subscriber to the dictionary's internal EntryStored added in Attach,
+        // which runs before the node's own handler there; a subscriber of EntryWritten no longer can
+        // (A_Subscriber_Writing_A_Second_Command_Entry_From_EntryWritten_Loses_Neither_Write). The
+        // write has no value left to tell.
         var app = Commands();
         bool armed = false;
         var declare = app.OnAttach!;
         app.OnAttach = host =>
         {
             declare(host);
-            host.ObjectDictionary.EntryWritten += (index, subindex) =>
+            host.ObjectDictionary.EntryStored += (index, subindex) =>
             {
                 if (!armed || index != 0x6040) return;
                 armed = false;
@@ -520,6 +523,32 @@ public partial class CanOpenApplicationSeamTests
         rig.Od.ReadUnsigned(0x6040, 0x00).Should().Be(0x0002u);
         CommandCalls(app).Should().Equal(new[] { Command(0x0002) },
             "the write committed before the restore belongs to the device the reset ended; the one after it is told");
+    }
+
+    [Fact]
+    public void A_Subscriber_Writing_A_Second_Command_Entry_From_EntryWritten_Loses_Neither_Write()
+    {
+        // A subscriber an application adds in its Attach is called before the node's own handler of the
+        // write; one that writes a second command entry from it nests that write inside the first. Both
+        // committed writes are delivered, in commit order.
+        var app = Commands();
+        var declare = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            declare(host);
+            host.ObjectDictionary.AddU16(0x6041, 0x00, 0x0000);
+            host.ObjectDictionary.EntryWritten += (index, _) =>
+            {
+                if (index == 0x6040) host.ObjectDictionary.WriteUnsigned(0x6041, 0x00, 0x0005);
+            };
+        };
+        app.CommandEntries = new[] { ControlWord, new CanOpenObjectAddress(0x6041, 0x00) };
+        using var rig = new EntryRig(With(app));
+
+        rig.Od.WriteUnsigned(0x6040, 0x00, 0x0009);
+        Settle(rig.Node);
+
+        CommandCalls(app).Should().Equal(Command(0x0009), "command 6041:00=0500");
     }
 
     [Fact]
