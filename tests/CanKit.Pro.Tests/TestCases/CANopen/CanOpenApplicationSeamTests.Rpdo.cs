@@ -271,9 +271,12 @@ public partial class CanOpenApplicationSeamTests
         if (type == 0x00)
         {
             // A synchronous TPDO would go with the SYNC; type 00h only if something had latched it.
-            // The node raises SyncReceived from the job that handles the SYNC, before that job sends
-            // the synchronous TPDOs; the barrier behind the witness then waits for that job to end
-            // and for what it sent to be on the wire (CanOpenTransmitBarrier).
+            // The job that handles the SYNC enqueues SyncReceived to the node's event dispatcher and
+            // then, in the same job, sends the synchronous TPDOs; the event reaches this handler from
+            // the dispatcher, possibly while that job still runs. Seeing it proves the SYNC was taken
+            // and its job has started, not that it has ended: the barrier behind the witness supplies
+            // the rest, as its empty actor jobs run only after the SYNC job has ended, and it then
+            // waits until what that job sent is on the wire (CanOpenTransmitBarrier).
             rig.Wire.Transmit(SyncId, Array.Empty<byte>());
             await syncHandled.Task.WithTimeoutAsync(ShortTimeout);
         }
