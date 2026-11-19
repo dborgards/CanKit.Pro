@@ -54,10 +54,9 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// </remarks>
 internal sealed class Cia408StateMachine
 {
-    // Bits 3..0 of the control word (CiA 408 v2.2.0 §9.3.2, Table 73): R reset fault, M device
-    // mode active enable, H hold enable, D disabled. Bits 4 and up never influence the machine.
-    private const uint MachineBits = 0b1111;
-    private const uint ResetFaultBit = 0b1000;
+    // Bits 3..0 of the control word (R M H D) and the reset bit among them: Cia408ControlWord.
+    private const uint MachineBits = Cia408ControlWord.MachineBits;
+    private const uint ResetFaultBit = Cia408ControlWord.ResetFault;
 
     /// <summary>The transitions caused by a control word (CiA 408 v2.2.0 §7.7, Table 7), one row
     /// each: from, to, and the bits 3..0 of the current word under a mask. A reset row also needs
@@ -145,6 +144,13 @@ internal sealed class Cia408StateMachine
 
         return taken is null ? Array.Empty<int>() : taken;
     }
+
+    /// <summary>Whether a write from <paramref name="previous"/> to <paramref name="current"/> makes a
+    /// fault reset of Table 7 (D10, D11 or D14) in the present state: the row
+    /// <see cref="ApplyControlWord"/> would take first. It moves nothing: a caller that refuses a
+    /// reset under conditions of its own (<see cref="Cia408Device.ReportFault"/>) asks this before it
+    /// applies the word, since <see cref="ApplyControlWord"/> would take the reset.</summary>
+    public bool IsFaultReset(uint previous, uint current) => Next(previous, current, reset: true) is not null;
 
     private Transition? Next(uint previous, uint current, bool reset)
     {

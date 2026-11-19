@@ -403,7 +403,9 @@ internal sealed class Cia408Configuration
         }
     }
 
-    private static bool IsDriveMode(Cia408ControlMode mode)
+    /// <summary>Whether <paramref name="mode"/> is a drive mode, 6 to 12 of Table 82; the others are
+    /// valve (or pump) modes.</summary>
+    internal static bool IsDriveMode(Cia408ControlMode mode)
         => mode is >= Cia408ControlMode.OpenLoopMovement and <= Cia408ControlMode.VelocityControlAxisWithPressureOverride;
 
     private static bool IsValveMode(Cia408ControlMode mode) => !IsDriveMode(mode);
