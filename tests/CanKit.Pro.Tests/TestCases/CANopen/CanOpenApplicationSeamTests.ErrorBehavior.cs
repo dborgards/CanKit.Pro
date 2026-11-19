@@ -98,6 +98,20 @@ public partial class CanOpenApplicationSeamTests
         watch.Rig.Node.State.Should().Be(NmtState.Stopped, "1029h:01 = 02h; 1029h:02 is the profile's class");
     }
 
+    [Fact] // #559: the 408 default of the communication error, 01h, is in force from the boot-up
+    public async Task The_Laid_Out_Communication_Error_Default_Is_In_Force_From_The_Boot_Up()
+    {
+        var app = LayingOut(Layout408);
+        using var watch = new ProducerWatchRig(app);
+        await watch.Rig.StartAsync();
+        await watch.BeatAsync();
+
+        watch.Silence();
+
+        Failures(app).Should().Equal(new[] { "failure True" }, "the heartbeat was lost");
+        watch.Rig.Node.State.Should().Be(NmtState.Operational, "1029h:01 = 01h, the layout's default: no change of the NMT state");
+    }
+
     [Fact]
     public async Task The_Laid_Out_Classes_Are_Stored_And_Restored_With_The_Record()
     {
@@ -169,6 +183,19 @@ public partial class CanOpenApplicationSeamTests
         var app = LayingOut(new CanOpenErrorBehaviorLayout { AdditionalDefaults = new byte[254] });
 
         OpenFails(WithErrorBehavior(app)).Message.Should().Contain("254");
+    }
+
+    [Fact]
+    public void A_Layout_That_Fills_The_Record_Is_Accepted()
+    {
+        // 253 additional classes: sub-indices 02h to FEh, the last a record may hold (CiA 301 v4.2.0
+        // §7.5.2.32); one more is refused above.
+        var app = LayingOut(new CanOpenErrorBehaviorLayout { AdditionalDefaults = Enumerable.Repeat((byte)2, 253).ToArray() });
+        using var bus = Open(NewSession(), 1);
+        using var node = OpenNode(bus, WithErrorBehavior(app));
+
+        node.ObjectDictionary.ReadUnsigned(0x1029, 0x00).Should().Be(0xFEu);
+        node.ObjectDictionary.ReadUnsigned(0x1029, 0xFE).Should().Be(2u);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -263,6 +290,27 @@ public partial class CanOpenApplicationSeamTests
         await OnActor(rig.Node, () => target = app.Host!.ErrorBehaviorTarget(0x02));
 
         target.Should().Be(expected);
+    }
+
+    [Fact]
+    public async Task ErrorBehaviorTarget_Asks_For_Nothing_In_Initialisation()
+    {
+        // In Initialisation the node takes no state request (RequestNmtState): 02h, which asks for
+        // Stopped from Pre-operational and Operational, asks for nothing there. Asked as a reset
+        // enters Initialisation, before the reset restores the record.
+        var app = LayingOut(Layout408);
+        var asked = new List<(NmtState State, NmtState? Target)>();
+        app.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Initializing) asked.Add((app.Host!.State, app.Host.ErrorBehaviorTarget(0x02)));
+        };
+        using var rig = new EntryRig(WithErrorBehavior(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        rig.Od.WriteUnsigned(0x1029, 0x02, 0x02);
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+
+        asked.Should().Equal(new[] { (NmtState.Initializing, (NmtState?)null) }, "02h asks for nothing where the node takes no request");
     }
 
     [Fact]

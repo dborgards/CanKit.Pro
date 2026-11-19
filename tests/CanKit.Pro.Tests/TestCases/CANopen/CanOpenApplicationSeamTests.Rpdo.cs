@@ -259,6 +259,8 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Responder();
         using var rig = new EntryRig(With(app));
+        var syncHandled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.SyncReceived += (_, _) => syncHandled.TrySetResult(true);
         rig.ConfigureWitness();
         rig.Od.WriteUnsigned(0x1800, 0x02, (uint)type);
         await rig.StartAsync();
@@ -266,8 +268,15 @@ public partial class CanOpenApplicationSeamTests
         await rig.Node.PostToActorAsync(() => { });
         app.Host!.Post(() => app.Host.RequestTransmissionOfTpdo(1));
         Settle(rig.Node);
-        // A synchronous TPDO would go with the SYNC; type 00h only if something had latched it.
-        if (type == 0x00) rig.Wire.Transmit(SyncId, Array.Empty<byte>());
+        if (type == 0x00)
+        {
+            // A synchronous TPDO would go with the SYNC; type 00h only if something had latched it.
+            // The node raises SyncReceived from the job that handles the SYNC, before that job sends
+            // the synchronous TPDOs; the barrier behind the witness then waits for that job to end
+            // and for what it sent to be on the wire (CanOpenTransmitBarrier).
+            rig.Wire.Transmit(SyncId, Array.Empty<byte>());
+            await syncHandled.Task.WithTimeoutAsync(ShortTimeout);
+        }
         await rig.WitnessAsync();
 
         rig.Wire.Count(Tpdo1).Should().Be(0, $"transmission type {type:X2}h is not triggered by an event");
