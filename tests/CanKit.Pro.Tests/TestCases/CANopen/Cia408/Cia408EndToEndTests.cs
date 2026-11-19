@@ -9,6 +9,7 @@ using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Cia401;
 using CanKit.Pro.CANopen.Cia408;
+using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -172,6 +173,16 @@ public class Cia408EndToEndTests
         await valvePeer.EnableAsync().WithTimeoutAsync(HangGuard);
         valve.State.Should().Be(Cia408State.Active);
         (await valvePeer.ReadStatusAsync().WithTimeoutAsync(HangGuard)).State.Should().Be(Cia408State.Active);
+
+        // The CiA 401 device follows 1029h:01 for a device failure (CiA 401-1 §6.2.4), and on this node
+        // that is CiA 408's 01h, no change: the failure leaves the node Operational, where CiA 401 alone
+        // (00h) would have taken it to Pre-operational.
+        await rig.StartAsync();
+        io.ReportDeviceFailure(true);
+        rig.Settle();
+        await rig.DrainAsync();
+        rig.Node.State.Should().Be(NmtState.Operational);
+        io.OutputsInErrorState.Should().BeFalse("the device has no outputs");
     }
 
     /// <summary>One device node with a <see cref="Cia401Device"/> and a <see cref="Cia408Device"/>

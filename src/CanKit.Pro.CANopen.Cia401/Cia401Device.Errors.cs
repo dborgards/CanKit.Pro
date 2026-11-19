@@ -91,7 +91,10 @@ internal sealed partial class Cia401Device
     /// communication errors only from Operational, for 02h too; for a device failure the device
     /// follows §6.2.4 instead. The case of the §6.2.4 NOTE, a node without <c>1029h</c>, does not
     /// arise: the device requires <see cref="CanOpenNodeOptions.EnableErrorBehavior"/> (it monitors
-    /// communication failures), with which the node always has <c>1029h:01</c>. The reserved values
+    /// communication failures), with which the node always has <c>1029h:01</c>. On a node that also
+    /// carries a CiA 408 device the record is CiA 408's (§8.6.8), whose <c>1029h:01</c> powers on as
+    /// 01h, no change: there a device failure, and a communication failure too, leaves the node in
+    /// Operational unless the master writes 00h. The reserved values
     /// change nothing, as the node treats them for a communication failure. The
     /// communication failures themselves are the node's to act on, and the device asks nothing for
     /// them.

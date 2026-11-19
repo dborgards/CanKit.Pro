@@ -30,7 +30,10 @@ internal sealed class CanOpenApplicationRequirements
     /// asking for layouts that differ in any value, and a layout without
     /// <see cref="CanOpenNodeOptions.EnableErrorBehavior"/> fail the open with an
     /// <see cref="System.ArgumentException"/> for <c>options</c>. Two applications asking for the
-    /// same layout share the record.
+    /// same layout share the record. When one application asks for a layout and another for none, the
+    /// record is the layout, for both: its defaults hold for the application that asked for none too —
+    /// on a node with a CiA 401 and a CiA 408 device, <c>1029h:01</c> powers on as CiA 408's 01h, not as
+    /// the generic 00h, so a communication failure leaves the node Operational.
     /// </para>
     /// <para>
     /// A device description that declares <c>1029h</c> wins, as for every object it declares: the
