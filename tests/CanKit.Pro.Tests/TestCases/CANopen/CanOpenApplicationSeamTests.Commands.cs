@@ -461,6 +461,34 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task A_Command_Write_Committed_During_A_Reset_Before_Its_Restore_Is_Not_Delivered()
+    {
+        // The window between the reset dropping the queue and restoring the dictionary, made
+        // deterministic: another application writes the command entry from its notification of the
+        // reset, which comes after the drop and before the restore. Reset Node then overwrites the
+        // value, so delivering it after the reset would tell a value the entry no longer holds.
+        var app = Commands();
+        var other = new RecordingApplication("other", new CanOpenIndexRange(0x6800, 0x6FFF))
+        {
+            WhenNmtChanged = (_, current) =>
+            {
+                if (current == NmtState.Initializing) app.Host!.ObjectDictionary.WriteUnsigned(0x6040, 0x00, 0x0009);
+            },
+        };
+        using var rig = new EntryRig(With(app, other));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        rig.Od.WriteUnsigned(0x6040, 0x00, 0x0002);
+        Settle(rig.Node);
+
+        rig.Od.ReadUnsigned(0x6040, 0x00).Should().Be(0x0002u);
+        CommandCalls(app).Should().Equal(new[] { Command(0x0002) },
+            "the write committed before the restore belongs to the device the reset ended; the one after it is told");
+    }
+
+    [Fact]
     public async Task A_Node_Disposed_By_A_Command_Callback_Delivers_No_More()
     {
         var app = Commands();

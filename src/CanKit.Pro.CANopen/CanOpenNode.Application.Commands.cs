@@ -17,11 +17,12 @@ internal sealed partial class CanOpenNode
     /// The most committed command writes the node holds for its applications, all applications
     /// together, between the write and the actor job that delivers them. The actor's mailbox is
     /// unbounded and a master can write a command entry faster than the actor comes round; without a
-    /// bound every such write would be held. 256 is far above what a command word sees between two
-    /// actor turns, so the bound is reached only by a flood, which it then refuses visibly
-    /// (<see cref="ReserveCommandWrite"/>) instead of dropping a committed write.
+    /// bound every such write would be held. The bound is far above what a command word sees between
+    /// two actor turns, so it is reached only by a flood, which it then refuses visibly
+    /// (<see cref="ReserveCommandWrite"/>) instead of dropping a committed write. The one place the
+    /// figure is stated; the seam's documentation and the tests refer to it.
     /// </summary>
-    private const int CommandQueueCapacity = 256;
+    internal const int CommandQueueCapacity = 256;
 
     // The command entries of every application, as CosKey values; null when no application declares
     // one. Assigned once, on the constructing thread, once every application has attached; read by
@@ -30,8 +31,14 @@ internal sealed partial class CanOpenNode
 
     // The committed command writes not yet delivered, oldest first, under _applicationGate. One job
     // delivers them and the dirty set together (EvaluateApplicationEntriesOnActor), so they share
-    // _applicationEvaluationPosted.
-    private List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value)>? _queuedCommands;
+    // _applicationEvaluationPosted. Each carries the restore generation it was committed in.
+    private List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)>? _queuedCommands;
+
+    // Counts the restores of an NMT reset (EndCommandWritesBeforeRestore). Changed under the
+    // dictionary's write gate, on the actor loop; read under the gate where a write is queued and on
+    // the actor loop where the queue is delivered. A queued write of an earlier generation was
+    // committed before the reset restored the dictionary and is not delivered.
+    private int _commandWriteGeneration;
 
     // The command write that passed its validation and is about to be stored, as its CosKey; null for
     // none. Under the dictionary's write gate: set at the end of the validation
@@ -103,16 +110,33 @@ internal sealed partial class CanOpenNode
     /// Tells the command writes queued since the last round, in commit order, each through the
     /// dispatcher: one that throws is reported, and the next is still told. Actor loop, at the head
     /// of the application round. Returns <see langword="false"/> when a callback disposed the node,
-    /// which ends the round.
+    /// which ends the round. A write committed before an NMT reset restored the dictionary is passed
+    /// over (<see cref="EndCommandWritesBeforeRestore"/>).
     /// </summary>
-    private bool DeliverCommandWrites(List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value)> commands)
+    private bool DeliverCommandWrites(List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)> commands)
     {
-        foreach (var (slot, entry, value) in commands)
+        foreach (var (slot, entry, value, generation) in commands)
         {
             if (Volatile.Read(ref _disposed) != 0) return false;
+            if (generation != _commandWriteGeneration) continue;
             InvokeApplication(slot, application => application.OnCommandWritten(entry, value));
         }
         return Volatile.Read(ref _disposed) == 0;
+    }
+
+    /// <summary>
+    /// An NMT reset restores the dictionary: every command write committed before this belongs to the
+    /// device the reset ended. <see cref="DropQueuedCommandWritesForReset"/> dropped what was queued
+    /// when the reset began, but a write can still be committed between that and the restore — by
+    /// another thread, or by another application's callback while the applications are told of the
+    /// reset — and the restore may overwrite its value. So the generation moves here, inside the
+    /// restore's hold of the write gate, and such a write, queued with the old one, is not delivered.
+    /// Actor loop, under the write gate. Nothing on a node without applications.
+    /// </summary>
+    private void EndCommandWritesBeforeRestore()
+    {
+        if (_applications.Length == 0) return;
+        _commandWriteGeneration++;
     }
 
     /// <summary>An NMT reset drops the command writes and the RPDO receptions still queued, before the

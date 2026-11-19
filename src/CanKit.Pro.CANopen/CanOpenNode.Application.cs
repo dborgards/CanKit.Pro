@@ -271,13 +271,17 @@ internal sealed partial class CanOpenNode
         if (Volatile.Read(ref _disposed) != 0) return;
 
         var key = CosKey(index, subindex);
-        byte[]? command = null;
         // Under the write gate, before anyone else can write the entry: the value this write stored.
-        if (reserved == key) _od.TryReadRaw(index, subindex, out command);
+        // An entry that is gone again has no value to tell; it is reported as written, as it would
+        // be without a reservation.
+        byte[]? command = reserved == key && _od.TryReadRaw(index, subindex, out var stored) ? stored : null;
         bool post;
         lock (_applicationGate)
         {
-            if (command is not null) (_queuedCommands ??= new()).Add((claimant, new CanOpenObjectAddress(index, subindex), command));
+            if (command is not null)
+            {
+                (_queuedCommands ??= new()).Add((claimant, new CanOpenObjectAddress(index, subindex), command, _commandWriteGeneration));
+            }
             else (_applicationDirty ??= new HashSet<uint>()).Add(key);
             post = !_applicationEvaluationPosted;
             _applicationEvaluationPosted = true;
@@ -313,7 +317,7 @@ internal sealed partial class CanOpenNode
     private void EvaluateApplicationEntriesOnActor()
     {
         HashSet<uint>? dirty;
-        List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value)>? commands;
+        List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)>? commands;
         List<(ApplicationSlot Slot, int PdoNumber)>? receptions;
         lock (_applicationGate)
         {

@@ -211,7 +211,11 @@ internal interface ICanOpenApplication
     /// </para>
     /// <para>
     /// An NMT reset drops the writes still queued, before the applications are told of the reset
-    /// (<see cref="OnNmtStateChanged"/> into Initializing), and so does the disposal of the node.
+    /// (<see cref="OnNmtStateChanged"/> into Initializing), and so does the disposal of the node. A
+    /// write committed after that and before the reset restores the dictionary — by another thread,
+    /// or by another application while the applications are told of the reset — is not told either:
+    /// it belongs to the device the reset ended, and the restore may have overwritten its value. What
+    /// is committed after the restore, from <see cref="OnReset"/> on, is told.
     /// </para>
     /// </remarks>
     void OnCommandWritten(CanOpenObjectAddress entry, byte[] value);

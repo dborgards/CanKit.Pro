@@ -1133,6 +1133,9 @@ internal sealed partial class CanOpenNode
                 {
                     _restoringValues = false;
                 }
+                // Still under the gate: a command write committed before this point is of the
+                // device the reset ended, one committed after it is told.
+                EndCommandWritesBeforeRestore();
                 // CiA 319 v2.0.0 §5.4: what came back from the store is checked before the node
                 // announces itself — the CRC of every existing SRDO against the 13FFh stored with
                 // it; a mismatch sets 13FEh to 00h (#308). After the flag: this is the device's
