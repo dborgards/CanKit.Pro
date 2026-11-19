@@ -184,10 +184,11 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// device type announces, the resolution's valve width where it announces none.
     /// <see langword="null"/> where the modes differ in width: the pair is then that of the mode in
     /// <c>6043h</c>, read at the start of each call that touches the words. <c>6043h</c> is Optional
-    /// (§9.3.5); a device that answers it with <c>0602 0000h</c>, "object does not exist", runs its
-    /// default control mode, which the norm does not name: the peer takes the lowest mode the device
-    /// type announces (<see cref="SupportedControlModes"/>), the mode a device built with
-    /// <see cref="Cia408Device.FromDescription"/> runs without <c>6043h</c>.</summary>
+    /// (§9.3.5); a device without it runs its default control mode, which the norm does not name: the
+    /// peer takes the lowest mode the device type announces (<see cref="SupportedControlModes"/>), the
+    /// mode a device built with <see cref="Cia408Device.FromDescription"/> runs without <c>6043h</c>. It
+    /// does so without a read where the bound description declares no <c>6043h</c>, and where a device
+    /// answers the read with <c>0602 0000h</c>, "object does not exist".</summary>
     public bool? UsesWideWords { get; }
 
     // ---- the state machine ---------------------------------------------------------------------------
@@ -271,6 +272,14 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// object, the lowest mode its type announces (see <see cref="UsesWideWords"/>).</summary>
     private async Task<Cia408ControlMode> RunningModeAsync(CancellationToken cancellationToken)
     {
+        // A bound description without 6043h: the gate would refuse the read before a frame is sent
+        // (ICanOpenNode.BindPeerDeviceDescription), and the device it describes runs its default mode.
+        if (_node.GetPeerDeviceDescription(PeerNodeId) is { } description
+            && !description.Contains(Shift(Cia408Objects.DeviceControlMode), 0x00))
+        {
+            return SupportedControlModes[0];
+        }
+
         try
         {
             return await ReadVariableAsync(Cia408Objects.DeviceControlMode, static value => (Cia408ControlMode)value, cancellationToken)

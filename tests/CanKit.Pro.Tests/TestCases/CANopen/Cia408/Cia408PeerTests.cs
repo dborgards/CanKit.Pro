@@ -857,6 +857,30 @@ public class Cia408PeerTests
     }
 
     [Fact]
+    public async Task Without_6043h_In_The_Bound_Description_The_Lowest_Mode_Is_Taken_Without_A_Read()
+    {
+        // The bound file leaves the Optional 6043h out (§9.3.5), as the device does: the gate would
+        // refuse the read before a frame is sent, so the peer does not try it.
+        var mixed = new Cia408Configuration
+        {
+            Resolution = Cia408Resolution.Valve16Drive32,
+            ControlModes = new[] { Cia408ControlMode.SpoolPositionOpenLoop, Cia408ControlMode.PositionControlAxis },
+        };
+        using var rig = new Cia408ToolRig(new[] { new Cia408Device(mixed) }, BothPairs(mixed.DeviceType.Value, with6043: false));
+        rig.Rig.Od.Remove(0x6043, 0x00);
+        var peer = rig.Peer(configuration: mixed);
+        peer.UsesWideWords.Should().BeNull();
+
+        await peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        rig.Rig.Device.State.Should().Be(Cia408State.Active);
+        var requests = await RequestsAsync(rig);
+        Uploads(requests, 0x6043).Should().Be(0, "the file has no 6043h");
+        Downloads(requests, ControlWord16).Should().Equal(0x0001u, 0x0003u, 0x0007u);
+        Downloads(requests, 0x6044).Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task The_Default_Pause_Runs_On_The_Clock()
     {
         // The options' own delay, with the shortest pause there is: the refused reset reads twice and
@@ -884,8 +908,8 @@ public class Cia408PeerTests
     }
 
     /// <summary>A description with <c>1000h</c> = <paramref name="deviceType"/>, both word pairs,
-    /// <c>6043h</c> and <c>604Fh</c>.</summary>
-    private static CanOpenDeviceDescription BothPairs(uint deviceType)
+    /// <c>604Fh</c> and, unless <paramref name="with6043"/> is false, <c>6043h</c>.</summary>
+    private static CanOpenDeviceDescription BothPairs(uint deviceType, bool with6043 = true)
     {
         var text = new StringBuilder();
         text.Append("[FileInfo]\nFileName=both.eds\nFileVersion=1\nFileRevision=0\nEDSVersion=4.0\n")
@@ -896,7 +920,9 @@ public class Cia408PeerTests
             .Append("[MandatoryObjects]\nSupportedObjects=1\n1=0x1000\n")
             .Append(string.Format(CultureInfo.InvariantCulture,
                 "[1000]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x{0:X8}\nPDOMapping=0\n", deviceType))
-            .Append("[OptionalObjects]\nSupportedObjects=6\n1=0x6040\n2=0x6041\n3=0x6043\n4=0x6044\n5=0x6045\n6=0x604F\n");
+            .Append(with6043
+                ? "[OptionalObjects]\nSupportedObjects=6\n1=0x6040\n2=0x6041\n3=0x6043\n4=0x6044\n5=0x6045\n6=0x604F\n"
+                : "[OptionalObjects]\nSupportedObjects=5\n1=0x6040\n2=0x6041\n3=0x6044\n4=0x6045\n5=0x604F\n");
         void Variable(ushort index, string type, string access)
             => text.Append(string.Format(CultureInfo.InvariantCulture,
                 "[{0:X4}]\nParameterName=V{0:X4}\nObjectType=0x7\nDataType={1}\nAccessType={2}\nDefaultValue=0\nPDOMapping=1\n",
@@ -904,7 +930,7 @@ public class Cia408PeerTests
 
         Variable(0x6040, "0x0006", "rw");
         Variable(0x6041, "0x0006", "ro");
-        Variable(0x6043, "0x0002", "rw");
+        if (with6043) Variable(0x6043, "0x0002", "rw");
         Variable(0x6044, "0x0007", "rw");
         Variable(0x6045, "0x0007", "ro");
         Variable(0x604F, "0x0002", "rw");
