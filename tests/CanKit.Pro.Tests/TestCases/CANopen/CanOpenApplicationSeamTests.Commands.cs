@@ -440,7 +440,10 @@ public partial class CanOpenApplicationSeamTests
         // deterministic with a subscriber to the dictionary's internal EntryStored added in Attach,
         // which runs before the node's own handler there; a subscriber of EntryWritten no longer can
         // (A_Subscriber_Writing_A_Second_Command_Entry_From_EntryWritten_Loses_Neither_Write). The
-        // write has no value left to tell.
+        // write has no value left to tell. The removal is a write of its own, reported from inside the
+        // first (ObjectDictionary.Remove raises EntryStored): it queues the round, and the actor may run
+        // that round before the outer report adds the entry again, so the entry is told once or twice,
+        // as written each time.
         var app = Commands();
         bool armed = false;
         var declare = app.OnAttach!;
@@ -462,7 +465,7 @@ public partial class CanOpenApplicationSeamTests
 
         rig.Od.ContainsIndex(0x6040).Should().BeFalse("the subscriber removed the entry");
         CommandCalls(app).Should().BeEmpty("there is no committed value left to deliver");
-        Written(app).Should().Equal("written 6040:00");
+        Written(app).Should().NotBeEmpty().And.OnlyContain(w => w == "written 6040:00");
     }
 
     // -----------------------------------------------------------------------------------------
