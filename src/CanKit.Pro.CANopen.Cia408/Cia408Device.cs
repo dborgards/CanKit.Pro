@@ -54,12 +54,17 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// fails that node's open. Once the node is disposed a call does nothing (the post is dropped).
 /// </para>
 /// <para>
-/// <b>What is not built in this slice.</b> The coupling to NMT (§7.8, Table 10): the device does not
-/// act on Stopped, a reset or a communication failure, and after Reset Node the dictionary holds the
-/// restored values of its objects, not the device's state, until the device next rewrites them. The
-/// hardware enable signal (§7.7, Table 8). The behaviour of device mode and control mode and their
-/// value ranges, the setpoints, actual values and the process model, and the answer to a received
-/// RPDO (§8.4.1). The default PDO 2, which maps the setpoints and actual values of the default control
+/// <b>NMT.</b> Stopped, Reset Communication and a communication failure force the fault reaction
+/// without an EMCY; Reset Node restarts the machine and gives back the device that powered on, with
+/// the faults the application still reports entered again (§7.8, Table 10; §7.6, Table 6; see
+/// <see cref="OnNmtStateChanged"/>, <see cref="OnReset"/>, <see cref="OnCommunicationFailureChanged"/>).
+/// The device is an NMT slave and asks NMT for nothing on these events, which are NMT's own; a fault
+/// the application reports asks for what <c>1029h:02</c> names (<see cref="ReportFault"/>).
+/// </para>
+/// <para>
+/// <b>What is not built in this slice.</b> The hardware enable signal (§7.7, Table 8). The behaviour
+/// of device mode and control mode and their value ranges, the setpoints, actual values and the
+/// process model, and the answer to a received RPDO (§8.4.1). The default PDO 2, which maps the setpoints and actual values of the default control
 /// mode: the device does not declare them yet, and sets PDO 1, the control and status word, only (see
 /// <see cref="Attach"/>). A device description that declares the device's objects.
 /// </para>
@@ -67,8 +72,12 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// <b>Readings where the norm is silent.</b> Each is argued where it is used:
 /// </para>
 /// <list type="bullet">
-/// <item><description>A fault reset is refused while a cause the application reported is still
-/// active, and the refused edge is consumed (<see cref="ReportFault"/>).</description></item>
+/// <item><description>A fault reset is refused while a cause is still active — a fault the
+/// application reported, or a communication failure — and the refused edge is consumed
+/// (<see cref="ReportFault"/>). Stopped and Reset Communication force the fault and are no cause
+/// (<see cref="OnNmtStateChanged"/>).</description></item>
+/// <item><description>Reset Node follows Table 6 over Table 10 and Figure 2, and enters again the
+/// faults the application still reports (<see cref="OnReset"/>).</description></item>
 /// <item><description>The control word has one history across both objects and both sources, and
 /// is not mirrored from one object into the other (<see cref="ControlWord"/>).</description></item>
 /// <item><description><c>604Eh</c> keeps the code of the warning or fault that occurred last
@@ -348,31 +357,13 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     {
     }
 
-    /// <summary>Nothing yet: the coupling of the device state machine to NMT (§7.8, Table 10) is not
-    /// built in this slice. A change of NMT state that the device asked for
-    /// (<see cref="ReportFault"/>) is told here too.</summary>
-    public void OnNmtStateChanged(NmtState previous, NmtState current)
-    {
-    }
-
-    /// <summary>Nothing yet: what a reset does to the device state machine (§7.6, Table 6; §7.8,
-    /// Table 10) is not built in this slice.</summary>
-    public void OnReset(NmtCommand command)
-    {
-    }
-
-    /// <summary>Nothing yet: what a communication failure does to the device state machine (§7.8) is
-    /// not built in this slice. The node acts on <c>1029h:01</c> itself.</summary>
-    public void OnCommunicationFailureChanged(bool active)
-    {
-    }
-
     // ---- the event ------------------------------------------------------------------------------
 
     /// <summary>The device state machine changed state. Raised on the node's actor loop, once per
     /// change, in the order the changes happened, with the D-numbers taken; never for a call that
     /// leaves the state where it was (a fault in FAULT_INIT takes D8 and D13 back into FAULT_INIT and
-    /// raises nothing).</summary>
+    /// raises nothing) — except the restart of Reset Node, D255, D0 and D1, which is raised also from
+    /// INIT: the machine was left and entered again (<see cref="OnReset"/>).</summary>
     /// <remarks>
     /// <para>
     /// Raised once the device's state is complete: the status words are rewritten and their
@@ -396,12 +387,14 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     public event EventHandler<Cia408StateChangedEventArgs>? StateChanged;
 
     /// <summary>Queues the change the machine just made from <paramref name="previous"/> by
-    /// <paramref name="taken"/>, if the state moved, and records the new state. Actor loop.</summary>
-    private void Changed(Cia408State previous, IReadOnlyList<int> taken)
+    /// <paramref name="taken"/>, if the state moved or <paramref name="evenWithoutMove"/> says so (the
+    /// restart, see <see cref="OnReset"/>), and records the new state. Actor loop.</summary>
+    private void Changed(Cia408State previous, IReadOnlyList<int> taken, bool evenWithoutMove = false)
     {
         var current = _machine.State;
         _state = current;
-        if (current != previous) _pendingChanges.Enqueue(new Cia408StateChangedEventArgs(previous, current, taken));
+        if (current != previous || evenWithoutMove)
+            _pendingChanges.Enqueue(new Cia408StateChangedEventArgs(previous, current, taken));
     }
 
     /// <summary>Gives every subscriber every pending change, in order, and again what they changed

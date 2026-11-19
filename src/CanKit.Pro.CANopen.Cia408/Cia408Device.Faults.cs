@@ -13,11 +13,23 @@ internal sealed partial class Cia408Device
     /// §7.5.2.2, Table 54.</summary>
     private const byte ReservedErrorRegisterBits = 0x20 | 0x40;
 
-    // The fault causes the application reported and has not cleared, by error code. Actor loop.
-    private readonly HashSet<ushort> _faultCauses = new();
+    // The fault causes the application reported and has not cleared, in the order reported, with
+    // what each asked for: Reset Node re-enters them (OnReset). Actor loop.
+    private readonly List<FaultCause> _faultCauses = new();
 
-    // The warnings the application reported active, by error code. Actor loop.
-    private readonly HashSet<ushort> _warnings = new();
+    // The warnings the application reported active, by error code, in the order they began. Actor
+    // loop.
+    private readonly List<ushort> _warnings = new();
+
+    // Whether a communication failure is active (OnCommunicationFailureChanged). Actor loop.
+    private bool _communicationFailure;
+
+    /// <summary>Whether a cause of a fault is active, for which the device refuses a fault reset: a
+    /// fault the application reported and has not cleared (<see cref="ReportFault"/>), or a
+    /// communication failure (<see cref="OnCommunicationFailureChanged"/>). NMT Stopped and Reset
+    /// Communication are none: they force the fault when they happen and do not last
+    /// (<see cref="OnNmtStateChanged"/>). Actor loop.</summary>
+    private bool HasActiveCause => _faultCauses.Count > 0 || _communicationFailure;
 
     /// <summary>Reports a fault the device detected (CiA 408 v2.2.0 §6.1): raises its EMCY, shows its
     /// code in <c>604Eh</c>, takes the state machine into the fault state
@@ -56,7 +68,9 @@ internal sealed partial class Cia408Device
     /// <b>The reset is refused while a cause is active.</b> The norm does not say whether a fault reset
     /// (D10, D11, D14; Table 7) may succeed while the fault it acknowledges persists. The device
     /// refuses it: the master's reset edge is taken as the previous control word (the edge is
-    /// consumed, see <see cref="ControlWord"/>) and the state stays. Once every cause is cleared, the
+    /// consumed, see <see cref="ControlWord"/>) and the state stays. The causes are the faults the
+    /// application reported and a communication failure while it lasts (see
+    /// <see cref="OnCommunicationFailureChanged"/>). Once every cause is cleared, the
     /// state still stays until the master makes a fresh edge — pattern with R = 0, then with R = 1.
     /// The fault states still fall by level meanwhile (D15, D16), which is no reset.
     /// </para>
@@ -98,17 +112,29 @@ internal sealed partial class Cia408Device
     /// <summary>Actor loop, in a callback of the device: see <see cref="ReportFault"/>.</summary>
     private void ApplyFault(ICanOpenApplicationHost host, ushort errorCode, Cia408FaultState reaction, byte errorRegisterBits)
     {
-        if (!_faultCauses.Add(errorCode)) return;
+        if (IndexOfCause(errorCode) >= 0) return;
 
-        host.RaiseError(errorCode, errorRegisterBits);
-        WriteOwn(host, _errorCode, Encode(errorCode, 2));
-        var before = _machine.State;
-        var taken = _machine.Fault(reaction);
-        Changed(before, taken);
+        var cause = new FaultCause(errorCode, reaction, errorRegisterBits);
+        _faultCauses.Add(cause);
+        EnterFault(host, cause);
         Publish(host, errorCodeChanged: true);
         _nmtRequestPending = true;
         FinishChanges(host);
     }
+
+    /// <summary>The EMCY of <paramref name="cause"/>, its code in <c>604Eh</c>, and the fault reaction
+    /// it asks for, queued as a change. Actor loop: <see cref="ApplyFault"/>, and Reset Node re-entering
+    /// a cause that persists (<see cref="OnReset"/>).</summary>
+    private void EnterFault(ICanOpenApplicationHost host, FaultCause cause)
+    {
+        host.RaiseError(cause.Code, cause.ErrorRegisterBits);
+        WriteOwn(host, _errorCode, Encode(cause.Code, 2));
+        var before = _machine.State;
+        var taken = _machine.Fault(cause.Reaction);
+        Changed(before, taken);
+    }
+
+    private int IndexOfCause(ushort errorCode) => _faultCauses.FindIndex(cause => cause.Code == errorCode);
 
     /// <summary>The cause <paramref name="errorCode"/> reported with <see cref="ReportFault"/> is gone:
     /// its error ends (<see cref="ICanOpenApplicationHost.ClearError"/>, an EMCY <c>0000h</c>). The
@@ -121,7 +147,10 @@ internal sealed partial class Cia408Device
         var host = RequireHost();
         host.Post(() =>
         {
-            if (_faultCauses.Remove(errorCode)) host.ClearError(errorCode);
+            int index = IndexOfCause(errorCode);
+            if (index < 0) return;
+            _faultCauses.RemoveAt(index);
+            host.ClearError(errorCode);
         });
     }
 
@@ -143,9 +172,11 @@ internal sealed partial class Cia408Device
     /// <para>
     /// <b>604Eh records what occurred last.</b> §9.3.8 says the object indicates the fault that
     /// occurred when the device enters a warning or fault state, and says nothing about the end of
-    /// one. The device writes the code when a warning begins or a fault is reported, and never clears
-    /// it: neither the end of a warning nor <see cref="ClearFaultCause"/> nor a reset of the fault
-    /// changes it, and with several causes it holds the latest.
+    /// one. The device writes the code when a warning begins or a fault is reported, and does not
+    /// clear it: neither the end of a warning nor <see cref="ClearFaultCause"/> nor a fault reset by the
+    /// master changes it, and with several causes it holds the latest. Reset Node gives the object
+    /// back as the device powers on (<see cref="OnReset"/>): the code of the last fault it re-enters,
+    /// else of the last warning still active, else 0.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>,
@@ -160,10 +191,36 @@ internal sealed partial class Cia408Device
         host.Post(() =>
         {
             bool began = false;
-            if (active) began = _warnings.Add(errorCode);
-            else _warnings.Remove(errorCode);
+            if (active && !_warnings.Contains(errorCode))
+            {
+                _warnings.Add(errorCode);
+                began = true;
+            }
+            else if (!active)
+            {
+                _warnings.Remove(errorCode);
+            }
+
             if (began) WriteOwn(host, _errorCode, Encode(errorCode, 2));
             Publish(host, errorCodeChanged: began);
         });
+    }
+
+    /// <summary>A fault the application reported: its code, the reaction it asked for, and its error
+    /// register bits.</summary>
+    private readonly struct FaultCause
+    {
+        internal FaultCause(ushort code, Cia408FaultState reaction, byte errorRegisterBits)
+        {
+            Code = code;
+            Reaction = reaction;
+            ErrorRegisterBits = errorRegisterBits;
+        }
+
+        internal ushort Code { get; }
+
+        internal Cia408FaultState Reaction { get; }
+
+        internal byte ErrorRegisterBits { get; }
     }
 }

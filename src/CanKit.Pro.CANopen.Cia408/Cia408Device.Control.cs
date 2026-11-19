@@ -108,7 +108,7 @@ internal sealed partial class Cia408Device
         // FAULT_HOLD, 1000b for FAULT_INIT), which meets no level row in that state (D15 needs x001b
         // in FAULT_HOLD, D16 x000b in FAULT_DISABLED, FAULT_INIT has none), so the machine would take
         // the reset and nothing else.
-        if (_faultCauses.Count > 0 && _machine.IsFaultReset(previous, word)) return;
+        if (HasActiveCause && _machine.IsFaultReset(previous, word)) return;
 
         var before = _machine.State;
         var taken = _machine.ApplyControlWord(previous, word);
