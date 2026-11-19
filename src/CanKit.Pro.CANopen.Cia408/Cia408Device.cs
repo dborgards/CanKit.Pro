@@ -195,6 +195,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
 
         _process = process;
         _interval = configuration.ProcessInterval;
+        // First: the records below are keyed by their index in this logical device (Shift).
+        _logicalDevice = configuration.LogicalDevice;
         foreach (var mode in configuration.DeviceModes) _deviceModes.Add((sbyte)mode);
         foreach (var mode in configuration.ControlModes)
         {
@@ -206,7 +208,6 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         _controlModeReadOnly = configuration.ControlModes.Count == 1;
         _deviceModeReadOnly = configuration.DeviceModes.Count == 1;
 
-        _logicalDevice = configuration.LogicalDevice;
         _deviceType = configuration.DeviceType;
         _defaultPdos = configuration.DefaultPdos;
         _requiredPdoCount = configuration.RequiredPdoCount;

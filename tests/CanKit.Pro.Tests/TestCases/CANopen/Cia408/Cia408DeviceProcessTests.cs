@@ -188,6 +188,52 @@ public class Cia408DeviceProcessTests
     // decision on Cia408Device; the norm defines no device-type bit for it, so no test can tell a
     // device that claims it from one that does not.
     [Fact]
+    public async Task A_Device_At_Logical_Device_1_Keeps_Its_Records_At_6B00h_And_Leaves_Logical_Device_0s_Alone()
+    {
+        // Logical device 1: every index 800h higher (CiA 301 v4.2.0 §7.4.1), 6300h at 6B00h, 6301h at 6B01h.
+        static Cia408Configuration Valve(int logicalDevice) => new()
+        {
+            Resolution = Cia408Resolution.Valve16,
+            ControlModes = new[] { Cia408ControlMode.SpoolPositionClosedLoop },
+            LogicalDevice = logicalDevice,
+            ProcessInterval = Interval,
+        };
+        var model = new RecordingModel();
+        long seen = 0;
+        model.OnStep = c =>
+        {
+            seen = c.Setpoint(Cia408Objects.QSetpoint);
+            c.SetActual(Cia408Objects.SpoolPositionActualValue, 55);
+        };
+        var ld0 = new Cia408Device(Valve(0));
+        var ld1 = new Cia408Device(Valve(1), model);
+        using var rig = new Cia408Rig(new[] { ld0, ld1 }, description: null);
+        var reports = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (reports) reports.Add(e); };
+        ld0.SetActualValue(Cia408Objects.SpoolPositionActualValue, 11);
+        rig.Settle();
+
+        await rig.WriteI16Async(0x6B00, 0x01, 1234);
+        rig.Advance(Interval);
+        rig.Settle();
+        seen.Should().Be(1234, "the model reads 6300h of its own logical device");
+        rig.Od.ReadSigned(0x6B01, 0x01).Should().Be(55, "and sets 6301h of it");
+
+        ld1.SetActualValue(Cia408Objects.SpoolPositionActualValue, 77);
+        rig.Settle();
+        rig.Od.ReadSigned(0x6B01, 0x01).Should().Be(77);
+        rig.Od.ReadSigned(0x6301, 0x01).Should().Be(11, "logical device 0's actual value is its own");
+
+        model.OnStep = null;
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        rig.Settle();
+        rig.Od.ReadSigned(0x6B01, 0x01).Should().Be(77, "Reset Node rewrites logical device 1's actual value at 6B01h");
+        rig.Od.ReadSigned(0x6301, 0x01).Should().Be(11, "and leaves logical device 0's alone");
+        await rig.FlushBackgroundReportsAsync();
+        lock (reports) reports.Select(r => r.Message).Should().BeEmpty("no write went to logical device 0's records");
+    }
+
+    [Fact]
     public void Both_Default_Pdos_Are_Set()
     {
         using var rig = new Cia408Rig(TwoModes);
