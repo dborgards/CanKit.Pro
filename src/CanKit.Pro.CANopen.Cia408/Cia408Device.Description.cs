@@ -213,9 +213,9 @@ internal sealed partial class Cia408Device
         {
             if (!Cia408Configuration.IsMappedIn16BitOnly(resolution, mode)) continue;
             throw OptionsError(string.Format(CultureInfo.InvariantCulture,
-                "The device description gives logical device {0} the control mode {1} with resolution {2}: the norm maps {1} " +
-                "in 16 bit only (CiA 408 §8.4 Table 13, §8.5 Table 32), and a valve mode runs in 32 bit on that resolution " +
-                "(Table 53, NOTE 2), so the device would have no setpoint or actual value for it.",
+                "The device description gives logical device {0} the control mode {1} with resolution {2}: the norm gives {1} " +
+                "its mappings and objects in 16 bit only (CiA 408 §8.4 Table 13, §8.5 Table 32, §9.16), and a valve mode runs in " +
+                "32 bit on that resolution (Table 53, NOTE 2).",
                 _logicalDevice, mode, resolution));
         }
 

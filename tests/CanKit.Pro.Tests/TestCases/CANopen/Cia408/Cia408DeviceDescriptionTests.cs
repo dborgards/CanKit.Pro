@@ -223,6 +223,27 @@ public class Cia408DeviceDescriptionTests
     }
 
     [Fact]
+    public void A_32_Bit_Device_Type_With_PFlow_Opens()
+    {
+        // dtprs 10b with bit 27, pFlow: 6708h and 6709h (§9.21.5, §9.21.6) and what Table 31 maps
+        // behind 6045h, 6701h and 6381h, with the pressure setpoint 6380h.
+        static string Record(ushort index, string type, string access)
+            => string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[{0:X4}]\nParameterName=R{0:X4}\nSubNumber=4\nObjectType=0x9\n\n"
+                + "[{0:X4}sub0]\nParameterName=Highest sub-index supported\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=3\nPDOMapping=0\n\n"
+                + "[{0:X4}sub1]\nParameterName=Value\nObjectType=0x7\nDataType={1}\nAccessType={2}\nDefaultValue=0\nPDOMapping=1\n\n"
+                + "[{0:X4}sub2]\nParameterName=Unit\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue=169\nPDOMapping=0\n\n"
+                + "[{0:X4}sub3]\nParameterName=Prefix\nObjectType=0x7\nDataType=0x0002\nAccessType=ro\nDefaultValue=-3\nPDOMapping=0\n\n",
+                index, type, access);
+
+        using var rig = Open(Fixture.Set("1000", "DefaultValue", "0x48000198").Set("6043", "DefaultValue", "14")
+            .Add(Record(0x6708, "0x0004", "rw") + Record(0x6709, "0x0004", "ro") + Record(0x6701, "0x0003", "ro")));
+
+        rig.Device.State.Should().Be(Cia408State.Init);
+        rig.Od.ReadUnsigned(0x1000, 0).Should().Be(0x4800_0198u);
+    }
+
+    [Fact]
     public void A_32_Bit_Device_Type_With_Pq_Fails_The_Open()
     {
         // dtprs 10b (§8.6.2, Table 53) with pQ, bit 25: the norm maps pQ in 16 bit only (Tables 13 and
@@ -404,7 +425,7 @@ public class Cia408DeviceDescriptionTests
             .Set("1000", "DefaultValue", "0xFFFF0198")
             .Set("6043", "AccessType", "rw")
             .Add("[6FFF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x22000198\nPDOMapping=0\n");
-        foreach (ushort index in new ushort[] { 0x6040, 0x6041, 0x6042, 0x6043, 0x6044, 0x6045, 0x604E, 0x604F, 0x6300, 0x6301, 0x6380, 0x6381 })
+        foreach (ushort index in new ushort[] { 0x6040, 0x6041, 0x6042, 0x6043, 0x6044, 0x6045, 0x604E, 0x604F, 0x6300, 0x6301, 0x6380, 0x6381, 0x640E })
             eds.Move(index, (ushort)(index + 0x800));
         var configured = new Cia408Device(new Cia408Configuration
         {

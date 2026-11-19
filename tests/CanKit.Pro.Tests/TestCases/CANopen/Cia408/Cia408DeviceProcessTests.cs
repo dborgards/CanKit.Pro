@@ -83,6 +83,103 @@ public class Cia408DeviceProcessTests
         rig.Od.ReadRaw(0x6701, 2).Should().Equal(new byte[] { 0xA9 });
     }
 
+    /// <summary>Every control mode of Table 82 at both widths: the setpoint and actual value records
+    /// the device declares — those the mapping tables name (§8.4 Table 13, §8.5 Table 32, §8.4.10 Table
+    /// 31) and those the object definitions make mandatory with the mode at that width (§9) — or the
+    /// refusal. Written out per cell; "-" for none.</summary>
+    [Theory]
+    [InlineData(1, false, "6300", "-")]
+    [InlineData(1, true, "6308", "-")]
+    [InlineData(2, false, "6300", "6301")]
+    [InlineData(2, true, "6308", "6309")]
+    [InlineData(3, false, "6380", "-")]
+    [InlineData(3, true, "6388", "6389")]              // §9.12.6: 6389h mandatory for 32 bit and mode 3 or 4
+    [InlineData(4, false, "6380", "6381")]
+    [InlineData(4, true, "6388", "6389")]
+    [InlineData(5, false, "6300 6380", "6301 6381 640E")] // §9.16.3: 640Eh mandatory for 16 bit and mode 5
+    [InlineData(5, true, "refused", "refused")]         // no 32-bit object for pQ
+    [InlineData(6, false, "refused", "refused")]        // drives have no 16-bit width
+    [InlineData(6, true, "6480", "-")]
+    [InlineData(7, false, "refused", "refused")]
+    [InlineData(7, true, "6500", "6501")]
+    [InlineData(8, false, "refused", "refused")]
+    [InlineData(8, true, "6580", "6581")]
+    [InlineData(9, false, "refused", "refused")]
+    [InlineData(9, true, "6600", "6601")]
+    [InlineData(10, false, "refused", "refused")]
+    [InlineData(10, true, "6600", "6601")]
+    [InlineData(11, false, "refused", "refused")]
+    [InlineData(11, true, "-", "-")]                    // no object of §9 is mandatory with mode 11
+    [InlineData(12, false, "refused", "refused")]
+    [InlineData(12, true, "-", "-")]                    // nor with mode 12
+    [InlineData(13, false, "6700", "6701")]
+    [InlineData(13, true, "6708", "6709")]
+    [InlineData(14, false, "6380 6700", "6381 6701")]
+    [InlineData(14, true, "6380 6708", "6381 6701 6709")] // §9.21.5/6 and Table 31's 16-bit 6701h and 6381h
+    [InlineData(15, false, "6700 6780", "6701 6781")]   // §9.21.2/3 and §9.31.2/3
+    [InlineData(15, true, "6708 6780", "6709 6781")]
+    public void Each_Control_Mode_Declares_The_Records_The_Norm_Gives_It(int mode, bool wide, string setpoints, string actuals)
+    {
+        var configuration = new Cia408Configuration
+        {
+            Resolution = wide ? Cia408Resolution.Valve32Drive32 : Cia408Resolution.Valve16,
+            ControlModes = new[] { (Cia408ControlMode)mode },
+        };
+        if (setpoints == "refused")
+        {
+            ((Action)(() => configuration.Validate())).Should().Throw<ArgumentException>();
+            return;
+        }
+
+        using var rig = new Cia408Rig(configuration);
+
+        Records(rig, OdAccess.ReadWrite).Should().Be(setpoints, "the setpoints");
+        Records(rig, OdAccess.ReadOnly).Should().Be(actuals, "the actual values");
+    }
+
+    /// <summary>The value records (sub-index 01h, §8.7.1) the device declares in 6100h to 67FFh with
+    /// <paramref name="access"/>, as hexadecimal indices; "-" for none.</summary>
+    private static string Records(Cia408Rig rig, OdAccess access)
+    {
+        var indices = rig.Od.SnapshotKeys()
+            .Where(key => (key & 0xFF) == 0x01 && key >> 8 is >= 0x6100 and <= 0x67FF)
+            .Where(key => rig.Od.TryGet((ushort)(key >> 8), 0x01, out var entry) && entry.Access == access)
+            .Select(key => (key >> 8).ToString("X4", System.Globalization.CultureInfo.InvariantCulture))
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ToList();
+        return indices.Count == 0 ? "-" : string.Join(" ", indices);
+    }
+
+    [Fact]
+    public async Task A_32_Bit_PFlow_Valve_Maps_Table_31_And_Its_Model_Sees_The_32_Bit_Flow_Setpoint()
+    {
+        var model = new FlowProbe();
+        using var rig = new Cia408Rig(new Cia408Device(new Cia408Configuration
+        {
+            Resolution = Cia408Resolution.Valve32Drive32,
+            ControlModes = new[] { Cia408ControlMode.PFlowControl },
+            ProcessInterval = Interval,
+        }, model));
+
+        rig.Od.ReadRaw(0x1A01, 0).Should().Equal(new byte[] { 0x03 });
+        rig.Od.ReadUnsigned(0x1A01, 1).Should().Be(0x6045_0020u, "Table 31: 6045h in case of 32-bit");
+        rig.Od.ReadUnsigned(0x1A01, 2).Should().Be(0x6701_0110u);
+        rig.Od.ReadUnsigned(0x1A01, 3).Should().Be(0x6381_0110u);
+        rig.Od.ReadRaw(0x1601, 0).Should().Equal(new byte[] { 0x00 }, "Table 32 has no 32-bit row for pFlow");
+
+        await rig.WriteI32Async(0x6708, 0x01, 123456);
+        rig.Advance(Interval);
+
+        model.Flow.Should().Be(123456);
+    }
+
+    private sealed class FlowProbe : ICia408Process
+    {
+        internal long Flow { get; private set; }
+
+        public void Step(Cia408ProcessContext context) => Flow = context.Setpoint(Cia408Objects.VflcSetpoint32);
+    }
+
     // The NMT role (an NMT slave, no virtual device application manager of §8.2) is a documented
     // decision on Cia408Device; the norm defines no device-type bit for it, so no test can tell a
     // device that claims it from one that does not.

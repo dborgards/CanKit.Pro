@@ -170,8 +170,8 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// Table 53), ascending; bits 23 and 24 each give two modes, and the drive bits of a 16-bit device
     /// type none (<see cref="Cia408Configuration.ControlModesOf"/>). What the device runs now is
     /// <c>6043h</c> (<see cref="ReadControlModeAsync"/>). The modes are reported as the type
-    /// announces them, also pQ or pFlow on a 32-bit valve, which the norm maps in 16 bit only and a
-    /// device of this package refuses (<see cref="Cia408Configuration.IsMappedIn16BitOnly"/>).</summary>
+    /// announces them, also pQ on a 32-bit valve, which the norm gives no 32-bit form and a device of
+    /// this package refuses (<see cref="Cia408Configuration.IsMappedIn16BitOnly"/>).</summary>
     public IReadOnlyList<Cia408ControlMode> SupportedControlModes { get; }
 
     /// <summary>The resolution field dtprs of the device type (Table 53), or <see langword="null"/>

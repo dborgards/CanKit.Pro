@@ -312,8 +312,9 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// </para>
     /// <para>
     /// The records (§8.7.1): for each supported control mode the setpoints and actual values that
-    /// Table 32 and Table 13 map for it, in the width the device uses for the mode
-    /// (<see cref="Cia408Configuration.SetpointsOf"/>, <see cref="Cia408Configuration.ActualValuesOf"/>).
+    /// Tables 32, 13 and 31 map for it and that the object definitions of §9 make mandatory with it, in
+    /// the width the device uses for the mode (<see cref="Cia408Configuration.SetpointsOf"/>,
+    /// <see cref="Cia408Configuration.ActualValuesOf"/>).
     /// Sub-index 00h is the constant 03h; 01h the value with the catalogue's type, access, PDO
     /// mappability and default (0 where it gives none); 02h the unit and 03h the prefix, read-only,
     /// since the device does not let them be configured over the bus (§8.3), with the catalogue's

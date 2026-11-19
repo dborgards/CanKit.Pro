@@ -103,7 +103,7 @@ DefaultValue=0
 PDOMapping=0
 
 [OptionalObjects]
-SupportedObjects=21
+SupportedObjects=22
 1=0x1029
 2=0x1400
 3=0x1401
@@ -125,6 +125,7 @@ SupportedObjects=21
 19=0x6301
 20=0x6380
 21=0x6381
+22=0x640E
 
 [1029]
 ParameterName=Error behavior
@@ -864,6 +865,43 @@ DefaultValue=0
 PDOMapping=0
 
 [6381sub3]
+ParameterName=Prefix
+ObjectType=0x7
+DataType=0x0002
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[640E]
+ParameterName=vpqc hydrostatic actual power
+SubNumber=4
+ObjectType=0x9
+
+[640Esub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=3
+PDOMapping=0
+
+[640Esub1]
+ParameterName=Value
+ObjectType=0x7
+DataType=0x0003
+AccessType=ro
+DefaultValue=0
+PDOMapping=1
+
+[640Esub2]
+ParameterName=Unit
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[640Esub3]
 ParameterName=Prefix
 ObjectType=0x7
 DataType=0x0002

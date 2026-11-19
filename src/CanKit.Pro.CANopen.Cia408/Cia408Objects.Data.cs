@@ -312,7 +312,7 @@ internal static partial class Cia408Objects
 
             // ---- §9.16 pQ control (vpqc): process values ----
             Var(0x640D, "vpqc power limit factor", "9.16.2", ValvePower, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("16-bit parameters and control mode is 5"), V(65537)),
-            Rec(0x640E, "vpqc hydrostatic actual power", "9.16.3", ValvePower, Integer16, Acc.Ro, Pdo.T, If("16-bit parameters and control mode is 5"), V(0), Ir, P(0)),
+            VpqcHydrostaticActualPower = Rec(0x640E, "vpqc hydrostatic actual power", "9.16.3", ValvePower, Integer16, Acc.Ro, Pdo.T, If("16-bit parameters and control mode is 5"), V(0), Ir, P(0)),
 
             // ---- §9.20 vpqc target window monitoring ----
             Var(0x6470, "vpqc target window monitoring type", "9.20.2", ValvePower, Integer8, Acc.Rw, Pdo.TrROrNo, If("target window monitoring is implemented"), V(0)),
@@ -383,8 +383,8 @@ internal static partial class Cia408Objects
             Rec(0x677A, "vflc target window monitoring lower threshold 32-bit", "9.25.10", ValveFlow, Integer32, Acc.Rw, Pdo.TrROrNo, If("target window monitoring type is 1"), Ds, Cms, Cms), // sub-index 00h default "No"
 
             // ---- §9.31 pFlow control with power limitation (vpflcpl) ----
-            Rec(0x6780, "vpflcpl power limit", "9.31.2", ValveFlow, Integer32, Acc.Rw, Pdo.TrROrNo, If("control mode 15 is supported"), V(0), U(0x24), P(-3)),
-            Rec(0x6781, "vpflcpl power actual value", "9.31.3", ValveFlow, Integer32, Acc.Ro, Pdo.T, If("control mode 15 is supported"), No, U(0x24), P(-3)),
+            VpflcplPowerLimit = Rec(0x6780, "vpflcpl power limit", "9.31.2", ValveFlow, Integer32, Acc.Rw, Pdo.TrROrNo, If("control mode 15 is supported"), V(0), U(0x24), P(-3)),
+            VpflcplPowerActualValue = Rec(0x6781, "vpflcpl power actual value", "9.31.3", ValveFlow, Integer32, Acc.Ro, Pdo.T, If("control mode 15 is supported"), No, U(0x24), P(-3)),
 
             // ---- §9.32 Open loop movement control (dcol): process values ----
             DcolSetpoint = Rec(0x6480, "dcol setpoint", "9.32.2", DriveOpenLoop, Integer32, Acc.Rw, Pdo.TrROrNo, If("control mode 6 is supported"), V(0), U(0xA1), P(-3)),
