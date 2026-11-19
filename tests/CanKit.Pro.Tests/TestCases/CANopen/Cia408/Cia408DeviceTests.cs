@@ -48,7 +48,7 @@ public class Cia408DeviceTests
         Entry(rig, ControlWord16).Should().Be((OdDataType.Unsigned16, OdAccess.ReadWrite, true));
         Entry(rig, StatusWord16).Should().Be((OdDataType.Unsigned16, OdAccess.ReadOnly, true));
         Entry(rig, DeviceMode).Should().Be((OdDataType.Integer8, OdAccess.ReadWrite, true));
-        Entry(rig, ControlMode).Should().Be((OdDataType.Integer8, OdAccess.ReadWrite, true));
+        Entry(rig, ControlMode).Should().Be((OdDataType.Integer8, OdAccess.ReadOnly, true), "§9.3.5: one control mode");
         Entry(rig, ControlWord32).Should().Be((OdDataType.Unsigned32, OdAccess.ReadWrite, true));
         Entry(rig, StatusWord32).Should().Be((OdDataType.Unsigned32, OdAccess.ReadOnly, true));
         Entry(rig, ErrorCode).Should().Be((OdDataType.Unsigned16, OdAccess.ReadOnly, true));
@@ -118,10 +118,18 @@ public class Cia408DeviceTests
         await rig.DrainAsync();
 
         rig.Device.State.Should().Be(Cia408State.Active);
-        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Should().ContainSingle()
-            .Which.Should().Equal(new byte[] { 0x0F, 0x00 }, "ACTIVE is RMHD 1111b (Table 4), and one change is one TPDO");
+        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Select(p => BitConverter.ToString(p)).Should().Equal(
+            new[] { "0F-00", "0F-00" },
+            "ACTIVE is RMHD 1111b (Table 4): the change sends one TPDO and the RPDO's answer (§8.4.1) another");
         Describe(rig.Changes.Last()).Should().Be("Init->Active [2,3,4]");
         rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_000Fu);
+
+        int afterRpdo = rig.Count(CanOpenProfileRig.Tpdo1);
+        await rig.WriteU16Async(ControlWord16, 0, 0x0003);
+        rig.Settle();
+        await rig.DrainAsync();
+        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(afterRpdo).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x0B, 0x00 }, "a change over SDO is one TPDO: HOLD (D5)");
     }
 
     [Fact]
@@ -686,17 +694,6 @@ public class Cia408DeviceTests
         rig.Device.State.Should().Be(Cia408State.Init, "0000b in INIT moves nothing");
         rig.Od.ReadUnsigned(StatusWord16, 0).Should().Be(0x0008u, "compared with the dictionary, not with what was written last");
         rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_0008u);
-    }
-
-    [Fact]
-    public void Only_Pdo_1_Has_A_Default_Pdo_2_Waits_For_The_Setpoint_Objects()
-    {
-        using var rig = new Cia408Rig(Cia408Rig.Valve);
-
-        rig.Od.ReadRaw(0x1600, 0).Should().Equal(new byte[] { 0x01 }, "RPDO 1 maps the control word");
-        rig.Od.ReadRaw(0x1A00, 0).Should().Equal(new byte[] { 0x01 }, "TPDO 1 maps the status word");
-        rig.Od.ReadRaw(0x1601, 0).Should().Equal(new byte[] { 0x00 }, "RPDO 2 maps a setpoint not declared yet");
-        rig.Od.ReadRaw(0x1A01, 0).Should().Equal(new byte[] { 0x00 }, "TPDO 2 maps an actual value not declared yet");
     }
 
     // ---- helpers --------------------------------------------------------------------------------

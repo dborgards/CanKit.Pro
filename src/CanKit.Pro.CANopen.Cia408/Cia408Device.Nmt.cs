@@ -76,7 +76,9 @@ internal sealed partial class Cia408Device
     /// written again from it, so a stored value never shows: both control words 0, as at power on,
     /// and the history of the control word starts afresh (<see cref="ControlWord"/>); <c>604Eh</c> the
     /// code of the last fault entered again, else of the last warning still active, else 0; the status
-    /// words composed from the state (<see cref="ComposeStatus"/>).
+    /// words composed from the state (<see cref="ComposeStatus"/>); the actual values from what the
+    /// device holds, the values the model or the application set last. The setpoints are parameters
+    /// and keep what the node restored, a default or a stored value.
     /// </para>
     /// <para>
     /// <b>Faults that persist.</b> The node has ended every error of the application, without an EMCY
@@ -142,6 +144,7 @@ internal sealed partial class Cia408Device
         ushort errorCode = _warnings.Count > 0 ? _warnings[_warnings.Count - 1] : (ushort)0;
         WriteOwn(host, _errorCode, Encode(errorCode, 2));
 
+        RewriteActualValues(host);
         foreach (var cause in _faultCauses) EnterFault(host, cause);
         _requestOnBoot = _faultCauses.Count > 0;
 

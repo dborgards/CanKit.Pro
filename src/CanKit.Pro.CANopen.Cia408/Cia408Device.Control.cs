@@ -121,25 +121,29 @@ internal sealed partial class Cia408Device
     /// The status word as the device's state makes it, the same value for <c>6041h</c> and, widened,
     /// <c>6045h</c>: bits 3..0 (R M H D) the state (§7.6, Table 4;
     /// <see cref="Cia408StateMachine.StatusBits"/>), bit 4 the source of the control word
-    /// (<c>604Fh</c>, as followed in commit order), bit 5 whether a warning is active (<see cref="SetWarning"/>). The other bits are
-    /// the process model's and are clear in this slice (<see cref="Cia408StatusWord"/>).
+    /// (<c>604Fh</c>, as followed in commit order), bit 5 whether a warning is active
+    /// (<see cref="SetWarning"/>), bits 7 to 23 as the process model set them
+    /// (<see cref="Cia408ProcessContext.SetStatusBit"/>; <see cref="Cia408StatusWord"/>). The 16-bit
+    /// word carries bits 0 to 15.
     /// </summary>
     /// <remarks>Composed from the device's state, never read back from the dictionary: the status
     /// words are read-only on the bus, and the device is their only writer.</remarks>
     private uint ComposeStatus()
         => Cia408StateMachine.StatusBits(_machine.State)
             | (_localSource ? Cia408StatusWord.Local : 0u)
-            | (_warnings.Count > 0 ? Cia408StatusWord.Warning : 0u);
+            | (_warnings.Count > 0 ? Cia408StatusWord.Warning : 0u)
+            | _processStatusBits;
 
     /// <summary>Rewrites each status word whose value in the dictionary differs from the composed
     /// one (<see cref="ComposeStatus"/>), and asks for one transmission of what changed: both status
-    /// words when either was rewritten, and <c>604Eh</c> when <paramref name="errorCodeChanged"/>. The
+    /// words when either was rewritten, <c>604Eh</c> when <paramref name="errorCodeChanged"/>, and
+    /// <paramref name="more"/>, the actual values a step or the application set. The
     /// node sends each TPDO that maps one of them once
     /// (<see cref="ICanOpenApplicationHost.RequestTransmission"/>), in Operational only. Actor
     /// loop.</summary>
     /// <remarks>Compared with the dictionary, not with what the device wrote last, so a value the
     /// node restored there (Reset Node, a stored value) is replaced however the state moved.</remarks>
-    private void Publish(ICanOpenApplicationHost host, bool errorCodeChanged)
+    private void Publish(ICanOpenApplicationHost host, bool errorCodeChanged, IReadOnlyList<CanOpenObjectAddress>? more = null)
     {
         var status = ComposeStatus();
         var od = host.ObjectDictionary;
@@ -147,9 +151,9 @@ internal sealed partial class Cia408Device
         var status32 = Encode(status, 4);
         bool changed16 = !Equal(od.ReadRaw(_statusWord16, 0x00), status16);
         bool changed32 = !Equal(od.ReadRaw(_statusWord32, 0x00), status32);
-        if (!changed16 && !changed32 && !errorCodeChanged) return;
+        if (!changed16 && !changed32 && !errorCodeChanged && (more is null || more.Count == 0)) return;
 
-        var send = new List<CanOpenObjectAddress>(3);
+        var send = new List<CanOpenObjectAddress>(3 + (more?.Count ?? 0));
         if (changed16 || changed32)
         {
             if (changed16) WriteOwn(host, _statusWord16, status16);
@@ -159,6 +163,7 @@ internal sealed partial class Cia408Device
         }
 
         if (errorCodeChanged) send.Add(new CanOpenObjectAddress(_errorCode, 0x00));
+        if (more is not null) send.AddRange(more);
         host.RequestTransmission(send);
     }
 

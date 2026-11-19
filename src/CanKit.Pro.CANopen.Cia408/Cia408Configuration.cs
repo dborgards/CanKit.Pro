@@ -173,12 +173,22 @@ internal sealed class Cia408Configuration
     /// §7.4.1).</summary>
     public int LogicalDevice { get; init; }
 
+    /// <summary>The default of <see cref="ProcessInterval"/>: 10 ms.</summary>
+    public static TimeSpan DefaultProcessInterval { get; } = TimeSpan.FromMilliseconds(10);
+
+    /// <summary>How often the device steps its process model (<see cref="ICia408Process"/>) on the
+    /// node's clock; positive. <see cref="DefaultProcessInterval"/> unless set. The norm gives no
+    /// cycle time; the value is the application's, and 10 ms is a choice that keeps a simulated
+    /// valve responsive without loading the node's actor loop.</summary>
+    public TimeSpan ProcessInterval { get; init; } = DefaultProcessInterval;
+
     /// <summary>Checks that the configuration describes a device the norm allows.</summary>
     /// <exception cref="ArgumentNullException"><see cref="ControlModes"/> or
     /// <see cref="DeviceModes"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The resolution is not one of Table 53, a control
     /// mode is not one of Table 82, a device mode is not one of Table 79, or the logical device lies
-    /// outside <c>0</c> to <c>7</c>. The parameter name is that of the property.</exception>
+    /// outside <c>0</c> to <c>7</c>, or <see cref="ProcessInterval"/> is not positive. The parameter
+    /// name is that of the property.</exception>
     /// <exception cref="ArgumentException">There is no control mode or no device mode, a mode appears
     /// twice, a drive control mode is given with <see cref="Cia408Resolution.Valve16"/>, whose
     /// dtprs code 01b says the device supports no drive (Table 53), or a device mode of 3 to 6 is
@@ -195,6 +205,12 @@ internal sealed class Cia408Configuration
         {
             throw new ArgumentOutOfRangeException(nameof(LogicalDevice), LogicalDevice,
                 $"LogicalDevice is {LogicalDevice}: it lies in 0 to {CanOpenLogicalDeviceAddressing.MaxLogicalDevices - 1}.");
+        }
+
+        if (ProcessInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ProcessInterval), ProcessInterval,
+                $"ProcessInterval is {ProcessInterval}: the process model steps at a positive interval.");
         }
 
         if (ControlModes is null)
@@ -362,7 +378,7 @@ internal sealed class Cia408Configuration
         {
             Validate();
             var mode = ControlModes[0];
-            var wide = !(IsValveMode(mode) && Resolution is Cia408Resolution.Valve16 or Cia408Resolution.Valve16Drive32);
+            var wide = IsWide(mode);
             var controlWord = wide ? Cia408Objects.DeviceControlWord32 : Cia408Objects.DeviceControlWord16;
             var statusWord = wide ? Cia408Objects.DeviceStatusWord32 : Cia408Objects.DeviceStatusWord16;
 
@@ -402,6 +418,24 @@ internal sealed class Cia408Configuration
             return highest;
         }
     }
+
+    /// <summary>The setpoint records that follow the control word in the RPDO mapping of
+    /// <paramref name="mode"/> (Table 32), in the width the device uses for that mode (see
+    /// <see cref="DefaultPdos"/>); empty where the table has no row for it. What the device declares
+    /// as the setpoints of a supported control mode.</summary>
+    internal IReadOnlyList<Cia408ObjectDefinition> SetpointsOf(Cia408ControlMode mode)
+        => RpdoValues(mode, IsWide(mode)) ?? Array.Empty<Cia408ObjectDefinition>();
+
+    /// <summary>The actual value records that follow the status word in the TPDO mapping of
+    /// <paramref name="mode"/> (Table 13), in the width the device uses for that mode; empty where the
+    /// table has no row for it.</summary>
+    internal IReadOnlyList<Cia408ObjectDefinition> ActualValuesOf(Cia408ControlMode mode)
+        => TpdoValues(mode, IsWide(mode)) ?? Array.Empty<Cia408ObjectDefinition>();
+
+    /// <summary>Whether <paramref name="mode"/> runs in 32 bit (Table 53, NOTE 2): every drive mode,
+    /// and a valve mode on <see cref="Cia408Resolution.Valve32Drive32"/>.</summary>
+    private bool IsWide(Cia408ControlMode mode)
+        => !(IsValveMode(mode) && Resolution is Cia408Resolution.Valve16 or Cia408Resolution.Valve16Drive32);
 
     /// <summary>Whether <paramref name="mode"/> is a drive mode, 6 to 12 of Table 82; the others are
     /// valve (or pump) modes.</summary>
