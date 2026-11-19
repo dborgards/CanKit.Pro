@@ -34,10 +34,10 @@ internal sealed partial class CanOpenNode
     // _applicationEvaluationPosted. Each carries the restore generation it was committed in.
     private List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)>? _queuedCommands;
 
-    // Counts the restores of an NMT reset (EndCommandWritesBeforeRestore). Changed under the
+    // Counts the restores of Reset Node (EndCommandWritesBeforeRestore). Changed under the
     // dictionary's write gate, on the actor loop; read under the gate where a write is queued and on
     // the actor loop where the queue is delivered. A queued write of an earlier generation was
-    // committed before the reset restored the dictionary and is not delivered.
+    // committed before a Reset Node restored the dictionary and is not delivered.
     private int _commandWriteGeneration;
 
     // The command write that passed its validation and is about to be stored, as its CosKey; null for
@@ -110,7 +110,7 @@ internal sealed partial class CanOpenNode
     /// Tells the command writes queued since the last round, in commit order, each through the
     /// dispatcher: one that throws is reported, and the next is still told. Actor loop, at the head
     /// of the application round. Returns <see langword="false"/> when a callback disposed the node,
-    /// which ends the round. A write committed before an NMT reset restored the dictionary is passed
+    /// which ends the round. A write committed before a Reset Node restored the dictionary is passed
     /// over (<see cref="EndCommandWritesBeforeRestore"/>).
     /// </summary>
     private bool DeliverCommandWrites(List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)> commands)
@@ -125,28 +125,35 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// An NMT reset restores the dictionary: every command write committed before this belongs to the
-    /// device the reset ended. <see cref="DropQueuedCommandWritesForReset"/> dropped what was queued
-    /// when the reset began, but a write can still be committed between that and the restore — by
-    /// another thread, or by another application's callback while the applications are told of the
-    /// reset — and the restore may overwrite its value. So the generation moves here, inside the
-    /// restore's hold of the write gate, and such a write, queued with the old one, is not delivered.
-    /// Actor loop, under the write gate. Nothing on a node without applications.
+    /// Reset Node restores the application's objects, command entries included: every command write
+    /// committed before this belongs to the device the reset ended, and its value is overwritten.
+    /// <see cref="DropQueuedCommandWritesForReset"/> dropped what was queued when the reset began, but
+    /// a write can still be committed between that and the restore — by another thread, or by another
+    /// application's callback while the applications are told of the reset. So the generation moves
+    /// here, inside the restore's hold of the write gate, and such a write, queued with the old one,
+    /// is not delivered. Not for Reset Communication (<paramref name="communicationOnly"/>), which
+    /// restores <c>1000h</c> to <c>1FFFh</c> only: a command entry, claimed from <c>2000h</c> up, keeps
+    /// the value written, so the application is told of it. Actor loop, under the write gate. Nothing
+    /// on a node without applications.
     /// </summary>
-    private void EndCommandWritesBeforeRestore()
+    private void EndCommandWritesBeforeRestore(bool communicationOnly)
     {
-        if (_applications.Length == 0) return;
+        if (_applications.Length == 0 || communicationOnly) return;
         _commandWriteGeneration++;
     }
 
-    /// <summary>An NMT reset drops the command writes and the RPDO receptions still queued, before the
-    /// applications are told of the reset. Actor loop. Nothing on a node without applications.</summary>
-    private void DropQueuedCommandWritesForReset()
+    /// <summary>An NMT reset drops the RPDO receptions still queued, and Reset Node the command writes
+    /// too, before the applications are told of the reset. Reset Communication keeps the command
+    /// writes: it leaves the application's objects as they are, so each written value is still the
+    /// entry's or was overwritten by a later write that is queued behind it, and the application is
+    /// told of them after the reset (<see cref="EndCommandWritesBeforeRestore"/>). Actor loop. Nothing
+    /// on a node without applications.</summary>
+    private void DropQueuedCommandWritesForReset(bool communicationOnly)
     {
         if (_applications.Length == 0) return;
         lock (_applicationGate)
         {
-            _queuedCommands = null;
+            if (!communicationOnly) _queuedCommands = null;
             _queuedReceptions = null;
         }
     }

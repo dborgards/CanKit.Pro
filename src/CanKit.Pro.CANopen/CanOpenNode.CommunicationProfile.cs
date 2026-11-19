@@ -943,9 +943,10 @@ internal sealed partial class CanOpenNode
             OnLeaveOperational();
             LeaveSrdoOperational();
         }
-        // What an application has not been told yet belongs to the device the reset ends; dropped
-        // before the applications hear of the reset.
-        DropQueuedCommandWritesForReset();
+        // What an application has not been told of the device the reset ends is dropped before the
+        // applications hear of the reset; Reset Communication keeps the command writes, whose
+        // values it does not restore.
+        DropQueuedCommandWritesForReset(communicationOnly);
         _state = NmtState.Initializing;
         NotifyNmtStateChanged(stateBeforeReset);
         // An application may have disposed the node from that notification: the drain, the restore
@@ -1133,9 +1134,9 @@ internal sealed partial class CanOpenNode
                 {
                     _restoringValues = false;
                 }
-                // Still under the gate: a command write committed before this point is of the
-                // device the reset ended, one committed after it is told.
-                EndCommandWritesBeforeRestore();
+                // Still under the gate: under Reset Node a command write committed before this point
+                // is of the device the reset ended, one committed after it is told.
+                EndCommandWritesBeforeRestore(communicationOnly);
                 // CiA 319 v2.0.0 §5.4: what came back from the store is checked before the node
                 // announces itself — the CRC of every existing SRDO against the 13FFh stored with
                 // it; a mismatch sets 13FEh to 00h (#308). After the flag: this is the device's

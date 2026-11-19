@@ -23,8 +23,7 @@ public partial class CanOpenApplicationSeamTests
     private static readonly CanOpenObjectAddress ControlWord = new(0x6040, 0x00);
 
     /// <summary>The queue bound the node documents (<see cref="ICanOpenApplication.OnCommandWritten"/>),
-    /// stated once, by the node. The values the bound tests write stay below 0100h, which
-    /// <see cref="A_Refused_Write_Takes_No_Room_In_The_Queue"/> relies on.</summary>
+    /// stated once, by the node.</summary>
     private const int CommandQueueBound = CanOpenNode.CommandQueueCapacity;
 
     /// <summary>The claimant of <c>6000h</c>-<c>67FFh</c> with one command entry, <c>6040h:00</c> at
@@ -404,6 +403,9 @@ public partial class CanOpenApplicationSeamTests
                 default: return OdWriteDecision.Accept;
             }
         };
+        // The filler writes 0 to bound − 2 go through the validator's default branch: their high byte,
+        // value[1], must not be one of the markers above.
+        ((CommandQueueBound - 2) >> 8).Should().BeLessThan(0xAA, "the filler values must not carry a marker in their high byte");
         using var rig = new EntryRig(With(app));
         var failures = new List<Exception?>();
 
@@ -428,6 +430,36 @@ public partial class CanOpenApplicationSeamTests
         CommandCalls(app).Should().Equal(
             Enumerable.Range(0, CommandQueueBound - 1).Select(i => Command((ushort)i)).Append(Command(0x0100)),
             "no refused write is delivered, and none took a place in the queue");
+    }
+
+    [Fact]
+    public void A_Command_Entry_Gone_When_Its_Write_Is_Reported_Is_Told_As_Written_Not_As_A_Command()
+    {
+        // The entry disappears between the store and the node's report of it: a subscriber to the
+        // dictionary's EntryWritten that was added in Attach runs before the node's own, and
+        // ObjectDictionary.Remove does not take the write gate. The write has no value left to tell.
+        var app = Commands();
+        bool armed = false;
+        var declare = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            declare(host);
+            host.ObjectDictionary.EntryWritten += (index, subindex) =>
+            {
+                if (!armed || index != 0x6040) return;
+                armed = false;
+                host.ObjectDictionary.Remove(index, subindex);
+            };
+        };
+        using var rig = new EntryRig(With(app));
+
+        armed = true;
+        rig.Od.WriteUnsigned(0x6040, 0x00, 0x0009);
+        Settle(rig.Node);
+
+        rig.Od.ContainsIndex(0x6040).Should().BeFalse("the subscriber removed the entry");
+        CommandCalls(app).Should().BeEmpty("there is no committed value left to deliver");
+        Written(app).Should().Equal("written 6040:00");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -488,6 +520,62 @@ public partial class CanOpenApplicationSeamTests
         rig.Od.ReadUnsigned(0x6040, 0x00).Should().Be(0x0002u);
         CommandCalls(app).Should().Equal(new[] { Command(0x0002) },
             "the write committed before the restore belongs to the device the reset ended; the one after it is told");
+    }
+
+    [Fact]
+    public async Task A_Command_Write_Committed_During_A_Reset_Communication_Is_Delivered()
+    {
+        // The window of the Reset Node test above, under Reset Communication: that reset restores
+        // 1000h to 1FFFh only, so the command entry keeps the value written in the window, and the
+        // application is told of it, after the reset.
+        var app = Commands();
+        var other = new RecordingApplication("other", new CanOpenIndexRange(0x6800, 0x6FFF))
+        {
+            WhenNmtChanged = (_, current) =>
+            {
+                if (current == NmtState.Initializing) app.Host!.ObjectDictionary.WriteUnsigned(0x6040, 0x00, 0x0009);
+            },
+        };
+        using var rig = new EntryRig(With(app, other));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        int mark = app.Log.Count;
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetCommunication);
+
+        rig.Od.ReadUnsigned(0x6040, 0x00).Should().Be(0x0009u, "Reset Communication leaves the application's objects alone");
+        app.Log.Skip(mark).Should().Equal(
+            "nmt PreOperational>Initializing", "reset ResetCommunication", "nmt Initializing>PreOperational", Command(0x0009));
+    }
+
+    [Fact]
+    public async Task A_Command_Write_Queued_Before_A_Reset_Communication_Is_Delivered_After_The_Reset()
+    {
+        // Committed while the actor is held, with the reset already queued ahead of the job that
+        // delivers the write: the reset runs first, keeps the queue (the value survives it), and the
+        // write is told in the next round, after the reset's notifications, in commit order.
+        var app = Commands();
+        using var rig = new EntryRig(With(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        int mark = app.Log.Count;
+        Task? reset = null;
+
+        await WhileActorHeldAsync(rig.Node, () =>
+        {
+            reset = rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
+                .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetCommunication), false }));
+            rig.Od.WriteUnsigned(0x6040, 0x00, 0x0009);
+            rig.Od.WriteUnsigned(0x6040, 0x00, 0x0001);
+        });
+        await reset!;
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 2);
+        Settle(rig.Node);
+
+        app.Log.Skip(mark).Should().Equal(
+            "nmt PreOperational>Initializing", "reset ResetCommunication", "nmt Initializing>PreOperational",
+            Command(0x0009), Command(0x0001));
     }
 
     [Fact]

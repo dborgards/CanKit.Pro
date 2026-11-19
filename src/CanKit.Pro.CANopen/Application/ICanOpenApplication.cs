@@ -109,6 +109,8 @@ internal interface ICanOpenApplication
     /// A write to a command entry that the queue of <see cref="OnCommandWritten"/> has no room for
     /// is refused (see there). A declaration through <c>Add*</c> that replaces a command entry is no
     /// written value: it is reported through <see cref="OnEntriesWritten"/>, as for any claimed entry.
+    /// Reset Node drops the command writes not yet told, whose values it restores; Reset
+    /// Communication, which leaves them in place, does not (see <see cref="OnCommandWritten"/>).
     /// </para>
     /// </remarks>
     IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; }
@@ -220,12 +222,22 @@ internal interface ICanOpenApplication
     /// the application's code whatever the queue holds.
     /// </para>
     /// <para>
-    /// An NMT reset drops the writes still queued, before the applications are told of the reset
+    /// Reset Node drops the writes still queued, before the applications are told of the reset
     /// (<see cref="OnNmtStateChanged"/> into Initializing), and so does the disposal of the node. A
     /// write committed after that and before the reset restores the dictionary — by another thread,
-    /// or by another application while the applications are told of the reset — is not told either:
-    /// it belongs to the device the reset ended, and the restore may have overwritten its value. What
-    /// is committed after the restore, from <see cref="OnReset"/> on, is told.
+    /// or by another application while the applications are told of the reset — is not told either.
+    /// Reset Node restores the application's objects, command entries included (see
+    /// <see cref="OnReset"/>), so such a write belongs to the device the reset ended and its value is
+    /// gone. What is committed after the restore, from <see cref="OnReset"/> on, is told.
+    /// </para>
+    /// <para>
+    /// Reset Communication drops nothing of this: it restores <c>1000h</c> to <c>1FFFh</c> only, and a
+    /// command entry, which lies in a claimed range from <c>2000h</c> up, keeps every value written to
+    /// it, so the application must be told of each. A write queued before the reset, and one
+    /// committed while the reset runs, is told in commit order in the first round after the reset
+    /// job, so after the notifications of the reset (<see cref="OnNmtStateChanged"/> into
+    /// Initializing, <see cref="OnReset"/>, <see cref="OnNmtStateChanged"/> into Pre-Operational) when
+    /// that job came first; a round already queued ahead of the reset tells its writes before it.
     /// </para>
     /// </remarks>
     void OnCommandWritten(CanOpenObjectAddress entry, byte[] value);
@@ -264,7 +276,9 @@ internal interface ICanOpenApplication
     /// <see cref="OnCommandWritten"/> and <see cref="OnEntriesWritten"/>, so the application has been
     /// told the RPDO's own writes when it hears of the RPDO. Several RPDOs taken before that job are
     /// told in the order taken, after every write of the job, including writes committed between the
-    /// frames. An NMT reset drops the receptions not yet told, with the queued command writes.
+    /// frames. An NMT reset, either command, drops the receptions not yet told: the PDOs of the
+    /// device before the reset are gone with it, whatever becomes of their command writes (see
+    /// <see cref="OnCommandWritten"/>).
     /// </para>
     /// </remarks>
     void OnRpdoReceived(int pdoNumber);
