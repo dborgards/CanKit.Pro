@@ -148,6 +148,13 @@ internal sealed partial class CanOpenNode
     /// entry's or was overwritten by a later write that is queued behind it, and the application is
     /// told of them after the reset (<see cref="EndCommandWritesBeforeRestore"/>). Actor loop. Nothing
     /// on a node without applications.</summary>
+    /// <remarks>The drop under Reset Node is not redundant with the generation that
+    /// <see cref="EndCommandWritesBeforeRestore"/> moves. The generation keeps a stale write from being
+    /// told, but only when the next round reaches it; until then the stale writes would still count
+    /// against <see cref="CommandQueueCapacity"/>. A queue filled before the reset would then refuse,
+    /// with <c>0800 0022h</c>, a command write committed after the restore — by another thread, or by
+    /// another application from its <see cref="ICanOpenApplication.OnReset"/> — which belongs to the
+    /// device the reset started and must be told.</remarks>
     private void DropQueuedCommandWritesForReset(bool communicationOnly)
     {
         if (_applications.Length == 0) return;

@@ -523,6 +523,42 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task A_Full_Queue_Dropped_By_Reset_Node_Leaves_Room_For_A_Write_After_The_Restore()
+    {
+        // The queue is filled to its bound while the actor is held, with Reset Node queued ahead of the
+        // job that would deliver the writes. The reset drops them; the generation alone would pass them
+        // over only in the next round, and until then they would hold the queue full. Another
+        // application writes the command entry from its OnReset, after the restore: it must find room.
+        var app = Commands();
+        var other = new RecordingApplication("other", new CanOpenIndexRange(0x6800, 0x6FFF))
+        {
+            WhenReset = _ => app.Host!.ObjectDictionary.WriteUnsigned(0x6040, 0x00, 0x0002),
+        };
+        using var rig = new EntryRig(With(app, other));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        int beats = rig.Wire.Count(SlaveHeartbeat);
+        var failures = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (failures) failures.Add(e); };
+        Task? reset = null;
+
+        await WhileActorHeldAsync(rig.Node, () =>
+        {
+            reset = rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
+                .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false }));
+            for (int i = 0; i < CommandQueueBound; i++) rig.Od.WriteUnsigned(0x6040, 0x00, 0x0003);
+        });
+        await reset!;
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, beats + 1);
+        Settle(rig.Node);
+
+        lock (failures) failures.Should().BeEmpty("the write after the restore found room in the queue");
+        CommandCalls(app).Should().Equal(new[] { Command(0x0002) },
+            "the writes before the reset belong to the device it ended; the one after the restore is told");
+    }
+
+    [Fact]
     public async Task A_Command_Write_Committed_During_A_Reset_Communication_Is_Delivered()
     {
         // The window of the Reset Node test above, under Reset Communication: that reset restores
