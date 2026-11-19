@@ -58,9 +58,8 @@ internal sealed partial class Cia408Device
     /// The fault states still fall by level meanwhile (D15, D16), which is no reset.
     /// </para>
     /// <para>
-    /// Before the node has started the device's machine nothing can be reported: the start is the
-    /// first work the device posts (<see cref="Attach"/>), before the host is published to the
-    /// application side, so a fault always meets a started machine.
+    /// A fault always meets a started machine: <see cref="Attach"/> starts it before it publishes the
+    /// host to the application side, and before that this method throws.
     /// </para>
     /// </remarks>
     /// <param name="errorCode">The EMCY error code: one of CiA 301 v4.2.0 Table 25, or of CiA 408
