@@ -491,10 +491,11 @@ internal sealed class Cia408Configuration
     /// <c>6601h</c> are "Mandatory, if 16-bit parameter and control mode is" 7, 8 and 9 (§9.37.3, §9.42.3,
     /// §9.47.3), which no drive meets, so the mapping is their only basis.</para>
     /// <para>Not declared: <c>640Dh</c>, the pQ power limit factor, a VAR mandatory with 16-bit parameters
-    /// and mode 5 (§9.16.2), which belongs to the pQ controller this slice does not build. The drive
-    /// controllers' parameters (<c>6503h</c>, <c>6504h</c>, <c>6583h</c> to <c>6587h</c>, <c>6603h</c> to
-    /// <c>6605h</c>) are not declared either; §9 makes them mandatory with 16-bit parameters and mode 7, 8
-    /// or 9, which no drive meets.</para>
+    /// and mode 5 (§9.16.2), which belongs to the pQ controller this slice does not build. Nor the drive
+    /// controllers' parameter records (<c>6503h</c>, <c>6504h</c>, <c>6583h</c> to <c>6587h</c>,
+    /// <c>6603h</c> to <c>6605h</c>, value records like the setpoints): §9 makes them mandatory with
+    /// 16-bit parameters and mode 7, 8 or 9 (§9.38.2, §9.42.8, §9.47.5 and on), which no drive meets, so
+    /// none is mandatory for any device.</para>
     /// </remarks>
     private static Cia408ObjectDefinition[] ActualValueRecords(Cia408ControlMode mode, bool wide) => (mode, wide) switch
     {
