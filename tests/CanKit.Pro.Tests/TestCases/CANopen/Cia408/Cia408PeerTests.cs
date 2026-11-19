@@ -664,6 +664,24 @@ public class Cia408PeerTests
     }
 
     [Fact]
+    public void Interpret_Names_An_Unknown_Object_Of_The_Device_And_A_Variable_Sub_Index_Above_00h()
+    {
+        using var tool = new LoneTool();
+        var peer = tool.Peer(0x2200_0198);
+
+        var values = peer.Interpret(new[] { Signal(0x6001, 0x00, 8, 0x05), Signal(0x6041, 0x01, 8, 0x03) });
+
+        var expected = new Cia408PdoValue(0x6041, 0x01, Cia408Objects.DeviceStatusWord16, "Device status word 16-bit, sub-index 01h", 3);
+        values.Select(v => v.Description).Should().Equal("6001h:00h", "Device status word 16-bit, sub-index 01h");
+        values[0].Index.Should().Be(0x6001);
+        values[0].Definition.Should().BeNull("6001h is not in the catalogue");
+        values[1].Definition.Should().BeSameAs(Cia408Objects.DeviceStatusWord16);
+        values[1].Should().Be(expected);
+        values[1].GetHashCode().Should().Be(expected.GetHashCode());
+        values[1].ToString().Should().Contain("Device status word 16-bit");
+    }
+
+    [Fact]
     public void Interpret_Refuses_A_Signal_Of_Another_Node()
     {
         using var tool = new LoneTool();

@@ -383,6 +383,28 @@ public class Cia408DeviceProcessTests
     }
 
     [Fact]
+    public async Task The_Model_Clears_A_Status_Bit_And_Reads_The_Device_Mode()
+    {
+        var seen = new List<Cia408DeviceMode>();
+        var model = new RecordingModel
+        {
+            OnStep = c =>
+            {
+                seen.Add(c.DeviceMode);
+                c.SetStatusBit(12, seen.Count == 1);
+            },
+        };
+        using var rig = new Cia408Rig(new Cia408Device(TwoModes, model));
+        rig.Settle();
+        (await rig.ReadU16Async(StatusWord16, 0)).Should().Be(0x1008, "set in the first step");
+
+        rig.Advance(Interval);
+
+        (await rig.ReadU16Async(StatusWord16, 0)).Should().Be(0x0008, "cleared in the second");
+        seen.Should().Equal(Cia408DeviceMode.SetpointViaBus, Cia408DeviceMode.SetpointViaBus);
+    }
+
+    [Fact]
     public async Task A_Throwing_Model_Is_Reported_And_Keeps_Stepping()
     {
         int calls = 0;

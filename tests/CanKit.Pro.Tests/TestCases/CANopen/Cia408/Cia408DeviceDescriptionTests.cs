@@ -203,6 +203,26 @@ public class Cia408DeviceDescriptionTests
     }
 
     [Fact]
+    public void A_Device_Type_That_Announces_No_Control_Mode_Fails_The_Open()
+    {
+        var open = () => Open(Fixture.Set("1000", "DefaultValue", "0x20000198"));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("announces no control mode"));
+    }
+
+    [Fact]
+    public void Without_A_Device_Type_A_File_Without_Mode_Objects_Fails_The_Open()
+    {
+        var open = () => Open(Fixture.Remove(0x1000).Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381));
+
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options")
+            .Where(e => e.Message.Contains("no control mode can be told"));
+    }
+
+    [Fact]
     public void A_32_Bit_Device_Type_With_Pq_Fails_The_Open()
     {
         // dtprs 10b (§8.6.2, Table 53) with pQ, bit 25: the norm maps pQ in 16 bit only (Tables 13 and

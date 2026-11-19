@@ -221,7 +221,7 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
 
         throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture,
             "{0} is {1:X4}h: bits 3..0 = {2} encode no state of CiA 408 §7.6, Table 4.",
-            Describe(words.Status.Index, 0x00), word, Convert.ToString(bits, 2).PadLeft(4, '0')));
+            Describe(words.Status, 0x00), word, Convert.ToString(bits, 2).PadLeft(4, '0')));
     }
 
     /// <summary>Writes <paramref name="word"/> to the control word as given, with no wait.</summary>
@@ -583,7 +583,7 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
         if (readOnly)
         {
             throw new InvalidOperationException(string.Format(CultureInfo.InvariantCulture,
-                "{0} is read-only: it is not written.", Describe(definition.Index, subindex)));
+                "{0} is read-only: it is not written.", Describe(definition, subindex)));
         }
 
         return _node.SdoDownloadAsync(PeerNodeId, Shift(definition), subindex, value, SdoTransferMode.Auto, cancellationToken);
@@ -628,7 +628,7 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
             }
 
             values[i] = TryFindDefinition(signal.Index, out var definition)
-                ? new Cia408PdoValue(signal.Index, signal.SubIndex, definition, Describe(definition.Index, signal.SubIndex),
+                ? new Cia408PdoValue(signal.Index, signal.SubIndex, definition, Describe(definition, signal.SubIndex),
                     CanOpenValueCodec.DecodeBits(signal.Value, signal.BitLength, IsSignedEntry(definition, signal.SubIndex)))
                 : new Cia408PdoValue(signal.Index, signal.SubIndex, null,
                     string.Format(CultureInfo.InvariantCulture, "{0:X4}h:{1:X2}h", signal.Index, signal.SubIndex),
@@ -692,13 +692,10 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
         return definition.IsValueRecord && subindex == 0x03;
     }
 
-    /// <summary>An entry of a catalogue object, by its index in logical device 0, for messages and
+    /// <summary>An entry of a catalogue object, for messages and
     /// <see cref="Cia408PdoValue.Description"/>.</summary>
-    private static string Describe(ushort indexInDevice0, byte subindex)
-    {
-        if (!Cia408Objects.TryGet(indexInDevice0, out var definition))
-            return string.Format(CultureInfo.InvariantCulture, "{0:X4}h:{1:X2}h", indexInDevice0, subindex);
-        return (definition.IsValueRecord, subindex) switch
+    private static string Describe(Cia408ObjectDefinition definition, byte subindex)
+        => (definition.IsValueRecord, subindex) switch
         {
             (false, 0x00) or (true, 0x01) => definition.Name,
             (true, 0x00) => definition.Name + ", highest sub-index supported",
@@ -706,7 +703,6 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
             (true, 0x03) => definition.Name + ", prefix",
             _ => string.Format(CultureInfo.InvariantCulture, "{0}, sub-index {1:X2}h", definition.Name, subindex),
         };
-    }
 
     private sealed class ListSink : IForeignPdoSink
     {

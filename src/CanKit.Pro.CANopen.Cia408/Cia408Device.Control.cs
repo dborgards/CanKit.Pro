@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CanKit.Pro.CANopen.Application;
 
 namespace CanKit.Pro.CANopen.Cia408;
@@ -64,7 +65,7 @@ internal sealed partial class Cia408Device
         }
 
         if (_localSource) return;
-        ApplyControlWord(host, ControlWordValue(entry.Index, value) ?? 0u);
+        ApplyControlWord(host, ControlWordValue(entry.Index, value));
     }
 
     /// <summary>The control word from the device's local source, used while <c>604Fh</c> is 1
@@ -149,8 +150,8 @@ internal sealed partial class Cia408Device
         var od = host.ObjectDictionary;
         var status16 = CanOpenValueCodec.Encode(OdDataType.Unsigned16, status);
         var status32 = CanOpenValueCodec.Encode(OdDataType.Unsigned32, status);
-        bool changed16 = !Equal(od.ReadRaw(_statusWord16, 0x00), status16);
-        bool changed32 = _has32 && !Equal(od.ReadRaw(_statusWord32, 0x00), status32);
+        bool changed16 = !od.ReadRaw(_statusWord16, 0x00).SequenceEqual(status16);
+        bool changed32 = _has32 && !od.ReadRaw(_statusWord32, 0x00).SequenceEqual(status32);
         if (!changed16 && !changed32 && !errorCodeChanged && (more is null || more.Count == 0)) return;
 
         var send = new List<CanOpenObjectAddress>(3 + (more?.Count ?? 0));
@@ -165,16 +166,5 @@ internal sealed partial class Cia408Device
         if (errorCodeChanged) send.Add(new CanOpenObjectAddress(_errorCode, 0x00));
         if (more is not null) send.AddRange(more);
         host.RequestTransmission(send);
-    }
-
-    private static bool Equal(byte[] a, byte[] b)
-    {
-        if (a.Length != b.Length) return false;
-        for (int i = 0; i < a.Length; i++)
-        {
-            if (a[i] != b[i]) return false;
-        }
-
-        return true;
     }
 }

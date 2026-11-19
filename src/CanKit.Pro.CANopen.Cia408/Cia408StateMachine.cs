@@ -131,13 +131,9 @@ internal sealed class Cia408StateMachine
 
         while (Next(previous, current, reset: false) is { } transition)
         {
+            // Table 7 has no cycle: every chain of level transitions ends (at most three steps, D2 to D4
+            // or D5 to D7), which the 9 × 16 table of Cia408StateMachineTests pins.
             taken ??= new List<int>();
-            if (taken.Count == ControlWordTransitions.Count)
-            {
-                // A cycle in the table: impossible for Table 7, where every chain ends.
-                throw new InvalidOperationException("The control-word transitions do not settle.");
-            }
-
             taken.Add(transition.Number);
             State = transition.To;
         }

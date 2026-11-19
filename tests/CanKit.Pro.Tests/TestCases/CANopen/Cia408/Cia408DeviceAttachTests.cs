@@ -19,6 +19,16 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Cia408;
 public class Cia408DeviceAttachTests
 {
     [Fact]
+    public void A_Device_Attaches_To_One_Node_Only()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        device.Attach(new HoldingHost());
+
+        ((Action)(() => device.Attach(new HoldingHost()))).Should().Throw<InvalidOperationException>();
+        ((Action)(() => device.Attach(null!))).Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
     public void A_Fault_Posted_Before_The_Start_Runs_Raises_The_Start_First()
     {
         var host = new HoldingHost();

@@ -437,8 +437,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
         if (subindex != 0x00) return OdWriteDecision.Accept;
 
-        if ((index == _controlWord16 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved16) is not (null or 0u))
-            || (index == _controlWord32 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved32) is not (null or 0u))
+        if ((index == _controlWord16 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved16) != 0)
+            || (index == _controlWord32 && (ControlWordValue(index, value) & Cia408ControlWord.Reserved32) != 0)
             || (index == _local && value.Length == 1 && value[0] > 1))
         {
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
@@ -670,14 +670,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         => CanOpenLogicalDeviceAddressing.Index(_logicalDevice, definition.Index);
 
     /// <summary>The value of a control word as written to <paramref name="index"/>, through the shared
-    /// codec (<see cref="CanOpenValueCodec"/>): <c>6040h</c> is UNSIGNED16, <c>6044h</c> UNSIGNED32;
-    /// <see langword="null"/> for a value of another length, which the dictionary refuses for its
-    /// size.</summary>
-    private uint? ControlWordValue(ushort index, byte[] value)
-    {
-        var type = index == _controlWord16 ? OdDataType.Unsigned16 : OdDataType.Unsigned32;
-        return value.Length == OdEntryLayout.FixedSize(type) ? (uint)CanOpenValueCodec.Decode(type, value) : null;
-    }
+    /// codec (<see cref="CanOpenValueCodec"/>): <c>6040h</c> is UNSIGNED16, <c>6044h</c> UNSIGNED32. The
+    /// dictionary checks a value's length against the entry before it asks the device
+    /// (<see cref="ValidateWrite"/>) and before it commits a write, so the value has the type's
+    /// width.</summary>
+    private uint ControlWordValue(ushort index, byte[] value)
+        => (uint)CanOpenValueCodec.Decode(index == _controlWord16 ? OdDataType.Unsigned16 : OdDataType.Unsigned32, value);
 
     private static bool Contains(IReadOnlyList<Cia408DeviceMode> modes, Cia408DeviceMode mode)
     {

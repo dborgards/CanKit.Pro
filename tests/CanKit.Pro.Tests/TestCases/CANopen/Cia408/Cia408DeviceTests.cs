@@ -711,6 +711,77 @@ public class Cia408DeviceTests
         rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_0008u);
     }
 
+    [Fact]
+    public async Task Two_Throwing_Subscribers_Are_Reported_Together()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        bool armed = false;
+        device.StateChanged += (_, _) => { if (armed) throw new InvalidOperationException("first"); };
+        device.StateChanged += (_, _) => { if (armed) throw new InvalidOperationException("second"); };
+        using var rig = new Cia408Rig(device);
+        var reports = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (reports) reports.Add(e); };
+        rig.Settle();
+        armed = true;
+
+        await rig.WriteU16Async(ControlWord16, 0, 0x0001);
+        await rig.FlushBackgroundReportsAsync();
+
+        rig.Device.State.Should().Be(Cia408State.Disabled, "the change stands");
+        lock (reports)
+        {
+            reports.Should().ContainSingle().Which.ToString().Should().Contain("AggregateException")
+                .And.Contain("first").And.Contain("second");
+        }
+    }
+
+    [Fact]
+    public void Null_Arguments_Are_Refused()
+    {
+        ((Action)(() => _ = new Cia408Device(null!))).Should().Throw<ArgumentNullException>();
+        ((Action)(() => Cia408Device.AddTo(null!, new Cia408Device(Cia408Rig.Valve)))).Should().Throw<ArgumentNullException>();
+        ((Action)(() => Cia408Device.AddTo(new CanOpenNodeOptions(), null!))).Should().Throw<ArgumentNullException>();
+        ((Action)(() => _ = new Cia408StateChangedEventArgs(Cia408State.Init, Cia408State.Disabled, null!)))
+            .Should().Throw<ArgumentNullException>();
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        ((Action)(() => rig.Device.SetActualValue(null!, 0))).Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task Clearing_An_Inactive_Cause_And_Repeating_A_Warning_Change_Nothing()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        var reports = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (reports) reports.Add(e); };
+        rig.Device.SetWarning(InputCurrentTooHigh, true);
+        rig.Device.SetWarning(InputCurrentTooHigh, true);
+        rig.Device.ClearFaultCause(SupplyTooLow);
+        rig.Settle();
+        await rig.DrainEmcyAsync();
+        await rig.FlushBackgroundReportsAsync();
+        lock (reports) reports.Should().BeEmpty();
+
+        (await rig.ReadU16Async(StatusWord16, 0)).Should().Be(0x0028);
+        rig.Count(CanOpenProfileRig.Emcy).Should().Be(0, "no error was raised or ended");
+        rig.Device.SetWarning(InputCurrentTooHigh, false);
+        rig.Settle();
+        (await rig.ReadU16Async(StatusWord16, 0)).Should().Be(0x0008, "one warning, reported twice, ends once");
+    }
+
+    [Fact]
+    public async Task A_32_Bit_Status_Word_That_Differs_Alone_Is_Rewritten_Alone()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Settle();
+        rig.Od.WriteRawUnchecked(StatusWord32, 0, new byte[] { 0xFF, 0x00, 0x00, 0x00 });
+
+        await rig.WriteU16Async(ControlWord16, 0, 0x0000);
+        rig.Settle();
+
+        rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_0008u);
+        rig.Od.ReadUnsigned(StatusWord16, 0).Should().Be(0x0008u);
+    }
+
     // ---- helpers --------------------------------------------------------------------------------
 
     private static (OdDataType, OdAccess, bool) Entry(Cia408Rig rig, ushort index)
