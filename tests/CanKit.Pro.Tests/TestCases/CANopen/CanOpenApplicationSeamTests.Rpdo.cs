@@ -82,6 +82,26 @@ public partial class CanOpenApplicationSeamTests
         Receptions(app).Should().Equal(new[] { "rpdo 1", "rpdo 1" }, "the second frame carries the same data and is a reception all the same");
     }
 
+    [Fact]
+    public async Task An_Rpdo_That_Writes_No_Claimed_Entry_Is_Told_In_A_Round_Of_Its_Own()
+    {
+        // RPDO 1 remapped to 2101h, outside the claim: the frame writes nothing the application is told
+        // of, so no write opens the round, and the reception opens one itself.
+        var app = Responder();
+        using var rig = new EntryRig(With(app));
+        rig.Node.ConfigureRpdo(1, new PdoMapping().Add(0x2101, 0x00, 8));
+        var events = new RpdoEvents(rig.Node);
+        await rig.StartAsync();
+
+        rig.Wire.Transmit(Rpdo1, new byte[] { 0x05 });
+        await events.WaitForAsync(1);
+        Settle(rig.Node);
+
+        Receptions(app).Should().Equal("rpdo 1");
+        Written(app).Should().BeEmpty();
+        rig.Od.ReadRaw(0x2101, 0x00).Should().Equal(new byte[] { 0x05 });
+    }
+
     [Fact] // #558
     public async Task A_Write_Of_The_Same_Entries_Is_No_Reception()
     {

@@ -246,7 +246,9 @@ internal sealed partial class CanOpenNode
     private ApplicationSlot? _applicationInCallback;
 
     /// <summary>
-    /// EntryWritten, on the writing thread and under the dictionary's write gate: a stored write to
+    /// <see cref="ObjectDictionary.EntryStored"/>, ahead of every subscriber of
+    /// <see cref="ObjectDictionary.EntryWritten"/>, on the writing thread and under the dictionary's
+    /// write gate: a stored write to
     /// an entry an application claims. Records the entry, or for a command entry whose write was
     /// validated (<see cref="ReserveCommandWrite"/>) queues a copy of the value it stored, and queues
     /// one evaluation, which tells the claimant on the actor loop

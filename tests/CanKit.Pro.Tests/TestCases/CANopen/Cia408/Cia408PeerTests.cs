@@ -137,6 +137,9 @@ public class Cia408PeerTests
     [InlineData(0x600A_0198u, new[] { 7, 9 }, 3, true)]
     // the reserved dtprs 00b: no resolution, the 16-bit pair; bits 26 to 28 are modes 13 to 15.
     [InlineData(0x1C00_0198u, new[] { 13, 14, 15 }, 0, false)]
+    // no capability bit: the pair is the resolution's valve width, 32 bit on 10b, 16 bit otherwise.
+    [InlineData(0x4000_0198u, new int[0], 2, true)]
+    [InlineData(0x2000_0198u, new int[0], 1, false)]
     public void The_Device_Type_Gives_The_Control_Modes_The_Resolution_And_The_Word_Pair(
         uint deviceType, int[] modes, int dtprs, bool wide)
     {
@@ -441,6 +444,31 @@ public class Cia408PeerTests
 
         Downloads(await RequestsAsync(rig), ControlWord16).Skip(before).Should().Equal(words);
         rig.Rig.Device.State.Should().Be(after);
+    }
+
+    [Fact]
+    public async Task A_Reset_That_Sees_No_Resting_State_Fails_Naming_None()
+    {
+        using var rig = new Cia408ToolRig();
+        rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new byte[] { 0x07, 0x00 }); // 0111b: FAULT_REACTION
+        var peer = rig.Peer(options: rig.Options(reads: 2, pause: TimeSpan.FromMilliseconds(5)));
+
+        Func<Task> reset = () => peer.ResetFaultAsync().WithTimeoutAsync(HangGuard);
+
+        var failure = (await reset.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*did not show a resting state*").Which;
+        failure.Reason.Should().Be(Cia408CommandFailure.NotReached);
+        Downloads(await RequestsAsync(rig), ControlWord16).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_Sub_Index_A_Variable_Does_Not_Have_Is_Left_To_The_Device()
+    {
+        using var tool = new LoneTool();
+        var valve = tool.Peer(0x2200_0198);
+
+        Func<Task> write = () => valve.WriteAsync(Cia408Objects.DeviceControlWord16, 0x01, new byte[2]);
+
+        await write.Should().ThrowExactlyAsync<PeerSdoAccessException>("not refused as read-only: it goes to the transfer, where the gate refuses it");
     }
 
     [Fact]

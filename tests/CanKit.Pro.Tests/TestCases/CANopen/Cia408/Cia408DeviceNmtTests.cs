@@ -352,6 +352,29 @@ public class Cia408DeviceNmtTests
     }
 
     [Fact]
+    public async Task Throws_In_Both_Rounds_Of_A_Restart_Are_Reported_Together()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        bool armed = false;
+        device.StateChanged += (_, e) => { if (armed) throw new InvalidOperationException(Describe(e)); };
+        using var rig = new Cia408Rig(device);
+        var reports = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (reports) reports.Add(e); };
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultInit);
+        rig.Settle();
+        armed = true;
+
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        await rig.FlushBackgroundReportsAsync();
+
+        lock (reports)
+        {
+            reports.Should().ContainSingle().Which.ToString().Should().Contain("FaultInit->Init [255,0,1]")
+                .And.Contain("Init->FaultInit [8,13]");
+        }
+    }
+
+    [Fact]
     public async Task A_Cause_Cleared_By_A_Subscriber_Of_The_Restart_Is_Not_Entered_Again()
     {
         var device = new Cia408Device(Cia408Rig.Valve);
