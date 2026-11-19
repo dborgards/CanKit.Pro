@@ -38,6 +38,20 @@ internal static class CanOpenValueCodec
         return bytes;
     }
 
+    /// <summary>Whether <paramref name="value"/> lies in the value range of <paramref name="type"/>,
+    /// so that <see cref="Encode"/> drops no bit of it: <c>−2ⁿ⁻¹</c> to <c>2ⁿ⁻¹ − 1</c> for a signed
+    /// type of <c>n</c> bits, <c>0</c> to <c>2ⁿ − 1</c> for an unsigned one (an UNSIGNED64 above
+    /// <see cref="long.MaxValue"/> cannot be given as a <see cref="long"/>).</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="type"/> has no fixed width.</exception>
+    /// <exception cref="NotSupportedException"><paramref name="type"/> is REAL32 or REAL64.</exception>
+    internal static bool IsInRange(OdDataType type, long value)
+    {
+        int bits = IntegerWidth(type) * BitsPerByte;
+        if (IsSigned(type))
+            return bits == MaxBits || (value >= -(1L << (bits - 1)) && value < (1L << (bits - 1)));
+        return value >= 0 && (bits == MaxBits || value < (1L << bits));
+    }
+
     /// <summary>The value of the little-endian <paramref name="raw"/> as <paramref name="type"/>:
     /// sign-extended for a signed type, zero-extended otherwise.</summary>
     /// <exception cref="InvalidDataException"><paramref name="raw"/> is not as long as the type is

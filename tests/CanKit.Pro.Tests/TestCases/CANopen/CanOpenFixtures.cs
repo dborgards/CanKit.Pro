@@ -11,7 +11,8 @@ internal static class CanOpenFixtures
 {
     public static string Text(string name)
     {
-        if (name is not ("device.eds" or "quirky.eds" or "device.dcf" or "safety.dcf" or "cia401.eds" or "cia401-digital.eds"))
+        if (name is not ("device.eds" or "quirky.eds" or "device.dcf" or "safety.dcf" or "cia401.eds" or "cia401-digital.eds"
+            or "cia408-pq-valve.eds"))
             throw new ArgumentOutOfRangeException(nameof(name), name, "Unknown fixture.");
         var sep = Path.DirectorySeparatorChar;
         var dir = AppContext.BaseDirectory.TrimEnd(sep, Path.AltDirectorySeparatorChar);

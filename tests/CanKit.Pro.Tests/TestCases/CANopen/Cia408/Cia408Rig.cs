@@ -46,20 +46,40 @@ internal sealed class Cia408Rig : CanOpenProfileRig
 
     /// <summary>Opens <paramref name="device"/>, which the test may have subscribed to already.</summary>
     internal Cia408Rig(Cia408Device device, CanOpenNodeOptions? options = null)
-        : this(device, new Recorder(device), options)
+        : this(new[] { device }, description: null, options)
+    {
+    }
+
+    /// <summary>Opens a node from <paramref name="description"/> (none when null) with
+    /// <paramref name="devices"/> attached in that order: several logical devices of one node, or a
+    /// device built with <see cref="Cia408Device.FromDescription"/>. <see cref="Changes"/> records the
+    /// first device. An open that fails throws here, with the rig's channels closed.</summary>
+    internal Cia408Rig(IReadOnlyList<Cia408Device> devices, CanOpenDeviceDescription? description, CanOpenNodeOptions? options = null)
+        : this(devices, new Recorder(devices[0]), description, options)
     {
     }
 
     // The recorder is built in the chained call's argument list, so it is on the device before the
     // base constructor opens the node.
-    private Cia408Rig(Cia408Device device, Recorder recorder, CanOpenNodeOptions? options)
-        : base("cia408", Cia408Device.AddTo(options ?? new CanOpenNodeOptions(), device), description: null)
+    private Cia408Rig(IReadOnlyList<Cia408Device> devices, Recorder recorder, CanOpenDeviceDescription? description,
+        CanOpenNodeOptions? options)
+        : base("cia408", Compose(devices, options), description)
     {
-        Device = device;
+        Devices = devices;
         _recorder = recorder;
     }
 
-    internal Cia408Device Device { get; }
+    private static CanOpenNodeOptions Compose(IReadOnlyList<Cia408Device> devices, CanOpenNodeOptions? options)
+    {
+        var composed = options ?? new CanOpenNodeOptions();
+        foreach (var device in devices) composed = Cia408Device.AddTo(composed, device);
+        return composed;
+    }
+
+    /// <summary>The first device, the only one in most tests.</summary>
+    internal Cia408Device Device => Devices[0];
+
+    internal IReadOnlyList<Cia408Device> Devices { get; }
 
     /// <summary>Every <see cref="Cia408Device.StateChanged"/> so far, in the order raised.</summary>
     internal IReadOnlyList<Cia408StateChangedEventArgs> Changes => _recorder.Snapshot();

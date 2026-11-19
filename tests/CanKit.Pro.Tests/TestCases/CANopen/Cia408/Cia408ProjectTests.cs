@@ -22,16 +22,6 @@ public class Cia408ProjectTests
     }
 
     [Fact]
-    public void The_Tool_Side_Is_Not_Built_Yet()
-    {
-        var profile = new Cia408Profile();
-
-        var act = () => profile.CreatePeer(null!, 1, null!);
-
-        act.Should().Throw<NotSupportedException>();
-    }
-
-    [Fact]
     public void The_Assembly_Exports_No_Public_Type()
     {
         // The guard that the project stays invisible until it is published: a public type here

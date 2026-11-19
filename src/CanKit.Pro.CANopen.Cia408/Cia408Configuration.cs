@@ -444,6 +444,29 @@ internal sealed class Cia408Configuration
 
     private static bool IsValveMode(Cia408ControlMode mode) => !IsDriveMode(mode);
 
+    /// <summary>The control modes whose capability bit <paramref name="deviceType"/> sets, ascending:
+    /// the reverse of <see cref="DeviceType"/>, with the same inferred pairing. Bit 23 names modes 1
+    /// and 2 and bit 24 modes 3 and 4, so each gives both: the word cannot tell an open-loop device
+    /// from a closed-loop one. The profile number is not checked.</summary>
+    internal static IReadOnlyList<Cia408ControlMode> ControlModesOf(CanOpenDeviceType deviceType)
+    {
+        var modes = new List<Cia408ControlMode>();
+        for (var mode = Cia408ControlMode.SpoolPositionOpenLoop; mode <= Cia408ControlMode.PFlowWithPowerLimitation; mode++)
+        {
+            if ((deviceType.Value & CapabilityBit(mode)) != 0) modes.Add(mode);
+        }
+
+        return modes.AsReadOnly();
+    }
+
+    /// <summary>The resolution field dtprs of <paramref name="deviceType"/> (Table 53, bits 29 and
+    /// 30), or <see langword="null"/> for the reserved code 00b.</summary>
+    internal static Cia408Resolution? ResolutionOf(CanOpenDeviceType deviceType)
+    {
+        var code = (deviceType.Value >> ResolutionShift) & 0b11;
+        return code == 0 ? null : (Cia408Resolution)code;
+    }
+
     /// <summary>The capability bit of a control mode in the device-type word. The pairing is
     /// inferred (see <see cref="DeviceType"/>).</summary>
     private static uint CapabilityBit(Cia408ControlMode mode) => mode switch
