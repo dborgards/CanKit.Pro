@@ -137,6 +137,13 @@ internal interface ICanOpenApplication
     /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/> and the write is refused with
     /// <see cref="Sdo.SdoAbortCode.General"/>.
     /// </para>
+    /// <para>
+    /// Accepting a write does not make it stored. A write to a command entry
+    /// (<see cref="CommandEntries"/>) that this accepted is still refused when the queue of
+    /// <see cref="OnCommandWritten"/> is full, with <c>0800 0022h</c> (see there), and the
+    /// dictionary refuses a write whose entry is gone by the time it is stored. Neither is told
+    /// back; decide from what is in the dictionary, not from what was accepted here.
+    /// </para>
     /// </remarks>
     OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value);
 
@@ -186,7 +193,9 @@ internal interface ICanOpenApplication
     /// nor the values an NMT reset restores.
     /// </para>
     /// <para>
-    /// The calls come on the actor loop, one actor job after the writes, in the job that tells
+    /// The calls come on the actor loop, one actor job after the writes, so a change of NMT state that
+    /// followed a write can have been told first (<see cref="OnNmtStateChanged"/>); the state the
+    /// write was made in is not carried. They come in the job that tells
     /// <see cref="OnEntriesWritten"/> too: first every command write committed since the last such
     /// job, in commit order, then the coalesced <see cref="OnEntriesWritten"/>, then
     /// <see cref="OnRpdoReceived"/>. A command entry is never reported through
@@ -195,8 +204,9 @@ internal interface ICanOpenApplication
     /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, and the next write is still told.
     /// </para>
     /// <para>
-    /// The writes wait in a queue of the node's, which holds at most 256 of them, for all
-    /// applications together: the actor's mailbox is unbounded, and a master that writes a command
+    /// The writes wait in a queue of the node's, which holds at most
+    /// <see cref="CanOpenNode.CommandQueueCapacity"/> of them, for all applications together: the
+    /// actor's mailbox is unbounded, and a master that writes a command
     /// entry faster than the actor loop comes round must not make the node hold an unbounded number
     /// of values for it. A write that finds the queue full is refused before it is stored, so no
     /// committed write is lost: an SDO download is aborted with <c>0800 0022h</c>, "data cannot be
@@ -248,7 +258,9 @@ internal interface ICanOpenApplication
     /// that a later one replaced before the SYNC is not told.
     /// </para>
     /// <para>
-    /// Actor loop, one actor job after the frame, in the job that tells the writes: after
+    /// Actor loop, one actor job after the frame, so a change of NMT state that followed the frame
+    /// can have been told first (<see cref="OnNmtStateChanged"/>): the node can have left Operational
+    /// by the time it is told of an RPDO it took there. It comes in the job that tells the writes: after
     /// <see cref="OnCommandWritten"/> and <see cref="OnEntriesWritten"/>, so the application has been
     /// told the RPDO's own writes when it hears of the RPDO. Several RPDOs taken before that job are
     /// told in the order taken, after every write of the job, including writes committed between the

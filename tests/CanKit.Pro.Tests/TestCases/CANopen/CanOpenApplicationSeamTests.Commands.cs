@@ -22,8 +22,10 @@ public partial class CanOpenApplicationSeamTests
     /// <summary>The command entry of <see cref="Commands"/>: a control word, UNSIGNED16.</summary>
     private static readonly CanOpenObjectAddress ControlWord = new(0x6040, 0x00);
 
-    /// <summary>The queue bound the node documents (<see cref="ICanOpenApplication.OnCommandWritten"/>).</summary>
-    private const int CommandQueueBound = 256;
+    /// <summary>The queue bound the node documents (<see cref="ICanOpenApplication.OnCommandWritten"/>),
+    /// stated once, by the node. The values the bound tests write stay below 0100h, which
+    /// <see cref="A_Refused_Write_Takes_No_Room_In_The_Queue"/> relies on.</summary>
+    private const int CommandQueueBound = CanOpenNode.CommandQueueCapacity;
 
     /// <summary>The claimant of <c>6000h</c>-<c>67FFh</c> with one command entry, <c>6040h:00</c> at
     /// <c>0001h</c>, and an ordinary entry <c>6000h:01</c>; <c>2101h</c> outside the claim is the
