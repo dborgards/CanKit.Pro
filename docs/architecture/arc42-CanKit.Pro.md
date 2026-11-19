@@ -1348,7 +1348,14 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   Namespace `CanKit.Pro.CANopen.Application`. CiA 401 gibt es als nicht paketiertes Projekt
   `CanKit.Pro.CANopen.Cia401` gegen die interne Naht: Objektkatalog, Geräteseite (erste Scheibe) und
   Tool-Seite. Beim Bauen ist die Naht um zwei Aufrufe gewachsen: Standard-PDOs und das Einreihen von
-  Arbeit in die Schleife des Knotens. CiA 408 und die Veröffentlichung stehen noch aus. Der ADR
+  Arbeit in die Schleife des Knotens. CiA 408 gibt es ebenso, als nicht paketiertes Projekt
+  `CanKit.Pro.CANopen.Cia408`: Objektkatalog, Geräteseite (erste Scheibe: Gerätesteuerung,
+  Zustandsmaschine, Fehler, Betriebsarten, die Soll- und Istwert-Records jeder Regelungsart — die ihre
+  Standard-PDOs abbilden und die Abschnitt 9 bei ihrer Breite verbindlich macht —, ein
+  Prozessmodell, ein Gerät aus einer EDS/DCF) und Tool-Seite. Dafür ist die Naht gewachsen um die
+  geordnete Zustellung jedes übernommenen Schreibzugriffs auf einen Kommandoeintrag (#557), die
+  Meldung jedes empfangenen RPDO und das Senden eines TPDO nach Nummer (#558) sowie einen vom Profil
+  ausgelegten Fehlerverhaltens-Record `1029h` (#559). Als Nächstes steht die Veröffentlichung an. Der ADR
   bleibt „entschieden, nicht umgesetzt", bis die Naht veröffentlicht ist.
 
 ---

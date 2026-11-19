@@ -712,6 +712,9 @@ internal sealed partial class CanOpenNode
             offset += entry.BitLength;
         }
         RaiseRpdoReceived(rp.PdoIndex, rp.CobId, payload);
+        // After the public event is queued, which keeps its place; on a node without applications
+        // this is the only line added to the path.
+        if (_applications.Length != 0) QueueRpdoReceivedForApplications(rp.PdoIndex);
     }
 
     // =========================================================================================

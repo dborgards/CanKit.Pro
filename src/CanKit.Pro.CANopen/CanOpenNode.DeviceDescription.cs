@@ -497,26 +497,51 @@ internal sealed partial class CanOpenNode
         return 0;
     }
 
+    /// <summary>
+    /// A described <c>1029h</c> on a node that manages it: sub-index 00h stays the constant the node
+    /// gives it, and the classes the node has take the file's access and value. Without a layout that
+    /// is the communication error alone. With one (<see cref="Application.CanOpenApplicationRequirements.ErrorBehavior"/>)
+    /// it is every class the layout names, and the file must declare all of them, or the open fails:
+    /// the file wins over the layout's defaults, and a record it shortened would not be the profile's.
+    /// A class above the node's is omitted and reported, as before.
+    /// </summary>
+    /// <exception cref="ArgumentException">The file lacks a sub-index the layout names; the parameter
+    /// is <c>options</c>.</exception>
     private int ApplyErrorBehaviorDescription(List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
     {
+        var layout = _errorBehaviorLayout;
+        int highest = layout?.Length ?? 1;
         int loaded = 0;
         foreach (var entry in entries)
         {
             if (entry.Subindex == 0)
             {
-                if (ParseUnsigned(entry, out _) == 1) loaded++;
+                if (ParseUnsigned(entry, out _) == (uint)highest) loaded++;
                 else findings.Add(new DeviceDescriptionFinding(Co.ErrorBehavior, 0, DeviceDescriptionOutcome.Corrected,
-                    "1029h sub-index 00h is constant 1; only communication-error behavior is implemented", entry.Value));
+                    layout is null
+                        ? "1029h sub-index 00h is constant 1; only communication-error behavior is implemented"
+                        : $"1029h sub-index 00h is constant {highest:X2}h, the error classes application '{_errorBehaviorLayoutOwner}' lays out",
+                    entry.Value));
             }
-            else if (entry.Subindex == 1)
+            else if (entry.Subindex <= highest)
             {
-                _od.TryGet(Co.ErrorBehavior, 1, out var current);
-                _od.Declare(Co.ErrorBehavior, 1, OdDataType.Unsigned8, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+                _od.TryGet(Co.ErrorBehavior, entry.Subindex, out var current);
+                _od.Declare(Co.ErrorBehavior, entry.Subindex, OdDataType.Unsigned8, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
                 loaded++;
-                ApplyManagedValue(Co.ErrorBehavior, 1, OdDataType.Unsigned8, entry, findings);
+                ApplyManagedValue(Co.ErrorBehavior, entry.Subindex, OdDataType.Unsigned8, entry, findings);
             }
             else findings.Add(new DeviceDescriptionFinding(Co.ErrorBehavior, entry.Subindex, DeviceDescriptionOutcome.Omitted,
                 "profile- and manufacturer-specific error classes are not implemented", entry.Value));
+        }
+        if (layout is not null)
+        {
+            var missing = Enumerable.Range(1, highest).Where(sub => !entries.Any(entry => entry.Subindex == sub)).ToList();
+            if (missing.Count > 0)
+            {
+                throw OptionsError($"The device description declares 1029h without sub-index {string.Join(", ", missing.Select(sub => $"{sub:X2}h"))}, " +
+                    $"which application '{_errorBehaviorLayoutOwner}' lays out (CanOpenApplicationRequirements.ErrorBehavior): " +
+                    "the file wins over the layout, so it declares every error class the profile has.");
+            }
         }
         return loaded;
     }

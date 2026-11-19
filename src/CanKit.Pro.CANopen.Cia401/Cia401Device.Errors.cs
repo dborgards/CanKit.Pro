@@ -1,5 +1,4 @@
 using CanKit.Pro.CANopen.Application;
-using CanKit.Pro.CANopen.Nmt;
 
 namespace CanKit.Pro.CANopen.Cia401;
 
@@ -7,10 +6,9 @@ namespace CanKit.Pro.CANopen.Cia401;
 // §8.7.4, §8.7.5), and the device failure the application reports.
 internal sealed partial class Cia401Device
 {
-    /// <summary><c>1029h</c>, error behavior: a CiA 301 object (v4.2.0 §7.5.2.32), whose sub-index
-    /// 01h CiA 401-1 §6.2.4 gives the values for. The core keeps its own name for it private to the
-    /// node.</summary>
-    private const ushort ErrorBehaviorIndex = 0x1029;
+    /// <summary>The error class of <c>1029h</c>, error behavior (CiA 301 v4.2.0 §7.5.2.32), that CiA
+    /// 401-1 §6.2.4 gives the values for a device failure in: sub-index 01h.</summary>
+    private const byte DeviceFailureErrorClass = 0x01;
 
     // The causes of the error state, each a level. Actor loop.
     private bool _communicationFailure;
@@ -91,8 +89,13 @@ internal sealed partial class Cia401Device
     /// boot-up: with 02h the node boots and then enters Stopped; with 00h, Pre-operational being
     /// where the boot-up leaves it, nothing more happens. The node itself acts on its own
     /// communication errors only from Operational, for 02h too; for a device failure the device
-    /// follows §6.2.4 instead. A node without <c>1029h</c> behaves as for 00h (§6.2.4 NOTE); the
-    /// reserved values change nothing, as the node treats them for a communication failure. The
+    /// follows §6.2.4 instead. The case of the §6.2.4 NOTE, a node without <c>1029h</c>, does not
+    /// arise: the device requires <see cref="CanOpenNodeOptions.EnableErrorBehavior"/> (it monitors
+    /// communication failures), with which the node always has <c>1029h:01</c>. On a node that also
+    /// carries a CiA 408 device the record is CiA 408's (§8.6.8), whose <c>1029h:01</c> powers on as
+    /// 01h, no change: there a device failure, and a communication failure too, leaves the node in
+    /// Operational unless the master writes 00h. The reserved values
+    /// change nothing, as the node treats them for a communication failure. The
     /// communication failures themselves are the node's to act on, and the device asks nothing for
     /// them.
     /// </para>
@@ -133,21 +136,12 @@ internal sealed partial class Cia401Device
         AnalogOutputsEnterErrorState(host);
     }
 
-    /// <summary>The NMT state <c>1029h:01</c> names for a device failure (CiA 401-1 §6.2.4). Actor
-    /// loop.</summary>
+    /// <summary>The NMT state <c>1029h:01</c> names for a device failure (CiA 401-1 §6.2.4), by the
+    /// host's reading of the error class (<see cref="ICanOpenApplicationHost.ErrorBehaviorTarget"/>:
+    /// 00h Pre-operational from Operational only, 02h Stopped from any state but Stopped and
+    /// Initialisation, anything else no change). Actor loop.</summary>
     private static void RequestDeviceFailureState(ICanOpenApplicationHost host)
     {
-        byte behavior = host.ObjectDictionary.TryReadRaw(ErrorBehaviorIndex, 0x01, out var raw) && raw.Length == 1
-            ? raw[0]
-            : (byte)0;
-        switch (behavior)
-        {
-            case 0:
-                if (host.State == NmtState.Operational) host.RequestNmtState(NmtState.PreOperational);
-                break;
-            case 2:
-                host.RequestNmtState(NmtState.Stopped);
-                break;
-        }
+        if (host.ErrorBehaviorTarget(DeviceFailureErrorClass) is { } target) host.RequestNmtState(target);
     }
 }

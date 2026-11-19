@@ -17,6 +17,43 @@ internal sealed class CanOpenApplicationRequirements
     /// <summary>The application wants <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/>.
     /// Needs <see cref="CanOpenNodeOptions.EnableErrorBehavior"/>.</summary>
     public bool CommunicationFailureMonitoring { get; init; }
+
+    /// <summary>The error behaviour record <c>1029h</c> the application's profile defines;
+    /// <see langword="null"/> for the node's generic record (sub-index 00h = 01h, the communication
+    /// error at 01h with default 00h). Needs <see cref="CanOpenNodeOptions.EnableErrorBehavior"/>,
+    /// without which the node has no <c>1029h</c>.</summary>
+    /// <remarks>
+    /// <para>
+    /// Read with the rest of the requirements, before the node builds its dictionary, so the record
+    /// exists as laid out from the first frame and a device description is loaded against it.
+    /// Values outside <c>00h</c> to <c>02h</c>, more than 253 additional classes, two applications
+    /// asking for layouts that differ in any value, and a layout without
+    /// <see cref="CanOpenNodeOptions.EnableErrorBehavior"/> fail the open with an
+    /// <see cref="System.ArgumentException"/> for <c>options</c>. Two applications asking for the
+    /// same layout share the record. When one application asks for a layout and another for none, the
+    /// record is the layout, for both: its defaults hold for the application that asked for none too —
+    /// on a node with a CiA 401 and a CiA 408 device, <c>1029h:01</c> powers on as CiA 408's 01h, not as
+    /// the generic 00h, so a communication failure leaves the node Operational.
+    /// </para>
+    /// <para>
+    /// A device description that declares <c>1029h</c> wins, as for every object it declares: the
+    /// node keeps the access it gives each sub-index and the values it gives them, also where they
+    /// differ from the layout's defaults, and corrects a value outside <c>00h</c> to <c>02h</c> to
+    /// the default, as it does for its own record. The file must declare every sub-index the layout
+    /// names, or the open fails naming those it lacks; sub-index 00h stays the constant the layout
+    /// gives, and a sub-index above the layout's is not created, as without a layout. A description
+    /// that does not declare <c>1029h</c> leaves the record as laid out.
+    /// </para>
+    /// <para>
+    /// The node acts on the communication error, sub-index 01h, as it does with its generic record
+    /// (CiA 301 v4.2.0 §7.5.2.32): only from Operational, whatever the value. The further classes are
+    /// the profile's to act on; <see cref="ICanOpenApplicationHost.ErrorBehaviorTarget"/> says what
+    /// one of them asks for in the present state. Reset Node and Reset Communication restore the
+    /// record to its power-on values, <c>1010h</c> stores it and <c>1011h</c> returns it to the
+    /// layout's defaults (or the file's), as for the generic record.
+    /// </para>
+    /// </remarks>
+    public CanOpenErrorBehaviorLayout? ErrorBehavior { get; init; }
 }
 
 /// <summary>
@@ -47,12 +84,39 @@ internal interface ICanOpenApplication
     /// <summary>The name that error messages use for this application.</summary>
     string Name { get; }
 
-    /// <summary>The object indices the application owns, within <c>2000h</c> to <c>FFFFh</c>. The
-    /// ranges of one node's applications must not overlap. Read when the node opens, once.</summary>
+    /// <summary>The object indices the application owns, within <c>2000h</c> to <c>BFFFh</c>: the
+    /// manufacturer-specific area, the standardized profile areas of the eight logical devices, and
+    /// the standardized network and system variable areas (CiA 301 v4.2.0 §7.4.1, Table 41). Below
+    /// lie the node's own areas, above it <c>C000h</c> to <c>FFFFh</c> are reserved; a range that
+    /// reaches either, by one index included, fails the open with an <see cref="System.ArgumentException"/>
+    /// for <c>options</c>. The ranges of one node's applications must not overlap. Read when the node
+    /// opens, once.</summary>
     IReadOnlyList<CanOpenIndexRange> ClaimedRanges { get; }
 
     /// <summary>What the application needs from the node. Read when the node opens, once.</summary>
     CanOpenApplicationRequirements Requirements { get; }
+
+    /// <summary>The claimed entries whose every committed write the application is told of, one by
+    /// one and with the value written (<see cref="OnCommandWritten"/>), instead of coalesced through
+    /// <see cref="OnEntriesWritten"/>: a command word, whose edges a profile reacts to, such as the
+    /// fault-reset edge of the CiA 408 v2.2.0 control word (§7.7, Table 7). Empty for none.</summary>
+    /// <remarks>
+    /// <para>
+    /// Read once, when the node opens, right after <see cref="Attach"/> returned, so it can name
+    /// what the application declared there. Each entry must lie in a range the application claims,
+    /// exist by then, and be of a fixed-width data type of at most 8 bytes; a string or a domain is
+    /// not a command. Anything else, and a <see langword="null"/> list, fails the open with an
+    /// <see cref="System.ArgumentException"/> for <c>options</c>.
+    /// </para>
+    /// <para>
+    /// A write to a command entry that the queue of <see cref="OnCommandWritten"/> has no room for
+    /// is refused (see there). A declaration through <c>Add*</c> that replaces a command entry is no
+    /// written value: it is reported through <see cref="OnEntriesWritten"/>, as for any claimed entry.
+    /// Reset Node drops the command writes not yet told, whose values it restores; Reset
+    /// Communication, which leaves them in place, does not (see <see cref="OnCommandWritten"/>).
+    /// </para>
+    /// </remarks>
+    IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; }
 
     /// <summary>The node is opening: declare the objects, set the device type and the default PDOs.
     /// Runs on the constructing thread, before the node boots; what the application declared here is
@@ -78,14 +142,22 @@ internal interface ICanOpenApplication
     /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/> and the write is refused with
     /// <see cref="Sdo.SdoAbortCode.General"/>.
     /// </para>
+    /// <para>
+    /// Accepting a write does not make it stored. A write to a command entry
+    /// (<see cref="CommandEntries"/>) that this accepted is still refused when the queue of
+    /// <see cref="OnCommandWritten"/> is full, with <c>0800 0022h</c> (see there), and the
+    /// dictionary refuses a write whose entry is gone by the time it is stored. Neither is told
+    /// back; decide from what is in the dictionary, not from what was accepted here.
+    /// </para>
     /// </remarks>
     OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value);
 
     /// <summary>Entries the application claims were written and stored.</summary>
     /// <remarks>
     /// <para>
-    /// Every stored write counts, whether or not it changed the value. A write that
-    /// <see cref="ValidateWrite"/> refused, or answered with <see cref="OdWriteDecision.Handled"/>,
+    /// Every stored write counts, whether or not it changed the value, except a written value of a
+    /// command entry (<see cref="CommandEntries"/>), which goes to <see cref="OnCommandWritten"/>,
+    /// one call per write, instead. A write that <see cref="ValidateWrite"/> refused, or answered with <see cref="OdWriteDecision.Handled"/>,
     /// stored nothing and is not reported. Coalesced: the entries written since the last call arrive
     /// in one list, each once, sorted by index and then sub-index. The call comes one actor job after
     /// the write, so a change of NMT state that followed the write can have been reported first.
@@ -108,6 +180,111 @@ internal interface ICanOpenApplication
     /// </para>
     /// </remarks>
     void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries);
+
+    /// <summary>A command entry (<see cref="CommandEntries"/>) was written: one call per committed
+    /// write, in the order the writes were committed, with a copy of the value each stored.</summary>
+    /// <remarks>
+    /// <para>
+    /// Every write that stored a value counts, from wherever it came — an SDO download, an RPDO, the
+    /// local user through <see cref="ObjectDictionary"/> — also when it stored the value the entry
+    /// held already, and also when a second write followed before the actor loop came round: two
+    /// writes, two calls, each with its own value. The value is copied under the dictionary's write
+    /// gate as the write is committed, so a later write cannot change what this call carries. A
+    /// write that was refused — by <see cref="ValidateWrite"/>, by the dictionary for its size, by
+    /// the SDO server for the access — stored nothing and is not reported, and neither is one that
+    /// <see cref="ValidateWrite"/> answered with <see cref="OdWriteDecision.Handled"/>. The rule for
+    /// the application's own writes is that of <see cref="OnEntriesWritten"/>: what it writes from
+    /// inside one of its callbacks is not reported to it, nor what it writes in <see cref="Attach"/>,
+    /// nor the values an NMT reset restores.
+    /// </para>
+    /// <para>
+    /// The calls come on the actor loop, one actor job after the writes, so a change of NMT state that
+    /// followed a write can have been told first (<see cref="OnNmtStateChanged"/>); the state the
+    /// write was made in is not carried. They come in the job that tells
+    /// <see cref="OnEntriesWritten"/> too: first every command write committed since the last such
+    /// job, in commit order, then the coalesced <see cref="OnEntriesWritten"/>, then
+    /// <see cref="OnRpdoReceived"/>. A command entry is never reported through
+    /// <see cref="OnEntriesWritten"/> for a written value. A call that throws
+    /// is reported on
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, and the next write is still told.
+    /// </para>
+    /// <para>
+    /// The writes wait in a queue of the node's, which holds at most
+    /// <see cref="CanOpenNode.CommandQueueCapacity"/> of them, for all applications together: the
+    /// actor's mailbox is unbounded, and a master that writes a command
+    /// entry faster than the actor loop comes round must not make the node hold an unbounded number
+    /// of values for it. A write that finds the queue full is refused before it is stored, so no
+    /// committed write is lost: an SDO download is aborted with <c>0800 0022h</c>, "data cannot be
+    /// transferred or stored to the application because of the present device state" (CiA 301
+    /// v4.2.0 §7.2.4.3.17, Table 22); a local write throws the <see cref="System.ArgumentException"/>
+    /// of <see cref="ObjectDictionary.WriteRaw"/> carrying that code; an RPDO's entry is not
+    /// written, the rest of the RPDO is, and the node reports the refusal on
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>, as for every RPDO entry the
+    /// dictionary refuses. The application has seen <see cref="ValidateWrite"/> accept such a write
+    /// by then: the queue is checked after it, so a value the application refuses is refused with
+    /// the application's code whatever the queue holds.
+    /// </para>
+    /// <para>
+    /// Reset Node drops the writes still queued, before the applications are told of the reset
+    /// (<see cref="OnNmtStateChanged"/> into Initializing), and so does the disposal of the node. A
+    /// write committed after that and before the reset restores the dictionary — by another thread,
+    /// or by another application while the applications are told of the reset — is not told either.
+    /// Reset Node restores the application's objects, command entries included (see
+    /// <see cref="OnReset"/>), so such a write belongs to the device the reset ended and its value is
+    /// gone. What is committed after the restore, from <see cref="OnReset"/> on, is told.
+    /// </para>
+    /// <para>
+    /// Reset Communication drops nothing of this: it restores <c>1000h</c> to <c>1FFFh</c> only, and a
+    /// command entry, which lies in a claimed range from <c>2000h</c> up, keeps every value written to
+    /// it, so the application must be told of each. A write queued before the reset, and one
+    /// committed while the reset runs, is told in commit order in the first round after the reset
+    /// job, so after the notifications of the reset (<see cref="OnNmtStateChanged"/> into
+    /// Initializing, <see cref="OnReset"/>, <see cref="OnNmtStateChanged"/> into Pre-Operational) when
+    /// that job came first; a round already queued ahead of the reset tells its writes before it.
+    /// </para>
+    /// </remarks>
+    void OnCommandWritten(CanOpenObjectAddress entry, byte[] value);
+
+    /// <summary>RPDO <paramref name="pdoNumber"/> was received and its data written: once per frame
+    /// the node took, also when it carried the data of the last one.</summary>
+    /// <remarks>
+    /// <para>
+    /// Told for the RPDOs of the logical devices the application set a device type for
+    /// (<see cref="ICanOpenApplicationHost.SetDeviceType"/>): logical device <c>n</c> uses the PDO
+    /// numbers <c>n·64 + 1</c> to <c>n·64 + 64</c> (CiA 301 v4.2.0 §7.2.2.1, Table 3;
+    /// <see cref="CanOpenLogicalDeviceAddressing.PdoNumber"/>). An RPDO outside every such range
+    /// tells no application. A profile answers a received RPDO with this, as CiA 408 v2.2.0 §8.4.1
+    /// asks of its TPDOs: "A TPDO with transmission type 255 shall be transmitted immediately after
+    /// receiving the corresponding RPDO"; it sends the answer with
+    /// <see cref="ICanOpenApplicationHost.RequestTransmissionOfTpdo"/>.
+    /// </para>
+    /// <para>
+    /// A frame counts when the node takes it: the RPDO exists (valid COB-ID), the node is
+    /// Operational (CiA 301 v4.2.0 §7.3.2.2.5, Table 37), and the frame carries at least the mapped
+    /// length (§7.5.2.36). An entry of the mapping that the dictionary or the application refused is
+    /// still part of a frame the node took. An SDO download or a local write of the same entries is
+    /// no reception and tells nothing here, whatever values it writes; neither does an MPDO, which
+    /// is addressed by its object, not by an RPDO of the application's.
+    /// </para>
+    /// <para>
+    /// A synchronous RPDO (transmission type <c>00h</c> to <c>F0h</c>) passes its data to the
+    /// application with the SYNC that follows it (§7.2.2.2), and is told then, once for the frame
+    /// whose data the SYNC applied: the node keeps the last frame received before the SYNC, so a frame
+    /// that a later one replaced before the SYNC is not told.
+    /// </para>
+    /// <para>
+    /// Actor loop, one actor job after the frame, so a change of NMT state that followed the frame
+    /// can have been told first (<see cref="OnNmtStateChanged"/>): the node can have left Operational
+    /// by the time it is told of an RPDO it took there. It comes in the job that tells the writes: after
+    /// <see cref="OnCommandWritten"/> and <see cref="OnEntriesWritten"/>, so the application has been
+    /// told the RPDO's own writes when it hears of the RPDO. Several RPDOs taken before that job are
+    /// told in the order taken, after every write of the job, including writes committed between the
+    /// frames. An NMT reset, either command, drops the receptions not yet told: the PDOs of the
+    /// device before the reset are gone with it, whatever becomes of their command writes (see
+    /// <see cref="OnCommandWritten"/>).
+    /// </para>
+    /// </remarks>
+    void OnRpdoReceived(int pdoNumber);
 
     /// <summary>The node's NMT state changed from <paramref name="previous"/> to
     /// <paramref name="current"/>.</summary>

@@ -213,6 +213,12 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public Action<bool>? WhenFailureChanged { get; set; }
 
+        public IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; set; } = Array.Empty<CanOpenObjectAddress>();
+
+        public Action<CanOpenObjectAddress, byte[]>? WhenCommand { get; set; }
+
+        public Action<int>? WhenRpdo { get; set; }
+
         /// <summary>What the node called, in order; a copy, so the actor can keep appending.</summary>
         public IReadOnlyList<string> Log
         {
@@ -247,6 +253,18 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         {
             Record("written " + string.Join(",", entries.Select(e => $"{e.Index:X4}:{e.Subindex:X2}")));
             WhenWritten?.Invoke(entries);
+        }
+
+        public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+        {
+            Record($"command {entry.Index:X4}:{entry.Subindex:X2}={string.Concat(value.Select(b => b.ToString("X2")))}");
+            WhenCommand?.Invoke(entry, value);
+        }
+
+        public void OnRpdoReceived(int pdoNumber)
+        {
+            Record($"rpdo {pdoNumber}");
+            WhenRpdo?.Invoke(pdoNumber);
         }
 
         public void OnNmtStateChanged(NmtState previous, NmtState current)
@@ -358,6 +376,40 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         using var node = OpenNode(bus, With(app));
 
         app.Log.Should().StartWith("attach", "2000h is the first index outside the node's own areas");
+    }
+
+    [Theory] // #555
+    [InlineData(0xBFFF, 0xC000)]
+    [InlineData(0xC000, 0xC000)]
+    [InlineData(0xFFFF, 0xFFFF)]
+    [InlineData(0x6000, 0xFFFF)]
+    public void A_Claim_Into_The_Reserved_Area_Fails_The_Open(int first, int last)
+    {
+        var range = new CanOpenIndexRange((ushort)first, (ushort)last);
+        var app = new RecordingApplication("high", range);
+
+        var failure = OpenFails(With(app));
+
+        failure.Message.Should().Contain("high").And.Contain(range.ToString()).And.Contain("0xBFFF");
+        app.Log.Should().BeEmpty("a claim that is refused is refused before anything is attached");
+    }
+
+    [Fact] // #555
+    public async Task A_Claim_Up_To_BFFFh_Is_Accepted()
+    {
+        // BFFFh, the last index of the standardized system variable area, is the highest an
+        // application may claim; CiA 301 v4.2.0 §7.4.1, Table 41, reserves C000h to FFFFh.
+        var app = new RecordingApplication("highest", new CanOpenIndexRange(0xBFFF, 0xBFFF))
+        {
+            OnAttach = host => host.ObjectDictionary.AddU8(0xBFFF, 0x00, 0x2A),
+        };
+        using var rig = new EntryRig(With(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+
+        var response = await rig.Wire.UploadAsync(0xBFFF, 0x00);
+
+        app.Log.Should().StartWith("attach");
+        response.Should().Equal(0x4F, 0xFF, 0xBF, 0x00, 0x2A, 0x00, 0x00, 0x00);
     }
 
     [Fact]

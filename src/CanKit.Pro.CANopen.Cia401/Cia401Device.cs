@@ -169,8 +169,6 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// <item><description>"By more than" means strictly greater.</description></item>
 /// <item><description>The last communicated value is reset at an interrupt, on entering
 /// Operational, on every reset, and when <c>6423h</c> goes from FALSE to TRUE.</description></item>
-/// <item><description>The warning of §5.3 ends when <c>6423h</c> is written TRUE or the node
-/// leaves Operational. The norm does not say when it ends.</description></item>
 /// </list>
 /// </description></item>
 /// <item><description><b>Analog outputs</b> (<see cref="ReadAnalogOutput"/>):
@@ -187,8 +185,10 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// given.</description></item>
 /// <item><description><b>Entering Operational</b> sends every TPDO of transmission type
 /// <c>FFh</c> that maps an entry of the device (§6.1), an input, an output or a parameter,
-/// whatever <c>6005h</c> and <c>6423h</c> say (see <see cref="OnNmtStateChanged"/>). TPDOs 2 to 4
-/// are disabled by default (see <see cref="Cia401Configuration.DefaultPdos"/>).</description></item>
+/// whatever <c>6005h</c> and <c>6423h</c> say (see <see cref="OnNmtStateChanged"/>): TPDOs 2 to 4,
+/// valid by default (see <see cref="Cia401Configuration.DefaultPdos"/>), go out then, while a
+/// changed analog input sends them only once <c>6423h</c> is TRUE and the condition <c>6421h</c>
+/// selects for the channel holds.</description></item>
 /// <item><description><b>Value ranges</b> (see <see cref="ValidateWrite"/>):
 /// <list type="bullet">
 /// <item><description>A BOOLEAN takes 0 and 1 only.</description></item>
@@ -318,6 +318,10 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <see cref="FromDescription"/>, and failure monitoring.</summary>
     public CanOpenApplicationRequirements Requirements { get; }
 
+    /// <summary>None: every CiA 401-1 object is a level, which the device reads when it is told of
+    /// the write (<see cref="OnEntriesWritten"/>).</summary>
+    public IReadOnlyList<CanOpenObjectAddress> CommandEntries => Array.Empty<CanOpenObjectAddress>();
+
     /// <summary>Declares the objects of every function block, or adopts those the node's device
     /// description declared (<see cref="FromDescription"/>); brings the inputs to the application's
     /// levels and the outputs to what their write objects hold; sets the device type and the default
@@ -372,7 +376,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
             {
                 var mapping = new PdoMapping();
                 foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
-                if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping, pdo.Enabled);
+                if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping);
                 else host.SetDefaultRpdo(pdo.Number, mapping);
             }
         }
@@ -439,12 +443,23 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         RaiseOutputsChanged();
     }
 
+    /// <summary>Not called: the device has no command entries (<see cref="CommandEntries"/>).</summary>
+    public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+    {
+    }
+
+    /// <summary>Nothing: CiA 401-1 ties no transmission to the reception of an RPDO; the device acts
+    /// on what the RPDO wrote (<see cref="OnEntriesWritten"/>).</summary>
+    public void OnRpdoReceived(int pdoNumber)
+    {
+    }
+
     /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).
     /// Entering Operational sends every TPDO of transmission type <c>FFh</c> (§6.1) that maps an
     /// entry of the device: the analog inputs first start their interrupt state afresh
-    /// (<c>6422h</c> cleared) and raise the warning of §5.3 when <c>6423h</c> is FALSE, which leaving
-    /// Operational ends (see <see cref="SetAnalogInput"/>); then the device asks for every entry it
-    /// owns, in one request, whatever the interrupt masks and the global interrupt enables say.
+    /// (<c>6422h</c> cleared) and send the warning of §5.3 when <c>6423h</c> is FALSE (see
+    /// <see cref="SetAnalogInput"/>); then the device asks for every entry it owns, in one request,
+    /// whatever the interrupt masks and the global interrupt enables say.
     /// Leaving Initialisation with a device failure active asks the node for the state
     /// <c>1029h:01</c> names (§6.2.4; see <see cref="ReportDeviceFailure"/>). Actor loop.</summary>
     /// <remarks>
@@ -481,10 +496,6 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         {
             AnalogInputsEnterOperational(host);
             RequestTransmission(host, _ownedEntries);
-        }
-        else if (previous == NmtState.Operational)
-        {
-            AnalogInputsLeaveOperational(host);
         }
         RaiseOutputsChanged();
     }
@@ -880,12 +891,10 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         /// <see cref="FromDescription"/> adds no parameter the file leaves out, and a parameter
         /// array shorter than its block leaves the channels beyond it at the default. An object
         /// without a default ("No") reads 0. The value is decoded with the catalogue's data type,
-        /// which an adopted entry has been checked to have.
+        /// which an adopted entry has been checked to have (<see cref="CanOpenProfileParameter.Read"/>).
         /// </remarks>
         internal long Read(ObjectDictionary od, byte subindex)
-            => od.TryReadRaw(Index, subindex, out var raw)
-                ? Cia401Codec.Decode(Definition.DataType, raw)
-                : Definition.DefaultValue ?? 0;
+            => CanOpenProfileParameter.Read(od, Index, subindex, Definition.DataType, Definition.DefaultValue ?? 0);
 
         /// <summary><see cref="Read"/> of a one-byte parameter.</summary>
         internal byte ReadByte(ObjectDictionary od, byte subindex) => unchecked((byte)Read(od, subindex));

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -59,13 +58,9 @@ public partial class CanOpenApplicationSeamTests
     private static IEnumerable<string> Written(RecordingApplication app) => app.Log.Where(e => e.StartsWith("written", StringComparison.Ordinal));
 
     /// <summary>The number of items the node's actor has queued and not yet started. The mailbox is
-    /// private; its depth is the quantity a coalescing writer is about, and nothing else shows it.</summary>
-    private static int MailboxDepth(CanOpenNode node)
-    {
-        var actor = typeof(CanOpenNode).GetField("_actor", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(node)!;
-        var mailbox = actor.GetType().GetField("_mailbox", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(actor)!;
-        return (int)mailbox.GetType().GetProperty("Count")!.GetValue(mailbox)!;
-    }
+    /// private; its depth is the quantity a coalescing writer is about, and nothing else shows it.
+    /// The profile rigs read it too (<see cref="CanOpenProfileRig.MailboxDepth"/>).</summary>
+    private static int MailboxDepth(CanOpenNode node) => CanOpenProfileRig.MailboxDepth(node);
 
     /// <summary>A raw channel on the virtual bus: records every data frame per COB-ID, and sends what
     /// a master or a PDO producer would.</summary>
@@ -120,10 +115,14 @@ public partial class CanOpenApplicationSeamTests
         /// <summary>One SDO request to the slave, and its response.</summary>
         internal async Task<byte[]> SdoAsync(byte[] request)
         {
+            // The response that answers the request, not the next frame by position: see
+            // CanOpenProfileRig.SdoAsync.
             int before = Count(SdoResponse);
             Transmit(SdoRequest, request);
-            await WaitForCountAsync(SdoResponse, before + 1);
-            return Payloads(SdoResponse)[before];
+            byte[]? response = null;
+            await WaitUntilAsync(() => (response = Payloads(SdoResponse).Skip(before)
+                .FirstOrDefault(r => CanOpenProfileRig.Answers(request, r))) is not null, "the response to the SDO request");
+            return response!;
         }
 
         internal Task<byte[]> DownloadU8Async(ushort index, byte subindex, byte value)

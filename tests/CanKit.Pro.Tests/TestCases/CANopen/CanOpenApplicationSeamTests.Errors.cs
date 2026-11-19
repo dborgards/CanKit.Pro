@@ -25,23 +25,10 @@ public partial class CanOpenApplicationSeamTests
         => applications.Aggregate(new CanOpenNodeOptions { EnableErrorBehavior = true },
             (options, application) => options.WithApplication(application));
 
-    private static readonly FieldInfo EmcyChain =
-        typeof(CanOpenNode).GetField("_emcySendChain", BindingFlags.NonPublic | BindingFlags.Instance)!;
-
     /// <summary>Returns once every EMCY ordered so far has been through the chain: the frame is out, or,
-    /// with the EMCY switched off, the register is written. The chain is a field the actor extends, so it
-    /// is read on the actor and awaited until it is the same task twice.</summary>
-    private static async Task EmcyChainSettledAsync(CanOpenNode node)
-    {
-        Task? last = null;
-        while (true)
-        {
-            var current = await node.ActorForTests.PostAsync(() => (Task)EmcyChain.GetValue(node)!);
-            await current.WithTimeoutAsync(ShortTimeout);
-            if (ReferenceEquals(current, last)) return;
-            last = current;
-        }
-    }
+    /// with the EMCY switched off, the register is written. The barrier of every assertion here on
+    /// what EMCYs were not sent, or exactly how many were: <see cref="CanOpenTransmitBarrier.DrainEmcyAsync"/>.</summary>
+    private static Task EmcyChainSettledAsync(CanOpenNode node) => CanOpenTransmitBarrier.DrainEmcyAsync(node);
 
     private static byte ErrorRegister(CanOpenNode node) => (byte)node.ObjectDictionary.ReadUnsigned(0x1001, 0);
 
@@ -97,7 +84,8 @@ public partial class CanOpenApplicationSeamTests
 
         await RaiseAsync(rig.Node, app, 0x5000, 0x04);
         await RaiseAsync(rig.Node, app, 0x5000, 0x04);
-        await RaiseAsync(rig.Node, app, 0x5000, 0x40, new byte[] { 9 });
+        // Other bits than the first raise's (bit 6, which an earlier version used here, is reserved, #554).
+        await RaiseAsync(rig.Node, app, 0x5000, 0x20, new byte[] { 9 });
 
         rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(1, "one EMCY per error event (§7.2.7.1)");
         ErrorRegister(rig.Node).Should().Be(0x05, "the second raise changed nothing");
@@ -180,7 +168,7 @@ public partial class CanOpenApplicationSeamTests
         await EmcyChainSettledAsync(rig.Node);
 
         rig.Wire.Payloads(SlaveEmcy)[0].Should().Equal(Emcy(0x5000, 0x05));
-        ErrorRegister(rig.Node).Should().Be(0x05, "the released EMCY wrote the register it carried");
+        ErrorRegister(rig.Node).Should().Be(0x05, "1001h shows the profile error from its raise on, and the released EMCY carried the same register (#550)");
     }
 
     [Fact]
@@ -217,7 +205,9 @@ public partial class CanOpenApplicationSeamTests
         await EmcyChainSettledAsync(rig.Node);
 
         rig.Wire.Count(SlaveEmcy).Should().Be(0);
-        ErrorRegister(rig.Node).Should().Be(0x05, "the held error's EMCY still wrote the register ahead of the application's");
+        ErrorRegister(rig.Node).Should().Be(0x05, "1001h shows a profile error from its raise to its clear, whatever became of its EMCY (#550). " +
+            "For a communication error, the register write a replaced EMCY still makes is covered by " +
+            "CanOpenPdoEngineTests.A_Held_Error_Reset_Replaced_By_An_Application_Emcy_Still_Clears_The_Register");
     }
 
     [Fact]
@@ -253,9 +243,47 @@ public partial class CanOpenApplicationSeamTests
 
         zero.Should().BeOfType<ArgumentOutOfRangeException>("0000h is the reset, which ClearError sends");
         tooLong.Should().BeOfType<ArgumentException>("the manufacturer field is five bytes");
-        Settle(rig.Node);
+        // The EMCY barrier, not Settle: an EMCY a refused raise ordered would still be on its way
+        // through the EMCY chain after two actor jobs (#562).
+        await EmcyChainSettledAsync(rig.Node);
         rig.Wire.Count(SlaveEmcy).Should().Be(0);
         ErrorRegister(rig.Node).Should().Be(0, "a refused raise records nothing");
+    }
+
+    [Theory] // #554
+    [InlineData(0x40)]
+    [InlineData(0x44)]
+    [InlineData(0xFF)]
+    public async Task A_Raise_With_The_Reserved_Bit_6_Is_Refused(int bits)
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        Exception? refused = null;
+
+        await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.RaiseError(0x5000, (byte)bits)));
+        await EmcyChainSettledAsync(rig.Node);
+
+        refused.Should().BeOfType<ArgumentOutOfRangeException>("bit 6 of the error register is reserved, always 0b (CiA 301 v4.2.0 §7.5.2.2, Table 54)")
+            .Which.ParamName.Should().Be("errorRegisterBits");
+        rig.Wire.Count(SlaveEmcy).Should().Be(0);
+        ErrorRegister(rig.Node).Should().Be(0, "a refused raise records nothing");
+
+        // Nothing was recorded either: the same code raised with valid bits is a new error event.
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy(0x5000, 0x05));
+    }
+
+    [Fact] // #554
+    public async Task Every_Bit_But_Bit_6_Reaches_1001h_And_The_Emcy()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await RaiseAsync(rig.Node, app, 0x5000, 0xBE);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy(0x5000, 0xBF),
+            "the categories, the manufacturer bit and the generic bit, which comes with any error");
+        ErrorRegister(rig.Node).Should().Be(0xBF);
     }
 
     [Fact]
@@ -272,6 +300,374 @@ public partial class CanOpenApplicationSeamTests
         raise.Should().Throw<InvalidOperationException>();
         clear.Should().Throw<InvalidOperationException>();
         ErrorRegister(node).Should().Be(0);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // 1001h during the EMCY inhibit time (#550).
+    // -----------------------------------------------------------------------------------------
+
+    private static readonly TimeSpan LongestInhibit = TimeSpan.FromTicks(0xFFFF * 1000L); // 6.5535 s
+
+    /// <summary>A node with the EMCY inhibit time at its longest, <c>FFFFh</c>, whose interval has just
+    /// been started by an EMCY of the application.</summary>
+    private static async Task<EntryRig> InsideTheInhibitIntervalAsync(RecordingApplication app, ManualTimeSource clock)
+    {
+        var rig = new EntryRig(new CanOpenNodeOptions { EnableEmcyInhibit = true }.WithApplication(app), clock);
+        try
+        {
+            rig.Od.WriteUnsigned(0x1015, 0, 0xFFFF);
+            Settle(rig.Node);
+            await rig.Node.SendEmcyAsync(0x1000, 0x00).WithTimeoutAsync(ShortTimeout);
+            await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+            return rig;
+        }
+        catch
+        {
+            rig.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>What a remote expedited SDO upload of <c>1001h:00</c> returns.</summary>
+    private static async Task<byte> UploadErrorRegisterAsync(EntryRig rig)
+    {
+        var response = await rig.Wire.UploadAsync(0x1001, 0x00);
+        response[0].Should().Be(0x4F, "an expedited upload of one byte");
+        return response[4];
+    }
+
+    /// <summary>Waits until the head of the EMCY chain waits for its slot: decided, not transmitted.</summary>
+    private static async Task UntilEmcyParkedAsync(CanOpenNode node)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!await EmcyParkedAsync(node))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The EMCY never waited for its slot.");
+            await Task.Delay(1);
+        }
+    }
+
+    [Fact] // #550
+    public async Task A_Profile_Error_Shows_In_1001h_While_Its_Emcy_Waits_For_The_Inhibit_Time()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await UntilEmcyParkedAsync(rig.Node);
+        Advance(clock, rig.Node, TimeSpan.FromMilliseconds(6500));
+
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05,
+            "an active error sets its bits and the generic bit (CiA 301 v4.2.0 §7.5.2.2, Table 54), inhibit time or not");
+        (await EmcyParkedAsync(rig.Node)).Should().BeTrue("the EMCY still waits for the end of the interval");
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "the inhibit time still spaces the frames (§7.5.2.18)");
+
+        Advance(clock, rig.Node, LongestInhibit - TimeSpan.FromMilliseconds(6500));
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x5000, 0x05));
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+    }
+
+    [Fact] // #550
+    public async Task An_Error_Cleared_During_The_Inhibit_Time_Leaves_1001h_At_Once_And_No_Older_Frame_Puts_It_Back()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await UntilEmcyParkedAsync(rig.Node);
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+
+        await OnActor(rig.Node, () => app.Host!.ClearError(0x5000));
+
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "the cause is gone: the register shows it at once");
+
+        // The raise's EMCY goes out at the end of the interval and carries what it was ordered with; the
+        // reset behind it waits for another interval. Between the two, 1001h stays what is true now.
+        Advance(clock, rig.Node, LongestInhibit);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await UntilEmcyParkedAsync(rig.Node);
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x5000, 0x05), "the frames keep their order and content");
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "the older frame does not write the ended error back");
+
+        Advance(clock, rig.Node, LongestInhibit);
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 3);
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Wire.Payloads(SlaveEmcy)[2].Should().Equal(Emcy(0x0000, 0x00));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Fact] // #550
+    public async Task A_Reset_During_The_Inhibit_Time_Ends_The_Error_In_1001h()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await UntilEmcyParkedAsync(rig.Node);
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        await EmcyChainSettledAsync(rig.Node);
+
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x00, "a reset ends the error");
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "the reset dropped the EMCY that was waiting, and sent none");
+    }
+
+    [Fact] // #550, Bugbot on #567
+    public async Task A_Reset_Takes_The_Profile_Errors_Out_Of_1001h_Before_The_Applications_Hear_Of_It()
+    {
+        // The error's EMCY is held in its send, so the EMCY chain is busy when the reset comes: whatever
+        // the reset queues there waits. The application reads 1001h in its reset callbacks, and the
+        // master uploads it as soon as it has seen the boot-up.
+        var app = Profile();
+        byte? inInitialisation = null;
+        byte? inOnReset = null;
+        app.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Initializing) inInitialisation = (byte)app.Host!.ObjectDictionary.ReadUnsigned(0x1001, 0);
+        };
+        app.WhenReset = _ => inOnReset = (byte)app.Host!.ObjectDictionary.ReadUnsigned(0x1001, 0);
+        using var rig = new EntryRig(With(app));
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        Settle(rig.Node);
+        var emcySending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var emcyMayLeave = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BeforeControlFrameSendForTests = id =>
+        {
+            if (id != SlaveEmcy) return Task.CompletedTask;
+            emcySending.TrySetResult(true);
+            return emcyMayLeave.Task;
+        };
+        await OnActor(rig.Node, () => app.Host!.RaiseError(0x5000, 0x04));
+        await emcySending.Task.WithTimeoutAsync(ShortTimeout);
+        (await UploadErrorRegisterAsync(rig)).Should().Be(0x05);
+
+        await ResetFromWireAsync(rig, NmtCommand.ResetNode);
+        byte afterBootUp = await UploadErrorRegisterAsync(rig);
+        emcyMayLeave.SetResult(true);
+        await EmcyChainSettledAsync(rig.Node);
+
+        using (new AwesomeAssertions.Execution.AssertionScope())
+        {
+            inInitialisation.Should().Be(0x00, "a reset ends the profile errors, and 1001h shows that at once (#550)");
+            inOnReset.Should().Be(0x00);
+            afterBootUp.Should().Be(0x00, "a master that reacts to the boot-up reads the ended errors as ended");
+            ErrorRegister(rig.Node).Should().Be(0x00);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Warnings: an EMCY of the class "error reset or no error", 00xxh (CiA 301 v4.2.0 §7.2.7.1,
+    // Table 25), that is not an error (#556).
+    // -----------------------------------------------------------------------------------------
+
+    private static async Task WarnAsync(CanOpenNode node, RecordingApplication app, ushort code, byte[]? manufacturer = null)
+    {
+        await OnActor(node, () => app.Host!.SendWarning(code, manufacturer));
+        await EmcyChainSettledAsync(node);
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Is_One_Emcy_With_The_Healthy_Register_And_Leaves_1001h_Alone()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await WarnAsync(rig.Node, app, 0x0080, new byte[] { 1, 2 });
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy(0x0080, 0x00, 1, 2),
+            "a warning is no error: the frame carries the register as it is, 00h on a healthy node");
+        ErrorRegister(rig.Node).Should().Be(0x00, "nothing became active, so 1001h shows no error");
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Carries_The_Bits_Of_An_Active_Error_And_Adds_And_Removes_None()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+
+        await WarnAsync(rig.Node, app, 0x0080);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(2);
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x0080, 0x05), "the error that is active shows in the warning's frame");
+        ErrorRegister(rig.Node).Should().Be(0x05, "the warning neither ends the error nor adds a bit");
+
+        // The warning left nothing behind to end: clearing the error leaves a healthy register.
+        await ClearAsync(rig.Node, app, 0x5000);
+        rig.Wire.Payloads(SlaveEmcy)[2].Should().Equal(Emcy(0x0000, 0x00));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Fact] // #556
+    public async Task The_Same_Warning_Twice_Is_Two_Emcys()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await WarnAsync(rig.Node, app, 0x0080);
+        await WarnAsync(rig.Node, app, 0x0080);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().HaveCount(2, "a warning is an event of its own each time, not an error state");
+        rig.Wire.Payloads(SlaveEmcy).Should().AllSatisfy(frame => frame.Should().Equal(Emcy(0x0080, 0x00)));
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Theory] // #556
+    [InlineData(0x0000)]
+    [InlineData(0x0100)]
+    [InlineData(0x1000)]
+    [InlineData(0x5000)]
+    [InlineData(0xFF80)]
+    public async Task A_Warning_Outside_0001h_To_00FFh_Is_Refused(int code)
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        Exception? refused = null;
+
+        await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.SendWarning((ushort)code)));
+        await EmcyChainSettledAsync(rig.Node);
+
+        refused.Should().BeOfType<ArgumentOutOfRangeException>(
+                "a warning is of the class 00xxh (CiA 301 v4.2.0 Table 25), and 0000h is the error reset")
+            .Which.ParamName.Should().Be("errorCode");
+        rig.Wire.Count(SlaveEmcy).Should().Be(0);
+        ErrorRegister(rig.Node).Should().Be(0x00);
+    }
+
+    [Theory] // #556: both ends of 0001h to 00FFh are accepted
+    [InlineData(0x0001)]
+    [InlineData(0x00FF)]
+    public async Task A_Warning_At_Either_End_Of_0001h_To_00FFh_Is_Sent(int code)
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+
+        await WarnAsync(rig.Node, app, (ushort)code);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle().Which.Should().Equal(Emcy((ushort)code, 0x00));
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_With_A_Manufacturer_Field_Longer_Than_Five_Bytes_Is_Refused_Even_Where_It_Would_Be_Held()
+    {
+        // In Initialisation, where the warning would be held for the boot-up: refused when it is sent,
+        // not when it is released.
+        var app = Profile();
+        using var rig = UnconfiguredLssRig(app);
+        Settle(rig.Node);
+        Exception? refused = null;
+
+        await OnActor(rig.Node, () => refused = Record.Exception(() => app.Host!.SendWarning(0x0080, new byte[6])));
+        refused.Should().BeOfType<ArgumentException>("the manufacturer field is five bytes");
+
+        await ConfigureNodeIdAsync(rig);
+        await rig.Wire.WaitForCountAsync(SlaveHeartbeat, 1);
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "a refused warning was not held");
+    }
+
+    [Fact] // #556
+    public void A_Warning_Is_Sent_On_The_Actor_Only()
+    {
+        using var bus = Open(NewSession(), 1);
+        var app = Profile();
+        using var node = OpenNode(bus, With(app));
+        Settle(node);
+
+        Action warn = () => app.Host!.SendWarning(0x0080);
+
+        warn.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Is_Entered_In_The_Error_History_Like_Every_Emcy_And_Cleared_With_It()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app).WithErrorHistoryCapacity(4));
+
+        await WarnAsync(rig.Node, app, 0x0080, new byte[] { 1, 2, 3 });
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(1);
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(1u, "1003h enters every EMCY the node transmits but 0000h (§7.5.2.4)");
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0x0201_0080u,
+            "the code low, the first two manufacturer-specific bytes high (§7.5.2.4, Figure 53)");
+        ErrorRegister(rig.Node).Should().Be(0x00, "the entry is a record of the frame, not an active error");
+
+        // An application's SendEmcyAsync of the same code is entered the same way, on top of it.
+        await rig.Node.SendEmcyAsync(0x0080, 0x00, new byte[] { 1, 2, 3 });
+        await EmcyChainSettledAsync(rig.Node);
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(2u);
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0x0201_0080u);
+        rig.Od.ReadUnsigned(0x1003, 0x02).Should().Be(0x0201_0080u);
+
+        // Writing 00h to sub-index 00h empties the history, the warning's entries with the rest.
+        rig.Od.WriteUnsigned(0x1003, 0x00, 0);
+        rig.Od.ReadUnsigned(0x1003, 0x00).Should().Be(0u);
+        rig.Od.ReadUnsigned(0x1003, 0x01).Should().Be(0u);
+        rig.Od.ReadUnsigned(0x1003, 0x02).Should().Be(0u);
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_With_The_Emcy_Switched_Off_Sends_Nothing_And_Leaves_1001h_Alone()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+        rig.Od.WriteUnsigned(0x1014, 0, SlaveEmcy | CanOpenCobId.InvalidBit);
+        Settle(rig.Node);
+
+        await WarnAsync(rig.Node, app, 0x0080);
+
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "bit 31 of 1014h: there is no EMCY to send");
+        ErrorRegister(rig.Node).Should().Be(0x05);
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Sent_In_Stopped_Is_Dropped_And_Leaves_The_Held_Emcy_Held()
+    {
+        var app = Profile();
+        using var rig = new EntryRig(With(app));
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.Stop, Slave });
+        await WaitUntilAsync(() => rig.Node.State == NmtState.Stopped, "Stopped");
+        await RaiseAsync(rig.Node, app, 0x5000, 0x04);
+
+        await WarnAsync(rig.Node, app, 0x0080);
+        rig.Wire.Count(SlaveEmcy).Should().Be(0, "no EMCY goes out in Stopped (§7.3.2.2.4)");
+
+        rig.Wire.Transmit(0x000, new[] { (byte)NmtCommand.EnterPreOperational, Slave });
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 1);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy).Should().ContainSingle(
+                "Stopped keeps the most recent active EMCY reason (§7.3.2.2.4), and a warning is none")
+            .Which.Should().Equal(Emcy(0x5000, 0x05));
+    }
+
+    [Fact] // #556
+    public async Task A_Warning_Waits_For_The_Inhibit_Time()
+    {
+        var app = Profile();
+        var clock = new ManualTimeSource();
+        using var rig = await InsideTheInhibitIntervalAsync(app, clock);
+
+        await OnActor(rig.Node, () => app.Host!.SendWarning(0x0080));
+        await UntilEmcyParkedAsync(rig.Node);
+        Advance(clock, rig.Node, TimeSpan.FromMilliseconds(6500));
+
+        (await EmcyParkedAsync(rig.Node)).Should().BeTrue("the warning still waits for the end of the interval");
+        rig.Wire.Count(SlaveEmcy).Should().Be(1, "the inhibit time spaces a warning as any other EMCY (§7.5.2.18)");
+
+        Advance(clock, rig.Node, LongestInhibit - TimeSpan.FromMilliseconds(6500));
+        await rig.Wire.WaitForCountAsync(SlaveEmcy, 2);
+        await EmcyChainSettledAsync(rig.Node);
+
+        rig.Wire.Payloads(SlaveEmcy)[1].Should().Equal(Emcy(0x0080, 0x00));
+        ErrorRegister(rig.Node).Should().Be(0x00);
     }
 
     // -----------------------------------------------------------------------------------------

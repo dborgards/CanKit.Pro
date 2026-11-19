@@ -60,7 +60,9 @@ internal sealed partial class CanOpenNode
     /// additional information lives there only (§7.5.2.1). The logical devices must be 0 to n-1: a
     /// reader stops at the first object that does not exist, so a gap would hide the devices behind
     /// it. An object a device description declared is not written; its profile number must be the
-    /// one the application set.
+    /// one the application set, and a described <c>1000h</c> must announce the logical devices the
+    /// node has (<see cref="RequireDescribedTopology"/>). The words themselves are checked against
+    /// the value definition first (<see cref="RequireValidWords"/>), #551.
     /// </summary>
     private void ComposeDeviceTypes()
     {
@@ -91,9 +93,14 @@ internal sealed partial class CanOpenNode
                 "or a reader of the chain would stop at the missing one and never see the rest.");
         }
 
+        RequireValidWords(types, setters, count);
+        // Whose RPDOs and TPDOs a PDO number names (OnRpdoReceived, RequestTransmissionOfTpdo).
+        _logicalDeviceOwners = setters;
+
         if (_describedObjects.Contains(Co.DeviceType))
         {
             RequireDescribedProfile(Co.DeviceType, setters[0]!, types[0]);
+            RequireDescribedTopology(types, setters, count);
         }
         else
         {
@@ -130,6 +137,74 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    /// <summary>
+    /// The words the applications set, against the value definition of CiA 301 v4.2.0 §7.5.2.1,
+    /// before anything is written: a profile number of <c>0000h</c> ("does not follow a standardized
+    /// profile") takes additional information <c>0000h</c> or <c>FFFFh</c> and nothing else, in
+    /// <c>1000h</c> and, by "the very same value definition", in a chain object; and the word of a
+    /// node's only logical device, which becomes <c>1000h</c>, does not carry <c>FFFFh</c>, which says
+    /// a further logical device is implemented. A reader would follow it to a <c>67FFh</c> the node
+    /// does not declare and take the word of <c>1000h</c>, <c>FFFFh</c> included, for the device's own.
+    /// Any other additional information is the profile's (§7.5.2.1) and is kept as set.
+    /// </summary>
+    private static void RequireValidWords(CanOpenDeviceType[] types, ApplicationSlot?[] setters, int count)
+    {
+        for (int device = 0; device < count; device++)
+        {
+            var type = types[device];
+            var setter = setters[device]!.Application.Name;
+            if (!type.FollowsStandardizedProfile
+                && type.AdditionalInformation is not (0x0000 or CanOpenDeviceType.FurtherLogicalDevices))
+            {
+                throw OptionsError($"Application '{setter}' sets logical device {device} to 0x{type.Value:X8}: profile " +
+                    "number 0000h is a device without a standardized profile, whose additional information is 0000h, " +
+                    "or FFFFh when a further logical device follows (CiA 301 v4.2.0 §7.5.2.1).");
+            }
+        }
+        if (count == 1 && types[0].HasFurtherLogicalDevices)
+        {
+            throw OptionsError($"Application '{setters[0]!.Application.Name}' sets logical device 0 to 0x{types[0].Value:X8}, " +
+                "whose additional information FFFFh announces a further logical device, but the node has only this one " +
+                "(CiA 301 v4.2.0 §7.5.2.1): a reader of 1000h would look for the next one in 67FFh.");
+        }
+    }
+
+    /// <summary>
+    /// A described <c>1000h</c> wins over the composed word, so it has to announce the logical devices
+    /// the node has (CiA 301 v4.2.0 §7.5.2.1): <c>FFFFh</c> in its upper half when there are several, or
+    /// a reader of <c>1000h</c> stops at the first and never sees the rest; and with <c>FFFFh</c>, a
+    /// <c>67FFh</c> for a reader to find, declared by the file or the application, or the reader takes
+    /// the word of <c>1000h</c> for the only device's. A <c>67FFh</c> the application declared is
+    /// checked here like a described one (<see cref="RequireDescribedProfile"/>): with one logical
+    /// device nothing else refuses or checks it.
+    /// </summary>
+    private void RequireDescribedTopology(CanOpenDeviceType[] types, ApplicationSlot?[] setters, int count)
+    {
+        // RequireDescribedProfile has read it as an UNSIGNED32 already.
+        _od.TryReadRaw(Co.DeviceType, 0x00, out var raw);
+        CanOpenDeviceType.TryParse(raw, out var described);
+        if (count > 1 && !described.HasFurtherLogicalDevices)
+        {
+            var hidden = string.Join(", ", Enumerable.Range(1, count - 1).Select(device =>
+                $"logical device {device} ('{setters[device]!.Application.Name}', profile {types[device].ProfileNumber})"));
+            throw OptionsError($"The device description's object 0x1000 holds 0x{described.Value:X8}, which announces one " +
+                $"logical device, but {count} are attached: {hidden} would be hidden behind it. With several logical " +
+                "devices 1000h holds FFFFh in its upper half (CiA 301 v4.2.0 §7.5.2.1).");
+        }
+        if (count == 1 && described.HasFurtherLogicalDevices && !_od.ContainsIndex(DeviceTypeObjectOf(0)))
+        {
+            throw OptionsError($"The device description's object 0x1000 holds 0x{described.Value:X8}, which announces further " +
+                $"logical devices, but neither the file nor application '{setters[0]!.Application.Name}' declares 0x67FF, " +
+                "where a reader looks for the first of them (CiA 301 v4.2.0 §7.5.2.1).");
+        }
+        // Then the reader takes 67FFh for the device's type. A described one is checked with the chain
+        // (ComposeDeviceTypes); one the application declared itself is checked here, by the same rules:
+        // with one logical device the node leaves it alone and checks nothing else about it.
+        var first = DeviceTypeObjectOf(0);
+        if (count == 1 && described.HasFurtherLogicalDevices && !_describedObjects.Contains(first))
+            RequireDescribedProfile(first, setters[0]!, types[0], $"Application '{setters[0]!.Application.Name}'");
+    }
+
     /// <summary>The device-type object of a logical device: <c>67FFh + x·800h</c>, x the logical device
     /// counted from 0 (CiA 301 v4.2.0 §7.5.2.1).</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="logicalDevice"/> is outside
@@ -138,17 +213,31 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The device description is the node's identity and wins over the application: it
     /// stays as it is, and the profile number it holds in <paramref name="index"/> must be the one
-    /// the application set, or the file describes another device than the one attached.</summary>
-    private void RequireDescribedProfile(ushort index, ApplicationSlot setter, CanOpenDeviceType set)
+    /// the application set, or the file describes another device than the one attached. The file
+    /// must declare the object as the read-only UNSIGNED32 a device type is (#553). The same rules
+    /// check a <c>67FFh</c> that <paramref name="declarer"/>, an application, declared itself where a
+    /// described <c>1000h</c> sends a reader to it (<see cref="RequireDescribedTopology"/>).</summary>
+    private void RequireDescribedProfile(ushort index, ApplicationSlot setter, CanOpenDeviceType set,
+        string declarer = "The device description")
     {
-        if (!_od.TryReadRaw(index, 0x00, out var raw) || !CanOpenDeviceType.TryParse(raw, out var described))
+        // The declaration first, then the value: four bytes of an INTEGER32, or a word a master may
+        // overwrite, are not a device type (CiA 301 v4.2.0 §7.5.2.1: UNSIGNED32, ro; a chain object has
+        // "the very same value definition"), #553.
+        if (!_od.TryGet(index, 0x00, out var entry) || entry.DataType != OdDataType.Unsigned32
+            || !_od.TryReadRaw(index, 0x00, out var raw) || !CanOpenDeviceType.TryParse(raw, out var described))
         {
-            throw OptionsError($"The device description declares object 0x{index:X4}, which is not an UNSIGNED32 " +
+            throw OptionsError($"{declarer} declares object 0x{index:X4}, which is not an UNSIGNED32 " +
                 $"at sub-index 0: application '{setter.Application.Name}' sets the device type {set}.");
         }
+        if (entry.Access != OdAccess.ReadOnly)
+        {
+            throw OptionsError($"{declarer} declares object 0x{index:X4} with access {entry.Access}, but a " +
+                $"device-type object is read-only (CiA 301 v4.2.0 §7.5.2.1): application '{setter.Application.Name}' " +
+                $"sets the device type {set}, and a write over the network must not replace it.");
+        }
         if (described.ProfileNumber == set.ProfileNumber) return;
-        throw OptionsError($"The device description's object 0x{index:X4} holds profile {described.ProfileNumber} " +
+        throw OptionsError($"{declarer} declares object 0x{index:X4} holding profile {described.ProfileNumber} " +
             $"(0x{described.ProfileNumber:X4}), but application '{setter.Application.Name}' sets profile " +
-            $"{set.ProfileNumber} (0x{set.ProfileNumber:X4}): the file describes another device than the one attached.");
+            $"{set.ProfileNumber} (0x{set.ProfileNumber:X4}): the object describes another device than the one attached.");
     }
 }

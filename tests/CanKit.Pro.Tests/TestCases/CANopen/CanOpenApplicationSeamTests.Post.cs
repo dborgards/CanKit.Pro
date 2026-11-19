@@ -220,6 +220,248 @@ public partial class CanOpenApplicationSeamTests
         Written(app).Should().BeEmpty("the held action ran as a callback of the application");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // A deadline armed before the node has opened (#561).
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>The node an application's host belongs to: the constructor has not returned it yet
+    /// while the applications attach.</summary>
+    private static CanOpenNode NodeOf(ICanOpenApplicationHost host)
+        => (CanOpenNode)host.GetType().GetField("_node", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(host)!;
+
+    /// <summary>
+    /// An application to attach after one that arms a deadline due at once in its <c>Attach</c>: its own
+    /// <c>Attach</c> holds the constructor and runs two jobs through the node's actor, by which time the
+    /// actor has fired a deadline that was due before the first job, and passes what
+    /// <paramref name="ran"/> says then to <paramref name="ranWhileHeld"/>.
+    /// </summary>
+    private static RecordingApplication HoldsTheConstructorAfter(Func<bool> ran, Action<bool> ranWhileHeld)
+        => new("holder")
+        {
+            OnAttach = host =>
+            {
+                var node = NodeOf(host);
+                node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+                node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+                ranWhileHeld(ran());
+            },
+        };
+
+    [Fact] // #561
+    public void A_Deadline_Due_During_Attach_Runs_Once_The_Node_Has_Opened()
+    {
+        using var bus = Open(NewSession(), 1);
+        int ran = 0;
+        bool? ranWhileHeld = null;
+        NmtState? seen = null;
+        var early = Entries("early");
+        var declare = early.OnAttach!;
+        early.OnAttach = host =>
+        {
+            declare(host);
+            host.Arm(TimeSpan.Zero, () =>
+            {
+                seen = host.State;
+                host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 9);
+                Interlocked.Increment(ref ran);
+            });
+        };
+        var holder = HoldsTheConstructorAfter(() => Volatile.Read(ref ran) > 0, held => ranWhileHeld = held);
+
+        using var node = OpenNode(bus, With(early, holder), new ManualTimeSource());
+        Settle(node);
+
+        ranWhileHeld.Should().BeFalse("the deadline is held while the constructor runs (#561)");
+        Volatile.Read(ref ran).Should().Be(1, "it runs once the node has opened");
+        seen.Should().Be(NmtState.PreOperational, "behind the start-up, as a post from Attach");
+        node.ObjectDictionary.ReadUnsigned(0x6000, 0x01).Should().Be(9u);
+        Written(early).Should().BeEmpty("it ran as a callback of the application");
+    }
+
+    [Fact] // #561
+    public async Task A_Deadline_The_Actor_Reaches_Only_After_The_Open_Still_Runs_Behind_The_Start_Up()
+    {
+        // The first application keeps the actor busy from its Attach until the open has returned, so
+        // the deadline the second arms, due at once, is fired by the actor only after the hold has been
+        // released, but ahead of the start-up job: a timer due before a job was posted does not wait
+        // for it (ProtocolActor.FireDueTimers). It still runs behind the start-up.
+        using var bus = Open(NewSession(), 1);
+        using var busy = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        Task? blocked = null;
+        NmtState? seen = null;
+        // The blocking job is running before Attach returns, so the actor took its batch of work with
+        // that job alone: the start-up job, posted later, waits for the next batch, which the deadline
+        // does not wait for.
+        var blocker = new RecordingApplication("blocker")
+        {
+            OnAttach = host =>
+            {
+                blocked = NodeOf(host).PostToActorAsync(() =>
+                {
+                    started.Set();
+                    busy.Wait(ShortTimeout);
+                });
+                started.Wait(ShortTimeout).Should().BeTrue("the actor runs the blocking job");
+            },
+        };
+        var early = new RecordingApplication("early")
+        {
+            OnAttach = host => host.Arm(TimeSpan.Zero, () => seen = host.State),
+        };
+
+        using var node = OpenNode(bus, With(blocker, early), new ManualTimeSource());
+        busy.Set();
+        await blocked!.WithTimeoutAsync(ShortTimeout);
+        Settle(node);
+
+        seen.Should().Be(NmtState.PreOperational, "the deadline runs behind the start-up job, not ahead of it");
+    }
+
+    /// <remarks>
+    /// What this proves is that the callback is held, not run, up to the failure: the second
+    /// application reads the count after the actor has fired the deadline, then fails the open. It
+    /// also fails if the failed open released the held work to the actor, whose shutdown drains its
+    /// mailbox and would run it. That the work is dropped rather than merely left held
+    /// (<c>CloseApplicationPosts</c>, the closed check in <c>RunApplicationDeadline</c>) is not
+    /// observable: nothing releases held work after a failed open, so removing the drop alone does
+    /// not fail this test.
+    /// </remarks>
+    [Fact] // #561
+    public void A_Deadline_Due_During_An_Open_That_Fails_Does_Not_Run_Before_The_Failure()
+    {
+        using var bus = Open(NewSession(), 1);
+        using var service = new CanBusService(bus);
+        int ran = 0;
+        int ranBeforeTheFailure = -1;
+        var early = new RecordingApplication("early")
+        {
+            OnAttach = host => host.Arm(TimeSpan.Zero, () => Interlocked.Increment(ref ran)),
+        };
+        // Holds the constructor until the actor has fired the deadline, reads the count, then fails the open.
+        var broken = new RecordingApplication("broken")
+        {
+            OnAttach = host =>
+            {
+                var node = NodeOf(host);
+                node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+                node.PostToActorAsync(() => { }).GetAwaiter().GetResult();
+                ranBeforeTheFailure = Volatile.Read(ref ran);
+                throw new InvalidOperationException("no device");
+            },
+        };
+
+        Assert.Throws<InvalidOperationException>(() => new CanOpenNode(service, Slave, With(early, broken), ownsService: false, new ManualTimeSource()));
+
+        ranBeforeTheFailure.Should().Be(0, "the deadline was held while the node was being opened");
+        Volatile.Read(ref ran).Should().Be(0, "the failed open ended the actor, and the held callback with it");
+    }
+
+    [Fact] // #561, Codecov on #567
+    public async Task A_Deadline_The_Actor_Fires_Only_After_The_Open_Failed_Is_Dropped_Quietly()
+    {
+        // The first application keeps the actor busy from its Attach, so the deadline the second arms,
+        // due at once, is not fired while the node is being opened. The third fails the open. Only once
+        // the failed open has closed the held work is the actor let go: it fires the deadline as it
+        // shuts down (its due timers are drained), and the callback must be dropped without a trace.
+        using var bus = Open(NewSession(), 1);
+        using var service = new CanBusService(bus);
+        using var busy = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        int ran = 0;
+        var reported = new List<Exception>();
+        CanOpenNode? opening = null;
+        var blocker = new RecordingApplication("blocker")
+        {
+            OnAttach = host =>
+            {
+                opening = NodeOf(host);
+                opening.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+                _ = opening.PostToActorAsync(() =>
+                {
+                    started.Set();
+                    busy.Wait(ShortTimeout);
+                });
+                started.Wait(ShortTimeout).Should().BeTrue("the actor runs the blocking job");
+            },
+        };
+        var early = new RecordingApplication("early")
+        {
+            OnAttach = host => host.Arm(TimeSpan.Zero, () => Interlocked.Increment(ref ran)),
+        };
+        var broken = new RecordingApplication("broken") { OnAttach = _ => throw new InvalidOperationException("no device") };
+        var closed = typeof(CanOpenNode).GetField("_applicationPostsClosed", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var letGo = Task.Run(async () =>
+        {
+            await WaitUntilAsync(() => opening is not null && (bool)closed.GetValue(opening)!, "the failed open to close the held work");
+            busy.Set();
+        });
+
+        Assert.Throws<InvalidOperationException>(() => new CanOpenNode(service, Slave, With(blocker, early, broken), ownsService: false, new ManualTimeSource()));
+        await letGo.WithTimeoutAsync(ShortTimeout);
+        // The constructor's failure path joined the actor, whose shutdown drained the due deadline; a
+        // marker behind every background report made so far is delivered after the last of them.
+        var dispatcher = (CanKit.Pro.Actor.BackgroundExceptionDispatcher)typeof(CanOpenNode)
+            .GetField("_backgroundReports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(opening!)!;
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        dispatcher.Post(() => delivered.TrySetResult(true));
+        await delivered.Task.WithTimeoutAsync(ShortTimeout);
+
+        Volatile.Read(ref ran).Should().Be(0, "a deadline of an open that failed is dropped");
+        lock (reported) reported.Should().BeEmpty("it is dropped quietly, not refused by an actor that is shutting down");
+    }
+
+    [Fact] // #561
+    public async Task A_Deadline_Due_Before_The_Start_Up_Of_A_Node_Disposed_Meanwhile_Is_Dropped_Quietly()
+    {
+        // The first application keeps the actor busy from its Attach, so the start-up job waits behind
+        // it and the deadline the second arms, due at once on the manual clock, is not fired. The node
+        // opens and is disposed; once its actor refuses work, the actor is let go: it fires the deadline
+        // before the start-up job, as it shuts down, and the callback must be dropped without a trace.
+        using var bus = Open(NewSession(), 1);
+        using var busy = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        int ran = 0;
+        var reported = new List<Exception>();
+        var blocker = new RecordingApplication("blocker")
+        {
+            OnAttach = host =>
+            {
+                var opening = NodeOf(host);
+                opening.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+                _ = opening.PostToActorAsync(() =>
+                {
+                    started.Set();
+                    busy.Wait(ShortTimeout);
+                });
+                started.Wait(ShortTimeout).Should().BeTrue("the actor runs the blocking job");
+            },
+        };
+        var early = new RecordingApplication("early")
+        {
+            OnAttach = host => host.Arm(TimeSpan.Zero, () => Interlocked.Increment(ref ran)),
+        };
+        var node = OpenNode(bus, With(blocker, early), new ManualTimeSource());
+        var actor = typeof(CanOpenNode).GetField("_actor", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(node)!;
+        var actorDisposed = actor.GetType().GetField("_disposedFlag", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var dispatcher = (CanKit.Pro.Actor.BackgroundExceptionDispatcher)typeof(CanOpenNode)
+            .GetField("_backgroundReports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(node)!;
+
+        var disposing = Task.Run(node.Dispose);
+        await WaitUntilAsync(() => (int)actorDisposed.GetValue(actor)! != 0, "the actor to refuse work");
+        busy.Set();
+        await disposing.WithTimeoutAsync(ShortTimeout);
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        dispatcher.Post(() => delivered.TrySetResult(true));
+        await delivered.Task.WithTimeoutAsync(ShortTimeout);
+
+        Volatile.Read(ref ran).Should().Be(0, "the node was disposed before the callback's turn");
+        lock (reported) reported.Should().BeEmpty("it is dropped quietly, as a post queued before the disposal is");
+    }
+
     [Fact]
     public void A_Post_Held_By_An_Open_That_Fails_Is_Dropped()
     {

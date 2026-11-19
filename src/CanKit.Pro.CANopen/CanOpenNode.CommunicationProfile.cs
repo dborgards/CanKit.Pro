@@ -161,11 +161,7 @@ internal sealed partial class CanOpenNode
         // §7.5.2.17: EMCY COB-ID, default 80h + node-id, valid.
         _od.AddU32(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(_nodeId), rw, nm);
         if (_options.EnableEmcyInhibit) _od.AddU16(Co.EmcyInhibitTime, 0x00, 0, rw, nm);
-        if (_options.EnableErrorBehavior)
-        {
-            _od.AddU8(Co.ErrorBehavior, 0, 1, ro, nm);
-            _od.AddU8(Co.ErrorBehavior, 1, 0, rw, nm);
-        }
+        if (_options.EnableErrorBehavior) PopulateErrorBehavior(ro, rw, nm);
 
         // §7.5.2.19 / §7.5.2.20: heartbeat. One consumer slot to begin with; AddHeartbeatConsumer
         // grows the array. Sub0 is const on the bus.
@@ -925,6 +921,7 @@ internal sealed partial class CanOpenNode
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
         _pendingEmcy = null;
         _pendingEmcyIsApplications = false;
+        _pendingEmcyIsProfile = false;
         EndCommunicationErrorsForReset();
         // §7.2.8.3.2.1: "The toggle bit in the guarding protocol shall be reset to 0 when the NMT
         // sub-state reset communication is passed."
@@ -946,6 +943,10 @@ internal sealed partial class CanOpenNode
             OnLeaveOperational();
             LeaveSrdoOperational();
         }
+        // What an application has not been told of the device the reset ends is dropped before the
+        // applications hear of the reset; Reset Communication keeps the command writes, whose
+        // values it does not restore.
+        DropQueuedCommandWritesForReset(communicationOnly);
         _state = NmtState.Initializing;
         NotifyNmtStateChanged(stateBeforeReset);
         // An application may have disposed the node from that notification: the drain, the restore
@@ -1133,6 +1134,9 @@ internal sealed partial class CanOpenNode
                 {
                     _restoringValues = false;
                 }
+                // Still under the gate: under Reset Node a command write committed before this point
+                // is of the device the reset ended, one committed after it is told.
+                EndCommandWritesBeforeRestore(communicationOnly);
                 // CiA 319 v2.0.0 §5.4: what came back from the store is checked before the node
                 // announces itself — the CRC of every existing SRDO against the 13FFh stored with
                 // it; a mismatch sets 13FEh to 00h (#308). After the flag: this is the device's

@@ -383,10 +383,8 @@ public class Cia401ProcessTests
             Body = (device, _) => device.SetAnalogInputs(1,
                 Enumerable.Range(1, 4).Select(c => device.ReadAnalogOutput(c)).ToArray()),
         };
-        using var rig = Open(new Cia401Configuration { AnalogInputs = 4, AnalogOutputs = 4 }, model,
-            Cia401Rig.WritablePdoRecords);
+        using var rig = Open(new Cia401Configuration { AnalogInputs = 4, AnalogOutputs = 4 }, model);
         await rig.WriteU8Async(0x6423, 0x00, 0x01);
-        await rig.EnableTpdoAsync(2);
         await rig.StartAndTakeFirstTpdoAsync(Cia401Rig.Tpdo2);
         int before = rig.Count(Cia401Rig.Tpdo2);
 

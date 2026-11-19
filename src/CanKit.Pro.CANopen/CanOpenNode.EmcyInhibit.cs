@@ -9,7 +9,8 @@ namespace CanKit.Pro.CANopen;
 // CiA 301 §4.4.1, §7.5.2.18: the minimum interval between EMCY transmission service
 // invocations. Count conservatively from send completion, so delayed driver handoffs or
 // echo confirmations cannot compress the actual invocation interval.
-// Optional 1029h also uses this queue's Stopped/reset gate, without enabling inhibit timing.
+// Optional 1029h also uses this queue's Stopped/reset gate, without enabling inhibit timing, and so
+// does a profile EMCY released behind a boot-up, whatever the options (EmitEmcy, #549).
 internal sealed partial class CanOpenNode
 {
     private object _emcyInhibitEpoch = new();

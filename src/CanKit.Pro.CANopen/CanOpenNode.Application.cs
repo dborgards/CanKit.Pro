@@ -22,6 +22,13 @@ internal sealed partial class CanOpenNode
     // reserved areas, which belong to the node.
     private const ushort FirstClaimableIndex = 0x2000;
 
+    // The highest index an application may claim, the last of the standardized system variable area:
+    // C000h to FFFFh are reserved (CiA 301 v4.2.0 §7.4.1, Table 41), #555.
+    private const ushort LastClaimableIndex = 0xBFFF;
+
+    // Bit 6 of 1001h: reserved, always 0b (CiA 301 v4.2.0 §7.5.2.2, Table 54). A profile may not set it.
+    private const byte ReservedErrorRegisterBit = 0x40;
+
     // One per attached application, in attach order. Written once, on the constructing thread,
     // before the node's actor runs anything; empty for a node opened without applications.
     private ApplicationSlot[] _applications = Array.Empty<ApplicationSlot>();
@@ -80,6 +87,37 @@ internal sealed partial class CanOpenNode
     /// </summary>
     /// <exception cref="ArgumentException">A claim or requirement cannot be met; the parameter is
     /// <c>options</c> and the message names the application.</exception>
+    // The requirements of each listed application, read once, before the dictionary is built
+    // (ReadApplicationRequirements), index by index with CanOpenNodeOptions.Applications; null for a
+    // node without applications. Constructing thread only.
+    private CanOpenApplicationRequirements?[]? _applicationRequirements;
+
+    /// <summary>
+    /// Reads the requirements of <see cref="CanOpenNodeOptions.Applications"/>, once, before the
+    /// communication profile is populated: the error behaviour layout one of them asks for shapes
+    /// <c>1029h</c> as it is declared and as a device description is loaded against it
+    /// (<see cref="TakeErrorBehaviorLayout"/>). An entry that is null or listed a second time is
+    /// skipped here and refused by <see cref="AttachApplications"/>, which takes the requirements
+    /// read here. Nothing on a node without applications.
+    /// </summary>
+    private void ReadApplicationRequirements()
+    {
+        var listed = _options.Applications;
+        if (listed.Count == 0) return;
+        var read = new CanOpenApplicationRequirements?[listed.Count];
+        for (int i = 0; i < read.Length; i++)
+        {
+            if (listed[i] is not { } application) continue;
+            bool listedBefore = false;
+            for (int earlier = 0; earlier < i; earlier++) listedBefore |= ReferenceEquals(listed[earlier], application);
+            if (listedBefore) continue;
+            var requirements = application.Requirements;
+            read[i] = requirements;
+            if (requirements?.ErrorBehavior is { } layout) TakeErrorBehaviorLayout(application, layout);
+        }
+        _applicationRequirements = read;
+    }
+
     private void AttachApplications()
     {
         var listed = _options.Applications;
@@ -95,7 +133,8 @@ internal sealed partial class CanOpenNode
                     throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.Applications.");
             }
             var host = new ApplicationHost(this);
-            var requirements = application.Requirements;
+            // Read before the dictionary was built (ReadApplicationRequirements), not again here.
+            var requirements = _applicationRequirements![i]!;
             slots[i] = new ApplicationSlot(application, host)
             {
                 Claims = ValidatedClaims(application, slots, i),
@@ -107,6 +146,7 @@ internal sealed partial class CanOpenNode
         }
 
         _applications = slots;
+        var commandEntries = new HashSet<uint>();
         foreach (var slot in slots)
         {
             _attachingSlot = slot;
@@ -118,7 +158,10 @@ internal sealed partial class CanOpenNode
             {
                 _attachingSlot = null;
             }
+            // Read once, after Attach: the list may name what the application declared there.
+            commandEntries.UnionWith(ValidatedCommandEntries(slot));
         }
+        if (commandEntries.Count > 0) _commandEntries = commandEntries;
         ComposeDeviceTypes();
         ComposeDefaultPdos();
 
@@ -138,6 +181,11 @@ internal sealed partial class CanOpenNode
             {
                 throw OptionsError($"Application '{application.Name}' claims {range}, which reaches below 0x{FirstClaimableIndex:X4}: " +
                     "the communication profile and the reserved areas belong to the node.");
+            }
+            if (range.Last > LastClaimableIndex)
+            {
+                throw OptionsError($"Application '{application.Name}' claims {range}, which reaches above 0x{LastClaimableIndex:X4}: " +
+                    "C000h to FFFFh are reserved (CiA 301 v4.2.0 §7.4.1, Table 41).");
             }
             for (int other = 0; other < r; other++)
             {
@@ -172,6 +220,11 @@ internal sealed partial class CanOpenNode
             throw OptionsError($"Application '{application.Name}' monitors communication failures: " +
                 "set CanOpenNodeOptions.EnableErrorBehavior to true.");
         }
+        if (requirements.ErrorBehavior is not null && !_options.EnableErrorBehavior)
+        {
+            throw OptionsError($"Application '{application.Name}' lays out the error behaviour record 1029h, which the node " +
+                "has only with error behaviour: set CanOpenNodeOptions.EnableErrorBehavior to true.");
+        }
     }
 
     private static ArgumentException OptionsError(string message) => new(message, "options");
@@ -193,15 +246,22 @@ internal sealed partial class CanOpenNode
     private ApplicationSlot? _applicationInCallback;
 
     /// <summary>
-    /// EntryWritten, on the writing thread and under the dictionary's write gate: a stored write to
-    /// an entry an application claims. Records the entry and queues one evaluation, which tells the
-    /// claimant on the actor loop (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for
-    /// what the claimant writes from inside its own callback, and not for a restore of values in
-    /// a reset: neither is news to it.
+    /// <see cref="ObjectDictionary.EntryStored"/>, ahead of every subscriber of
+    /// <see cref="ObjectDictionary.EntryWritten"/>, on the writing thread and under the dictionary's
+    /// write gate: a stored write to
+    /// an entry an application claims. Records the entry, or for a command entry whose write was
+    /// validated (<see cref="ReserveCommandWrite"/>) queues a copy of the value it stored, and queues
+    /// one evaluation, which tells the claimant on the actor loop
+    /// (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for what the claimant writes from
+    /// inside its own callback, and not for a restore of values in a reset: neither is news to it.
     /// </summary>
     private void OnOdEntryWrittenForApplications(ushort index, byte subindex)
     {
         if (_applications.Length == 0) return;
+        // Taken by this write or by none: a reservation belongs to the write it was made for, which
+        // is the one being reported here when the keys match (ReserveCommandWrite).
+        var reserved = _reservedCommand;
+        _reservedCommand = null;
         // RestoreValues sets this under the write gate, which this write holds too: it is true for
         // the restore's own writes and for nobody else's.
         if (_restoringValues) return;
@@ -212,13 +272,30 @@ internal sealed partial class CanOpenNode
         if (_actor.IsOnCurrentActor && ReferenceEquals(_applicationInCallback, claimant)) return;
         if (Volatile.Read(ref _disposed) != 0) return;
 
+        var key = CosKey(index, subindex);
+        // Under the write gate, before anyone else can write the entry: the value this write stored.
+        // An entry that is gone again has no value to tell; it is reported as written, as it would
+        // be without a reservation.
+        byte[]? command = reserved == key && _od.TryReadRaw(index, subindex, out var stored) ? stored : null;
+        bool post;
         lock (_applicationGate)
         {
-            (_applicationDirty ??= new HashSet<uint>()).Add(CosKey(index, subindex));
-            if (_applicationEvaluationPosted) return;
+            if (command is not null)
+            {
+                (_queuedCommands ??= new()).Add((claimant, new CanOpenObjectAddress(index, subindex), command, _commandWriteGeneration));
+            }
+            else (_applicationDirty ??= new HashSet<uint>()).Add(key);
+            post = !_applicationEvaluationPosted;
             _applicationEvaluationPosted = true;
         }
+        if (post) PostApplicationEvaluation();
+    }
 
+    /// <summary>Queues the one evaluation of the application round, once the flag that says it is
+    /// queued has been set under <c>_applicationGate</c>; an actor that has ended takes nothing, and
+    /// the flag is cleared again.</summary>
+    private void PostApplicationEvaluation()
+    {
         try
         {
             _actor.Post(EvaluateApplicationEntriesOnActor);
@@ -233,22 +310,38 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// Tells each claimant the entries written since it was last told: sorted by index, then
-    /// sub-index, each once. Actor loop. Writes landing while this runs re-arm the dirty set and
-    /// queue the next evaluation, so none is lost; one claimant that throws does not keep the next
-    /// from being told (<see cref="InvokeApplication"/>), one that disposes the node does.
+    /// Tells each claimant its command writes, in commit order (<see cref="DeliverCommandWrites"/>),
+    /// then the entries written since it was last told: sorted by index, then sub-index, each once;
+    /// then the RPDOs taken since (<see cref="DeliverReceptions"/>). Actor loop. Writes landing while this runs re-arm the queue and the dirty set and queue the
+    /// next evaluation, so none is lost; one claimant that throws does not keep the next from being
+    /// told (<see cref="InvokeApplication"/>), one that disposes the node does.
     /// </summary>
     private void EvaluateApplicationEntriesOnActor()
     {
         HashSet<uint>? dirty;
+        List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)>? commands;
+        List<(ApplicationSlot Slot, int PdoNumber)>? receptions;
         lock (_applicationGate)
         {
             dirty = _applicationDirty;
             _applicationDirty = null;
+            commands = _queuedCommands;
+            _queuedCommands = null;
+            receptions = _queuedReceptions;
+            _queuedReceptions = null;
             _applicationEvaluationPosted = false;
         }
-        if (dirty is null || dirty.Count == 0 || Volatile.Read(ref _disposed) != 0) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (commands is not null && !DeliverCommandWrites(commands)) return;
+        if (dirty is { Count: > 0 } && !DeliverWrittenEntries(dirty)) return;
+        // Last: an application hears of an RPDO once it has been told what the RPDO wrote.
+        if (receptions is not null) DeliverReceptions(receptions);
+    }
 
+    /// <summary>Tells each claimant its entries of <paramref name="dirty"/>, sorted and each once.
+    /// Returns <see langword="false"/> when a callback disposed the node, which ends the round.</summary>
+    private bool DeliverWrittenEntries(HashSet<uint> dirty)
+    {
         var keys = new uint[dirty.Count];
         dirty.CopyTo(keys);
         Array.Sort(keys); // CosKey is index << 8 | sub-index: its order is index, then sub-index
@@ -257,7 +350,7 @@ internal sealed partial class CanOpenNode
         {
             // One that disposed the node ends the round: the rest are not called on a node that is
             // gone, as in the other rounds (NotifyNmtStateChanged, PublishCommunicationFailure).
-            if (Volatile.Read(ref _disposed) != 0) return;
+            if (Volatile.Read(ref _disposed) != 0) return false;
             List<CanOpenObjectAddress>? entries = null;
             foreach (var key in keys)
             {
@@ -269,6 +362,7 @@ internal sealed partial class CanOpenNode
             var written = entries.ToArray();
             InvokeApplication(slot, application => application.OnEntriesWritten(written));
         }
+        return Volatile.Read(ref _disposed) == 0;
     }
 
     // =========================================================================================
@@ -290,9 +384,13 @@ internal sealed partial class CanOpenNode
         bool onActor = _actor.IsOnCurrentActor;
         var outer = onActor ? _applicationInCallback : null;
         if (onActor) _applicationInCallback = null;
+        // A reservation left by a validated write that was not stored after all goes with the next
+        // validation (ReserveCommandWrite).
+        _reservedCommand = null;
+        OdWriteDecision decision;
         try
         {
-            return slot.Application.ValidateWrite(index, subindex, value);
+            decision = slot.Application.ValidateWrite(index, subindex, value);
         }
         // Everything, deliberately: this is the application's code, and whatever it throws must not
         // reach the dictionary's writer, which on an SDO download or a PDO is the node's own actor
@@ -306,6 +404,11 @@ internal sealed partial class CanOpenNode
         {
             if (onActor) _applicationInCallback = outer;
         }
+        // The queue of command writes is checked once the application has accepted the write, so a
+        // value it refuses is refused with its code whatever the queue holds. Whose write it is goes
+        // by the callback that was running before the validation, as for OnEntriesWritten.
+        if (!decision.Store || decision.Abort is not null) return decision;
+        return ReserveCommandWrite(index, subindex, own: onActor && ReferenceEquals(outer, slot));
     }
 
     /// <summary>
@@ -343,10 +446,11 @@ internal sealed partial class CanOpenNode
     // Work an application posts to the actor loop (ICanOpenApplicationHost.Post).
     // =========================================================================================
 
-    // The posts made before the node has opened, oldest first: the actor's thread runs from early in
-    // the constructor, and a post made in Attach, or by another thread once Attach has handed the
-    // application its host, would otherwise run while the constructor still composes the default
-    // PDOs and takes the power-on values. Non-null while held; released behind the start-up job
+    // The posts made, and the deadline callbacks that came due (RunApplicationDeadline), before the
+    // node has opened, oldest first: the actor's thread runs from early in the constructor, and a post
+    // made in Attach, or by another thread once Attach has handed the application its host, would
+    // otherwise run while the constructor still composes the default PDOs and takes the power-on
+    // values. Non-null while held; released behind the start-up job
     // (ReleaseApplicationPosts), dropped when the open fails (CloseApplicationPosts). Under
     // _applicationPostGate, as is _applicationPostsClosed.
     private readonly object _applicationPostGate = new();
@@ -410,6 +514,60 @@ internal sealed partial class CanOpenNode
                 foreach (var work in held) _actor.Post(work);
             }
         }
+    }
+
+    // Whether the start-up job has begun. Actor loop only: set by that job, read by a deadline callback.
+    private bool _startUpBegun;
+
+    /// <summary>
+    /// A deadline of <paramref name="slot"/>'s application came due (<see cref="ICanOpenApplicationHost.Arm"/>).
+    /// Actor loop. Before the node has opened its callback is held like a post (#561): the actor's
+    /// thread runs from early in the constructor, and a deadline armed in <c>Attach</c> and due at once
+    /// would otherwise run while the constructor still attaches the next application, composes the
+    /// device types and the default PDOs and takes the power-on values. Held, it is queued behind the
+    /// start-up job with the posts, in the order the deadlines came due, and dropped when the open
+    /// fails. After the release and before the start-up job has run, it is queued behind that job;
+    /// from then on it runs at once.
+    /// </summary>
+    /// <remarks>The deadline itself is armed when <c>Arm</c> is called and expires when it comes due,
+    /// so its time counts from the call and <see cref="IDeadline.IsExpired"/> is true while the
+    /// callback is held; a <c>Dispose</c> then is too late to stop it, as for any expired deadline.</remarks>
+    private void RunApplicationDeadline(ApplicationSlot slot, Action onExpired)
+    {
+        // Built once, outside work: nested in it, the lambda would get a lazily cached delegate whose
+        // second use never comes, as each callback runs once.
+        Action<ICanOpenApplication> callback = _ => onExpired();
+        Action work = () =>
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            InvokeApplication(slot, callback);
+        };
+        lock (_applicationPostGate)
+        {
+            if (_applicationPostsClosed) return;
+            if (_heldApplicationPosts is { } held)
+            {
+                held.Add(work);
+                return;
+            }
+        }
+        if (!_startUpBegun)
+        {
+            // Released, and the start-up job is in the mailbox ahead of this. As for a Post: a node
+            // disposed meanwhile drops it, and so does an actor that ended between the check and the
+            // post, without a throw (the actor may be shutting down and draining its due timers).
+            if (Volatile.Read(ref _disposed) != 0) return;
+            try
+            {
+                _actor.Post(work);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Dropped, as documented.
+            }
+            return;
+        }
+        work();
     }
 
     /// <summary>The open failed: what is held is dropped, and so is every later post.</summary>
@@ -506,27 +664,49 @@ internal sealed partial class CanOpenNode
     /// error "shall be signaled at any error situation"). An EMCY carries it ORed with the
     /// application's part. Equal to <see cref="CommunicationErrorBits"/> on a node without
     /// applications.</summary>
-    private byte NodeErrorBits
+    private byte NodeErrorBits => (byte)(CommunicationErrorBits | ProfileErrorBits);
+
+    /// <summary>The bits of every profile error that is active, and bit 0 while any is: 0 on a node
+    /// without applications. Unlike the communication errors, which <c>1001h</c> shows from the EMCY
+    /// that reports them, these are what <c>1001h</c> shows at every moment: every write of the
+    /// register takes them as they are then (<see cref="UpdateErrorRegister"/>), and a raise or a
+    /// clear writes it at once (<see cref="ShowProfileErrorsInRegister"/>), so neither an EMCY waiting
+    /// for its inhibit time nor an older one transmitted later hides or brings back a profile error
+    /// (#550).</summary>
+    private byte ProfileErrorBits
     {
         get
         {
-            byte bits = CommunicationErrorBits;
-            if (_profileErrors.Count == 0) return bits;
-            bits |= GenericErrorBit;
+            if (_profileErrors.Count == 0) return 0;
+            byte bits = GenericErrorBit;
             foreach (var profile in _profileErrors.Values) bits |= profile;
             return bits;
         }
     }
 
-    // The EMCYs of profile errors raised in Initialisation, oldest first, not yet ordered: in that
-    // state only the boot-up object exists (CiA 301 §7.3.2.2.1, Table 37), so they wait for it
-    // (ReleaseProfileEmcysAfterBootUp). It holds exactly the errors active in Initialisation, as
-    // every one of those was raised in it: a reset ends all profile errors and drops this list
-    // before it enters the state, and nothing calls a profile before the start-up's Initialisation.
-    // So an error cleared before the boot-up leaves its entry and nothing else, and the list is
-    // bounded by the errors active at once however long an LSS slave waits for its node-id. Null
-    // when empty. Actor loop only.
-    private List<(ApplicationSlot Slot, ushort Code, byte[] ManufacturerSpecific)>? _heldProfileEmcys;
+    /// <summary>A profile error began or ended: <c>1001h</c> shows it now (CiA 301 v4.2.0 §7.5.2.2:
+    /// "If a specific error occurs the corresponding bit shall be set"), not when its EMCY gets its
+    /// turn on the chain. The communication bits stay those of the last register write on the
+    /// chain, and the application's part is taken as at any step (the notice of its own writes,
+    /// #417). Actor loop.</summary>
+    private void ShowProfileErrorsInRegister()
+    {
+        // From here on a reset writes the register it leaves behind (EndCommunicationErrorsForReset).
+        _errorRegisterQueued = true;
+        UpdateErrorRegister(passed: null, _registerCommunicationBits);
+    }
+
+    // The EMCYs of profile errors raised in Initialisation, and the warnings sent there, oldest
+    // first, not yet ordered: in that state only the boot-up object exists (CiA 301 §7.3.2.2.1,
+    // Table 37), so they wait for it (ReleaseProfileEmcysAfterBootUp). Its errors are exactly the
+    // errors active in Initialisation, as every one of those was raised in it: a reset ends all
+    // profile errors and drops this list before it enters the state, and whatever calls a profile
+    // before the start-up job does so in the start-up's Initialisation.
+    // So an error cleared before the boot-up leaves its entry and nothing else; a warning is not an
+    // error, and no clear takes it out (#556). The errors are bounded by those active at once; the
+    // warnings by what a profile sends while an LSS slave waits for its node-id. Null when empty.
+    // Actor loop only.
+    private List<(ApplicationSlot Slot, ushort Code, byte[] ManufacturerSpecific, bool Warning)>? _heldProfileEmcys;
 
     /// <summary>Records an error of <paramref name="slot"/>'s application and orders its EMCY: once per
     /// error event, so an error that is active already does nothing (CiA 301 §7.2.7.1). Unlike a
@@ -541,6 +721,13 @@ internal sealed partial class CanOpenNode
             throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode,
                 "0000h is the error reset: ClearError sends it.");
         }
+        if ((errorRegisterBits & ReservedErrorRegisterBit) != 0)
+        {
+            // Refused rather than masked: a profile that sets it has a bug, and dropping the bit would
+            // record an error the profile did not describe (#554).
+            throw new ArgumentOutOfRangeException(nameof(errorRegisterBits), errorRegisterBits,
+                "Bit 6 of the error register is reserved and always 0 (CiA 301 v4.2.0 §7.5.2.2, Table 54).");
+        }
         if (manufacturerSpecific.Length > EmcyMessage.ManufacturerFieldLength)
         {
             throw new ArgumentException(
@@ -552,13 +739,15 @@ internal sealed partial class CanOpenNode
         var key = (slot, errorCode);
         if (_profileErrors.ContainsKey(key)) return;
         _profileErrors[key] = errorRegisterBits;
+        ShowProfileErrorsInRegister();
         var manufacturer = manufacturerSpecific.ToArray();
         if (_state == NmtState.Initializing)
         {
-            (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer));
+            (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: false));
             return;
         }
-        EmitNodeEmcy(errorCode, manufacturer);
+        if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
+        EmitNodeEmcy(errorCode, manufacturer, profile: true);
     }
 
     /// <summary>Ends an error of <paramref name="slot"/>'s application: nothing when it is not active,
@@ -570,12 +759,55 @@ internal sealed partial class CanOpenNode
     {
         RequireActor(nameof(ApplicationHost.ClearError));
         if (!_profileErrors.Remove((slot, errorCode))) return;
+        ShowProfileErrorsInRegister();
         if (_state == NmtState.Initializing)
         {
-            _heldProfileEmcys?.RemoveAll(held => ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
+            _heldProfileEmcys?.RemoveAll(held => !held.Warning && ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
             return;
         }
-        EmitErrorReset();
+        if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
+        EmitNodeEmcy(ErrorResetCode, profile: true);
+    }
+
+    /// <summary>The highest error code of the class "error reset or no error", <c>00xxh</c> (CiA 301
+    /// v4.2.0 §7.2.7.1, Table 25): the codes of a warning are <c>0001h</c> to this.</summary>
+    private const ushort HighestNoErrorCode = 0x00FF;
+
+    /// <summary>Sends a warning of <paramref name="slot"/>'s application: one EMCY of the class
+    /// <c>00xxh</c> that is no active error and writes nothing to <c>1001h</c> (see
+    /// <see cref="ICanOpenApplicationHost.SendWarning"/>). In Initialisation it is held with the
+    /// errors' EMCYs until the boot-up has been ordered; in Stopped it is dropped, as Stopped keeps
+    /// the most recent active EMCY reason only (CiA 301 v4.2.0 §7.3.2.2.4); otherwise it takes the
+    /// gated path of a profile EMCY, behind a pending boot-up.</summary>
+    private void SendProfileWarning(ApplicationSlot slot, ushort errorCode, ReadOnlySpan<byte> manufacturerSpecific)
+    {
+        if (errorCode is ErrorResetCode or > HighestNoErrorCode)
+        {
+            throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode,
+                "A warning is of the class 00xxh, \"error reset or no error\" (CiA 301 v4.2.0 §7.2.7.1, Table 25), "
+                + "0001h to 00FFh: an error of another class is raised with RaiseError, and 0000h is the error reset.");
+        }
+        if (manufacturerSpecific.Length > EmcyMessage.ManufacturerFieldLength)
+        {
+            throw new ArgumentException(
+                $"The manufacturer-specific field is at most {EmcyMessage.ManufacturerFieldLength} bytes.",
+                nameof(manufacturerSpecific));
+        }
+        RequireActor(nameof(ApplicationHost.SendWarning));
+
+        var manufacturer = manufacturerSpecific.ToArray();
+        switch (_state)
+        {
+            case NmtState.Initializing:
+                (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: true));
+                return;
+            case NmtState.Stopped:
+                return;
+            default:
+                EmcyChainWaitsForBootUp();
+                _ = EmitEmcy(new EmcyMessage(_nodeId, errorCode, 0, manufacturer), gate: true, warning: true);
+                return;
+        }
     }
 
     // Counts the NMT resets that ended the profile errors. A profile EMCY released behind a boot-up
@@ -615,25 +847,51 @@ internal sealed partial class CanOpenNode
     /// turn that would transmit it, after the wait: a reset handled before that turn drops it, frame
     /// and <c>1001h</c> write alike.
     /// </para>
+    /// <para>
+    /// A master can as well stop the node before that turn. The released EMCYs therefore take the
+    /// gated path of the EMCY chain whatever the options (<see cref="EmitEmcy"/>): in Stopped the
+    /// step waits until the node leaves it (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), and a reset ends the
+    /// wait without a frame (#549).
+    /// </para>
     /// </remarks>
     private void ReleaseProfileEmcysAfterBootUp(Task bootUp)
     {
+        _bootUpSend = bootUp;
         var held = _heldProfileEmcys;
         if (held is not { Count: > 0 }) return;
         _heldProfileEmcys = null;
-        _ = AppendToEmcyChain(() =>
+        AppendBootUpWait(bootUp);
+        int generation = _profileResetGeneration;
+        foreach (var (_, code, manufacturer, warning) in held)
+            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation, warning: warning);
+    }
+
+    // The send of the boot-up the node ordered last (ReleaseProfileEmcysAfterBootUp). Actor loop only.
+    private Task _bootUpSend = Task.CompletedTask;
+
+    /// <summary>A profile EMCY ordered in Pre-Operational or Operational while the boot-up's send is
+    /// still pending waits for it on the EMCY chain, as the EMCYs held in Initialisation do: the
+    /// work of a profile that was held behind the start-up job (a post or a deadline from
+    /// <c>Attach</c>, #561) runs right after the boot-up has been ordered, and its EMCY must not
+    /// overtake the boot-up on the bus. Nothing once the boot-up is out. Like every profile EMCY it
+    /// takes the gated path (<see cref="EmitEmcy"/>), so a Stop or a reset during the wait is
+    /// honoured (#549). Actor loop.</summary>
+    private void EmcyChainWaitsForBootUp()
+    {
+        if (!_bootUpSend.IsCompleted) AppendBootUpWait(_bootUpSend);
+    }
+
+    /// <summary>Puts a wait for <paramref name="bootUp"/>'s send on the EMCY chain. Actor loop.</summary>
+    private void AppendBootUpWait(Task bootUp)
+        => _ = AppendToEmcyChain(() =>
         {
             HeldEmcysWaitForBootUpForTests?.Invoke();
             return bootUp.ContinueWith(static sent => { _ = sent.Exception; },
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         });
-        int generation = _profileResetGeneration;
-        foreach (var (_, code, manufacturer) in held)
-            _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation);
-    }
 
     /// <summary>Test seam: runs on the actor when the EMCY chain starts waiting for the boot-up
-    /// before it sends the profile EMCYs held in Initialisation.</summary>
+    /// before it sends a profile EMCY (<see cref="AppendBootUpWait"/>).</summary>
     internal Action? HeldEmcysWaitForBootUpForTests { get; set; }
 
     private void RequireActor(string member)
@@ -749,7 +1007,7 @@ internal sealed partial class CanOpenNode
         public IDeadline Arm(TimeSpan delay, Action onExpired)
         {
             if (onExpired is null) throw new ArgumentNullException(nameof(onExpired));
-            return _node._deadlines.Arm(delay, () => _node.InvokeApplication(Slot, _ => onExpired()));
+            return _node._deadlines.Arm(delay, () => _node.RunApplicationDeadline(Slot, onExpired));
         }
 
         public void Post(Action action) => _node.PostApplicationWork(Slot, action);
@@ -791,10 +1049,38 @@ internal sealed partial class CanOpenNode
             _node.TriggerChangeOfState(dirty);
         }
 
+        public NmtState? ErrorBehaviorTarget(byte subindex)
+        {
+            if (subindex == 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(subindex), subindex,
+                    "1029h sub-index 00h is the highest sub-index supported, not an error class.");
+            }
+            if (!_node._actor.IsOnCurrentActor)
+            {
+                throw new InvalidOperationException(
+                    "ErrorBehaviorTarget runs on the node's actor loop: call it from a callback of the application.");
+            }
+            return _node.ErrorBehaviorTargetOf(subindex);
+        }
+
+        public void RequestTransmissionOfTpdo(int pdoNumber)
+        {
+            if (!_node._actor.IsOnCurrentActor)
+            {
+                throw new InvalidOperationException(
+                    "RequestTransmissionOfTpdo runs on the node's actor loop: call it from a callback of the application.");
+            }
+            _node.TransmitApplicationTpdo(Slot, pdoNumber);
+        }
+
         public void RaiseError(ushort errorCode, byte errorRegisterBits, ReadOnlySpan<byte> manufacturerSpecific = default)
             => _node.RaiseProfileError(Slot, errorCode, errorRegisterBits, manufacturerSpecific);
 
         public void ClearError(ushort errorCode) => _node.ClearProfileError(Slot, errorCode);
+
+        public void SendWarning(ushort errorCode, ReadOnlySpan<byte> manufacturerSpecific = default)
+            => _node.SendProfileWarning(Slot, errorCode, manufacturerSpecific);
 
         // Leaving Operational, or a state a profile's own fault calls for. Never Operational: only
         // the master's NMT Start puts the node there.

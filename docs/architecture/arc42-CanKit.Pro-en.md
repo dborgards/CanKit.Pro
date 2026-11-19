@@ -1348,7 +1348,14 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   namespace `CanKit.Pro.CANopen.Application`. CiA 401 exists as an unpackaged project,
   `CanKit.Pro.CANopen.Cia401`, against the internal seam: object catalogue, device side (first
   slice) and tool side. The seam gained two calls while it was being built: default PDOs and posting
-  work to the node's loop. CiA 408 and publication are still to come. The ADR stays "decided, not
+  work to the node's loop. CiA 408 exists likewise, as the unpackaged project
+  `CanKit.Pro.CANopen.Cia408`: object catalogue, device side (first slice: device control, state
+  machine, faults, modes, the setpoint and actual value records of each control mode — those its
+  default PDOs map and those clause 9 makes mandatory with it at its width — a process model, a
+  device from an EDS/DCF) and tool side. For it the seam gained ordered delivery of every committed
+  write to a command entry (#557), the report of each received RPDO and the transmission of a TPDO
+  by number (#558), and an error behaviour record `1029h` laid out by the profile (#559). Publication
+  is next. The ADR stays "decided, not
   implemented" until the seam is published.
 
 ---

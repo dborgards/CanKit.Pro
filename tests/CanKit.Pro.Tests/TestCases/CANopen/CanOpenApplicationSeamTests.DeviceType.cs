@@ -399,6 +399,215 @@ public partial class CanOpenApplicationSeamTests
             .Message.Should().Contain("67FF").And.Contain("402").And.Contain("401");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // The topology 1000h announces, checked before the boot-up (#551, CiA 301 v4.2.0 §7.5.2.1).
+    // -----------------------------------------------------------------------------------------
+
+    [Fact] // #551
+    public void A_Described_Single_Device_1000h_Over_Two_Logical_Devices_Fails_The_Open()
+    {
+        // The file's 1000h says one logical device; the applications attach two. A reader of 1000h
+        // would stop there and never see logical device 1 in 6FFFh.
+        var failure = OptionsRefused(With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408))),
+            DescriptionWith6000(deviceType: Profile401));
+
+        failure.Message.Should().Contain("0x1000").And.Contain("0x000F0191").And.Contain("FFFF")
+            .And.Contain("logical device 1").And.Contain("valve");
+    }
+
+    [Fact] // #551
+    public void A_Described_1000h_That_Announces_A_Chain_The_Node_Does_Not_Have_Fails_The_Open()
+    {
+        // FFFFh above the profile, one logical device and no 67FFh: a reader takes 1000h's word for the
+        // device's own, FFFFh and all.
+        var failure = OptionsRefused(With(Typed("io", (0, Profile401))), DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        failure.Message.Should().Contain("0x1000").And.Contain("0x67FF").And.Contain("io");
+    }
+
+    [Fact] // #551
+    public void A_Described_Chain_Announcement_Over_A_Described_67FFh_Is_Kept_For_One_Device()
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, With(Typed("io", (0, Profile401))),
+            description: DescriptionWith6000(0xFFFF0191, (0x67FF, 0x00050191)));
+
+        DeviceTypeOf(node).Should().Be(0xFFFF0191u, "the file's chain has its 67FFh: a reader finds the device there");
+        DeviceTypeOf(node, 0x67FF).Should().Be(0x00050191u);
+    }
+
+    /// <summary>One logical device of profile 401 whose application declares <c>67FFh</c> itself, under a
+    /// described <c>1000h</c> of <c>FFFF0191h</c>: the reader of <c>1000h</c> takes that object for the device's
+    /// type.</summary>
+    private static CanOpenNodeOptions OneDeviceDeclaring67FF(uint word, OdAccess access)
+    {
+        var app = Typed("io", (0, Profile401));
+        var set = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            host.ObjectDictionary.AddU32(0x67FF, 0x00, word, access);
+            set(host);
+        };
+        return With(app);
+    }
+
+    [Fact] // #551, review
+    public void An_Application_Declared_67FFh_Behind_A_Described_Chain_Announcement_Is_Checked_For_Its_Profile()
+    {
+        var failure = OptionsRefused(OneDeviceDeclaring67FF(0x00000192, OdAccess.ReadOnly), DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("402").And.Contain("401").And.Contain("io");
+    }
+
+    [Fact] // #551, review
+    public void An_Application_Declared_67FFh_Behind_A_Described_Chain_Announcement_Must_Be_Read_Only()
+    {
+        var failure = OptionsRefused(OneDeviceDeclaring67FF(Profile401, OdAccess.ReadWrite), DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("read-only").And.Contain("io");
+    }
+
+    [Fact] // #551, review
+    public void A_Valid_Application_Declared_67FFh_Behind_A_Described_Chain_Announcement_Is_Kept()
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, OneDeviceDeclaring67FF(Profile401, OdAccess.ReadOnly),
+            description: DescriptionWith6000(deviceType: 0xFFFF0191));
+
+        DeviceTypeOf(node, 0x67FF).Should().Be(Profile401);
+    }
+
+    [Fact] // #551
+    public void A_Single_Device_Word_That_Announces_Further_Devices_Fails_The_Open()
+    {
+        var failure = OptionsRefused(With(Typed("lonely", (0, 0xFFFF0198))));
+
+        failure.Message.Should().Contain("lonely").And.Contain("0xFFFF0198").And.Contain("FFFF");
+    }
+
+    [Theory] // #551
+    [InlineData(0x00010000u)]
+    [InlineData(0x80000000u)]
+    public void An_Unprofiled_Single_Device_With_Additional_Information_Fails_The_Open(uint word)
+    {
+        var failure = OptionsRefused(With(Typed("plain", (0, word))));
+
+        failure.Message.Should().Contain("plain").And.Contain($"0x{word:X8}").And.Contain("0000h");
+    }
+
+    [Fact] // #551
+    public void An_Unprofiled_Logical_Device_In_A_Chain_With_Additional_Information_Fails_The_Open()
+    {
+        var failure = OptionsRefused(With(Typed("two", (0, Profile401), (1, 0x00010000))));
+
+        failure.Message.Should().Contain("two").And.Contain("logical device 1").And.Contain("0x00010000");
+    }
+
+    [Theory] // #551
+    [InlineData(0x00000000u)]
+    [InlineData(0x000F0191u)]
+    [InlineData(0xFF8F0191u)]
+    public void A_Valid_Single_Device_Word_Is_1000h_As_Set(uint word)
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, With(Typed("one", (0, word))));
+
+        DeviceTypeOf(node).Should().Be(word, "the profile's capability bits are its own (§7.5.2.1)");
+    }
+
+    [Fact] // #551
+    public async Task A_Described_Chain_Of_Two_Devices_Reads_Back_Over_The_Bus()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        // 77FFh too, so that the slave itself ends the chain ("object does not exist").
+        master.BindPeerDeviceDescription(Slave, PeerSdoLaboratory.Variables(0x1000, 0x67FF, 0x6FFF, 0x77FF));
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = OpenNode(busB, With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408))),
+            description: DescriptionWith6000(0xFFFF0191, (0x67FF, 0x00050191)));
+        await bootups.First;
+
+        var result = await CanOpenLogicalDevices.ReadAsync(master, Slave).WithTimeoutAsync(ShortTimeout);
+
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+        result.DeviceType.Value.Should().Be(0xFFFF0191u);
+        result.Devices.Select(d => (d.Index, d.DeviceType.Value)).Should().Equal((0, 0x00050191u), (1, Profile408));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A described device-type object: its declaration as well as its value (#553).
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>The two-device description of <see cref="A_Described_Chain_Keeps_Its_Own_Words"/>,
+    /// with <c>67FFh</c> declared with <paramref name="dataType"/> and <paramref name="access"/> instead
+    /// of UNSIGNED32 and <c>ro</c>; the word, <c>000F0191h</c>, still fits in four bytes.</summary>
+    private static CanOpenDeviceDescription ChainWith67FFDeclaredAs(string dataType, string access)
+    {
+        var eds = EdsWith6000(0xFFFF0191, (0x67FF, Profile401));
+        const string Declared = "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\n";
+        eds.Should().Contain(Declared);
+        return CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
+            $"[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType={dataType}\nAccessType={access}\n"));
+    }
+
+    private static CanOpenNodeOptions TwoDevices() => With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408)));
+
+    [Fact] // #553
+    public void A_Described_Device_Type_Object_Of_Another_Type_Of_The_Same_Width_Fails_The_Open()
+    {
+        var failure = OptionsRefused(TwoDevices(), ChainWith67FFDeclaredAs("0x0004", "ro"));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32").And.Contain("io");
+    }
+
+    [Theory] // #553
+    [InlineData("rw")]
+    [InlineData("wo")]
+    [InlineData("rww")]
+    [InlineData("rwr")]
+    public void A_Writable_Described_Device_Type_Object_Fails_The_Open(string access)
+    {
+        var failure = OptionsRefused(TwoDevices(), ChainWith67FFDeclaredAs("0x0007", access));
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("read-only").And.Contain("io");
+    }
+
+    [Fact] // #553
+    public void A_Described_Device_Type_Object_Without_Sub_Index_0_Fails_The_Open()
+    {
+        // 67FFh described as a RECORD whose only entry is sub-index 1: there is no device type to read.
+        var eds = EdsWith6000(0xFFFF0191, (0x67FF, Profile401));
+        const string Declared = "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191\nPDOMapping=0\n";
+        eds.Should().Contain(Declared);
+        var description = CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
+            "[67FF]\nParameterName=Device type\nObjectType=0x9\nSubNumber=1\n" +
+            "[67FFsub1]\nParameterName=Word\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191\nPDOMapping=0\n"));
+
+        var failure = OptionsRefused(TwoDevices(), description);
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32 at sub-index 0").And.Contain("io");
+    }
+
+    [Theory] // #553
+    [InlineData("ro")]
+    [InlineData("const")]
+    public void A_Read_Only_Unsigned32_Device_Type_Object_Is_Accepted(string access)
+    {
+        using var bus = Open(NewSession(), 1);
+
+        using var node = OpenNode(bus, TwoDevices(), description: ChainWith67FFDeclaredAs("0x0007", access));
+
+        node.ObjectDictionary.TryGet(0x67FF, 0x00, out var entry).Should().BeTrue();
+        entry.DataType.Should().Be(OdDataType.Unsigned32);
+        entry.Access.Should().Be(OdAccess.ReadOnly);
+        DeviceTypeOf(node, 0x67FF).Should().Be(Profile401);
+    }
+
     [Fact]
     public void A_Partly_Described_Chain_Declares_The_Rest()
     {

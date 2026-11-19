@@ -250,6 +250,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // to leave the thread behind (#357 C-10).
         try
         {
+            // What the applications require is read first: a layout of 1029h one of them asks for
+            // shapes the communication profile below (CanOpenNode.Application.cs).
+            ReadApplicationRequirements();
             // The communication-profile objects at their CiA 301 defaults, plus the OD hooks
             // that validate writes to them and carry accepted values into the runtime
             // (CanOpenNode.CommunicationProfile.cs).
@@ -277,7 +280,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _od.EntryWritten += OnOdEntryWrittenForCoS;
 
         // After the attach phase: what an application writes while it attaches is not news to it.
-        _od.EntryWritten += OnOdEntryWrittenForApplications;
+        // On EntryStored, ahead of every EntryWritten subscriber: one an application added in its
+        // Attach may write a second command entry from inside this write, and the reservation this
+        // handler takes must still be this write's when it runs (ReserveCommandWrite).
+        _od.EntryStored += OnOdEntryWrittenForApplications;
 
         // The pump has to be running before the subscription exists: a frame can be dispatched
         // as soon as Subscribe returns, and construction failure below signals the pump to
@@ -352,14 +358,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // Pre-Operational over it without leaving Operational (#357 C-10).
         _actor.Post(() =>
         {
+            _startUpBegun = true;
             ApplyAllCommunicationObjects();
             StartSrdoConfigurationCheck();
             // An unconfigured LSS slave stays in NMT reset-communication waiting (§8.3.1):
             // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
             if (LayerSettingsBlockBoot()) return;
             _state = NmtState.PreOperational;
-            // A deadline an application armed in Attach can run before this job, in
-            // Initialisation; an error it raised there follows the boot-up.
+            // The deadlines and posts of an application from before the open are held behind this
+            // job (#561). What can still reach a profile ahead of it is an OnEntriesWritten for a
+            // write another thread made while the node was being opened; an error raised there, in
+            // Initialisation, follows the boot-up.
             ReleaseProfileEmcysAfterBootUp(EmitHeartbeat(0x00));
             StartControllerOverrunMonitoring();
             StartControllerErrorMonitoring();
@@ -535,6 +544,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // after the transition into another NMT state.
                 _pendingEmcy = msg;
                 _pendingEmcyIsApplications = true;
+                _pendingEmcyIsProfile = false;
                 return Task.CompletedTask;
             }
             // errorRegister is the application's part of 1001h; the node adds its communication
@@ -548,7 +558,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // register a master reads is the one the last EMCY on the bus carried, so it is written
     // inside the chain, right before its frame is transmitted — not when the call was posted,
     // nor for an EMCY that is disabled, held or cancelled and never reaches the bus (Codex on
-    // #133). Actor loop only.
+    // #133). The errors of an attached profile are the exception: 1001h shows them from their
+    // raise to their clear, whatever the chain holds (ProfileErrorBits, #550). Actor loop only.
     private Task _emcySendChain = Task.CompletedTask;
 
     // Every frame of this node on 0x700 + id — boot-up, state change, producer tick, guarding
@@ -597,40 +608,62 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     // profileResetGeneration: set for a profile EMCY released behind a boot-up, the reset generation
     // of its release. A reset handled before the turn that would transmit it drops it, frame and
-    // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Null for
-    // every other EMCY, which therefore behaves as it did before profiles existed.
+    // register write alike (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp). Since such an
+    // EMCY takes the gated path (#549), the reset's new inhibit epoch drops it first: this check is
+    // defence in depth behind the epoch, and removing it alone fails no test. Null for every other
+    // EMCY, which therefore behaves as it did before profiles existed.
+    // warning: a profile's warning, of the class 00xxh (CanOpenNode.Application.cs,
+    // SendProfileWarning). It is no active error and sets no bit: its frame carries 1001h as it is
+    // when the frame is transmitted and 1001h is not written; 1003h enters it as it enters every EMCY
+    // the node transmits (NoteTransmittedWarning, #556).
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default,
-        byte? applicationErrorRegister = null, int? profileResetGeneration = null)
+        byte? applicationErrorRegister = null, int? profileResetGeneration = null, bool gate = false,
+        bool warning = false)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
         // The node's bits are those of the moment the EMCY is decided; the application's part is
         // read when it is transmitted, so it is the part of the last application EMCY before it
-        // on this chain (#379). msg.ErrorRegister is not used.
+        // on this chain (#379). msg.ErrorRegister is not used. The frame carries all the node's
+        // bits; 1001h takes the communication bits from here and the profile errors as they are
+        // when it is written (UpdateErrorRegister, #550).
         byte nodeBits = NodeErrorBits;
+        byte communicationBits = CommunicationErrorBits;
         object inhibitEpoch = _emcyInhibitEpoch;
-        _errorRegisterQueued = true;
+        // A warning writes no register, so a reset has none of it to write back either.
+        if (!warning) _errorRegisterQueued = true;
         // Resolve the producer and reserve its send in one actor turn. A reset that drains
         // the previous send can retarget the dictionary before this queued emergency starts.
         Func<Task> transmit = () =>
         {
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
-            // Here, on the actor in the turn that transmits, after every wait ahead of it on the chain.
+            // Here, on the actor in the turn that transmits, after every wait ahead of it on the chain;
+            // behind the epoch check of the gated path, which drops such an EMCY first.
             if (profileResetGeneration is { } released && released != _profileResetGeneration) return Task.CompletedTask;
             uint cobId = _emcyCobId;
             if (cobId == 0 || !_emcyValid)
             {
-                // No frame. An application EMCY that does not reach the bus leaves 1001h alone;
-                // the node's own still sets the register it decided, so an error that ended is
-                // not read on (Codex on #417).
-                if (applicationErrorRegister is null) UpdateErrorRegister(passed: null, nodeBits);
+                // No frame. An application EMCY that does not reach the bus leaves 1001h alone,
+                // and so does a warning; the node's own still sets the register it decided, so an
+                // error that ended is not read on (Codex on #417).
+                if (applicationErrorRegister is null && !warning) UpdateErrorRegister(passed: null, communicationBits);
                 return Task.CompletedTask;
             }
-            NoteTransmittedEmcy(frame, applicationErrorRegister, nodeBits);
+            if (warning) NoteTransmittedWarning(frame);
+            else NoteTransmittedEmcy(frame, applicationErrorRegister, communicationBits, nodeBits);
             var send = SendControlFrame(cobId, frame, cancellationToken);
             return _options.EnableEmcyInhibit ? RecordEmcyCompletionAsync(send, inhibitEpoch) : send;
         };
-        return AppendToEmcyChain(() => _options.EnableEmcyInhibit || _options.EnableErrorBehavior
+        // A profile EMCY released behind a boot-up takes the gated path whatever the options say: its
+        // turn can come long after its release (the boot-up's send is waited for first), in a state
+        // the node has entered since, and the gate holds it while the node is Stopped (CiA 301 v4.2.0
+        // §7.3.2.2.4, Table 37) and drops it on a reset (the epoch). Without inhibit time the gate
+        // waits for nothing else (#549). So does every other EMCY of a profile, raise, clear and warning (gate):
+        // one raised while the boot-up's send is still pending waits for it likewise (#561), and one
+        // queued behind a profile EMCY that waits must not outlive a reset that drops that one. Every
+        // other EMCY keeps the path its options give it.
+        bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null || gate;
+        return AppendToEmcyChain(() => gated
             ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
     }
 
