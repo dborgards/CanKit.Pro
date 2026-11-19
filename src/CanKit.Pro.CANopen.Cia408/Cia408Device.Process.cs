@@ -40,7 +40,8 @@ internal sealed partial class Cia408Device
     /// called from inside one of the device's callbacks.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="definition"/> is null.</exception>
     /// <exception cref="ArgumentException">The device declares no such actual value: it is no actual
-    /// value of a supported control mode in the width the device uses.</exception>
+    /// value of a supported control mode in the width the device uses, or the device description does
+    /// not declare it (<see cref="FromDescription"/>).</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="value"/> does not fit the
     /// record's value type.</exception>
     /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
@@ -228,7 +229,8 @@ internal sealed partial class Cia408Device
         if (!records.TryGetValue(index, out var declared) || !ReferenceEquals(declared, definition))
         {
             throw new ArgumentException(
-                $"{definition} is no {what} of {Name}: the device declares the {what}s of its supported control modes only.",
+                $"{definition} is no {what} of {Name}: the device declares the {what}s of its supported control modes only, "
+                + "and a device built from a description those the description declares.",
                 nameof(definition));
         }
 

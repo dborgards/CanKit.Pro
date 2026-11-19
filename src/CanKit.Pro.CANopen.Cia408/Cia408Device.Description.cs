@@ -69,8 +69,10 @@ internal sealed partial class Cia408Device
     /// 16-bit device type, "do not care" by Table 53 NOTE 1), where bit 23 (spool position) and
     /// bit 24 (pressure) each name an open-loop and a closed-loop mode the word cannot tell apart: the
     /// open-loop mode (1, 3) is taken always, the closed-loop mode (2, 4) when the file declares its
-    /// actual value — the object the norm adds for closed loop (§9.8.3, §9.12.3: Conditional on mode 2,
-    /// mode 4). Every mode taken must have the value records declared that the object definitions of §9
+    /// actual value — the object the norm adds for closed loop (§9.8.3, §9.8.6: Conditional on mode 2;
+    /// §9.12.3: on mode 4, in 16 bit). At 32 bit bit 24 has no such object: <c>6388h</c> and
+    /// <c>6389h</c> are mandatory with mode 3 or 4 alike (§9.12.5, §9.12.6), so mode 3's records are
+    /// mode 4's, and a 32-bit file announcing bit 24 supports both. Every mode taken must have the value records declared that the object definitions of §9
     /// make mandatory with it at its width (<see cref="Cia408Configuration.MandatoryRecordsOf"/>); one
     /// missing fails the open. A mapping table is no requirement here, since the device installs no
     /// default PDO: the mode's other records (<see cref="Cia408Configuration.SetpointsOf"/>,
@@ -298,7 +300,7 @@ internal sealed partial class Cia408Device
     }
 
     /// <summary>The control modes the file's device type announces, bits 23 and 24 split by the
-    /// closed-loop actual value, each with the records §9 makes mandatory with it at its width required
+    /// closed-loop actual value (at 32 bit bit 24 gives both modes, whose records are the same), each with the records §9 makes mandatory with it at its width required
     /// (<see cref="Cia408Configuration.MandatoryRecordsOf"/>; see <see cref="FromDescription"/>). A
     /// mapping table is no requirement here: a device from a description installs no default PDO.</summary>
     private List<Cia408ControlMode> AnnouncedModes(ObjectDictionary od, Cia408Configuration shape, CanOpenDeviceType deviceType)

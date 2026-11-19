@@ -49,7 +49,8 @@ internal sealed class Cia408ProcessContext
     /// <summary>The value (sub-index <c>01h</c>) of the setpoint record <paramref name="definition"/>
     /// as the dictionary holds it: what the master last wrote, or the default.</summary>
     /// <exception cref="ArgumentException">The device declares no such setpoint: it is no setpoint
-    /// of a supported control mode in the width the device uses.</exception>
+    /// of a supported control mode in the width the device uses, or the device description does not
+    /// declare it (<see cref="Cia408Device.FromDescription"/>).</exception>
     public long Setpoint(Cia408ObjectDefinition definition)
     {
         Valid(0);
@@ -59,7 +60,9 @@ internal sealed class Cia408ProcessContext
     /// <summary>Sets the value (sub-index <c>01h</c>) of the actual value record
     /// <paramref name="definition"/>; it is transmitted once the step has returned, with whatever
     /// else the step changed.</summary>
-    /// <exception cref="ArgumentException">The device declares no such actual value.</exception>
+    /// <exception cref="ArgumentException">The device declares no such actual value: it is no actual
+    /// value of a supported control mode in the width the device uses, or the device description does
+    /// not declare it (<see cref="Cia408Device.FromDescription"/>).</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="value"/> does not fit the
     /// record's value type.</exception>
     public void SetActual(Cia408ObjectDefinition definition, long value)

@@ -444,8 +444,9 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     public Task<Cia408DeviceMode> ReadDeviceModeAsync(CancellationToken cancellationToken = default)
         => ReadVariableAsync(Cia408Objects.DeviceMode, static value => (Cia408DeviceMode)value, cancellationToken);
 
-    /// <summary>Writes <c>6042h</c>. The device decides what it takes: an unsupported mode or one the
-    /// state does not let change (ACTIVE, Table 4) is its abort.</summary>
+    /// <summary>Writes <c>6042h</c>. The device decides what it takes: it is read-only with one device
+    /// mode (<c>0601 0002h</c>; §9.3.4, Table 81, footnote a), and an unsupported mode or one the state
+    /// does not let change (ACTIVE, Table 4) is its abort.</summary>
     /// <exception cref="PeerSdoAccessException">The bound description does not allow the entry.</exception>
     /// <exception cref="SdoAbortException">The device aborted the download.</exception>
     public Task WriteDeviceModeAsync(Cia408DeviceMode mode, CancellationToken cancellationToken = default)
