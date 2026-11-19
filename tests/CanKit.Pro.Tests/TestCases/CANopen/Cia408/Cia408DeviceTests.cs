@@ -179,7 +179,7 @@ public class Cia408DeviceTests
     }
 
     [Fact] // Review Focus 1, #557
-    public async Task Two_Sdo_Writes_That_Land_Before_The_Device_Is_Told_Acknowledge_The_Fault()
+    public async Task Two_Bus_Writes_That_Land_Before_The_Device_Is_Told_Acknowledge_The_Fault()
     {
         using var rig = new Cia408Rig(Cia408Rig.Valve);
         await rig.WriteU16Async(ControlWord16, 0, 0x0001);
@@ -192,9 +192,10 @@ public class Cia408DeviceTests
 
         // 0009h then 0001h, both committed before the job that tells the device runs: the reset edge
         // is 0001h (the word before the fault) to 0009h, and only the order of the writes shows it.
+        await rig.StartAsync(); // the second word comes in RPDO 1: one SDO transfer at a time
         await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
             (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU16(ControlWord16, 0, 0x0009)),
-            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU16(ControlWord16, 0, 0x0001))));
+            (CanOpenProfileRig.Rpdo1, new byte[] { 0x01, 0x00 })));
         rig.Settle();
 
         rig.Device.State.Should().Be(Cia408State.Disabled, "D10: FAULT_DISABLED with 0001b then 1001b");
@@ -663,9 +664,10 @@ public class Cia408DeviceTests
     {
         using var rig = new Cia408Rig(Cia408Rig.Valve);
         rig.Settle();
+        await rig.StartAsync(); // the word comes in RPDO 1: one SDO transfer at a time
 
         await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
-            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU16(ControlWord16, 0, 0x0001)),
+            (CanOpenProfileRig.Rpdo1, new byte[] { 0x01, 0x00 }),
             (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU8(Local, 0, 0x01))));
         rig.Settle();
 
@@ -678,10 +680,11 @@ public class Cia408DeviceTests
     {
         using var rig = new Cia408Rig(Cia408Rig.Valve);
         rig.Settle();
+        await rig.StartAsync(); // the word comes in RPDO 1: one SDO transfer at a time
 
         await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
             (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU8(Local, 0, 0x01)),
-            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU16(ControlWord16, 0, 0x0001))));
+            (CanOpenProfileRig.Rpdo1, new byte[] { 0x01, 0x00 })));
         rig.Settle();
 
         rig.Device.State.Should().Be(Cia408State.Init, "the word was written under local control");
@@ -693,9 +696,10 @@ public class Cia408DeviceTests
     {
         using var rig = new Cia408Rig(Cia408Rig.Drive);
         rig.Settle();
+        await rig.StartAsync(); // the word comes in RPDO 1: one SDO transfer at a time
 
         await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
-            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU32(ControlWord32, 0, 0x0000_0001)),
+            (CanOpenProfileRig.Rpdo1, new byte[] { 0x01, 0x00, 0x00, 0x00 }),
             (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU8(Local, 0, 0x00))));
         rig.Settle();
 

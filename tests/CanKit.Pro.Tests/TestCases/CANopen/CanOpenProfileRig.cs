@@ -167,10 +167,17 @@ internal abstract class CanOpenProfileRig : IDisposable
 
     /// <summary>Holds the device node's actor in a job of its own while <paramref name="whileHeld"/>
     /// runs, so that what the test does there lands before the actor comes round; then releases it
-    /// and waits for the holding job to end. A signal, not a sleep: the hold begins when the job has
+    /// and waits for the holding job to end, and for the response to an SDO request queued in the
+    /// hold (<see cref="QueueFramesAsync"/>). A signal, not a sleep: the hold begins when the job has
     /// started and ends when the test says so.</summary>
+    /// <remarks>The node sends an SDO response from a task of its own, not from the actor job that
+    /// handled the request, so a settled actor does not mean the response is on the wire: how long
+    /// after the job it goes out is the thread pool's to decide, and a loaded host stretches it. The
+    /// response is therefore awaited by count before the hold returns, and the next request starts
+    /// only then (<see cref="SdoAsync"/>).</remarks>
     internal async Task WhileActorHeldAsync(Func<Task> whileHeld)
     {
+        _heldSdoResponses = null;
         using var release = new ManualResetEventSlim();
         var holding = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var hold = Node.PostToActorAsync(() =>
@@ -190,13 +197,30 @@ internal abstract class CanOpenProfileRig : IDisposable
         }
 
         await hold;
+        if (_heldSdoResponses is { } awaited)
+        {
+            _heldSdoResponses = null;
+            await WaitForCountAsync(SdoResponse, awaited);
+        }
     }
+
+    // The count of SDO responses the hold waits for once released: the responses before it, plus the
+    // one to the request queued in it. Null when it queued none.
+    private int? _heldSdoResponses;
 
     /// <summary>Sends <paramref name="frames"/> from the master while the actor is held
     /// (<see cref="WhileActorHeldAsync"/>), and waits until the reader has handed each to the
-    /// actor's mailbox: they then run, in that order, before anything queued afterwards.</summary>
+    /// actor's mailbox: they then run, in that order, before anything queued afterwards. At most one
+    /// of them is an SDO request: the SDO service is confirmed (CiA 301 v4.2.0 §7.2.4.2.3), and a
+    /// master starts the next transfer on a channel only after the response to the last, which
+    /// <see cref="WhileActorHeldAsync"/> awaits after the release.</summary>
+    /// <exception cref="InvalidOperationException">A second SDO request in one hold.</exception>
     internal Task QueueFramesAsync(params (uint CobId, byte[] Data)[] frames)
     {
+        int requests = frames.Count(frame => frame.CobId == SdoRequest);
+        if (requests + (_heldSdoResponses is null ? 0 : 1) > 1)
+            throw new InvalidOperationException("One SDO request per hold: the service is confirmed (CiA 301 v4.2.0 §7.2.4.2.3).");
+        if (requests == 1) _heldSdoResponses = Count(SdoResponse) + 1;
         int baseline = MailboxDepth(Node);
         foreach (var (cobId, data) in frames) Transmit(cobId, data);
         return WaitUntilAsync(() => MailboxDepth(Node) - baseline >= frames.Length,
@@ -303,13 +327,30 @@ internal abstract class CanOpenProfileRig : IDisposable
 
     // ---- SDO, expedited, from the master side -----------------------------------------------------
 
-    /// <summary>One SDO request to the device, and its response.</summary>
+    /// <summary>One SDO request to the device, and its response: the first frame on
+    /// <see cref="SdoResponse"/> after the request that answers it (<see cref="Answers"/>), not the
+    /// next frame by position.</summary>
     internal async Task<byte[]> SdoAsync(byte[] request)
     {
         int before = Count(SdoResponse);
         Transmit(SdoRequest, request);
-        await WaitForCountAsync(SdoResponse, before + 1);
-        return Payloads(SdoResponse)[before];
+        byte[]? response = null;
+        await WaitUntilAsync(() => (response = Payloads(SdoResponse).Skip(before).FirstOrDefault(r => Answers(request, r))) is not null,
+            $"the response to the SDO request {request[0]:X2}h for {request[2]:X2}{request[1]:X2}h:{request[3]:X2}h");
+        return response!;
+    }
+
+    /// <summary>Whether <paramref name="response"/> answers the expedited <paramref name="request"/>:
+    /// the same multiplexer, and an abort or the server command specifier that goes with the
+    /// client's — 3 (60h) to a download initiate (ccs 1), 2 (4xh) to an upload initiate (ccs 2)
+    /// (CiA 301 v4.2.0 §7.2.4.3.3, §7.2.4.3.6).</summary>
+    internal static bool Answers(byte[] request, byte[] response)
+    {
+        if (response.Length < 4 || response[1] != request[1] || response[2] != request[2] || response[3] != request[3]) return false;
+        if (response[0] == 0x80) return true;
+        int ccs = request[0] >> 5;
+        int scs = response[0] >> 5;
+        return (ccs == 1 && scs == 3) || (ccs == 2 && scs == 2);
     }
 
     /// <summary>The request of an expedited one-byte download.</summary>

@@ -115,10 +115,14 @@ public partial class CanOpenApplicationSeamTests
         /// <summary>One SDO request to the slave, and its response.</summary>
         internal async Task<byte[]> SdoAsync(byte[] request)
         {
+            // The response that answers the request, not the next frame by position: see
+            // CanOpenProfileRig.SdoAsync.
             int before = Count(SdoResponse);
             Transmit(SdoRequest, request);
-            await WaitForCountAsync(SdoResponse, before + 1);
-            return Payloads(SdoResponse)[before];
+            byte[]? response = null;
+            await WaitUntilAsync(() => (response = Payloads(SdoResponse).Skip(before)
+                .FirstOrDefault(r => CanOpenProfileRig.Answers(request, r))) is not null, "the response to the SDO request");
+            return response!;
         }
 
         internal Task<byte[]> DownloadU8Async(ushort index, byte subindex, byte value)
