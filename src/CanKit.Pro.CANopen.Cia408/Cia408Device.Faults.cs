@@ -32,7 +32,10 @@ internal sealed partial class Cia408Device
     /// indicated"); D8 and the exit Table 9 allows from the present state, never higher than
     /// <paramref name="reaction"/> (<see cref="Cia408StateMachine.Fault"/>); the status words, with R =
     /// 0, rewritten and transmitted with <c>604Eh</c>; <see cref="StateChanged"/>; last the NMT request,
-    /// so that a TPDO carrying the fault state goes out while the node is still Operational.
+    /// so that a TPDO carrying the fault state goes out while the node is still Operational, and every
+    /// subscriber has seen the fault before the node changes state — also when the fault was reported
+    /// from inside a <see cref="StateChanged"/> handler, whose change is raised after the running event
+    /// and whose request waits until then.
     /// </para>
     /// <para>
     /// <b>1029h:02.</b> §8.6.8 has the internal device error class "valid when the device is in error
@@ -67,15 +70,19 @@ internal sealed partial class Cia408Device
     /// <param name="reaction">The fault state the device's fault reaction ends in, within Table 9.</param>
     /// <param name="errorRegisterBits">The error register bits of the fault (CiA 301 v4.2.0 Table 54)
     /// besides the generic bit, which the node sets with any error.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is <c>0000h</c>, the
-    /// error reset; <paramref name="reaction"/> is no member of <see cref="Cia408FaultState"/>; or
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is of the class
+    /// <c>00xxh</c>, "error reset or no error" (CiA 301 v4.2.0 §7.2.7.1, Table 25), which names no
+    /// fault; <paramref name="reaction"/> is no member of <see cref="Cia408FaultState"/>; or
     /// <paramref name="errorRegisterBits"/> sets bit 5, which §8.6.3 reserves, or bit 6, reserved by
     /// CiA 301.</exception>
     /// <exception cref="InvalidOperationException">No node has attached the device yet.</exception>
     public void ReportFault(ushort errorCode, Cia408FaultState reaction, byte errorRegisterBits = 0)
     {
-        if (errorCode == 0x0000)
-            throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode, "0000h is the error reset, not a fault.");
+        if (errorCode <= 0x00FF)
+        {
+            throw new ArgumentOutOfRangeException(nameof(errorCode), errorCode,
+                "00xxh is the class \"error reset or no error\" of CiA 301 Table 25, not a fault.");
+        }
         if (reaction is not (Cia408FaultState.FaultInit or Cia408FaultState.FaultDisabled or Cia408FaultState.FaultHold))
             throw new ArgumentOutOfRangeException(nameof(reaction), reaction, "Not a fault state of CiA 408 §7.7, Table 9.");
         if ((errorRegisterBits & ReservedErrorRegisterBits) != 0)
@@ -99,9 +106,8 @@ internal sealed partial class Cia408Device
         var taken = _machine.Fault(reaction);
         Changed(before, taken);
         Publish(host, errorCodeChanged: true);
-        var failures = RaisePendingChanges();
-        if (host.ErrorBehaviorTarget(InternalDeviceErrorClass) is { } target) host.RequestNmtState(target);
-        ThrowIfAny(failures);
+        _nmtRequestPending = true;
+        FinishChanges(host);
     }
 
     /// <summary>The cause <paramref name="errorCode"/> reported with <see cref="ReportFault"/> is gone:

@@ -424,8 +424,12 @@ public class Cia408DeviceTests
 
         using var rig = new Cia408Rig(Cia408Rig.Valve);
         var device = rig.Device;
-        ((Action)(() => device.ReportFault(0x0000, Cia408FaultState.FaultInit)))
-            .Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("errorCode");
+        foreach (var code in new ushort[] { 0x0000, 0x0001, 0x0050, 0x00FF })
+        {
+            ((Action)(() => device.ReportFault(code, Cia408FaultState.FaultInit)))
+                .Should().Throw<ArgumentOutOfRangeException>("CiA 301 Table 25: 00xxh is \"error reset or no error\"")
+                .Which.ParamName.Should().Be("errorCode");
+        }
         ((Action)(() => device.ReportFault(InputCurrentTooHigh, (Cia408FaultState)7)))
             .Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("reaction");
         ((Action)(() => device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultInit, 0x20)))
@@ -566,6 +570,133 @@ public class Cia408DeviceTests
         var expected = new[] { "NotReady->Init [0,1]", "Init->Active [2,3,4]", "Active->FaultHold [8,9]" };
         first.Should().Equal(expected);
         second.Should().Equal(expected, "each subscriber sees the changes in the order they happened");
+    }
+
+    [Fact]
+    public async Task A_Handler_Reads_The_Status_Of_The_State_It_Is_Told_Of()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        Cia408Rig? rigRef = null;
+        var seen = new List<string>();
+        device.StateChanged += (_, e) =>
+        {
+            if (rigRef is null) return;
+            seen.Add($"{e.Current}:{rigRef.Od.ReadUnsigned(StatusWord16, 0):X4}:{rigRef.Od.ReadUnsigned(StatusWord32, 0):X8}");
+        };
+        using var rig = new Cia408Rig(device);
+        rig.Settle();
+        rigRef = rig;
+
+        await rig.WriteU16Async(ControlWord16, 0, 0x0007);
+        rig.Settle();
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultHold);
+        rig.Settle();
+
+        seen.Should().Equal("Active:000F:0000000F", "FaultHold:0003:00000003");
+    }
+
+    [Fact]
+    public async Task A_Fault_Reported_From_A_Handler_Asks_For_Its_Nmt_State_After_Every_Subscriber_Saw_It()
+    {
+        var device = new Cia408Device(Cia408Rig.Valve);
+        Cia408Rig? rigRef = null;
+        var seen = new List<string>();
+        device.StateChanged += (_, e) =>
+        {
+            if (e.Current == Cia408State.Active) device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultHold);
+        };
+        device.StateChanged += (_, e) =>
+        {
+            if (rigRef is not null) seen.Add($"{e.Current} in {rigRef.Node.State}");
+        };
+        using var rig = new Cia408Rig(device);
+        rig.Settle();
+        rigRef = rig;
+        await rig.WriteU8Async(0x1029, 0x02, 0x00);
+        await rig.StartAsync();
+
+        await rig.SendRpdo1Async(0x07, 0x00);
+        await rig.WaitForStateAsync(NmtState.PreOperational);
+        rig.Settle();
+
+        seen.Should().Equal("Active in Operational", "FaultHold in Operational");
+    }
+
+    [Fact]
+    public async Task A_Bus_Word_Written_Before_The_Switch_To_Local_Control_Is_Applied()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Settle();
+
+        await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
+            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU16(ControlWord16, 0, 0x0001)),
+            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU8(Local, 0, 0x01))));
+        rig.Settle();
+
+        rig.Device.State.Should().Be(Cia408State.Disabled, "the word was written under bus control");
+        (await rig.ReadU16Async(StatusWord16, 0)).Should().Be(0x0019, "DISABLED, now with L");
+    }
+
+    [Fact]
+    public async Task A_Bus_Word_Written_Before_The_Switch_To_Bus_Control_Is_Ignored()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Drive);
+        rig.Settle();
+
+        await rig.WhileActorHeldAsync(() => rig.QueueFramesAsync(
+            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU32(ControlWord32, 0, 0x0000_0001)),
+            (CanOpenProfileRig.SdoRequest, CanOpenProfileRig.DownloadU8(Local, 0, 0x00))));
+        rig.Settle();
+
+        rig.Device.State.Should().Be(Cia408State.Init, "the word was written under local control");
+        (await rig.ReadU32Async(StatusWord32, 0)).Should().Be(0x0000_0008u, "INIT, now without L");
+    }
+
+    [Fact]
+    public async Task An_Ignored_Bus_Word_Is_Not_Taken_As_The_Previous_Word()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Drive);
+        rig.Device.SetLocalControlWord(0x0009);
+        rig.Settle();
+        rig.Device.State.Should().Be(Cia408State.Disabled, "D2 by level");
+        rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultDisabled);
+        rig.Device.ClearFaultCause(InputCurrentTooHigh);
+        rig.Settle();
+
+        await rig.WriteU32Async(ControlWord32, 0, 0x0000_0001);
+        rig.Settle();
+        rig.Device.SetLocalControlWord(0x0009);
+        rig.Settle();
+
+        rig.Device.State.Should().Be(Cia408State.FaultDisabled,
+            "1001b after the local 1001b is no edge: the bus 0001b in between was ignored");
+    }
+
+    [Fact]
+    public async Task A_Status_Word_That_Differs_From_The_State_Is_Rewritten_On_The_Next_Word()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Settle();
+        rig.Od.WriteRawUnchecked(StatusWord16, 0, new byte[] { 0xFF, 0x00 });
+        rig.Od.WriteRawUnchecked(StatusWord32, 0, new byte[] { 0xFF, 0x00, 0x00, 0x00 });
+
+        await rig.WriteU16Async(ControlWord16, 0, 0x0000);
+        rig.Settle();
+
+        rig.Device.State.Should().Be(Cia408State.Init, "0000b in INIT moves nothing");
+        rig.Od.ReadUnsigned(StatusWord16, 0).Should().Be(0x0008u, "compared with the dictionary, not with what was written last");
+        rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_0008u);
+    }
+
+    [Fact]
+    public void Only_Pdo_1_Has_A_Default_Pdo_2_Waits_For_The_Setpoint_Objects()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+
+        rig.Od.ReadRaw(0x1600, 0).Should().Equal(new byte[] { 0x01 }, "RPDO 1 maps the control word");
+        rig.Od.ReadRaw(0x1A00, 0).Should().Equal(new byte[] { 0x01 }, "TPDO 1 maps the status word");
+        rig.Od.ReadRaw(0x1601, 0).Should().Equal(new byte[] { 0x00 }, "RPDO 2 maps a setpoint not declared yet");
+        rig.Od.ReadRaw(0x1A01, 0).Should().Equal(new byte[] { 0x00 }, "TPDO 2 maps an actual value not declared yet");
     }
 
     // ---- helpers --------------------------------------------------------------------------------

@@ -61,7 +61,7 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// value ranges, the setpoints, actual values and the process model, and the answer to a received
 /// RPDO (§8.4.1). The default PDO 2, which maps the setpoints and actual values of the default control
 /// mode: the device does not declare them yet, and sets PDO 1, the control and status word, only (see
-/// <see cref="MapsDeclaredEntriesOnly"/>). A device description that declares the device's objects.
+/// <see cref="Attach"/>). A device description that declares the device's objects.
 /// </para>
 /// <para>
 /// <b>Readings where the norm is silent.</b> Each is argued where it is used:
@@ -105,6 +105,9 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private readonly ushort _local;
     private readonly CanOpenObjectAddress[] _commandEntries;
 
+    // The PDO number of the default setpoint and actual value PDO (PDO 2 of the logical device).
+    private readonly int _modePdo;
+
     // The state machine. Actor loop, and the constructing thread in Attach before the host is
     // published.
     private readonly Cia408StateMachine _machine = new();
@@ -127,6 +130,10 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private readonly Queue<Cia408StateChangedEventArgs> _pendingChanges = new();
     private bool _raising;
 
+    // A fault asked for the NMT state 1029h:02 names; the request waits until the changes have been
+    // raised (FinishChanges). Actor loop.
+    private bool _nmtRequestPending;
+
     /// <summary>A device with what <paramref name="configuration"/> says. The configuration is read
     /// once, here.</summary>
     /// <remarks>The process model is not built in this slice; its parameter arrives with it.</remarks>
@@ -146,6 +153,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         _defaultPdos = configuration.DefaultPdos;
         _requiredPdoCount = configuration.RequiredPdoCount;
         _claims = new[] { CanOpenIndexRange.ForLogicalDevice(_logicalDevice) };
+        _modePdo = CanOpenLogicalDeviceAddressing.PdoNumber(_logicalDevice, 2);
 
         var firstControlMode = configuration.ControlModes[0];
         _controlModeDefault = (sbyte)firstControlMode;
@@ -162,7 +170,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         _statusWord32 = Shift(Cia408Objects.DeviceStatusWord32);
         _errorCode = Shift(Cia408Objects.DeviceErrorCode);
         _local = Shift(Cia408Objects.DeviceLocal);
-        _commandEntries = new[] { new CanOpenObjectAddress(_controlWord16, 0x00), new CanOpenObjectAddress(_controlWord32, 0x00) };
+        _commandEntries = new[]
+        {
+            new CanOpenObjectAddress(_controlWord16, 0x00),
+            new CanOpenObjectAddress(_controlWord32, 0x00),
+            new CanOpenObjectAddress(_local, 0x00),
+        };
 
         Requirements = new CanOpenApplicationRequirements
         {
@@ -208,9 +221,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// error behaviour record (<see cref="ErrorBehaviorLayout"/>).</summary>
     public CanOpenApplicationRequirements Requirements { get; }
 
-    /// <summary>The two control words, <c>6040h:00</c> and <c>6044h:00</c>: the fault reset is an
-    /// edge between two written words (§7.7, Table 7), so the device needs every write in order,
-    /// not the coalesced last value (<see cref="OnCommandWritten"/>).</summary>
+    /// <summary>The two control words, <c>6040h:00</c> and <c>6044h:00</c>, and the source of the
+    /// control word, <c>604Fh:00</c>: the fault reset is an edge between two written words (§7.7,
+    /// Table 7), so the device needs every write in order, not the coalesced last value; and whether a
+    /// control word counts depends on the source it was written under, so the switches of the source
+    /// must come in the same order (<see cref="OnCommandWritten"/>).</summary>
     public IReadOnlyList<CanOpenObjectAddress> CommandEntries => _commandEntries;
 
     /// <summary>The state the device state machine rests in. Any thread: the state last applied on
@@ -219,12 +234,12 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     public Cia408State State => _state;
 
     /// <summary>Declares the eight objects of §9.3, starts the state machine (D0, D1 into INIT, so
-    /// the status words show INIT from the first frame), sets the device type and the default PDOs
-    /// whose objects it declares (<see cref="MapsDeclaredEntriesOnly"/>),
-    /// and only then makes the device usable from the application side. The start is raised on
-    /// <see cref="StateChanged"/> from work posted here, which the node holds until it has opened
-    /// (<see cref="ICanOpenApplicationHost.Post"/>): it runs as the first actor job after the
-    /// start-up.</summary>
+    /// the status words show INIT from the first frame), sets the device type and the default
+    /// PDO 1, and only then makes the device usable from the application side. The start is queued
+    /// as a change before that, and raised on <see cref="StateChanged"/> from work posted here, which
+    /// the node holds until it has opened (<see cref="ICanOpenApplicationHost.Post"/>): it runs as the
+    /// first actor job after the start-up, unless a fault the application reported from another
+    /// thread in the meantime came first, which then raises it, ahead of its own change.</summary>
     /// <remarks>
     /// The defaults: <c>6040h</c> and <c>6044h</c> 0 (§9.3.2, §9.3.6); <c>6042h</c> 1, "setpoint via
     /// bus", where the configuration supports it, and its first device mode otherwise — §9.3.4 gives
@@ -233,6 +248,13 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// §9.3.5 leaves it to the manufacturer); <c>604Eh</c> 0, no fault yet (§9.3.8 gives no default);
     /// <c>604Fh</c> by device kind (§9.3.9, see the remarks on the class); the status words composed
     /// from the state (<see cref="ComposeStatus"/>).
+    /// <para>
+    /// The default PDO 2 maps the setpoint and actual value of the default control mode
+    /// (<see cref="Cia408Configuration.DefaultPdos"/>), objects the device does not declare in this
+    /// slice; it is left without a default until they arrive with the process model. Every other
+    /// default PDO is set, and one the node's PDO records refuse fails the open
+    /// (<see cref="ICanOpenApplicationHost.SetDefaultTpdo"/>).
+    /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">The device is attached to a node already.</exception>
     public void Attach(ICanOpenApplicationHost host)
@@ -252,14 +274,16 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             Declare(od, Cia408Objects.DeviceControlMode, new[] { unchecked((byte)_controlModeDefault) });
             Declare(od, Cia408Objects.DeviceErrorCode, Encode(0, 2));
             Declare(od, Cia408Objects.DeviceLocal, new[] { unchecked((byte)_localDefault) });
-            _status = ComposeStatus(od);
-            Declare(od, Cia408Objects.DeviceStatusWord16, Encode(_status, 2));
-            Declare(od, Cia408Objects.DeviceStatusWord32, Encode(_status, 4));
+            _localSource = _localDefault == 1;
+            var status = ComposeStatus();
+            Declare(od, Cia408Objects.DeviceStatusWord16, Encode(status, 2));
+            Declare(od, Cia408Objects.DeviceStatusWord32, Encode(status, 4));
 
             host.SetDeviceType(_logicalDevice, _deviceType);
             foreach (var pdo in _defaultPdos)
             {
-                if (!MapsDeclaredEntriesOnly(od, pdo)) continue;
+                // The setpoint and actual value PDO waits for the objects it maps (see the remarks).
+                if (pdo.Number == _modePdo) continue;
                 var mapping = new PdoMapping();
                 foreach (var (index, subindex, bits) in pdo.Entries) mapping.Add(index, subindex, bits);
                 if (pdo.IsTpdo) host.SetDefaultTpdo(pdo.Number, mapping);
@@ -272,12 +296,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             throw;
         }
 
+        // Queued before the host is published: a fault reported from another thread as soon as it is
+        // queues its change behind the start, whichever posted work runs first.
+        _pendingChanges.Enqueue(new Cia408StateChangedEventArgs(Cia408State.NotReady, Cia408State.Init, new[] { 0, 1 }));
         Volatile.Write(ref _host, host);
-        host.Post(() =>
-        {
-            _pendingChanges.Enqueue(new Cia408StateChangedEventArgs(Cia408State.NotReady, Cia408State.Init, new[] { 0, 1 }));
-            ThrowIfAny(RaisePendingChanges());
-        });
+        host.Post(() => FinishChanges(host));
     }
 
     /// <summary>Refuses a control word with a reserved bit set, and a value of <c>604Fh</c> other than
@@ -311,20 +334,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         return OdWriteDecision.Accept;
     }
 
-    /// <summary>A write to <c>604Fh</c> rewrites the status words, whose bit 4 mirrors it, and
-    /// transmits them. Every other entry is stored without behaviour in this slice. Actor
-    /// loop.</summary>
+    /// <summary>Nothing in this slice: the entries reported here (<c>6042h</c>, <c>6043h</c>) are
+    /// stored without behaviour. The command entries, <c>604Fh</c> among them, come through
+    /// <see cref="OnCommandWritten"/>. Actor loop.</summary>
     public void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries)
     {
-        var host = AttachedHost();
-        foreach (var entry in entries)
-        {
-            if (entry.Index == _local && entry.Subindex == 0x00)
-            {
-                Publish(host, errorCodeChanged: false);
-                return;
-            }
-        }
     }
 
     /// <summary>Nothing yet: the answer to a received RPDO (§8.4.1) arrives with the process model.
@@ -391,13 +405,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     }
 
     /// <summary>Gives every subscriber every pending change, in order, and again what they changed
-    /// meanwhile, until nothing is pending. Called while it runs already (a subscriber made a
-    /// change), it leaves the change for the running call. Returns what the subscribers threw, for the
+    /// meanwhile, until nothing is pending. Only from <see cref="FinishChanges"/>, which leaves a
+    /// change made while this runs to the running call. Returns what the subscribers threw, for the
     /// caller to throw once it has finished. Actor loop.</summary>
     private List<Exception>? RaisePendingChanges()
     {
-        if (_raising) return null;
-
         List<Exception>? failures = null;
         _raising = true;
         try
@@ -430,6 +442,24 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         }
 
         return failures;
+    }
+
+    /// <summary>Raises every pending change (<see cref="RaisePendingChanges"/>), then makes the NMT
+    /// request a fault asked for (<see cref="ReportFault"/>), then throws what the subscribers threw.
+    /// Called from inside a running raise (a subscriber made a change), it does neither: the running
+    /// call raises the change and then makes the request, so the NMT state changes only once every
+    /// subscriber has seen the fault. Actor loop.</summary>
+    private void FinishChanges(ICanOpenApplicationHost host)
+    {
+        if (_raising) return;
+        var failures = RaisePendingChanges();
+        if (_nmtRequestPending)
+        {
+            _nmtRequestPending = false;
+            if (host.ErrorBehaviorTarget(InternalDeviceErrorClass) is { } target) host.RequestNmtState(target);
+        }
+
+        ThrowIfAny(failures);
     }
 
     private static void ThrowIfAny(List<Exception>? failures)
@@ -475,20 +505,6 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     private void Declare(ObjectDictionary od, Cia408ObjectDefinition definition, byte[] initial)
         => od.AddRaw(Shift(definition), 0x00, definition.ValueType, initial, definition.Access,
             definition.PdoAccess != Cia408PdoAccess.No);
-
-    /// <summary>Whether every entry <paramref name="pdo"/> maps exists in the dictionary. The default
-    /// PDO 2 maps the setpoints and actual values of the default control mode, which the device does
-    /// not declare in this slice; until it does, that PDO keeps no default, and PDO 1, the control and
-    /// status word, is the device's only default PDO. Constructing thread, in Attach.</summary>
-    private static bool MapsDeclaredEntriesOnly(ObjectDictionary od, Cia408DefaultPdo pdo)
-    {
-        foreach (var (index, subindex, _) in pdo.Entries)
-        {
-            if (!od.TryGet(index, subindex, out _)) return false;
-        }
-
-        return true;
-    }
 
     /// <summary>The index of a catalogue object in the device's logical device.</summary>
     private ushort Shift(Cia408ObjectDefinition definition)
