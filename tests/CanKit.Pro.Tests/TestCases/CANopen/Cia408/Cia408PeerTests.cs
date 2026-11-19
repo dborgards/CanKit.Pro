@@ -133,8 +133,8 @@ public class Cia408PeerTests
     [InlineData(0x4002_0198u, new[] { 7 }, 2, true)]
     // dtprs 11b with valve modes only (bit 24: modes 3 and 4): the 16-bit pair.
     [InlineData(0x6100_0198u, new[] { 3, 4 }, 3, false)]
-    // dtprs 11b with a drive mode (bit 19: mode 9) beside bit 23: the 32-bit pair.
-    [InlineData(0x6088_0198u, new[] { 1, 2, 9 }, 3, true)]
+    // dtprs 11b with drive modes only (bits 17 and 19): the 32-bit pair.
+    [InlineData(0x600A_0198u, new[] { 7, 9 }, 3, true)]
     // the reserved dtprs 00b: no resolution, the 16-bit pair; bits 26 to 28 are modes 13 to 15.
     [InlineData(0x1C00_0198u, new[] { 13, 14, 15 }, 0, false)]
     public void The_Device_Type_Gives_The_Control_Modes_The_Resolution_And_The_Word_Pair(
@@ -147,6 +147,18 @@ public class Cia408PeerTests
         peer.SupportedControlModes.Select(m => (int)m).Should().Equal(modes);
         peer.Resolution.Should().Be(dtprs == 0 ? null : (Cia408Resolution)dtprs);
         peer.UsesWideWords.Should().Be(wide);
+    }
+
+    [Fact]
+    public void Valve_And_Drive_Modes_Of_Resolution_11b_Leave_The_Word_Pair_To_The_Running_Mode()
+    {
+        using var tool = new LoneTool();
+
+        // Bit 19 (mode 9, a drive: 32 bit) beside bit 23 (modes 1 and 2, valves: 16 bit on 11b).
+        var peer = tool.Peer(0x6088_0198);
+
+        peer.SupportedControlModes.Select(m => (int)m).Should().Equal(1, 2, 9);
+        peer.UsesWideWords.Should().BeNull("the pair follows the mode in 6043h");
     }
 
     [Fact]
@@ -199,15 +211,62 @@ public class Cia408PeerTests
         (await rig.Peer().ReadStatusAsync().WithTimeoutAsync(HangGuard)).State.Should().Be((Cia408State)state);
     }
 
-    [Fact]
-    public async Task Bits_That_Encode_No_State_Are_Invalid_Data()
+    [Theory]
+    [InlineData(0x000A)] // 1010b
+    [InlineData(0x000C)] // 1100b
+    [InlineData(0x000E)] // 1110b
+    public async Task Bits_With_R_Set_That_Encode_No_State_Are_Invalid_Data(ushort word)
     {
         using var rig = new Cia408ToolRig();
-        rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new byte[] { 0x02, 0x00 }); // 0010b: no row of Table 4
+        rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new[] { (byte)word, (byte)(word >> 8) });
 
         Func<Task> read = () => rig.Peer().ReadStatusAsync().WithTimeoutAsync(HangGuard);
 
-        await read.Should().ThrowExactlyAsync<InvalidDataException>();
+        await read.Should().ThrowExactlyAsync<InvalidDataException>("neither Figure 1 nor Table 4 gives R = 1 with these bits a state");
+    }
+
+    [Theory]
+    [InlineData(0x0002)] // 0010b
+    [InlineData(0x0004)] // 0100b
+    [InlineData(0x0007)] // 0111b
+    public async Task Bits_With_R_Clear_That_Are_No_Fault_State_Read_As_Fault_Reaction(ushort word)
+    {
+        using var rig = new Cia408ToolRig();
+        rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new[] { (byte)word, (byte)(word >> 8) });
+
+        (await rig.Peer().ReadStatusAsync().WithTimeoutAsync(HangGuard)).State
+            .Should().Be(Cia408State.FaultReaction, "Figure 1 gives FAULT_REACTION 0xxx");
+    }
+
+    [Fact]
+    public async Task A_Command_Reads_Through_Fault_Reaction_And_Fails_When_It_Lasts()
+    {
+        using var rig = new Cia408ToolRig();
+        rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new byte[] { 0x07, 0x00 }); // 0111b: FAULT_REACTION
+        var peer = rig.Peer(options: rig.Options(reads: 3, pause: TimeSpan.FromMilliseconds(5)));
+
+        Func<Task> enable = () => peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        var failure = (await enable.Should().ThrowExactlyAsync<Cia408CommandException>()).Which;
+        failure.Reason.Should().Be(Cia408CommandFailure.NotReached);
+        failure.State.Should().Be(Cia408State.FaultReaction);
+        rig.Pauses.Should().Equal(TimeSpan.FromMilliseconds(5), TimeSpan.FromMilliseconds(5));
+        Uploads(await RequestsAsync(rig), StatusWord16).Should().Be(3);
+        Downloads(await RequestsAsync(rig), ControlWord16).Should().BeEmpty("no resting state was seen, so nothing was written");
+    }
+
+    [Fact]
+    public async Task A_Command_Goes_On_Once_Fault_Reaction_Has_Passed()
+    {
+        using var rig = new Cia408ToolRig();
+        rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new byte[] { 0x07, 0x00 });
+        // During the first pause the device shows its resting state again, INIT.
+        rig.OnPause = () => rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new byte[] { 0x08, 0x00 });
+
+        await rig.Peer().EnableAsync().WithTimeoutAsync(HangGuard);
+
+        rig.Pauses.Should().ContainSingle();
+        rig.Rig.Device.State.Should().Be(Cia408State.Active);
     }
 
     // ---- the command sequences of Table 7 ----------------------------------------------------------------
@@ -268,8 +327,55 @@ public class Cia408PeerTests
 
         Func<Task> enable = () => peer.EnableAsync().WithTimeoutAsync(HangGuard);
 
-        (await enable.Should().ThrowExactlyAsync<InvalidOperationException>()).WithMessage("*fault*ResetFaultAsync*");
+        var failure = (await enable.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*fault*ResetFaultAsync*").Which;
+        failure.Reason.Should().Be(Cia408CommandFailure.FaultState);
+        failure.State.Should().Be(Cia408State.FaultInit);
         Downloads(await RequestsAsync(rig), ControlWord16).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_Device_That_Faults_On_The_Way_Fails_The_Command_With_Its_Fault_State()
+    {
+        using var rig = new Cia408ToolRig();
+        var peer = rig.Peer();
+        // As soon as D2 has taken the device to DISABLED, the application reports a fault.
+        rig.Rig.Device.StateChanged += (_, e) =>
+        {
+            if (e.Current == Cia408State.Disabled) rig.Rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultDisabled);
+        };
+
+        Func<Task> enable = () => peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        var failure = (await enable.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*fell into FaultDisabled*").Which;
+        failure.Reason.Should().Be(Cia408CommandFailure.FaultState);
+        failure.State.Should().Be(Cia408State.FaultDisabled);
+        Downloads(await RequestsAsync(rig), ControlWord16).Should().Equal(new uint[] { 0x0001 }, "the walk stops where the fault caught it");
+    }
+
+    [Fact]
+    public async Task A_Device_That_Switches_To_Local_On_The_Way_Fails_The_Command_As_Local_Control()
+    {
+        using var rig = new Cia408ToolRig();
+        var peer = rig.Peer();
+        // When D2 has taken the device to DISABLED, the status still shows INIT for one read (a device
+        // slower than an SDO round trip), so the peer pauses; during the pause a master switches the
+        // device to its local source (604Fh = 1), and the next read shows DISABLED under local control.
+        rig.Rig.Device.StateChanged += (_, e) =>
+        {
+            if (e.Current == Cia408State.Disabled) rig.Rig.Od.WriteRawUnchecked(StatusWord16, 0x00, new byte[] { 0x08, 0x00 });
+        };
+        int switched = 0;
+        rig.OnPause = () =>
+        {
+            if (System.Threading.Interlocked.Exchange(ref switched, 1) == 0)
+                rig.Rig.WriteU8Async(0x604F, 0x00, 0x01).GetAwaiter().GetResult();
+        };
+
+        Func<Task> enable = () => peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        var failure = (await enable.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*local control*").Which;
+        failure.Reason.Should().Be(Cia408CommandFailure.LocalControl);
+        rig.Rig.Device.State.Should().Be(Cia408State.Disabled);
     }
 
     [Fact]
@@ -283,8 +389,10 @@ public class Cia408PeerTests
         Func<Task> enable = () => peer.EnableAsync().WithTimeoutAsync(HangGuard);
         Func<Task> reset = () => peer.ResetFaultAsync().WithTimeoutAsync(HangGuard);
 
-        (await enable.Should().ThrowExactlyAsync<InvalidOperationException>()).WithMessage("*local control*604Fh*");
-        (await reset.Should().ThrowExactlyAsync<InvalidOperationException>()).WithMessage("*local control*");
+        (await enable.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*local control*604Fh*")
+            .Which.Reason.Should().Be(Cia408CommandFailure.LocalControl);
+        (await reset.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*local control*")
+            .Which.Reason.Should().Be(Cia408CommandFailure.LocalControl);
         (await peer.ReadStatusAsync().WithTimeoutAsync(HangGuard)).Local.Should().BeTrue("status bit 4 mirrors 604Fh (§9.3.9)");
         Downloads(await RequestsAsync(rig), ControlWord16).Should().BeEmpty();
         rig.Rig.Device.State.Should().Be(Cia408State.Init);
@@ -339,19 +447,26 @@ public class Cia408PeerTests
     public async Task A_Reset_The_Device_Refuses_Fails_After_The_Bounded_Reads_And_Does_Not_Hang()
     {
         using var rig = new Cia408ToolRig();
-        var peer = rig.Peer();
+        var pause = TimeSpan.FromMilliseconds(7);
+        var peer = rig.Peer(options: rig.Options(reads: 4, pause: pause));
         await peer.EnableAsync().WithTimeoutAsync(HangGuard);
         rig.Rig.Device.ReportFault(InputCurrentTooHigh, Cia408FaultState.FaultHold);
         rig.Rig.Settle();
         var earlier = await RequestsAsync(rig);
+        long before = rig.PauseClock.GetTimestamp();
 
         Func<Task> reset = () => peer.ResetFaultAsync().WithTimeoutAsync(HangGuard);
 
-        (await reset.Should().ThrowExactlyAsync<InvalidOperationException>()).WithMessage("*refused the fault reset*FaultHold*");
+        var failure = (await reset.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*refused the fault reset*FaultHold*").Which;
+        failure.Reason.Should().Be(Cia408CommandFailure.NotReached);
+        failure.State.Should().Be(Cia408State.FaultHold);
         var requests = (await RequestsAsync(rig)).Skip(earlier.Length).ToArray();
         Downloads(requests, ControlWord16).Should().Equal(0x0003u, 0x000Bu);
-        Uploads(requests, StatusWord16).Should().Be(1 + Cia408Peer.StatusReads,
-            "one read finds the fault state, then the bounded reads after the edge, and not one more");
+        Uploads(requests, StatusWord16).Should().Be(1 + 4,
+            "one read finds the fault state, then the four reads the options allow after the edge, and not one more");
+        rig.Pauses.Should().Equal(new[] { pause, pause, pause }, "a pause before each read after the edge but the first");
+        TimeSpan.FromTicks((rig.PauseClock.GetTimestamp() - before) * TimeSpan.TicksPerSecond / rig.PauseClock.Frequency)
+            .Should().Be(TimeSpan.FromMilliseconds(21), "the pauses ran on the virtual clock");
         rig.Rig.Device.State.Should().Be(Cia408State.FaultHold, "the device refuses the reset while the cause lasts");
     }
 
@@ -362,7 +477,8 @@ public class Cia408PeerTests
 
         Func<Task> reset = () => rig.Peer().ResetFaultAsync().WithTimeoutAsync(HangGuard);
 
-        (await reset.Should().ThrowExactlyAsync<InvalidOperationException>()).WithMessage("*not in a fault state*");
+        (await reset.Should().ThrowExactlyAsync<Cia408CommandException>()).WithMessage("*not in a fault state*")
+            .Which.Reason.Should().Be(Cia408CommandFailure.NoFault);
         Downloads(await RequestsAsync(rig), ControlWord16).Should().BeEmpty();
     }
 
@@ -639,6 +755,76 @@ public class Cia408PeerTests
         Uploads(requests, 0x6045).Should().BeGreaterThan(0);
         Uploads(requests, StatusWord16).Should().Be(0, "the status is read from 6045h");
         (await peer.ReadStatusAsync().WithTimeoutAsync(HangGuard)).Should().Be(new Cia408Status(0x0000_000F, Cia408State.Active));
+    }
+
+    [Fact]
+    public async Task A_Device_Of_Resolution_11b_Is_Driven_On_The_Pair_Of_The_Mode_It_Runs()
+    {
+        // dtprs 11b with a position drive (mode 9, 32 bit) as the default and a spool valve mode
+        // (mode 1, 16 bit on 11b): Table 53 NOTE 2 by Cia408Configuration.IsWide.
+        var mixed = new Cia408Configuration
+        {
+            Resolution = Cia408Resolution.Valve16Drive32,
+            ControlModes = new[] { Cia408ControlMode.PositionControlAxis, Cia408ControlMode.SpoolPositionOpenLoop },
+        };
+        using var rig = new Cia408ToolRig(new[] { new Cia408Device(mixed) }, BothPairs(mixed.DeviceType.Value));
+        var peer = rig.Peer(configuration: mixed);
+        peer.UsesWideWords.Should().BeNull();
+        await peer.WriteLocalAsync(false).WithTimeoutAsync(HangGuard); // a drive powers on in local control (§9.3.9)
+
+        await peer.DisableAsync().WithTimeoutAsync(HangGuard);
+        var running9 = await RequestsAsync(rig);
+        Downloads(running9, 0x6044).Should().Equal(new uint[] { 0x0001 }, "6043h holds 9, a drive mode: the 32-bit pair");
+        Downloads(running9, ControlWord16).Should().BeEmpty();
+
+        await peer.WriteControlModeAsync(Cia408ControlMode.SpoolPositionOpenLoop).WithTimeoutAsync(HangGuard);
+        await peer.EnableAsync().WithTimeoutAsync(HangGuard);
+
+        var running1 = (await RequestsAsync(rig)).Skip(running9.Length).ToArray();
+        Downloads(running1, ControlWord16).Should().Equal(new uint[] { 0x0003, 0x0007 }, "6043h holds 1, a 16-bit valve mode on 11b");
+        Downloads(running1, 0x6044).Should().BeEmpty();
+        Uploads(running1, 0x6041).Should().BeGreaterThan(0);
+        rig.Rig.Device.State.Should().Be(Cia408State.Active);
+    }
+
+    [Fact]
+    public void The_Peer_Options_Are_Checked_By_The_Descriptor()
+    {
+        FluentActions.Invoking(() => new Cia408Profile(new Cia408PeerOptions { StatusReads = 0 }))
+            .Should().Throw<ArgumentOutOfRangeException>().WithParameterName("StatusReads");
+        FluentActions.Invoking(() => new Cia408Profile(new Cia408PeerOptions { StatusPause = TimeSpan.FromTicks(-1) }))
+            .Should().Throw<ArgumentOutOfRangeException>().WithParameterName("StatusPause");
+        FluentActions.Invoking(() => new Cia408Profile(new Cia408PeerOptions { Delay = null! }))
+            .Should().Throw<ArgumentNullException>().WithParameterName("Delay");
+        new Cia408Profile().PeerOptions.Should().BeSameAs(Cia408PeerOptions.Default);
+    }
+
+    /// <summary>A description with <c>1000h</c> = <paramref name="deviceType"/>, both word pairs,
+    /// <c>6043h</c> and <c>604Fh</c>.</summary>
+    private static CanOpenDeviceDescription BothPairs(uint deviceType)
+    {
+        var text = new StringBuilder();
+        text.Append("[FileInfo]\nFileName=both.eds\nFileVersion=1\nFileRevision=0\nEDSVersion=4.0\n")
+            .Append("Description=A CiA 408 device with both pairs\nCreationTime=10:00AM\nCreationDate=11-19-2026\nCreatedBy=CanKit.Pro tests\n")
+            .Append("[DeviceInfo]\nVendorName=CanKit.Pro\nVendorNumber=0\nProductName=Both\nProductNumber=0\nRevisionNumber=0\n")
+            .Append("OrderCode=BOTH\nBaudRate_500=1\nSimpleBootUpMaster=0\nSimpleBootUpSlave=1\nGranularity=8\n")
+            .Append("DynamicChannelsSupported=0\nGroupMessaging=0\nNrOfRXPDO=0\nNrOfTXPDO=0\nLSS_Supported=0\n")
+            .Append("[MandatoryObjects]\nSupportedObjects=1\n1=0x1000\n")
+            .Append(string.Format(CultureInfo.InvariantCulture,
+                "[1000]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x{0:X8}\nPDOMapping=0\n", deviceType))
+            .Append("[OptionalObjects]\nSupportedObjects=6\n1=0x6040\n2=0x6041\n3=0x6043\n4=0x6044\n5=0x6045\n6=0x604F\n");
+        void Variable(ushort index, string type, string access)
+            => text.Append(string.Format(CultureInfo.InvariantCulture,
+                "[{0:X4}]\nParameterName=V{0:X4}\nObjectType=0x7\nDataType={1}\nAccessType={2}\nDefaultValue=0\nPDOMapping=1\n",
+                index, type, access));
+
+        Variable(0x6040, "0x0006", "rw");
+        Variable(0x6041, "0x0006", "ro");
+        Variable(0x6043, "0x0002", "rw");
+        Variable(0x6044, "0x0007", "rw");
+        Variable(0x6045, "0x0007", "ro");
+        Variable(0x604F, "0x0002", "rw");
+        return CanOpenDeviceDescription.ParseEds(text.ToString());
     }
 
     /// <summary>The description of the 32-bit valve of <see cref="A_32_Bit_Valve_Is_Driven_At_6044h_And_Read_At_6045h"/>:

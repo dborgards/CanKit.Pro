@@ -79,13 +79,49 @@ internal sealed class Cia408ToolRig : IDisposable
     /// <summary>The description bound for the device in the tool, or null.</summary>
     internal CanOpenDeviceDescription? Description { get; }
 
+    /// <summary>The clock the peer's pauses run on (<see cref="Cia408PeerOptions.Delay"/>): each pause
+    /// advances it by its length and completes at once, so no test waits on a wall clock.</summary>
+    internal ManualTimeSource PauseClock { get; } = new();
+
+    /// <summary>Every pause a peer of this rig took, in order.</summary>
+    internal IReadOnlyList<TimeSpan> Pauses
+    {
+        get
+        {
+            lock (_pauses) return _pauses.ToArray();
+        }
+    }
+
+    /// <summary>Runs inside each pause, after the clock was advanced: what the device does while the
+    /// tool waits.</summary>
+    internal Action? OnPause { get; set; }
+
+    private readonly List<TimeSpan> _pauses = new();
+
+    /// <summary>Options with <paramref name="reads"/> and <paramref name="pause"/> (the defaults when
+    /// not given) whose delay is <see cref="PauseClock"/>.</summary>
+    internal Cia408PeerOptions Options(int reads = Cia408PeerOptions.DefaultStatusReads, TimeSpan? pause = null) => new()
+    {
+        StatusReads = reads,
+        StatusPause = pause ?? Cia408PeerOptions.DefaultStatusPause,
+        Delay = (length, _) =>
+        {
+            lock (_pauses) _pauses.Add(length);
+            PauseClock.Advance(length);
+            OnPause?.Invoke();
+            return System.Threading.Tasks.Task.CompletedTask;
+        },
+    };
+
     /// <summary>The peer of logical device <paramref name="logicalDevice"/> of the device, made by
     /// the descriptor for the device type <paramref name="configuration"/> gives it (the fixture's
-    /// when null). Performs no bus access.</summary>
-    internal Cia408Peer Peer(int logicalDevice = 0, Cia408Configuration? configuration = null)
+    /// when null), with <paramref name="options"/> (<see cref="Options"/> with the defaults when null).
+    /// Performs no bus access.</summary>
+    internal Cia408Peer Peer(int logicalDevice = 0, Cia408Configuration? configuration = null, Cia408PeerOptions? options = null)
     {
         var type = (configuration ?? FixtureConfiguration).DeviceType;
-        return (Cia408Peer)new Cia408Profile().CreatePeer(Tool, CanOpenProfileRig.DeviceId, new CanOpenLogicalDevice(logicalDevice, type));
+        return (Cia408Peer)new Cia408Profile(options ?? Options())
+            .CreatePeer(Tool, CanOpenProfileRig.DeviceId, new CanOpenLogicalDevice(logicalDevice, type));
     }
 
     public void Dispose()

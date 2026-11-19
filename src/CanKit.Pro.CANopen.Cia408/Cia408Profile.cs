@@ -14,6 +14,20 @@ internal sealed class Cia408Profile : ICanOpenProfile
     /// <c>1000h</c> carries in its low 16 bits (CiA 408 v2.2.0 §8.6.2, Figure 3).</summary>
     internal const ushort Number = 408;
 
+    /// <summary>A descriptor whose peers wait with <paramref name="peerOptions"/>
+    /// (<see cref="Cia408PeerOptions.Default"/> when null).</summary>
+    /// <exception cref="ArgumentOutOfRangeException">An option is out of range
+    /// (<see cref="Cia408PeerOptions"/>).</exception>
+    /// <exception cref="ArgumentNullException">The options' delay is null.</exception>
+    public Cia408Profile(Cia408PeerOptions? peerOptions = null)
+    {
+        PeerOptions = peerOptions ?? Cia408PeerOptions.Default;
+        PeerOptions.Validate();
+    }
+
+    /// <summary>How the peers this descriptor makes wait for a status (<see cref="Cia408PeerOptions"/>).</summary>
+    public Cia408PeerOptions PeerOptions { get; }
+
     /// <inheritdoc />
     public ushort ProfileNumber => Number;
 
@@ -42,6 +56,6 @@ internal sealed class Cia408Profile : ICanOpenProfile
                 logicalDevice.Index, logicalDevice.DeviceType, Number), nameof(logicalDevice));
         }
 
-        return new Cia408Peer(this, node, peerNodeId, logicalDevice);
+        return new Cia408Peer(this, node, peerNodeId, logicalDevice, PeerOptions);
     }
 }

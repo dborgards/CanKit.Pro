@@ -338,11 +338,9 @@ internal sealed class Cia408Configuration
     /// PDO 2 carries the mapping of the default control mode, if the table has a row for that mode
     /// in the width in use. Where only one table has such a row, only that direction gets a PDO 2.
     /// Every mapping row begins with the control or status word again, as the tables write it.</para>
-    /// <para>Which width is in use depends on the default control mode and the resolution (Table 53,
-    /// NOTE 2). A valve mode runs in 16 bit with <see cref="Cia408Resolution.Valve16"/> or
-    /// <see cref="Cia408Resolution.Valve16Drive32"/>, and the device then uses <c>6040h</c> and
-    /// <c>6041h</c>. A valve mode with <see cref="Cia408Resolution.Valve32Drive32"/>, and every drive
-    /// mode, runs in 32 bit with <c>6044h</c> and <c>6045h</c>.</para>
+    /// <para>Which width is in use is that of the default control mode
+    /// (<see cref="IsWide(Cia408Resolution?, Cia408ControlMode)"/>, the one rule): 16 bit with
+    /// <c>6040h</c> and <c>6041h</c>, or 32 bit with <c>6044h</c> and <c>6045h</c>.</para>
     /// <para>The mapping numbers of the tables that PDO 2 carries, by default control mode:
     /// <list type="bullet">
     /// <item><description>1: RPDO mapping 2 only, 16 and 32 bit.</description></item>
@@ -432,17 +430,26 @@ internal sealed class Cia408Configuration
     internal IReadOnlyList<Cia408ObjectDefinition> ActualValuesOf(Cia408ControlMode mode)
         => TpdoValues(mode, IsWide(mode)) ?? Array.Empty<Cia408ObjectDefinition>();
 
-    /// <summary>Whether <paramref name="mode"/> runs in 32 bit (Table 53, NOTE 2): every drive mode,
-    /// and a valve mode on <see cref="Cia408Resolution.Valve32Drive32"/>.</summary>
-    private bool IsWide(Cia408ControlMode mode)
-        => !(IsValveMode(mode) && Resolution is Cia408Resolution.Valve16 or Cia408Resolution.Valve16Drive32);
+    /// <summary>Whether <paramref name="mode"/> runs in 32 bit on this configuration's resolution
+    /// (<see cref="IsWide(Cia408Resolution?, Cia408ControlMode)"/>).</summary>
+    private bool IsWide(Cia408ControlMode mode) => IsWide(Resolution, mode);
+
+    /// <summary>
+    /// The one rule for the width a control mode runs in, and so for the control/status word pair a
+    /// device uses while it runs that mode (Table 53, NOTE 2: the resolution "applies to the control
+    /// word, the status word and the related parameters"): every drive mode is 32 bit, and a valve mode
+    /// is 32 bit on <see cref="Cia408Resolution.Valve32Drive32"/> and 16 bit otherwise.
+    /// </summary>
+    /// <remarks>The device side applies it to its default control mode (<see cref="DefaultPdos"/>), the
+    /// tool side to the control mode a device runs (<see cref="Cia408Peer.UsesWideWords"/>). The reserved
+    /// resolution 00b (<see langword="null"/>) counts as no 32-bit valve.</remarks>
+    internal static bool IsWide(Cia408Resolution? resolution, Cia408ControlMode mode)
+        => IsDriveMode(mode) || resolution == Cia408Resolution.Valve32Drive32;
 
     /// <summary>Whether <paramref name="mode"/> is a drive mode, 6 to 12 of Table 82; the others are
     /// valve (or pump) modes.</summary>
     internal static bool IsDriveMode(Cia408ControlMode mode)
         => mode is >= Cia408ControlMode.OpenLoopMovement and <= Cia408ControlMode.VelocityControlAxisWithPressureOverride;
-
-    private static bool IsValveMode(Cia408ControlMode mode) => !IsDriveMode(mode);
 
     /// <summary>The control modes whose capability bit <paramref name="deviceType"/> sets, ascending:
     /// the reverse of <see cref="DeviceType"/>, with the same inferred pairing. Bit 23 names modes 1

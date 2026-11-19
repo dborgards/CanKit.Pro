@@ -13,10 +13,24 @@ namespace CanKit.Pro.CANopen.Cia408;
 /// (CiA 408 v2.2.0 §9.3.3, Table 76; §9.3.7, Table 88), decoded.</summary>
 /// <param name="Word">The status word as the device sent it: 16 bits from <c>6041h</c> or 32 bits
 /// from <c>6045h</c>, whichever the peer uses (see <see cref="Cia408Peer"/>).</param>
-/// <param name="State">The state bits 3..0 (R M H D) encode (§7.6, Table 4). <c>0000b</c> is
-/// FAULT_INIT: NOT_READY has no encoding of its own in the norm and the same bits
-/// (<see cref="Cia408StateMachine.StatusBits"/>), and a device leaves it on its own before it
-/// answers SDO.</param>
+/// <param name="State">The state bits 3..0 (R M H D) encode (§7.6, Table 4, Figure 1):
+/// <c>1000b</c> INIT, <c>1001b</c> DISABLED, <c>1011b</c> HOLD, <c>1111b</c> ACTIVE, <c>0000b</c>
+/// FAULT_INIT, <c>0001b</c> FAULT_DISABLED, <c>0011b</c> FAULT_HOLD — and
+/// <see cref="Cia408State.FaultReaction"/> for every other pattern with R = 0. See the remarks.</param>
+/// <remarks>
+/// <para><b>NOT_READY</b> has no encoding of its own in the norm; <c>0000b</c> is read as FAULT_INIT, a
+/// resting state, since a device leaves NOT_READY on its own before it answers SDO
+/// (<see cref="Cia408StateMachine.StatusBits"/>).</para>
+/// <para><b>FAULT_REACTION</b> is encoded twice, and differently: Figure 1 gives it <c>0xxx</c>, while
+/// Table 4 says bits 0 to 3 keep the values of the state the fault came from. The reading taken: a
+/// pattern with R = 0 that is no fault state's own (<c>0010b</c>, <c>0100b</c> to <c>0111b</c>) can
+/// only be FAULT_REACTION by Figure 1, and is decoded as it; a device that follows Table 4 shows the
+/// state it came from, which no reader can tell apart from that state. Either way FAULT_REACTION is
+/// passed through, not rested in, and the command sequences keep reading through it within their
+/// bound (<see cref="Cia408PeerOptions.StatusReads"/>). A pattern with R = 1 that encodes no state
+/// (<c>1010b</c>, <c>1100b</c> to <c>1110b</c>) has no reading in either passage and is
+/// <see cref="InvalidDataException"/>.</para>
+/// </remarks>
 internal readonly record struct Cia408Status(uint Word, Cia408State State)
 {
     /// <summary>Bit 4, L: local operation active, the control word comes from the device's local
@@ -67,12 +81,12 @@ internal readonly record struct Cia408Observation(ForeignPdoObserveResult Result
 /// </summary>
 /// <remarks>
 /// <para><b>Which word pair.</b> The norm calls both control/status word pairs Mandatory, while the
-/// resolution of the device type says which one the device uses (§8.6.2, Table 53, NOTE 2). The peer
-/// uses <c>6040h</c>/<c>6041h</c> on a device with dtprs 01b (16-bit valve) and <c>6044h</c>/<c>6045h</c>
-/// on one with 10b (32-bit valve and drive). Code 11b, 16-bit valve and 32-bit drive, names no single
-/// width: the peer takes the 32-bit pair when the device type sets a drive capability bit (16 to 22),
-/// the 16-bit pair otherwise. The reserved code 00b is taken as 16-bit, the pair a device without a
-/// drive uses (<see cref="UsesWideWords"/>).</para>
+/// resolution says which one a device uses while it runs a control mode (§8.6.2, Table 53, NOTE 2;
+/// the rule is <see cref="Cia408Configuration.IsWide(Cia408Resolution?, Cia408ControlMode)"/>, the one
+/// the device side applies too). Where every mode the device type announces runs in one width, the
+/// peer uses that width's pair. Where they differ — dtprs 11b with valve and drive modes — the pair
+/// follows the mode the device runs, and the peer reads <c>6043h</c> at the start of every call that
+/// touches the words (<see cref="UsesWideWords"/>).</para>
 /// <para><b>Command sequences.</b> <see cref="EnableAsync"/>, <see cref="HoldAsync"/> and
 /// <see cref="DisableAsync"/> walk the device one transition of Table 7 at a time from the state it
 /// reports to the one asked for, writing one control word per transition and waiting for the status
@@ -84,14 +98,15 @@ internal readonly record struct Cia408Observation(ForeignPdoObserveResult Result
 /// manufacturer-specific, are written 0 — a tool that uses them writes its own words
 /// (<see cref="WriteControlWordAsync"/>). <see cref="ResetFaultAsync"/> makes the fault reset of
 /// Table 7 as an edge in two writes.</para>
-/// <para><b>The wait.</b> After each write the peer reads the status word again, at most
-/// <see cref="StatusReads"/> times, and goes on as soon as the state is the expected one. A device
-/// in local control, one that is in a fault state or falls into one, and one that is still elsewhere
-/// after the last read fail the call with <see cref="InvalidOperationException"/>, so the call ends
-/// whatever the device does. The bound counts SDO round trips, not time: every read is a request and
-/// its answer, and no clock is consulted. A device that needs more round trips to change state is
-/// reported as not having changed; a caller that knows its device is slower polls
-/// <see cref="ReadStatusAsync"/> itself.</para>
+/// <para><b>The wait.</b> Before the first write, and after each write, the peer reads the status
+/// word at most <see cref="Cia408PeerOptions.StatusReads"/> times, with
+/// <see cref="Cia408PeerOptions.StatusPause"/> before each read but the first, and goes on as soon as
+/// the device shows the state it waits for. FAULT_REACTION, which a device passes through
+/// (<see cref="Cia408Status"/>), is read through. A sequence fails with
+/// <see cref="Cia408CommandException"/>, whose <see cref="Cia408CommandException.Reason"/> says why:
+/// the device is in local control, is in a fault state or falls into one, or does not show the state
+/// within the reads. A sequence that fails after it wrote leaves its last control word in the device,
+/// which may keep moving.</para>
 /// <para><b>Values.</b> They are encoded and decoded little-endian by the data type of the catalogue
 /// (<see cref="CanOpenValueCodec"/>); a value of another length than its type is an
 /// <see cref="InvalidDataException"/>, not a truncation.</para>
@@ -99,18 +114,15 @@ internal readonly record struct Cia408Observation(ForeignPdoObserveResult Result
 /// reserved bit, an object of the wrong kind and a write to an entry the catalogue marks read-only
 /// are thrown by the call itself, before a task exists; nothing is sent then. Everything that happens
 /// on the bus ends in the returned task.</para>
-/// <para><b>State.</b> The peer holds the node, the peer's node-id and the logical device, and caches
-/// no value. It can be used from any thread; the node's SDO client allows one transfer per server at a
-/// time and refuses a second with <see cref="InvalidOperationException"/>.</para>
+/// <para><b>State.</b> The peer holds the node, the peer's node-id, the logical device and its options,
+/// and caches no value. It can be used from any thread; the node's SDO client allows one transfer per
+/// server at a time and refuses a second with <see cref="InvalidOperationException"/>.</para>
 /// </remarks>
 internal sealed class Cia408Peer : ICanOpenProfilePeer
 {
-    /// <summary>How often a command sequence reads the status word after a write before it gives up
-    /// (see the remarks on the class).</summary>
-    internal const int StatusReads = 8;
-
     // The states that have an encoding of their own (Table 4), in the order a status is matched;
-    // NOT_READY and FAULT_REACTION share 0000b with FAULT_INIT (see Cia408Status.State).
+    // NOT_READY shares 0000b with FAULT_INIT, and FAULT_REACTION is every other pattern with R = 0
+    // (see Cia408Status).
     private static readonly Cia408State[] EncodedStates =
     {
         Cia408State.Init, Cia408State.Disabled, Cia408State.Hold, Cia408State.Active,
@@ -124,23 +136,25 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     private static readonly uint[] LadderWords = { 0b0000, 0b0001, 0b0011, 0b0111 };
 
     private readonly ICanOpenNode _node;
-    private readonly Cia408ObjectDefinition _controlWord;
-    private readonly Cia408ObjectDefinition _statusWord;
+    private readonly Cia408PeerOptions _options;
 
-    internal Cia408Peer(ICanOpenProfile profile, ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice)
+    internal Cia408Peer(ICanOpenProfile profile, ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice,
+        Cia408PeerOptions options)
     {
         Profile = profile;
         _node = node;
+        _options = options;
         PeerNodeId = peerNodeId;
         LogicalDevice = logicalDevice;
         SupportedControlModes = Cia408Configuration.ControlModesOf(logicalDevice.DeviceType);
         Resolution = Cia408Configuration.ResolutionOf(logicalDevice.DeviceType);
 
-        bool drive = false;
-        foreach (var mode in SupportedControlModes) drive |= Cia408Configuration.IsDriveMode(mode);
-        UsesWideWords = Resolution == Cia408Resolution.Valve32Drive32 || (Resolution == Cia408Resolution.Valve16Drive32 && drive);
-        _controlWord = UsesWideWords ? Cia408Objects.DeviceControlWord32 : Cia408Objects.DeviceControlWord16;
-        _statusWord = UsesWideWords ? Cia408Objects.DeviceStatusWord32 : Cia408Objects.DeviceStatusWord16;
+        int wide = 0;
+        foreach (var mode in SupportedControlModes) wide += Cia408Configuration.IsWide(Resolution, mode) ? 1 : 0;
+        UsesWideWords = SupportedControlModes.Count == 0 ? Resolution == Cia408Resolution.Valve32Drive32
+            : wide == SupportedControlModes.Count ? true
+            : wide == 0 ? false
+            : null;
     }
 
     /// <inheritdoc />
@@ -153,8 +167,8 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     public CanOpenLogicalDevice LogicalDevice { get; }
 
     /// <summary>The control modes the device type announces with its capability bits (§8.6.2,
-    /// Table 53), ascending; bits 23 and 24 each give two modes
-    /// (<see cref="Cia408Configuration.ControlModesOf"/>). What the device runs now is
+    /// Table 53), ascending; bits 23 and 24 each give two modes, and the drive bits of a 16-bit device
+    /// type none (<see cref="Cia408Configuration.ControlModesOf"/>). What the device runs now is
     /// <c>6043h</c> (<see cref="ReadControlModeAsync"/>).</summary>
     public IReadOnlyList<Cia408ControlMode> SupportedControlModes { get; }
 
@@ -162,92 +176,129 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// for the reserved code 00b.</summary>
     public Cia408Resolution? Resolution { get; }
 
-    /// <summary>Whether the peer reads and writes the 32-bit pair <c>6044h</c>/<c>6045h</c> rather
-    /// than <c>6040h</c>/<c>6041h</c> (see the remarks on the class).</summary>
-    public bool UsesWideWords { get; }
+    /// <summary>Whether the peer reads and writes the 32-bit pair <c>6044h</c>/<c>6045h</c>
+    /// (<see langword="true"/>) or <c>6040h</c>/<c>6041h</c> (<see langword="false"/>):
+    /// <see cref="Cia408Configuration.IsWide(Cia408Resolution?, Cia408ControlMode)"/> for every mode the
+    /// device type announces, the resolution's valve width where it announces none.
+    /// <see langword="null"/> where the modes differ in width: the pair is then that of the mode in
+    /// <c>6043h</c>, read at the start of each call that touches the words.</summary>
+    public bool? UsesWideWords { get; }
 
     // ---- the state machine ---------------------------------------------------------------------------
 
-    /// <summary>Reads the status word and decodes it.</summary>
-    /// <exception cref="PeerSdoAccessException">The bound description does not allow the entry.</exception>
-    /// <exception cref="SdoAbortException">The device aborted the upload.</exception>
-    /// <exception cref="InvalidDataException">The status word has another length than its type, or
-    /// bits 3..0 that encode no state of Table 4.</exception>
+    /// <summary>Reads the status word and decodes it (<see cref="Cia408Status"/>). Where the word pair
+    /// depends on the control mode (<see cref="UsesWideWords"/> is null), reads <c>6043h</c> first.</summary>
+    /// <exception cref="PeerSdoAccessException">The bound description does not allow an entry.</exception>
+    /// <exception cref="SdoAbortException">The device aborted an upload.</exception>
+    /// <exception cref="InvalidDataException">An entry has another length than its type, or the status
+    /// word has R = 1 with bits 2..0 that encode no state of Table 4.</exception>
     public Task<Cia408Status> ReadStatusAsync(CancellationToken cancellationToken = default)
-        => ReadStatusCoreAsync(cancellationToken);
+        => ReadStatusWithWordsAsync(cancellationToken);
 
-    private async Task<Cia408Status> ReadStatusCoreAsync(CancellationToken cancellationToken)
+    private async Task<Cia408Status> ReadStatusWithWordsAsync(CancellationToken cancellationToken)
     {
-        var word = (uint)CanOpenValueCodec.Decode(_statusWord.ValueType,
-            await ReadAsync(_statusWord, 0x00, cancellationToken).ConfigureAwait(false));
+        var words = await WordsAsync(cancellationToken).ConfigureAwait(false);
+        return await ReadStatusCoreAsync(words, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Cia408Status> ReadStatusCoreAsync(Words words, CancellationToken cancellationToken)
+    {
+        var word = (uint)CanOpenValueCodec.Decode(words.Status.ValueType,
+            await ReadAsync(words.Status, 0x00, cancellationToken).ConfigureAwait(false));
         var bits = (byte)(word & Cia408ControlWord.MachineBits);
         foreach (var state in EncodedStates)
         {
             if (Cia408StateMachine.StatusBits(state) == bits) return new Cia408Status(word, state);
         }
 
+        if ((bits & Cia408ControlWord.ResetFault) == 0) return new Cia408Status(word, Cia408State.FaultReaction);
+
         throw new InvalidDataException(string.Format(CultureInfo.InvariantCulture,
             "{0} is {1:X4}h: bits 3..0 = {2} encode no state of CiA 408 §7.6, Table 4.",
-            Describe(_statusWord.Index, 0x00), word, Convert.ToString(bits, 2).PadLeft(4, '0')));
+            Describe(words.Status.Index, 0x00), word, Convert.ToString(bits, 2).PadLeft(4, '0')));
     }
 
     /// <summary>Writes <paramref name="word"/> to the control word as given, with no wait.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="word"/> sets a reserved bit — 4,
     /// 5 or 12, and 24 to 31 of the 32-bit word (§9.3.2, Table 73; §9.3.6, Table 85) — or a bit above
-    /// 15 where the peer uses the 16-bit word.</exception>
-    /// <exception cref="PeerSdoAccessException">The bound description does not allow the entry.</exception>
-    /// <exception cref="SdoAbortException">The device aborted the download.</exception>
+    /// 15 where the peer uses the 16-bit word. Thrown by the call where the pair is known
+    /// (<see cref="UsesWideWords"/>), in the returned task where it follows <c>6043h</c>.</exception>
+    /// <exception cref="PeerSdoAccessException">The bound description does not allow an entry.</exception>
+    /// <exception cref="SdoAbortException">The device aborted a transfer.</exception>
     public Task WriteControlWordAsync(uint word, CancellationToken cancellationToken = default)
     {
-        uint reserved = UsesWideWords ? Cia408ControlWord.Reserved32 : Cia408ControlWord.Reserved16 | 0xFFFF_0000u;
-        if ((word & reserved) != 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(word), word, string.Format(CultureInfo.InvariantCulture,
-                "{0:X8}h sets a bit {1} reserves or does not have (CiA 408 §9.3.2, Table 73; §9.3.6, Table 85).",
-                word, _controlWord));
-        }
-
+        RequireNoReservedBit(word, UsesWideWords ?? true);
         return WriteControlWordCoreAsync(word, cancellationToken);
     }
 
-    private Task WriteControlWordCoreAsync(uint word, CancellationToken cancellationToken)
-        => _node.SdoDownloadAsync(PeerNodeId, Shift(_controlWord), 0x00, CanOpenValueCodec.Encode(_controlWord.ValueType, word),
+    private async Task WriteControlWordCoreAsync(uint word, CancellationToken cancellationToken)
+    {
+        var words = await WordsAsync(cancellationToken).ConfigureAwait(false);
+        RequireNoReservedBit(word, words.Wide);
+        await WriteWordAsync(words, word, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void RequireNoReservedBit(uint word, bool wide)
+    {
+        uint reserved = wide ? Cia408ControlWord.Reserved32 : Cia408ControlWord.Reserved16 | 0xFFFF_0000u;
+        if ((word & reserved) == 0) return;
+        throw new ArgumentOutOfRangeException(nameof(word), word, string.Format(CultureInfo.InvariantCulture,
+            "{0:X8}h sets a bit the {1}-bit control word reserves or does not have (CiA 408 §9.3.2, Table 73; §9.3.6, Table 85).",
+            word, wide ? 32 : 16));
+    }
+
+    private Task WriteWordAsync(Words words, uint word, CancellationToken cancellationToken)
+        => _node.SdoDownloadAsync(PeerNodeId, Shift(words.Control), 0x00, CanOpenValueCodec.Encode(words.Control.ValueType, word),
             SdoTransferMode.Auto, cancellationToken);
+
+    /// <summary>The word pair of this call (<see cref="UsesWideWords"/>): fixed by the device type, or
+    /// that of the control mode in <c>6043h</c>, read now.</summary>
+    private async Task<Words> WordsAsync(CancellationToken cancellationToken)
+    {
+        bool wide = UsesWideWords ?? Cia408Configuration.IsWide(Resolution,
+            await ReadVariableAsync(Cia408Objects.DeviceControlMode, static value => (Cia408ControlMode)value, cancellationToken)
+                .ConfigureAwait(false));
+        return wide
+            ? new Words(true, Cia408Objects.DeviceControlWord32, Cia408Objects.DeviceStatusWord32)
+            : new Words(false, Cia408Objects.DeviceControlWord16, Cia408Objects.DeviceStatusWord16);
+    }
 
     /// <summary>Takes the device to ACTIVE, one transition of Table 7 at a time from the state it
     /// reports (see the remarks on the class): from INIT D2, D3, D4; from DISABLED D3, D4; from HOLD
     /// D4; from ACTIVE nothing is written.</summary>
-    /// <exception cref="InvalidOperationException">The device is in local control, in a fault state
-    /// (reset it first, <see cref="ResetFaultAsync"/>), falls into one, or does not reach the next
-    /// state within <see cref="StatusReads"/> reads.</exception>
+    /// <exception cref="Cia408CommandException">The device is in local control, in a fault state
+    /// (reset it first, <see cref="ResetFaultAsync"/>), falls into one, or does not show the next state
+    /// within the reads the options allow; <see cref="Cia408CommandException.Reason"/> says which.</exception>
     /// <exception cref="PeerSdoAccessException">The bound description does not allow an entry.</exception>
     /// <exception cref="SdoAbortException">The device aborted a transfer.</exception>
+    /// <exception cref="InvalidDataException">The status word encodes no state (see <see cref="Cia408Status"/>).</exception>
     public Task EnableAsync(CancellationToken cancellationToken = default) => WalkAsync(Cia408State.Active, cancellationToken);
 
     /// <summary>Takes the device to HOLD, one transition at a time: from INIT D2, D3; from DISABLED
     /// D3; from ACTIVE D5.</summary>
-    /// <exception cref="InvalidOperationException">As for <see cref="EnableAsync"/>.</exception>
+    /// <exception cref="Cia408CommandException">As for <see cref="EnableAsync"/>.</exception>
     /// <exception cref="PeerSdoAccessException">The bound description does not allow an entry.</exception>
     /// <exception cref="SdoAbortException">The device aborted a transfer.</exception>
+    /// <exception cref="InvalidDataException">As for <see cref="EnableAsync"/>.</exception>
     public Task HoldAsync(CancellationToken cancellationToken = default) => WalkAsync(Cia408State.Hold, cancellationToken);
 
     /// <summary>Takes the device to DISABLED, one transition at a time: from INIT D2; from HOLD D6;
     /// from ACTIVE D5, D6.</summary>
-    /// <exception cref="InvalidOperationException">As for <see cref="EnableAsync"/>.</exception>
+    /// <exception cref="Cia408CommandException">As for <see cref="EnableAsync"/>.</exception>
     /// <exception cref="PeerSdoAccessException">The bound description does not allow an entry.</exception>
     /// <exception cref="SdoAbortException">The device aborted a transfer.</exception>
+    /// <exception cref="InvalidDataException">As for <see cref="EnableAsync"/>.</exception>
     public Task DisableAsync(CancellationToken cancellationToken = default) => WalkAsync(Cia408State.Disabled, cancellationToken);
 
     private async Task WalkAsync(Cia408State target, CancellationToken cancellationToken)
     {
-        var status = await ReadStatusCoreAsync(cancellationToken).ConfigureAwait(false);
-        RequireBusControl(status);
+        var words = await WordsAsync(cancellationToken).ConfigureAwait(false);
+        var status = await WaitForAsync(words, IsRestingState, target, cancellationToken).ConfigureAwait(false);
         if (IsFaultState(status.State))
         {
-            throw new InvalidOperationException(string.Format(CultureInfo.InvariantCulture,
-                "Node 0x{0:X2}, logical device {1}, is in {2}: a fault state is left by a fault reset (ResetFaultAsync), " +
-                "not by the control words of {3} (CiA 408 §7.7, Table 7). Nothing was written.",
-                PeerNodeId, LogicalDevice.Index, status.State, target));
+            throw Failure(Cia408CommandFailure.FaultState, status.State, string.Format(CultureInfo.InvariantCulture,
+                "is in {0}: a fault state is left by a fault reset (ResetFaultAsync), not by the control words of {1} " +
+                "(CiA 408 §7.7, Table 7). Nothing was written.", status.State, target));
         }
 
         int at = Array.IndexOf(Ladder, status.State);
@@ -255,8 +306,15 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
         while (at != to)
         {
             at += at < to ? 1 : -1;
-            await WriteControlWordCoreAsync(LadderWords[at], cancellationToken).ConfigureAwait(false);
-            await WaitForAsync(Ladder[at], cancellationToken).ConfigureAwait(false);
+            var next = Ladder[at];
+            await WriteWordAsync(words, LadderWords[at], cancellationToken).ConfigureAwait(false);
+            var reached = await WaitForAsync(words, state => state == next || IsFaultState(state), next, cancellationToken)
+                .ConfigureAwait(false);
+            if (reached.State != next)
+            {
+                throw Failure(Cia408CommandFailure.FaultState, reached.State, string.Format(CultureInfo.InvariantCulture,
+                    "fell into {0} on the way to {1}.", reached.State, next));
+            }
         }
     }
 
@@ -271,76 +329,83 @@ internal sealed class Cia408Peer : ICanOpenProfilePeer
     /// are the pattern, and the word the device holds may be anything — the word it faulted under,
     /// say. The first write meets no row of Table 7 in its fault state (D15 needs <c>x001b</c> in
     /// FAULT_HOLD, D16 <c>x000b</c> in FAULT_DISABLED), so it moves nothing by itself.</para>
-    /// <para>A device may refuse the reset while the cause of the fault lasts — CiA 408 does not say,
-    /// and <see cref="Cia408Device"/> refuses. Such a device stays in its fault state, and the call
-    /// fails with <see cref="InvalidOperationException"/> after <see cref="StatusReads"/> reads.</para>
+    /// <para>A device still in FAULT_REACTION is read through until it rests in its fault state. A
+    /// device may refuse the reset while the cause of the fault lasts — CiA 408 does not say, and
+    /// <see cref="Cia408Device"/> refuses. Such a device stays in its fault state, and the call fails with
+    /// <see cref="Cia408CommandFailure.NotReached"/> once the reads are used up.</para>
     /// </remarks>
-    /// <exception cref="InvalidOperationException">The device is in local control, is in no fault
-    /// state (nothing was written), or is not out of its fault state within <see cref="StatusReads"/>
-    /// reads after the edge.</exception>
+    /// <exception cref="Cia408CommandException">The device is in local control, in no fault state
+    /// (<see cref="Cia408CommandFailure.NoFault"/>; nothing was written), or not out of its fault state
+    /// within the reads the options allow.</exception>
     /// <exception cref="PeerSdoAccessException">The bound description does not allow an entry.</exception>
     /// <exception cref="SdoAbortException">The device aborted a transfer.</exception>
+    /// <exception cref="InvalidDataException">As for <see cref="EnableAsync"/>.</exception>
     public Task ResetFaultAsync(CancellationToken cancellationToken = default) => ResetFaultCoreAsync(cancellationToken);
 
     private async Task ResetFaultCoreAsync(CancellationToken cancellationToken)
     {
-        var status = await ReadStatusCoreAsync(cancellationToken).ConfigureAwait(false);
-        RequireBusControl(status);
+        var words = await WordsAsync(cancellationToken).ConfigureAwait(false);
+        var status = await WaitForAsync(words, IsRestingState, null, cancellationToken).ConfigureAwait(false);
         var expected = status.State switch
         {
             Cia408State.FaultDisabled => Cia408State.Disabled,
             Cia408State.FaultHold => Cia408State.Hold,
             Cia408State.FaultInit => Cia408State.Init,
-            _ => throw new InvalidOperationException(string.Format(CultureInfo.InvariantCulture,
-                "Node 0x{0:X2}, logical device {1}, is in {2}, not in a fault state: there is no fault to reset. " +
-                "Nothing was written.", PeerNodeId, LogicalDevice.Index, status.State)),
+            _ => throw Failure(Cia408CommandFailure.NoFault, status.State, string.Format(CultureInfo.InvariantCulture,
+                "is in {0}, not in a fault state: there is no fault to reset. Nothing was written.", status.State)),
         };
 
         uint pattern = Cia408StateMachine.StatusBits(status.State);
-        await WriteControlWordCoreAsync(pattern, cancellationToken).ConfigureAwait(false);
-        await WriteControlWordCoreAsync(pattern | Cia408ControlWord.ResetFault, cancellationToken).ConfigureAwait(false);
-        await WaitForAsync(expected, cancellationToken, refusedReset: status.State).ConfigureAwait(false);
+        await WriteWordAsync(words, pattern, cancellationToken).ConfigureAwait(false);
+        await WriteWordAsync(words, pattern | Cia408ControlWord.ResetFault, cancellationToken).ConfigureAwait(false);
+        await WaitForAsync(words, state => state == expected, expected, cancellationToken, refusedReset: status.State).ConfigureAwait(false);
     }
 
-    /// <summary>Reads the status until it shows <paramref name="expected"/>, at most
-    /// <see cref="StatusReads"/> times (see the remarks on the class).</summary>
-    private async Task WaitForAsync(Cia408State expected, CancellationToken cancellationToken, Cia408State? refusedReset = null)
+    /// <summary>Reads the status until <paramref name="done"/> holds for its state, at most
+    /// <see cref="Cia408PeerOptions.StatusReads"/> times with <see cref="Cia408PeerOptions.StatusPause"/>
+    /// before each read but the first, and returns it; a status in local control fails at once (see the
+    /// remarks on the class). <paramref name="aim"/> names the state for the message.</summary>
+    private async Task<Cia408Status> WaitForAsync(Words words, Func<Cia408State, bool> done, Cia408State? aim,
+        CancellationToken cancellationToken, Cia408State? refusedReset = null)
     {
         Cia408Status status = default;
-        for (int read = 0; read < StatusReads; read++)
+        for (int read = 0; read < _options.StatusReads; read++)
         {
-            status = await ReadStatusCoreAsync(cancellationToken).ConfigureAwait(false);
-            if (status.State == expected) return;
-            RequireBusControl(status);
-            if (refusedReset is null && IsFaultState(status.State))
+            if (read > 0 && _options.StatusPause > TimeSpan.Zero)
+                await _options.Delay(_options.StatusPause, cancellationToken).ConfigureAwait(false);
+            status = await ReadStatusCoreAsync(words, cancellationToken).ConfigureAwait(false);
+            if (status.Local)
             {
-                throw new InvalidOperationException(string.Format(CultureInfo.InvariantCulture,
-                    "Node 0x{0:X2}, logical device {1}, fell into {2} on the way to {3}.",
-                    PeerNodeId, LogicalDevice.Index, status.State, expected));
+                throw Failure(Cia408CommandFailure.LocalControl, status.State,
+                    "is in local control (status bit 4; 604Fh = 1, CiA 408 §9.3.9): it ignores a control word written over the " +
+                    "bus. Write 604Fh = 0 first (WriteLocalAsync). Nothing further was written.");
             }
+
+            if (done(status.State)) return status;
         }
 
-        throw new InvalidOperationException(refusedReset is { } fault
+        throw Failure(Cia408CommandFailure.NotReached, status.State, refusedReset is { } fault
             ? string.Format(CultureInfo.InvariantCulture,
-                "Node 0x{0:X2}, logical device {1}, refused the fault reset: it is still in {2} after {3} reads of the status " +
-                "word. A device may refuse the reset while the cause of the fault lasts.",
-                PeerNodeId, LogicalDevice.Index, fault, StatusReads)
+                "refused the fault reset: it is still in {0} after {1} reads of the status word. A device may refuse the reset " +
+                "while the cause of the fault lasts.", fault, _options.StatusReads)
             : string.Format(CultureInfo.InvariantCulture,
-                "Node 0x{0:X2}, logical device {1}, did not reach {2}: it shows {3} after {4} reads of the status word.",
-                PeerNodeId, LogicalDevice.Index, expected, status.State, StatusReads));
+                "did not show {0} within {1} reads of the status word: it shows {2}, and may still be moving.",
+                aim is { } state ? state.ToString() : "a resting state", _options.StatusReads, status.State));
     }
 
-    private void RequireBusControl(Cia408Status status)
-    {
-        if (!status.Local) return;
-        throw new InvalidOperationException(string.Format(CultureInfo.InvariantCulture,
-            "Node 0x{0:X2}, logical device {1}, is in local control (status bit 4; 604Fh = 1, CiA 408 §9.3.9): it ignores a " +
-            "control word written over the bus. Write 604Fh = 0 first (WriteLocalAsync). Nothing further was written.",
-            PeerNodeId, LogicalDevice.Index));
-    }
+    private Cia408CommandException Failure(Cia408CommandFailure reason, Cia408State state, string what)
+        => new(reason, state, string.Format(CultureInfo.InvariantCulture,
+            "Node 0x{0:X2}, logical device {1}, {2}", PeerNodeId, LogicalDevice.Index, what));
 
     private static bool IsFaultState(Cia408State state)
         => state is Cia408State.FaultInit or Cia408State.FaultDisabled or Cia408State.FaultHold;
+
+    /// <summary>A state the device may rest in: every state but FAULT_REACTION, which it passes through
+    /// (and NOT_READY, which no status shows; see <see cref="Cia408Status"/>).</summary>
+    private static bool IsRestingState(Cia408State state) => state != Cia408State.FaultReaction;
+
+    /// <summary>The control and status word of one call, and whether they are the 32-bit pair.</summary>
+    private readonly record struct Words(bool Wide, Cia408ObjectDefinition Control, Cia408ObjectDefinition Status);
 
     // ---- modes, error code, source -------------------------------------------------------------------
 
