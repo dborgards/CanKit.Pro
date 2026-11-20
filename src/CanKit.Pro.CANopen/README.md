@@ -513,6 +513,13 @@ if (peer.End == CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired)
     client.BindPeerDeviceDescription(0x10, description);   // an EDS/DCF that lists 67FFh, 6FFFh, ...
     peer = await CanOpenLogicalDevices.ReadAsync(client, peerNodeId: 0x10);
 }
+if (peer.End is CanOpenLogicalDeviceReadEnd.Failed or CanOpenLogicalDeviceReadEnd.Inconsistent)
+{
+    // Devices holds what was read until then. After a contradiction, Devices[0] (67FFh) and
+    // peer.DeviceType (1000h) may name different profiles: report it rather than trust the list.
+    Console.WriteLine($"{peer.End}: {peer.Failure!.Message} ({peer.Devices.Count} device(s) read)");
+    return;
+}
 foreach (var device in peer.Devices)
     Console.WriteLine($"{device.Index}: {device.DeviceType}, objects from {device.ObjectAreaStart:X4}h");
 ```
@@ -521,10 +528,11 @@ It reads `1000h:00`. A peer without `FFFFh` is one logical device and nothing el
 `FFFFh` it reads `67FFh:00`, `6FFFh:00` and on, until the peer aborts with "object does not exist"
 (`0602 0000h`), the bound peer description does not declare the next object, or eight devices are
 read. `Devices` is never empty: when `67FFh` was not read, the first device carries the type of
-`1000h`. `End` says how the reading ended, one of four ways:
+`1000h`. `End` says how the reading ended, one of five ways:
 
-- `Complete`: the peer itself ended the chain, with no `FFFFh` in `1000h`, with the abort "object
-  does not exist", or after eight devices. Every logical device the peer has is in `Devices`.
+- `Complete`: the peer itself ended the chain, consistently with `1000h`: no `FFFFh` in `1000h`;
+  or the abort "object does not exist" after at least two devices, the first of the profile
+  `1000h` names; or eight devices. Every logical device the peer has is in `Devices`.
 - `PeerDescriptionRequired`: `1000h` announces more devices, but `67FFh` is not one of the objects
   the client may read without a peer description ([SDO client](#sdo-client-and-a-peers-device-description))
   and none is bound for this node. Nothing is sent for it. Bind a description that lists the
@@ -532,6 +540,14 @@ read. `Devices` is never empty: when `67FFh` was not read, the first device carr
 - `Failed`: a read inside the chain ended in an SDO abort other than "object does not exist", the
   client's own timeout included, or returned something other than four bytes. `Failure` holds the
   exception and `Devices` what was read before it.
+- `Inconsistent`: the peer's answers are each well formed but contradict each other. `FFFFh` says
+  the node holds several logical devices and `1000h` names the profile of the first (CiA 301
+  §7.5.2.1), so a `67FFh` of another profile, or the peer reporting `67FFh` or `6FFFh` as
+  non-existent, ends here. `Failure` is an `InvalidDataException` saying how, with the peer's abort
+  as its inner exception where the peer ended the chain, and `Devices` holds what was read, every
+  word as the peer returned it: after a `67FFh` of another profile, `DeviceType` and `Devices[0]`
+  show both. A refusal by the client's gate is not an answer of the peer and contradicts nothing.
+  The remarks of `ReadAsync` give the full table of answers and results.
 - `EndedByPeerDescription`: a peer description is bound and does not declare the next device-type
   object, so the client refused to ask for it and nothing is sent. The description is the list of
   objects the client may touch on that peer, so `Devices` is complete as far as the bound
@@ -543,7 +559,7 @@ The two refusals of the gate, `PeerDescriptionRequired` and `EndedByPeerDescript
 `67FFh` and the objects after it, and `ReadAsync` does not throw for them. `1000h:00` goes through
 the same gate: a bound description that does not declare `1000h` throws `PeerSdoAccessException`, and
 any other failure of `1000h:00` reaches the caller as its exception too. So does anything inside the
-chain that is not one of the four outcomes above: a transport fault (`CanOpenTransportException`),
+chain that is not one of the five outcomes above: a transport fault (`CanOpenTransportException`),
 cancellation and an SDO transfer already in flight with that peer (`InvalidOperationException`)
 among them.
 
