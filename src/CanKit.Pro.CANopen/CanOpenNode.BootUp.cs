@@ -231,8 +231,13 @@ internal sealed partial class CanOpenNode
             else
             {
                 for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
-                    if (IsAssignedSlave(id) && _slaveSeen[id] && (Assignment(id) & SlaveBootBit) != 0)
+                {
+                    if (IsAssignedSlave(id) && _slaveSeen[id] && (Assignment(id) & SlaveBootBit) != 0 && !_slaveStarted[id])
+                    {
+                        _slaveStarted[id] = true;
                         _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.StartRequested);
+                    }
+                }
                 SendNmt(NmtCommand.Start, 0);
             }
         }

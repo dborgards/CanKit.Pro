@@ -2087,7 +2087,9 @@ cancels the old verification; late completions cannot start a slave in the newer
 identity verification, Start requested, already Operational, or a failure. Identity failures carry
 the remote index/sub-index, expected and actual value when available, and the upload exception
 (including `SdoAbortException.AbortCode`). Start requested means queued, not confirmed or remotely
-acknowledged. A new boot replaces the results; leaving the master role clears them. The extension
+acknowledged. A broadcast Start preserves `AlreadyOperational` for a slave that was running
+before it, and later heartbeats do not rewrite `StartRequested`; the latest NMT state remains
+available in `1F82h`. A new boot replaces the results; leaving the master role clears them. The extension
 leaves the published `ICanOpenNode` interface unchanged.
 
 ```csharp

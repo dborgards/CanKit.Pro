@@ -16,7 +16,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 /// <summary>FR-CO-064: identity expectations gate the boot; failures and cancellation are
 /// observable on a virtual bus with a controlled protocol clock.</summary>
-public class CanOpenBootIdentityTests : IClassFixture<VirtualAdapterFixture>
+public partial class CanOpenBootIdentityTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Slave = 5;
 
@@ -76,7 +76,7 @@ public class CanOpenBootIdentityTests : IClassFixture<VirtualAdapterFixture>
         => rig.Log.Snapshot().Any(f => IsNmt(f, NmtCommand.Start, target));
 
     private static SlaveBootResult Result(MasterRig rig)
-        => ((ICanOpenNode)rig.Node).GetSlaveBootResults().Single(r => r.NodeId == Slave);
+        => CanOpenNodeExtensions.GetSlaveBootResults(rig.Node).Single(r => r.NodeId == Slave);
 
     private static async Task Elect(MasterRig rig)
     {
@@ -300,7 +300,7 @@ public class CanOpenBootIdentityTests : IClassFixture<VirtualAdapterFixture>
         var snapshot = rig.Node.GetSlaveBootResults();
         rig.Node.StopFlyingMaster();
         cancel.Cancel();
-        try { await occupying; } catch (OperationCanceledException) { }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => occupying);
         await QuiesceAsync(rig.Witness, null);
         rig.Node.GetSlaveBootResults().Should().BeEmpty();
         snapshot.Single().Status.Should().Be(SlaveBootStatus.VerifyingIdentity);
@@ -343,7 +343,7 @@ public class CanOpenBootIdentityTests : IClassFixture<VirtualAdapterFixture>
         using var peer = rig.OpenPeerNode(Slave);
         SetRemote(peer, 0x1000, 0, 1);
         cancel.Cancel();
-        try { await occupying; } catch (OperationCanceledException) { }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => occupying);
         await UntilAsync(rig.Clock, rig.Witness, null,
             () => Result(rig).Status == SlaveBootStatus.IdentityMismatch, 300, "only the new expectation applies");
         Result(rig).ExpectedValue.Should().Be(2);

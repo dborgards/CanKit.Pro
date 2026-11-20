@@ -67,9 +67,19 @@ internal sealed partial class CanOpenNode
         {
             var result = await VerifySlaveIdentityAsync(nodeId, expectations, token).ConfigureAwait(false);
             if (token.IsCancellationRequested) return;
-            try { _actor.Post(() => OnSlaveIdentityVerified(nodeId, generation, result)); }
-            catch (ObjectDisposedException) { }
+            PostSlaveIdentityResult(nodeId, generation, result);
         });
+    }
+
+    private void PostSlaveIdentityResult(byte nodeId, int generation, SlaveBootResult result)
+    {
+        try { _actor.Post(() => OnSlaveIdentityVerified(nodeId, generation, result)); }
+        catch (ObjectDisposedException)
+        {
+            // Dispose can close the mailbox after the worker's cancellation check. There is
+            // no boot left to update and no live actor on which to report a boot failure.
+            return;
+        }
     }
 
     private async Task<SlaveBootResult> VerifySlaveIdentityAsync(byte nodeId, uint[] expectations, CancellationToken token)
@@ -108,6 +118,9 @@ internal sealed partial class CanOpenNode
         }
         catch (Exception ex)
         {
+            // This is the worker's exception-to-result boundary, including transport faults
+            // and malformed bound descriptions. Keep the original exception for the caller;
+            // a faulted, unobserved worker task would otherwise leave the slave verifying.
             return new SlaveBootResult(nodeId, SlaveBootStatus.IdentityReadFailed, index, subindex, expected, error: ex);
         }
         finally
