@@ -313,10 +313,36 @@ public interface ICanOpenNode : IDisposable
     /// reads over SDO is the one the last EMCY carried: the write and the transmission are one
     /// ordered step on the node's actor loop, and every EMCY of this node goes out through one
     /// ordered path, so overlapping calls reach the bus in the order the register was written.
-    /// In NMT state Stopped the EMCY is held and the most recent one is transmitted when the
-    /// node leaves Stopped (CiA 301 §7.3.2.2.4). The returned task faults with
-    /// <see cref="InvalidOperationException"/> when EMCY is disabled (bit 31 of <c>1014h</c> set).
+    /// The returned task faults with <see cref="InvalidOperationException"/> when EMCY is disabled
+    /// (bit 31 of <c>1014h</c> set).
     /// </summary>
+    /// <remarks>
+    /// No EMCY is started in NMT state Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), whatever the
+    /// options; one already handed to the driver when the Stop is processed still goes out.
+    /// <list type="bullet">
+    /// <item>An EMCY requested in Stopped is kept back, the most recent one only, and its task
+    /// completes at once. It is transmitted when the node leaves Stopped; an NMT reset discards it.</item>
+    /// <item>An EMCY requested before, which waits because its turn on the ordered path came while
+    /// the node is Stopped — queued behind a slow send, for instance — goes out when the node leaves
+    /// Stopped, in order with those behind it and ahead of the one kept back. Its task stays pending
+    /// while it waits and completes once it has been transmitted; cancelling
+    /// <paramref name="cancellationToken"/> while it waits withdraws it, without a frame and without a
+    /// write of <c>1001h</c>, and cancels the task. Across an NMT reset it is kept and goes out behind
+    /// that reset's boot-up, on the COB-ID active then; with <c>EnableEmcyInhibit</c> or
+    /// <c>EnableErrorBehavior</c> set, a reset drops it instead, and its task completes without a
+    /// frame. Disposing the node while it waits completes its task without a frame, as for an EMCY
+    /// queued on disposal.</item>
+    /// </list>
+    /// <para>That reset rule is for the EMCYs this method orders. An EMCY the node raises for its own
+    /// error state — a communication error, or the <c>0000h</c> that ends one — that waited in Stopped
+    /// is dropped by a reset that comes before it was transmitted, whatever the options, also when the
+    /// node had left Stopped just before: the reset ended that error without an EMCY (CiA 301 v4.2.0
+    /// §7.2.7.1, Figure 37, transitions 5 and 0).</para>
+    /// <para>Bit 6 of <paramref name="errorRegister"/> is reserved and always 0 (CiA 301 v4.2.0
+    /// §7.5.2.2, Table 54): it is transmitted and recorded in <c>1001h</c> as 0, whatever is passed,
+    /// and the call proceeds as it would with the bit clear. A later major version will refuse it.
+    /// Bit 7 is manufacturer-specific and is carried as passed.</para>
+    /// </remarks>
     Task SendEmcyAsync(ushort errorCode, byte errorRegister,
         ReadOnlyMemory<byte> manufacturerSpecific = default,
         CancellationToken cancellationToken = default);

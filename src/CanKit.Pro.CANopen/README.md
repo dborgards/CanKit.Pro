@@ -751,12 +751,24 @@ the PDO, of `1019h`/`1007h` or of the SRDO; leaving and entering Operational doe
 what the register still holds: 0 when nothing else is reported (transition 4, "All errors are
 repaired"), the application's bits otherwise (transition 2). The register passed to
 `SendEmcyAsync` is the application's part, taken when that EMCY is transmitted: a call cancelled
-before then, or a held EMCY a reset discards, changes nothing. A value the application writes to
+before then, or an EMCY requested in Stopped that a reset discards, changes nothing. A value the application writes to
 `1001h` through `ObjectDictionary` since, or one a device description gives it, is the
-application's part as well. The node ORs its own bits into every EMCY, the
+application's part as well. Bit 6 is reserved and always 0 (§7.5.2.2, Table 54): passed to
+`SendEmcyAsync`, written to `1001h` or described as its value, it is cleared, and the call or
+the write otherwise proceeds as it would without it (#566); a described value with it is reported
+as a `Corrected` finding. A later major version will refuse it. `1001h` is `ro` on the bus, so an SDO download is refused with `0601 0002h` unless a device
+description makes it writable. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
-while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
-register of the moment it is sent. Reset Node and Reset Communication end the communication
+while a communication error is active still carries bit 4. An EMCY requested in Stopped, or one
+that waited there, carries the register of the moment it is sent. An EMCY of the node's own — a
+communication error or the `0000h` that ends one — that waited in Stopped is dropped by a reset that comes before it was transmitted, also when the
+node had just left Stopped, since the reset ended the error without an EMCY; it writes neither
+`1001h` nor `1003h`. Disposing the node ends any such wait: an application's EMCY then completes
+its task without a frame. A communication error raised while
+an LSS slave waits for its node-id (a heartbeat-consumer timeout, in Initialisation, where only the
+boot-up object exists) is held and goes out behind the boot-up once the slave has its node-id,
+`1001h` showing it from that EMCY; one whose cause ends before leaves nothing on the bus, `0000h`
+included, and a reset before its turn drops it together with any `0000h` that ended it (#547). Reset Node and Reset Communication end the communication
 errors without an EMCY (transitions 5 and 0) and leave the application's bits in `1001h`. With
 the EMCY switched off (bit 31 of `1014h`) no error is raised, and an error that ends meanwhile
 still clears the bits. A run of short RPDO frames or SRDO pairs is not consumed while disabled:
@@ -897,9 +909,9 @@ when this capability is enabled, so a policy write that enters Stopped receives 
 normal completion response; other unfinished sessions still abort. Local reactions do not
 broadcast NMT commands.
 
-New EMCY reasons in Stopped keep the existing latest-reason hold. With this capability,
-previously queued EMCYs also pause until communication resumes, using the same queue gate
-as optional 1015h without enabling an inhibit interval. NMT reset discards old queued EMCYs,
+New EMCY reasons in Stopped keep the existing latest-reason hold. Previously queued EMCYs wait
+until communication resumes, without this capability too (#565); with it they use the same
+queue gate as optional 1015h without enabling an inhibit interval, and an NMT reset discards old queued EMCYs,
 clears old timeout observations and refreshes the controller baseline; disposal releases waits
 and detaches the monitor. An in-flight transport attempt retains its existing completion
 contract. Controller observation uses the existing 50 ms poll plus error/fault hints and
@@ -977,10 +989,10 @@ Table 37 of CiA 301, as the node applies it:
 | PDO | — | transmitted and received | — |
 | SDO | served | served | requests ignored; an open server session is aborted with `0800 0022h`. This row is the server's: the node's own SDO client is not gated by the NMT state, and `SdoUploadAsync` and `SdoDownloadAsync` run in Stopped too, as `SendSyncAsync` does (#254) |
 | SYNC | consumed and produced | consumed and produced | neither; the producer keeps its cycle and resumes afterwards (`SendSyncAsync` is a raw send and transmits regardless of the state and of bit 30 of `1005h`) |
-| EMCY | transmitted | transmitted | held; the most recent one is transmitted when the node leaves Stopped |
+| EMCY | transmitted | transmitted | none started, whatever the options (one already handed to the driver when the Stop is processed still goes out). The most recent one *requested* in Stopped is kept back and transmitted when the node leaves Stopped; a reset discards it. One requested before, which *waits* because its turn came in Stopped, goes out when the node leaves Stopped, in order. Across a reset, one the application ordered goes out behind that reset's boot-up on the COB-ID active then, unless `EnableEmcyInhibit` or `EnableErrorBehavior` is set, with which a reset drops it; one the node raised for its own error state (a communication error or its `0000h`) is dropped by the reset, which ended that error (#565) |
 | Heartbeat, guarding | active | active | active |
 
-**Reset Node and Reset Communication** abort SDO server sessions, discard a held EMCY, reset the
+**Reset Node and Reset Communication** abort SDO server sessions, discard an EMCY requested in Stopped, reset the
 guarding toggle to 0 (§7.2.8.3.2.1), restore the power-on values of the communication profile
 (see above), raise `ApplicationReset`, send the boot-up and settle in Pre-operational. With the
 heartbeat producer on, a heartbeat with the new state follows the boot-up.

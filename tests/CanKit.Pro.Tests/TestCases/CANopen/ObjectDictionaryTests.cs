@@ -133,4 +133,33 @@ public class ObjectDictionaryTests
             succeeded.Should().Be(1, $"round {round}: one of two simultaneous writes for the same producer passes, never both");
         }
     }
+
+    // #566: a validator may store a normalised value in place of the written one, of the same length.
+    [Fact]
+    public void A_Replacement_Is_Stored_In_Place_Of_The_Written_Value()
+    {
+        var od = new ObjectDictionary();
+        od.AddU8(0x2000, 0x00, 0);
+        od.WriteValidator = (_, _, value) => OdWriteDecision.AcceptAs(new[] { (byte)(value[0] & 0x0F) });
+        var written = new byte[] { 0xAB };
+        od.WriteRaw(0x2000, 0x00, written);
+        od.ReadUnsigned(0x2000, 0x00).Should().Be(0x0Bu);
+        written.Should().Equal(new byte[] { 0xAB }, "the caller's array is not changed");
+    }
+
+    // A replacement of another length than the written value is a programming error of the validator.
+    // A fixed-width entry would refuse it on its own; a domain takes any length, so the check is the
+    // dictionary's.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public void A_Replacement_Of_Another_Length_Is_Refused(int length)
+    {
+        var od = new ObjectDictionary();
+        od.AddDomain(0x2000, 0x00, new byte[] { 0x07, 0x07 });
+        od.WriteValidator = (_, _, _) => OdWriteDecision.AcceptAs(new byte[length]);
+        Action write = () => od.WriteRaw(0x2000, 0x00, new byte[] { 0x01, 0x02 });
+        write.Should().Throw<InvalidOperationException>().WithMessage("*validator*");
+        od.ReadRaw(0x2000, 0x00).Should().Equal(new byte[] { 0x07, 0x07 }, "nothing was stored");
+    }
 }
