@@ -266,13 +266,12 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         var session = NewSession();
         using var peerBus = Open(session, 0);
         using var toolBus = Open(session, 1);
-        using var observer = Open(session, 2);
+        var uploads = new SdoTap(peerBus, Peer); // ahead of the peer's node (see SdoTap)
         using var peer = CanOpen.OpenNode(peerBus, Peer, MinimalEds());
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         var file = PeerFile();
         tool.BindPeerDeviceDescription(Peer, file);
-        var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x34, 0x12, 0x00 }, file, sink)
@@ -353,13 +352,12 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
 2=0x2001",
             sections: Comm("1800", "$NODEID+0x180", tpdo: true) + Map("1A00", "1", "0x20000010")
                       + Var("2000", "0x0006", "0") + Var("2001", "0x0005", "0")));
-        using var observer = Open(session, 2);
+        var uploads = new SdoTap(peerBus, Peer); // ahead of the peer's node (see SdoTap)
         using var peer = CanOpen.OpenNode(peerBus, Peer, narrow);
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ConfigureTpdo(1, new PdoMapping().Add(0x2001, 0x00, 8).Add(0x2001, 0x00, 8));
         tool.BindPeerDeviceDescription(Peer, narrow);
-        var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0xAB, 0xCD }, narrow, sink)
@@ -381,7 +379,7 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         var session = NewSession();
         using var peerBus = Open(session, 0);
         using var toolBus = Open(session, 1);
-        using var observer = Open(session, 2);
+        var uploads = new SdoTap(peerBus, Peer); // ahead of the peer's node (see SdoTap)
         using var peer = CanOpen.OpenNode(peerBus, Peer, PeerFile());
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
@@ -392,7 +390,6 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
             manufacturer: "SupportedObjects=0",
             sections: Comm("1800", "$NODEID+0x180", tpdo: true)));
         tool.BindPeerDeviceDescription(Peer, file);
-        var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, sink)
@@ -446,7 +443,7 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         var session = NewSession();
         using var peerBus = Open(session, 0);
         using var toolBus = Open(session, 1);
-        using var observer = Open(session, 2);
+        var uploads = new SdoTap(peerBus, Peer); // ahead of the peer's node (see SdoTap)
         using var peer = CanOpen.OpenNode(peerBus, Peer);
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
@@ -457,7 +454,6 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
             manufacturer: "SupportedObjects=0",
             sections: Comm("1800", "$NODEID+0x180", tpdo: true) + Map("1A00", "1", "0x20000010")));
         tool.BindPeerDeviceDescription(Peer, file);
-        var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x11, 0x22 }, file, sink)
@@ -477,7 +473,7 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         var session = NewSession();
         using var peerBus = Open(session, 0);
         using var toolBus = Open(session, 1);
-        using var observer = Open(session, 2);
+        var uploads = new SdoTap(peerBus, Peer); // ahead of the peer's node (see SdoTap)
         using var peer = CanOpen.OpenNode(peerBus, Peer);
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
@@ -488,7 +484,6 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
             manufacturer: "SupportedObjects=0",
             sections: Comm("1800", "0x80000191", tpdo: true) + Map("1A00", "1", "0x20000010")));
         tool.BindPeerDeviceDescription(Peer, file);
-        var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
         var unknown = await tool.ObserveForeignPdoAsync(Peer, 0x192, new byte[] { 0x11, 0x22 }, file, sink)
@@ -1408,8 +1403,11 @@ PDOMapping=1
     /// Virtual hub hands one frame to its targets one after another on the sender's thread, with
     /// nothing holding the targets together; between the server's bus and a bystander's the sender
     /// can be preempted, the server answers, and the next request — sent only after that answer —
-    /// reaches the bystander first. Tap the server's bus for an ordered assertion (#321); a
-    /// bystander is fine for <c>Contain</c>/<c>NotContain</c>.</para>
+    /// reaches the bystander first. Tap the server's bus for an ordered assertion (#321), and for
+    /// any other assertion made once an exchange is over (#569): the client goes on as soon as the
+    /// answer comes, whether or not its request has reached the bystander yet, so the sender can
+    /// still be preempted short of the bystander when the observation completes and the test reads
+    /// the tap. A bystander is fine only for waiting until a request appears.</para>
     /// <para>On the server's bus, too, only if the tap is created before the server's node is
     /// opened on it (#424). A bus raises <c>FrameObserved</c> to its handlers in subscription order
     /// on the delivering thread, again with nothing holding them together: subscribed after the
