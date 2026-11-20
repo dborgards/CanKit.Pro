@@ -91,31 +91,39 @@ internal sealed partial class CanOpenNode
     /// the reset comes is decided after the reset, as before this rule existed.
     /// </para>
     /// <para>
-    /// The disposal ends the step, its task completed and no frame, as on the gated path (Bugbot on
-    /// #574): each pass begins by checking it, and the disposal ends both waits, for Stopped and for a
-    /// boot-up (<see cref="ResetEmcyInhibit"/>), so that the pass after it runs.
+    /// How it holds, whenever the reset, a Start, the disposal or a cancellation comes: every wait —
+    /// for the node to leave Stopped, or for a boot-up — ends by a redispatch, and every pass of this
+    /// method begins on the actor by deciding afresh, in this order: the node disposed ends the step,
+    /// its task completed and no frame, as on the gated path (Bugbot on #574); a node EMCY that waited
+    /// and has seen a reset since (<paramref name="waitedIn"/>, the reset epoch of its first wait, is no
+    /// longer <see cref="_emcyInhibitEpoch"/>) is dropped, also when a Start woke its wait just before
+    /// the reset came (Codex on #574); Stopped waits again; a step that waited waits for a pending
+    /// boot-up; otherwise it transmits, and <c>transmit</c> honours a token cancelled meanwhile. A reset
+    /// and the disposal end both waits (<see cref="ResetEmcyInhibit"/>), so no wait outlives either.
     /// </para>
     /// </summary>
     private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, bool dropOnReset,
-        bool waited = false)
+        object? waitedIn = null)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
+        if (dropOnReset && waitedIn is not null && !ReferenceEquals(waitedIn, _emcyInhibitEpoch)) return;
         var slot = WaitForEmcySlot(cancellationToken);
         if (!slot.IsCompleted)
         {
-            // True: the node left Stopped. False: a reset or the disposal ended the wait. A node EMCY
-            // ends there; any other step looks again, on the actor.
-            if (!await slot.ConfigureAwait(false) && dropOnReset) return;
-            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, waited: true)).ConfigureAwait(false);
+            var epoch = waitedIn ?? _emcyInhibitEpoch;
+            // True: the node left Stopped; false: a reset or the disposal ended the wait. Either way the
+            // next pass decides, on the actor; a token cancelled during the wait throws here.
+            await slot.ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, epoch)).ConfigureAwait(false);
             return;
         }
         // Completed at once: not Stopped (true), or a token cancelled already, which throws here.
         await slot.ConfigureAwait(false);
-        if (waited && !_bootUpSend.IsCompleted)
+        if (waitedIn is not null && !_bootUpSend.IsCompleted)
         {
             HeldEmcysWaitForBootUpForTests?.Invoke();
             await WaitForBootUpSendAsync(_bootUpSend, _emcyEpochEnded.Task, cancellationToken).ConfigureAwait(false);
-            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, waited: true)).ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, waitedIn)).ConfigureAwait(false);
             return;
         }
         await transmit().ConfigureAwait(false);

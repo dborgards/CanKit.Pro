@@ -745,8 +745,9 @@ description makes it writable. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
 while a communication error is active still carries bit 4. An EMCY requested in Stopped, or one
 that waited there, carries the register of the moment it is sent. An EMCY of the node's own — a
-communication error or the `0000h` that ends one — that waited in Stopped is dropped by a reset,
-which ended the error without an EMCY; it writes neither `1001h` nor `1003h`. Disposing the node ends any such wait: an application's EMCY then completes
+communication error or the `0000h` that ends one — that waited in Stopped is dropped by a reset that comes before it was transmitted, also when the
+node had just left Stopped, since the reset ended the error without an EMCY; it writes neither
+`1001h` nor `1003h`. Disposing the node ends any such wait: an application's EMCY then completes
 its task without a frame. A communication error raised while
 an LSS slave waits for its node-id (a heartbeat-consumer timeout, in Initialisation, where only the
 boot-up object exists) is held and goes out behind the boot-up once the slave has its node-id,
