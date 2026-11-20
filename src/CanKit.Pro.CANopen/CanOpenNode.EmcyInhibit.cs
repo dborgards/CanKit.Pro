@@ -90,12 +90,16 @@ internal sealed partial class CanOpenNode
     /// Only a node EMCY that waited in Stopped is dropped. One merely queued behind a slow send when
     /// the reset comes is decided after the reset, as before this rule existed.
     /// </para>
+    /// <para>
+    /// The disposal ends the step, its task completed and no frame, as on the gated path (Bugbot on
+    /// #574): each pass begins by checking it, and the disposal ends both waits, for Stopped and for a
+    /// boot-up (<see cref="ResetEmcyInhibit"/>), so that the pass after it runs.
+    /// </para>
     /// </summary>
     private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, bool dropOnReset,
         bool waited = false)
     {
-        // No disposal check of its own, as on the gated path: a step that runs after the disposal finds
-        // the actor refusing the redispatch (DispatchQueuedEmcy) or the send refusing the frame.
+        if (Volatile.Read(ref _disposed) != 0) return;
         var slot = WaitForEmcySlot(cancellationToken);
         if (!slot.IsCompleted)
         {
@@ -110,23 +114,28 @@ internal sealed partial class CanOpenNode
         if (waited && !_bootUpSend.IsCompleted)
         {
             HeldEmcysWaitForBootUpForTests?.Invoke();
-            await WaitForBootUpSendAsync(_bootUpSend, cancellationToken).ConfigureAwait(false);
+            await WaitForBootUpSendAsync(_bootUpSend, _emcyEpochEnded.Task, cancellationToken).ConfigureAwait(false);
             await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, waited: true)).ConfigureAwait(false);
             return;
         }
         await transmit().ConfigureAwait(false);
     }
 
-    /// <summary>Completes when <paramref name="bootUp"/>'s send has ended, however it ended, or
-    /// throws <see cref="OperationCanceledException"/> when <paramref name="cancellationToken"/> is
-    /// cancelled first. Only the wait is cancelled, never the boot-up (Codex on #574).</summary>
-    private static async Task WaitForBootUpSendAsync(Task bootUp, CancellationToken cancellationToken)
+    // Completed, and replaced, by every reset and by the disposal (ResetEmcyInhibit): what ends a step's
+    // wait for a boot-up, so that the next pass decides in the state the node is in then. Actor loop only.
+    private TaskCompletionSource<bool> _emcyEpochEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes when <paramref name="bootUp"/>'s send has ended, however it ended, or when
+    /// <paramref name="epochEnded"/> completes (a reset or the disposal); throws
+    /// <see cref="OperationCanceledException"/> when <paramref name="cancellationToken"/> is cancelled
+    /// first. Only the wait ends, never the boot-up (Codex on #574).</summary>
+    private static async Task WaitForBootUpSendAsync(Task bootUp, Task epochEnded, CancellationToken cancellationToken)
     {
         var sent = bootUp.ContinueWith(static ended => { _ = ended.Exception; },
             CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using (cancellationToken.Register(() => cancelled.TrySetCanceled(cancellationToken)))
-            await (await Task.WhenAny(sent, cancelled.Task).ConfigureAwait(false)).ConfigureAwait(false);
+            await (await Task.WhenAny(sent, epochEnded, cancelled.Task).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private Task<bool> WaitForEmcySlot(CancellationToken cancellationToken)
@@ -176,5 +185,8 @@ internal sealed partial class CanOpenNode
         _emcyInhibitEpoch = new object();
         Volatile.Write(ref _emcyLastCompletion, null);
         ReleaseEmcyInhibitWait()?.Completion.TrySetResult(false);
+        var ended = _emcyEpochEnded;
+        _emcyEpochEnded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ended.TrySetResult(true);
     }
 }

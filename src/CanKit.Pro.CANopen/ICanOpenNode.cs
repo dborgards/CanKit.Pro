@@ -330,7 +330,8 @@ public interface ICanOpenNode : IDisposable
     /// write of <c>1001h</c>, and cancels the task. Across an NMT reset it is kept and goes out behind
     /// that reset's boot-up, on the COB-ID active then; with <c>EnableEmcyInhibit</c> or
     /// <c>EnableErrorBehavior</c> set, a reset drops it instead, and its task completes without a
-    /// frame.</item>
+    /// frame. Disposing the node while it waits completes its task without a frame, as for an EMCY
+    /// queued on disposal.</item>
     /// </list>
     /// <para>That reset rule is for the EMCYs this method orders. An EMCY the node raises for its own
     /// error state — a communication error, or the <c>0000h</c> that ends one — that waited in Stopped

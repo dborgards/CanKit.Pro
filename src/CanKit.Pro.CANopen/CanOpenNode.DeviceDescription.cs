@@ -1061,7 +1061,13 @@ internal sealed partial class CanOpenNode
         }
         else if (index == Co.ErrorRegister && od.ReadRaw(index, subindex) is var stored && !stored.SequenceEqual(bytes))
         {
-            // ReadRaw, not TryReadRaw: the write that just succeeded proves the entry is there.
+            // ReadRaw, not TryReadRaw: nothing can remove 1001h between the write above and this read.
+            // This branch runs only for the node's own dictionary, from ApplyDeviceDescription in the
+            // constructor (ApplyDescribedObject → ApplyManagedVariable(index, …)): on the constructing
+            // thread, before AttachApplications hands any application the host and before the node is
+            // returned to anyone who could call ObjectDictionary.Remove. The static loader of a safety
+            // peer's objects (LoadDescribedSafetyObjects) applies no 1001h. Should that change, this
+            // must become TryReadRaw.
             // Accepted with reserved bit 6 cleared, as every write of 1001h is (#566): the file said
             // something the node does not hold.
             findings.Add(new DeviceDescriptionFinding(index, subindex, DeviceDescriptionOutcome.Corrected,
