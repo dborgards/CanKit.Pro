@@ -781,7 +781,43 @@ public partial class CanOpenApplicationSeamTests
         var failure = OptionsRefused(With(Typed("io", (0, Profile401))),
             ChainWithObjectDeclaredAs(0x6FFF, dataType, access, "0x00010198", 0xFFFF0191, (0x67FF, 0x00050191), (0x6FFF, Profile408)));
 
-        failure.Message.Should().Contain("0x6FFF").And.Contain("logical device 1");
+        failure.Message.Should().Contain("0x6FFF").And.Contain("logical device 1").And.Contain("The device description");
+    }
+
+    /// <summary>A described device-type object behind the attached devices that has no sub-index 0, a
+    /// RECORD with only sub-index 1, holds no device type a reader could read (#575, as #553 for an
+    /// attached device).</summary>
+    [Fact] // #575
+    public void A_Device_Type_Object_Behind_The_Attached_Devices_Without_Sub_Index_0_Fails_The_Open()
+    {
+        var eds = EdsWith6000(0xFFFF0191, (0x67FF, 0x00050191), (0x6FFF, Profile408));
+        const string Declared = "[6FFF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x00010198\nPDOMapping=0\n";
+        eds.Should().Contain(Declared);
+        var description = CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
+            "[6FFF]\nParameterName=Device type\nObjectType=0x9\nSubNumber=1\n" +
+            "[6FFFsub1]\nParameterName=Word\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x00010198\nPDOMapping=0\n"));
+
+        var failure = OptionsRefused(With(Typed("io", (0, Profile401))), description);
+
+        failure.Message.Should().Contain("0x6FFF").And.Contain("without sub-index 0").And.Contain("logical device 1");
+    }
+
+    /// <summary>A device-type object behind the attached devices that an application declared itself is
+    /// checked like a described one: a reader of the announced chain asks for it all the same (#575).</summary>
+    [Fact] // #575
+    public void An_Application_Declared_Device_Type_Object_Behind_The_Attached_Devices_Is_Checked_Too()
+    {
+        var app = Typed("io", (0, Profile401));
+        var set = app.OnAttach!;
+        app.OnAttach = host =>
+        {
+            host.ObjectDictionary.AddU32(0x6FFF, 0x00, Profile408, OdAccess.ReadWrite);
+            set(host);
+        };
+
+        var failure = OptionsRefused(With(app), DescriptionWith6000(0xFFFF0191, (0x67FF, 0x00050191)));
+
+        failure.Message.Should().Contain("An application").And.Contain("0x6FFF").And.Contain("ReadWrite");
     }
 
     /// <summary>A profile device built from a configuration sets a word without <c>FFFFh</c> (CiA 401-1
