@@ -317,14 +317,21 @@ public interface ICanOpenNode : IDisposable
     /// (bit 31 of <c>1014h</c> set).
     /// </summary>
     /// <remarks>
-    /// No EMCY leaves this node in NMT state Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), whatever
-    /// the options. An EMCY requested in Stopped is held and its task completes at once; the most
-    /// recent one held is transmitted when the node leaves Stopped. An EMCY requested before, whose
-    /// turn on the ordered path comes while the node is Stopped — queued behind a slow send, for
-    /// instance — waits there, in order with those behind it, until the node has left Stopped, and is
-    /// transmitted then, ahead of the one held; its task completes once it has been transmitted, and
-    /// cancelling <paramref name="cancellationToken"/> while it waits withdraws it without a frame and
-    /// without a write of <c>1001h</c>.
+    /// No EMCY is started in NMT state Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), whatever the
+    /// options; one already handed to the driver when the Stop is processed still goes out.
+    /// <list type="bullet">
+    /// <item>An EMCY requested in Stopped is kept back, the most recent one only, and its task
+    /// completes at once. It is transmitted when the node leaves Stopped; an NMT reset discards it.</item>
+    /// <item>An EMCY requested before, which waits because its turn on the ordered path came while
+    /// the node is Stopped — queued behind a slow send, for instance — goes out when the node leaves
+    /// Stopped, in order with those behind it and ahead of the one kept back. Its task stays pending
+    /// while it waits and completes once it has been transmitted; cancelling
+    /// <paramref name="cancellationToken"/> while it waits withdraws it, without a frame and without a
+    /// write of <c>1001h</c>, and cancels the task. Across an NMT reset it is kept and goes out behind
+    /// that reset's boot-up, on the COB-ID active then; with <c>EnableEmcyInhibit</c> or
+    /// <c>EnableErrorBehavior</c> set, a reset drops it instead, and its task completes without a
+    /// frame.</item>
+    /// </list>
     /// <para>Bit 6 of <paramref name="errorRegister"/> is reserved and always 0 (CiA 301 v4.2.0
     /// §7.5.2.2, Table 54): it is transmitted and recorded in <c>1001h</c> as 0, whatever is passed,
     /// and the call proceeds as it would with the bit clear. A later major version will refuse it.
