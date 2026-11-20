@@ -89,18 +89,20 @@ public partial class CanOpenPdoEngineTests
         await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
         await ExpectEmcyAsync(rig.Wire, 3, 0x1002, 0);
         rig.Wire.Count(EmcyId).Should().Be(3, "the waiting EMCY went out exactly once");
-        BootUpsAheadOfTheSecondEmcy(driver).Should().Be(1, "the reset's boot-up goes out ahead of the EMCY that waited");
+        SecondEmcyShouldFollowBootUps(driver, resets: 1);
     }
 
-    /// <summary>The boot-ups handed to the driver between the first EMCY (1000h) and the second, the
-    /// one that waited. The node's start-up boot-up can still reach the driver after the rig was
-    /// built, ahead of the first EMCY: it is not counted.</summary>
-    private static int BootUpsAheadOfTheSecondEmcy(SlowEmcyDriver driver)
+    /// <summary>The second EMCY handed to the driver — the one that waited — follows the boot-up of
+    /// each of <paramref name="resets"/>: at least that many boot-ups come before it, and none after
+    /// it. The node's start-up boot-up can reach the driver late, anywhere before the resets' ones, so
+    /// it is not counted exactly.</summary>
+    private static void SecondEmcyShouldFollowBootUps(SlowEmcyDriver driver, int resets)
     {
         var order = driver.Order;
-        int first = order.IndexOf(EmcyId);
-        int second = order.IndexOf(EmcyId, first + 1);
-        return order.Skip(first + 1).Take(second - first - 1).Count(id => id == CanOpenCobId.Heartbeat(Device));
+        int second = order.IndexOf(EmcyId, order.IndexOf(EmcyId) + 1);
+        uint bootUp = CanOpenCobId.Heartbeat(Device);
+        order.Take(second).Count(id => id == bootUp).Should().BeGreaterThanOrEqualTo(resets, "every reset's boot-up goes out first");
+        order.Skip(second + 1).Should().NotContain(bootUp, "no boot-up is left behind the EMCY that waited");
     }
 
     // Bugbot on #574: the disposal ends an application EMCY's wait in Stopped; its task completes,
@@ -158,7 +160,7 @@ public partial class CanOpenPdoEngineTests
         await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
         await ExpectEmcyAsync(rig.Wire, 3, 0x1002, 0);
         rig.Wire.Count(EmcyId).Should().Be(3, "the application's EMCY goes out exactly once");
-        BootUpsAheadOfTheSecondEmcy(driver).Should().Be(1, "behind the reset's boot-up");
+        SecondEmcyShouldFollowBootUps(driver, resets: 1);
     }
 
     [Fact]
@@ -254,7 +256,7 @@ public partial class CanOpenPdoEngineTests
         await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
         await ExpectEmcyAsync(rig.Wire, 3, 0x1002, 0);
         rig.Wire.Count(EmcyId).Should().Be(3, "exactly once");
-        BootUpsAheadOfTheSecondEmcy(driver).Should().Be(2, "behind both resets' boot-ups");
+        SecondEmcyShouldFollowBootUps(driver, resets: 2);
     }
 
     // A node EMCY that waited in Stopped, woken by Start while the boot-up of an earlier reset is still
