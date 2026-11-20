@@ -107,6 +107,7 @@ maintainer decision does.
 | FR-CO-057 | SAM/DAM MPDO, scanner/dispatcher blocks and inhibit queue |
 | FR-CO-062 | Pre-defined error field `1003h`, opt-in by `ErrorHistoryCapacity` or a description that declares it ([Error control](#error-control)) |
 | FR-CO-063 | Device type `1000h` split into profile number and additional information, and a peer's logical devices read from `1000h` and `67FFh + x·800h` through the peer-SDO gate ([Device type and logical devices](#device-type-and-logical-devices)) |
+| FR-CO-064 | Optional identity gate before slave Start via `1F84h`–`1F88h`, with immutable per-slave boot results ([Boot-up](#boot-up)) |
 
 ## Not built, and why
 
@@ -2052,8 +2053,50 @@ Sub-index 0 is constant 127. Each other sub-index is the node-id, an UNSIGNED32:
 | 4 | Keep-alive. NMT Reset Communication is not sent to this slave. |
 
 Bits 8–31 hold the guard time and life time. They are stored. Heartbeat is preferred, and
-node guarding is not started from them. `1F84h`–`1F88h` (the identity check) and the concise
-DCF are not implemented.
+node guarding is not started from them. Configuration download, including concise DCF, is
+not implemented.
+
+**Identity before Start (CiA 302-2 v4.1.0 §3.4, §6.6–§6.10).** `1F84h`–`1F88h` are managed
+UNSIGNED32 arrays, sub-index 0 constant 127 and one expectation per node-id, initially 0:
+device type (`1000h:00`), vendor-id, product code, revision and serial number (`1018h:01`–`:04`).
+Device type, vendor-id, product code and serial number must match exactly. For the revision,
+§6.9 requires equal major revisions (bits 16..31) and an actual minor revision (bits 0..15)
+at least as high as expected; a compatible newer minor revision is accepted.
+A zero expectation skips that comparison. With all five zero, the existing announcement-based
+boot runs without identity SDOs. This is an opt-in identity gate, not the complete §3.4 boot
+procedure: unconditional reachability uploads, configuration download and automatic error-control
+setup are still outside this implementation.
+
+An assigned, boot-enabled slave with any nonzero expectation is verified before Start, including
+one that announced Operational. The uploads share the peer SDO channel, hold it for the whole
+comparison and respect a snapshot of the bound EDS/DCF gate. An unavailable channel is awaited;
+the boot timeout still bounds a mandatory slave's wait when `1F89h` is nonzero. An upload must
+return exactly four bytes. A mismatch, an abort, a timeout or a refused peer-description access
+prevents Start and raises `SlaveIdentityInvalid`. A mandatory slave, or any slave under
+simultaneous start, halts the boot with the existing error reaction; an optional failure is
+skipped. While any assigned slave has an expectation there is no Start to node 0: simultaneous
+start retains its moment but addresses verified slaves individually. Manual NMT commands and
+`1F82h` requests remain explicit application actions and do not run this gate.
+
+Local and SDO writes to the expectation arrays have the same effect: an edit while active begins
+a new boot. EDS/DCF values use that same validated path. `StartFlyingMaster` keeps the expectations
+across its cold reset, together with the network list and timing. A reset, role loss or new boot
+cancels the old verification; late completions cannot start a slave in the newer boot.
+
+`node.GetSlaveBootResults()` returns immutable snapshots in node-id order: announcement wait,
+identity verification, Start requested, already Operational, or a failure. Identity failures carry
+the remote index/sub-index, expected and actual value when available, and the upload exception
+(including `SdoAbortException.AbortCode`). Start requested means queued, not confirmed or remotely
+acknowledged. A new boot replaces the results; leaving the master role clears them. The extension
+leaves the published `ICanOpenNode` interface unchanged.
+
+```csharp
+node.ObjectDictionary.WriteUnsigned(0x1F85, 5, 0x1234); // expected vendor-id of slave 5
+node.ObjectDictionary.WriteUnsigned(0x1F86, 5, 0x5678); // expected product code
+// Set 1F81h and the startup policy before starting the master.
+node.StartFlyingMaster(0, TimeSpan.FromSeconds(2));
+var progress = node.GetSlaveBootResults();
+```
 
 `1F80h`, read the way the open stack that cites 302-2 v4.1.0 reads it:
 

@@ -236,7 +236,7 @@ public interface ICanOpenNode : IDisposable
     /// The first election after this call is a cold boot: if no master answers, the node
     /// broadcasts NMT Reset Communication and runs the election again as a warm boot. That
     /// reset restores power-on values, so this method records <c>1F80h</c>, <c>1F81h</c>,
-    /// <c>1F89h</c> and <c>1F90h</c> as power-on values before it starts; call
+    /// <c>1F84h</c>–<c>1F88h</c>, <c>1F89h</c> and <c>1F90h</c> as power-on values before it starts; call
     /// <see cref="StoreParameters"/> first if the rest of the configuration must survive the same
     /// reset. After the node becomes the active master it boots the slaves assigned in
     /// <c>1F81h</c> (see the package README).

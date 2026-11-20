@@ -190,7 +190,7 @@ internal sealed partial class CanOpenNode
             IsBound = description is not null;
             if (description is null) return;
             foreach (var (index, entries) in description.Ordered(static i =>
-                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.StoreParameters))
+                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.DeviceType || i == Co.StoreParameters))
             {
                 foreach (var entry in entries)
                 {

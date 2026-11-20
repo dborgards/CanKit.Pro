@@ -332,6 +332,7 @@ internal sealed partial class CanOpenNode
         // 1F81h and 1F89h before 1F80h, and 1F90h before both: the network list, the boot
         // timeout and the times are in the dictionary when bits 0 and 5 start the election.
         Co.SlaveAssignment or Co.BootTime => -2,
+        >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber => -2,
         Co.FlyingMasterTiming => -1,
         >= Co.RpdoComm and < Co.RpdoComm + 0x200 => 1,
         >= Co.TpdoComm and < Co.TpdoComm + 0x200 => 1,
@@ -427,7 +428,8 @@ internal sealed partial class CanOpenNode
             case Co.BootTime:
                 return ApplyManagedVariable(index, entries, findings);
             case Co.SlaveAssignment:
-                return ApplySlaveAssignment(entries, findings);
+            case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
+                return ApplySlaveAssignment(index, entries, findings);
             case Co.RequestNmt:
                 return ApplyRequestNmt(entries, findings);
             case Co.FlyingMasterTiming:
@@ -618,11 +620,11 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    /// <summary><c>1F81h</c>: one UNSIGNED32 per node-id. Sub-index <c>00h</c> stays 127. A described
+    /// <summary><c>1F81h</c> and <c>1F84h</c>–<c>1F88h</c>: one UNSIGNED32 per node-id.
+    /// Sub-index <c>00h</c> stays 127. A described
     /// entry is stored through the same checks an SDO download hits.</summary>
-    private int ApplySlaveAssignment(List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
+    private int ApplySlaveAssignment(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
     {
-        const ushort index = Co.SlaveAssignment;
         int loaded = 0;
         foreach (var entry in entries)
         {
@@ -632,14 +634,14 @@ internal sealed partial class CanOpenNode
                 else
                 {
                     findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
-                        "1F81h sub-index 00h is constant 127; the described count is not applied", entry.Value));
+                        $"{index:X4}h sub-index 00h is constant 127; the described count is not applied", entry.Value));
                 }
                 continue;
             }
             if (entry.Subindex > CanOpenCobId.MaxNodeId || !_od.TryGet(index, entry.Subindex, out var current))
             {
                 findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
-                    "1F81h implements sub-indices 01h to 7Fh; this sub-index is not created", entry.Value));
+                    $"{index:X4}h implements sub-indices 01h to 7Fh; this sub-index is not created", entry.Value));
                 continue;
             }
             _od.Declare(index, entry.Subindex, OdDataType.Unsigned32, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);

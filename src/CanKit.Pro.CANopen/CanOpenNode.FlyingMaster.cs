@@ -597,7 +597,11 @@ internal sealed partial class CanOpenNode
         // timeout, and the master that just won would start nobody.
         RememberOne(Co.BootTime, 0x00);
         for (byte sub = 0; sub <= CanOpenCobId.MaxNodeId; sub++)
+        {
             RememberOne(Co.SlaveAssignment, sub);
+            for (ushort index = Co.ExpectedDeviceType; index <= Co.ExpectedSerialNumber; index++)
+                RememberOne(index, sub);
+        }
     }
 
     /// <summary>Records the disabled <c>1F80h</c> so a later reset does not rejoin. Does not
