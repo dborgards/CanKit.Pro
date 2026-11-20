@@ -55,6 +55,8 @@ namespace CanKit.Pro.CANopen;
 // A reset (transition 5, then 0) ends every communication error and every profile error without
 // an EMCY, and drops a profile EMCY that has not gone out: one still held, and one already released
 // behind a boot-up but not yet transmitted (a master that resets the node on seeing its boot-up).
+// It drops the EMCY of a communication error, and a 0000h, that has not been transmitted likewise,
+// whatever the options and wherever it waits on the chain (SendWhenNotStoppedAsync, #577).
 //
 // The condition the error behaviour of 1029h reacts to — bus-off, heartbeat timeout, life guarding
 // — is also what an application that asks for it is told about (PublishCommunicationFailure).
