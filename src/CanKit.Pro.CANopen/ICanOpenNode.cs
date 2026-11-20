@@ -334,10 +334,11 @@ public interface ICanOpenNode : IDisposable
     /// queued on disposal.</item>
     /// </list>
     /// <para>That reset rule is for the EMCYs this method orders. An EMCY the node raises for its own
-    /// error state — a communication error, or the <c>0000h</c> that ends one — that waited in Stopped
-    /// is dropped by a reset that comes before it was transmitted, whatever the options, also when the
-    /// node had left Stopped just before: the reset ended that error without an EMCY (CiA 301 v4.2.0
-    /// §7.2.7.1, Figure 37, transitions 5 and 0).</para>
+    /// error state — a communication error, or the <c>0000h</c> that ends one — that has not been
+    /// transmitted when an NMT reset is processed is dropped by it, whatever the options and wherever
+    /// it waits: queued behind a slow send, or waiting in Stopped. It sends no frame and enters nothing
+    /// in <c>1003h</c>: the reset ended that error without an EMCY (CiA 301 v4.2.0 §7.2.7.1, Figure 37,
+    /// transitions 5 and 0).</para>
     /// <para>Bit 6 of <paramref name="errorRegister"/> is reserved and always 0 (CiA 301 v4.2.0
     /// §7.5.2.2, Table 54): it is transmitted and recorded in <c>1001h</c> as 0, whatever is passed,
     /// and the call proceeds as it would with the bit clear. A later major version will refuse it.
