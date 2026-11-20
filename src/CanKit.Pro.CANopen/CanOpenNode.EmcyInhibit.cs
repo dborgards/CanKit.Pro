@@ -11,7 +11,8 @@ namespace CanKit.Pro.CANopen;
 // echo confirmations cannot compress the actual invocation interval.
 // Optional 1029h also uses this queue's Stopped/reset gate, without enabling inhibit timing, and so
 // does a profile EMCY released behind a boot-up, whatever the options (EmitEmcy, #549). Every other
-// EMCY uses its Stopped wait, without the reset drop (SendWhenNotStoppedAsync, #565).
+// EMCY uses its Stopped wait, where a reset drops the node's own EMCYs and keeps the application's
+// (SendWhenNotStoppedAsync, #565, #577).
 internal sealed partial class CanOpenNode
 {
     private object _emcyInhibitEpoch = new();
@@ -77,56 +78,66 @@ internal sealed partial class CanOpenNode
     /// and this is where the rule lives:
     /// </para>
     /// <list type="bullet">
-    /// <item>An EMCY the application ordered with <c>SendEmcyAsync</c> survives the reset, as an EMCY
-    /// queued across a reset always has (3eb49f3e): the step looks again once the reset is done and
-    /// goes out on the COB-ID active then (<c>transmit</c> reads it), behind the boot-up that reset
-    /// ordered, so that it does not overtake it.</item>
-    /// <item>An EMCY the node raises for its own error state (<paramref name="dropOnReset"/>: a
-    /// communication error and its <c>0000h</c>) is dropped, as the gated path drops it: the reset
-    /// ended the error it reports without an EMCY (Figure 37, transitions 5 and 0). It writes neither
-    /// <c>1001h</c> nor <c>1003h</c>; the reset has written <c>1001h</c> itself.</item>
+    /// <item>An EMCY the application ordered with <c>SendEmcyAsync</c> (<see cref="EmcyOrigin.Application"/>)
+    /// survives the reset, as an EMCY queued across a reset always has (3eb49f3e): the step looks again
+    /// once the reset is done and goes out on the COB-ID active then (<c>transmit</c> reads it). One
+    /// that waited in Stopped goes out behind the boot-up that reset ordered, so that it does not
+    /// overtake it; one merely queued does not wait for the boot-up, as before #565.</item>
+    /// <item>An EMCY the node raises for its own error state (<see cref="EmcyOrigin.Node"/>: a
+    /// communication error and its <c>0000h</c>) that has not been transmitted when the reset is
+    /// processed is dropped, as the gated path drops it: the reset ended the error it reports without
+    /// an EMCY (Figure 37, transitions 5 and 0). That holds wherever the reset finds the step — queued
+    /// behind a slow send (#577), waiting in Stopped, woken but not yet run, or waiting for a boot-up.
+    /// It writes neither <c>1001h</c> nor <c>1003h</c>; the reset has written <c>1001h</c> itself.</item>
     /// </list>
-    /// <para>
-    /// Only a node EMCY that waited in Stopped is dropped. One merely queued behind a slow send when
-    /// the reset comes is decided after the reset, as before this rule existed.
-    /// </para>
     /// <para>
     /// How it holds, whenever the reset, a Start, the disposal or a cancellation comes: every wait —
     /// for the node to leave Stopped, or for a boot-up — ends by a redispatch, and every pass of this
     /// method begins on the actor by deciding afresh, in this order: the node disposed ends the step,
-    /// its task completed and no frame, as on the gated path (Bugbot on #574); a node EMCY that waited
-    /// and has seen a reset since (<paramref name="waitedIn"/>, the reset epoch of its first wait, is no
-    /// longer <see cref="_emcyInhibitEpoch"/>) is dropped, also when a Start woke its wait just before
-    /// the reset came (Codex on #574); Stopped waits again; a step that waited waits for a pending
-    /// boot-up; otherwise it transmits, and <c>transmit</c> honours a token cancelled meanwhile. A reset
-    /// and the disposal end both waits (<see cref="ResetEmcyInhibit"/>), so no wait outlives either.
+    /// its task completed and no frame, as on the gated path (Bugbot on #574); a node EMCY decided
+    /// before a reset processed since (<paramref name="decidedIn"/>, the reset epoch of the turn that
+    /// decided it — the epoch the gated path checks — is no longer <see cref="_emcyInhibitEpoch"/>) is
+    /// dropped; Stopped waits again; a step that <paramref name="waited"/> waits for a pending boot-up;
+    /// otherwise it transmits, and <c>transmit</c> honours a token cancelled meanwhile. A reset and the
+    /// disposal end both waits (<see cref="ResetEmcyInhibit"/>), so no wait outlives either.
     /// </para>
     /// </summary>
-    private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, bool dropOnReset,
-        object? waitedIn = null)
+    private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, EmcyOrigin origin,
+        object decidedIn, bool waited = false)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
-        if (dropOnReset && waitedIn is not null && !ReferenceEquals(waitedIn, _emcyInhibitEpoch)) return;
+        if (origin == EmcyOrigin.Node && !ReferenceEquals(decidedIn, _emcyInhibitEpoch)) return;
         var slot = WaitForEmcySlot(cancellationToken);
         if (!slot.IsCompleted)
         {
-            var epoch = waitedIn ?? _emcyInhibitEpoch;
             // True: the node left Stopped; false: a reset or the disposal ended the wait. Either way the
             // next pass decides, on the actor; a token cancelled during the wait throws here.
             await slot.ConfigureAwait(false);
-            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, epoch)).ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, origin, decidedIn, waited: true)).ConfigureAwait(false);
             return;
         }
         // Completed at once: not Stopped (true), or a token cancelled already, which throws here.
         await slot.ConfigureAwait(false);
-        if (waitedIn is not null && !_bootUpSend.IsCompleted)
+        if (waited && !_bootUpSend.IsCompleted)
         {
             HeldEmcysWaitForBootUpForTests?.Invoke();
             await WaitForBootUpSendAsync(_bootUpSend, _emcyEpochEnded.Task, cancellationToken).ConfigureAwait(false);
-            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, waitedIn)).ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, origin, decidedIn, waited: true)).ConfigureAwait(false);
             return;
         }
         await transmit().ConfigureAwait(false);
+    }
+
+    /// <summary>Who ordered an EMCY on the ungated path, which decides what an NMT reset does to it
+    /// (<see cref="SendWhenNotStoppedAsync"/>).</summary>
+    private enum EmcyOrigin
+    {
+        /// <summary>The application, with <c>SendEmcyAsync</c>: it survives a reset (3eb49f3e).</summary>
+        Application,
+
+        /// <summary>The node, for its own error state — a communication error or its <c>0000h</c>:
+        /// a reset that comes before it is transmitted drops it (#577).</summary>
+        Node,
     }
 
     // Completed, and replaced, by every reset and by the disposal (ResetEmcyInhibit): what ends a step's
