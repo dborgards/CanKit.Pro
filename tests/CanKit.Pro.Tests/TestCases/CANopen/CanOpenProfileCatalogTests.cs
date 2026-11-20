@@ -84,6 +84,52 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
         peers[2]!.PeerNodeId.Should().Be(PeerId);
     }
 
+    /// <summary>
+    /// A read whose answers contradict each other (#552) gives no profile to select: <c>1000h</c>
+    /// names one and <c>67FFh</c> another, or <c>1000h</c> announces several logical devices and the
+    /// peer ends the chain before the second. The catalogue refuses the whole result rather than
+    /// pick one of the two words or report a device as "no access" without saying why.
+    /// </summary>
+    [Theory] // FR-CO-063, #552
+    [InlineData(0x00010198u)] // 67FFh names profile 408 under a 1000h of profile 401
+    [InlineData(null)] // the peer reports 67FFh as non-existent
+    [InlineData(0x000F0191u)] // the peer reports 6FFFh as non-existent
+    public async Task CreatePeers_Refuses_A_Read_Whose_Answers_Contradict_Each_Other(uint? at67FF)
+    {
+        var catalog = new CanOpenProfileCatalog(new FakeProfile(401), new FakeProfile(408));
+        var answers = new List<(ushort, object)> { (0x1000, 0xFFFF0191u) };
+        if (at67FF is { } first) answers.Add((0x67FF, first));
+        var result = await CanOpenLogicalDevices.ReadCoreAsync(new ScriptedUpload(answers.ToArray()).Upload, default);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+
+        using var rig = new NodeRig();
+
+        FluentActions.Invoking(() => catalog.CreatePeers(rig.Node, PeerId, result))
+            .Should().Throw<ArgumentException>().WithParameterName("result")
+            .Where(e => e.Message.Contains(result.Failure!.Message));
+        // A device the caller picks itself is still the caller's to map.
+        catalog.CreatePeer(rig.Node, PeerId, result.Devices[0]).Should().NotBeNull();
+    }
+
+    /// <summary>A read that failed for another reason than a contradiction keeps the devices read
+    /// before it, and they are mapped as before (#552 changes only the contradictory case).</summary>
+    [Fact] // FR-CO-063, #552
+    public async Task CreatePeers_Maps_What_A_Read_That_Failed_Without_A_Contradiction_Found()
+    {
+        var catalog = new CanOpenProfileCatalog(new FakeProfile(401));
+        var timeout = new SdoAbortException(0x6FFF, 0, (uint)SdoAbortCode.SdoProtocolTimedOut,
+            SdoAbortOrigin.Local, "timed out");
+        var result = await CanOpenLogicalDevices.ReadCoreAsync(
+            new ScriptedUpload((0x1000, 0xFFFF0191u), (0x67FF, 0x000F0191u), (0x6FFF, timeout)).Upload, default);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+
+        using var rig = new NodeRig();
+        var peers = catalog.CreatePeers(rig.Node, PeerId, result);
+
+        peers.Should().ContainSingle().Which.Should().BeOfType<FakePeer>()
+            .Which.LogicalDevice.Should().BeSameAs(result.Devices[0]);
+    }
+
     [Fact]
     public void Two_Descriptors_For_One_Profile_Are_Refused()
     {
@@ -212,12 +258,13 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
         public CanOpenLogicalDevice LogicalDevice { get; } = logicalDevice;
     }
 
-    /// <summary>A scripted peer: an index that is not scripted is the peer's "object does not exist".</summary>
+    /// <summary>A scripted peer: a <c>uint</c> answer is returned as four bytes, an exception is thrown,
+    /// and an index that is not scripted is the peer's "object does not exist".</summary>
     private sealed class ScriptedUpload
     {
-        private readonly Dictionary<ushort, uint> _answers;
+        private readonly Dictionary<ushort, object> _answers;
 
-        public ScriptedUpload(params (ushort Index, uint Answer)[] answers)
+        public ScriptedUpload(params (ushort Index, object Answer)[] answers)
             => _answers = answers.ToDictionary(a => a.Index, a => a.Answer);
 
         public Task<byte[]> Upload(ushort index, CancellationToken cancellationToken)
@@ -228,7 +275,12 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
                     SdoAbortOrigin.Peer, "no such object");
             }
 
-            return Task.FromResult(BitConverter.GetBytes(answer));
+            return answer switch
+            {
+                uint value => Task.FromResult(BitConverter.GetBytes(value)),
+                Exception ex => throw ex,
+                _ => throw new InvalidOperationException("Unscripted answer type."),
+            };
         }
     }
 }

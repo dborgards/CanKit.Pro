@@ -87,6 +87,12 @@ internal sealed class CanOpenProfileCatalog
     }
 
     /// <summary>The peer access for every logical device a read found. Performs no bus access.</summary>
+    /// <remarks>A read that ended in another way than <see cref="CanOpenLogicalDeviceReadEnd.Complete"/>
+    /// is mapped as far as it got, except one whose answers contradict each other (#552): there
+    /// <c>1000h</c> and the chain disagree on what the first logical device is, or on whether there
+    /// is more than one, and either word could be the wrong one. Selecting a profile from such a list
+    /// would pick one of them silently, so the result is refused; <see cref="CreatePeer"/> maps a
+    /// device the caller has chosen.</remarks>
     /// <param name="node">The node that reads the peer.</param>
     /// <param name="peerNodeId">The node-id of the peer, <c>1</c> to <c>127</c>.</param>
     /// <param name="result">The logical devices of the peer, see <see cref="CanOpenLogicalDevices.ReadAsync"/>.</param>
@@ -96,6 +102,8 @@ internal sealed class CanOpenProfileCatalog
     /// <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside <c>1</c> to
     /// <c>127</c>.</exception>
+    /// <exception cref="ArgumentException">The peer's answers in <paramref name="result"/> contradict
+    /// each other; the message carries its <see cref="CanOpenLogicalDeviceReadResult.Failure"/>.</exception>
     public IReadOnlyList<ICanOpenProfilePeer?> CreatePeers(ICanOpenNode node, byte peerNodeId,
         CanOpenLogicalDeviceReadResult result)
     {
@@ -104,6 +112,12 @@ internal sealed class CanOpenProfileCatalog
         CanOpenCobId.ValidateNodeId(peerNodeId);
         if (result is null)
             throw new ArgumentNullException(nameof(result));
+        if (result.Inconsistent)
+        {
+            throw new ArgumentException(
+                $"The logical devices of node {peerNodeId} were read from answers that contradict each other, so no " +
+                $"profile is selected from them: {result.Failure!.Message}", nameof(result));
+        }
 
         var peers = new ICanOpenProfilePeer?[result.Devices.Count];
         for (var i = 0; i < peers.Length; i++)
