@@ -1059,6 +1059,14 @@ internal sealed partial class CanOpenNode
             findings.Add(new DeviceDescriptionFinding(index, subindex, DeviceDescriptionOutcome.Corrected,
                 "the value was rejected by the rule an SDO download would hit; the default is kept", entry.Value, abort));
         }
+        else if (index == Co.ErrorRegister && od.TryReadRaw(index, subindex, out var stored) && !stored.SequenceEqual(bytes))
+        {
+            // Accepted with reserved bit 6 cleared, as every write of 1001h is (#566): the file said
+            // something the node does not hold.
+            findings.Add(new DeviceDescriptionFinding(index, subindex, DeviceDescriptionOutcome.Corrected,
+                $"bit 6 of the error register is reserved and always 0 (CiA 301 v4.2.0 §7.5.2.2, Table 54); stored as {stored[0]:X2}h",
+                entry.Value));
+        }
     }
 
     private bool DeclareDescribedEntry(ushort index, DescribedEntry entry, List<DeviceDescriptionFinding> findings)

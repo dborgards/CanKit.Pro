@@ -216,6 +216,18 @@ PDOMapping=0
     {
         using var rig = new EmcyInhibitRig(new CanOpenNodeOptions(), ErrorRegisterDescription("rw", "0x44"));
         rig.Node.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x04, "the described default loses bit 6");
+        var finding = rig.Node.DeviceDescription!.Findings.Should()
+            .ContainSingle(f => f.Index == 0x1001, "the correction is reported as other corrected values are").Which;
+        finding.Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        finding.Subindex.Should().Be(0);
+    }
+
+    [Fact]
+    public void A_Described_1001h_Default_Without_Bit_6_Raises_No_Finding()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions(), ErrorRegisterDescription("rw", "0x84"));
+        rig.Node.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x84);
+        rig.Node.DeviceDescription!.Findings.Should().NotContain(f => f.Index == 0x1001);
     }
 
     [Fact]
