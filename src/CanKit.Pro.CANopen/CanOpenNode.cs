@@ -661,10 +661,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // waits for nothing else (#549). So does every other EMCY of a profile, raise, clear and warning (gate):
         // one raised while the boot-up's send is still pending waits for it likewise (#561), and one
         // queued behind a profile EMCY that waits must not outlive a reset that drops that one. Every
-        // other EMCY keeps the path its options give it.
+        // other EMCY keeps the path its options give it, and is held in Stopped there too
+        // (SendWhenNotStoppedAsync, #565), but not dropped by a reset.
         bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null || gate;
         return AppendToEmcyChain(() => gated
-            ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
+            ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch)
+            : SendWhenNotStoppedAsync(transmit, cancellationToken));
     }
 
     /// <summary>Appends one step to the EMCY chain; it runs on the actor once the steps before it

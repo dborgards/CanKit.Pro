@@ -10,7 +10,8 @@ namespace CanKit.Pro.CANopen;
 // invocations. Count conservatively from send completion, so delayed driver handoffs or
 // echo confirmations cannot compress the actual invocation interval.
 // Optional 1029h also uses this queue's Stopped/reset gate, without enabling inhibit timing, and so
-// does a profile EMCY released behind a boot-up, whatever the options (EmitEmcy, #549).
+// does a profile EMCY released behind a boot-up, whatever the options (EmitEmcy, #549). Every other
+// EMCY uses its Stopped wait, without the reset drop (SendWhenNotStoppedAsync, #565).
 internal sealed partial class CanOpenNode
 {
     private object _emcyInhibitEpoch = new();
@@ -58,6 +59,44 @@ internal sealed partial class CanOpenNode
             // Recheck configuration/state on the actor after waking: they may have changed
             // again while the continuation was waiting to run.
             await DispatchQueuedEmcy(() => SendWithEmcyInhibitAsync(transmit, cancellationToken, epoch)).ConfigureAwait(false);
+            return;
+        }
+        await transmit().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The step of an EMCY that takes no gated path — neither EMCY inhibit nor error behaviour is
+    /// enabled, and it is not a profile's. It runs on the actor in the turn the chain gives it and
+    /// checks the NMT state then: in Stopped it waits in <see cref="WaitForEmcySlot"/>, which without
+    /// inhibit time waits for nothing else, until the node has left Stopped, as the gated path does
+    /// (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY in Stopped; #565). Its task completes once the
+    /// frame has gone out, and cancelling its token during the wait ends it without a frame or a
+    /// <c>1001h</c> write. Unlike the gated path an NMT reset does not drop it: the reset ends the
+    /// wait, the step looks again once the reset is done, and goes out on the COB-ID active then
+    /// (<c>transmit</c> reads it), as an EMCY queued across a reset always has (3eb49f3e). A step that
+    /// waited goes out behind a boot-up whose send is still pending, so that one released by a reset
+    /// does not overtake the boot-up that reset ordered.
+    /// </summary>
+    private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, bool waited = false)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        var slot = WaitForEmcySlot(cancellationToken);
+        if (!slot.IsCompleted)
+        {
+            // True: the node left Stopped. False: a reset or the disposal ended the wait. Either way
+            // the step looks again, on the actor.
+            await slot.ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, waited: true)).ConfigureAwait(false);
+            return;
+        }
+        // Completed at once: not Stopped (true), or a token cancelled already, which throws here.
+        await slot.ConfigureAwait(false);
+        if (waited && !_bootUpSend.IsCompleted)
+        {
+            HeldEmcysWaitForBootUpForTests?.Invoke();
+            await _bootUpSend.ContinueWith(static sent => { _ = sent.Exception; },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, waited: true)).ConfigureAwait(false);
             return;
         }
         await transmit().ConfigureAwait(false);

@@ -881,9 +881,9 @@ when this capability is enabled, so a policy write that enters Stopped receives 
 normal completion response; other unfinished sessions still abort. Local reactions do not
 broadcast NMT commands.
 
-New EMCY reasons in Stopped keep the existing latest-reason hold. With this capability,
-previously queued EMCYs also pause until communication resumes, using the same queue gate
-as optional 1015h without enabling an inhibit interval. NMT reset discards old queued EMCYs,
+New EMCY reasons in Stopped keep the existing latest-reason hold. Previously queued EMCYs pause
+until communication resumes, without this capability too (#565); with it they use the same
+queue gate as optional 1015h without enabling an inhibit interval, and an NMT reset discards old queued EMCYs,
 clears old timeout observations and refreshes the controller baseline; disposal releases waits
 and detaches the monitor. An in-flight transport attempt retains its existing completion
 contract. Controller observation uses the existing 50 ms poll plus error/fault hints and
@@ -961,7 +961,7 @@ Table 37 of CiA 301, as the node applies it:
 | PDO | — | transmitted and received | — |
 | SDO | served | served | requests ignored; an open server session is aborted with `0800 0022h`. This row is the server's: the node's own SDO client is not gated by the NMT state, and `SdoUploadAsync` and `SdoDownloadAsync` run in Stopped too, as `SendSyncAsync` does (#254) |
 | SYNC | consumed and produced | consumed and produced | neither; the producer keeps its cycle and resumes afterwards (`SendSyncAsync` is a raw send and transmits regardless of the state and of bit 30 of `1005h`) |
-| EMCY | transmitted | transmitted | held; the most recent one is transmitted when the node leaves Stopped |
+| EMCY | transmitted | transmitted | none transmitted, whatever the options: the most recent one requested in Stopped is held and transmitted when the node leaves Stopped; one requested before, whose turn comes in Stopped, waits until then (#565) |
 | Heartbeat, guarding | active | active | active |
 
 **Reset Node and Reset Communication** abort SDO server sessions, discard a held EMCY, reset the

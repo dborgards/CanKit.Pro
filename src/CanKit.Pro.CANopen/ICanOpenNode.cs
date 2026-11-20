@@ -313,10 +313,19 @@ public interface ICanOpenNode : IDisposable
     /// reads over SDO is the one the last EMCY carried: the write and the transmission are one
     /// ordered step on the node's actor loop, and every EMCY of this node goes out through one
     /// ordered path, so overlapping calls reach the bus in the order the register was written.
-    /// In NMT state Stopped the EMCY is held and the most recent one is transmitted when the
-    /// node leaves Stopped (CiA 301 §7.3.2.2.4). The returned task faults with
-    /// <see cref="InvalidOperationException"/> when EMCY is disabled (bit 31 of <c>1014h</c> set).
+    /// The returned task faults with <see cref="InvalidOperationException"/> when EMCY is disabled
+    /// (bit 31 of <c>1014h</c> set).
     /// </summary>
+    /// <remarks>
+    /// No EMCY leaves this node in NMT state Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), whatever
+    /// the options. An EMCY requested in Stopped is held and its task completes at once; the most
+    /// recent one held is transmitted when the node leaves Stopped. An EMCY requested before, whose
+    /// turn on the ordered path comes while the node is Stopped — queued behind a slow send, for
+    /// instance — waits there, in order with those behind it, until the node has left Stopped, and is
+    /// transmitted then, ahead of the one held; its task completes once it has been transmitted, and
+    /// cancelling <paramref name="cancellationToken"/> while it waits withdraws it without a frame and
+    /// without a write of <c>1001h</c>.
+    /// </remarks>
     Task SendEmcyAsync(ushort errorCode, byte errorRegister,
         ReadOnlyMemory<byte> manufacturerSpecific = default,
         CancellationToken cancellationToken = default);

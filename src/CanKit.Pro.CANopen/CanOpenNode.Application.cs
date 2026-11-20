@@ -891,7 +891,8 @@ internal sealed partial class CanOpenNode
         });
 
     /// <summary>Test seam: runs on the actor when the EMCY chain starts waiting for the boot-up
-    /// before it sends a profile EMCY (<see cref="AppendBootUpWait"/>).</summary>
+    /// before it sends a profile EMCY (<see cref="AppendBootUpWait"/>), or an EMCY that waited in
+    /// Stopped (<see cref="SendWhenNotStoppedAsync"/>).</summary>
     internal Action? HeldEmcysWaitForBootUpForTests { get; set; }
 
     private void RequireActor(string member)
