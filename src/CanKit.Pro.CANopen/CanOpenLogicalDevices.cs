@@ -63,8 +63,8 @@ public enum CanOpenLogicalDeviceReadEnd
     /// or the peer's answers contradict each other: <c>67FFh</c> names another profile than
     /// <c>1000h</c>, or <c>1000h</c> announces several logical devices and the peer reports
     /// <c>67FFh</c> or <c>6FFFh</c> as non-existent. <see cref="CanOpenLogicalDeviceReadResult.Failure"/>
-    /// says which, and the list holds the devices read until then, a <c>67FFh</c> that contradicts
-    /// <c>1000h</c> included.</summary>
+    /// says which (its remarks tell the cases apart), and the list holds the devices read until
+    /// then, a <c>67FFh</c> that contradicts <c>1000h</c> included.</summary>
     Failed = 2,
 
     /// <summary>The bound peer description does not declare the next device-type object, so the
@@ -105,6 +105,23 @@ public sealed class CanOpenLogicalDeviceReadResult
 
     /// <summary>The failure that ended the reading. Not <see langword="null"/> exactly when
     /// <see cref="End"/> is <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>.</summary>
+    /// <remarks>
+    /// What it is tells the failures apart:
+    /// <list type="bullet">
+    /// <item><description>an <see cref="SdoAbortException"/>: a read inside the chain was aborted,
+    /// by the peer with a code other than "object does not exist", or locally, the client's own
+    /// timeout included;</description></item>
+    /// <item><description>an <see cref="InvalidDataException"/> whose
+    /// <see cref="Exception.InnerException"/> is the peer's <see cref="SdoAbortException"/>
+    /// "object does not exist": <c>1000h</c> announces several logical devices and the peer ended
+    /// the chain before the second;</description></item>
+    /// <item><description>an <see cref="InvalidDataException"/> without an inner exception, where the
+    /// profile number of the first of <see cref="Devices"/> differs from the one of
+    /// <see cref="DeviceType"/>: <c>67FFh</c> names another profile than <c>1000h</c>;</description></item>
+    /// <item><description>an <see cref="InvalidDataException"/> without an inner exception, where the
+    /// two profile numbers agree: a device-type object did not return four bytes.</description></item>
+    /// </list>
+    /// </remarks>
     public Exception? Failure { get; }
 }
 
@@ -192,7 +209,11 @@ public static class CanOpenLogicalDevices
     /// the read ends as <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> with an
     /// <see cref="InvalidDataException"/>, keeps every word as the peer returned it, and asks
     /// nothing further. Only the profile numbers are compared: the additional information of
-    /// device 0 is its own and lives in <c>67FFh</c>. A refusal by the SDO client's gate is not an
+    /// device 0 is its own and lives in <c>67FFh</c>. Profile number <c>0000h</c>, a device that
+    /// follows no standardized profile, is compared like any other: a <c>1000h</c> of profile
+    /// <c>0000h</c> over a <c>67FFh</c> of profile 401 contradicts it. That is a reading of §7.5.2.1,
+    /// which names "the device profile of the first device" in <c>1000h</c> without exempting
+    /// <c>0000h</c>. A refusal by the SDO client's gate is not an
     /// answer of the peer and contradicts nothing. Every way a read ends:
     /// </para>
     /// <list type="table">

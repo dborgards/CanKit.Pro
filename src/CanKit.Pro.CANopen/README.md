@@ -513,6 +513,13 @@ if (peer.End == CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired)
     client.BindPeerDeviceDescription(0x10, description);   // an EDS/DCF that lists 67FFh, 6FFFh, ...
     peer = await CanOpenLogicalDevices.ReadAsync(client, peerNodeId: 0x10);
 }
+if (peer.End == CanOpenLogicalDeviceReadEnd.Failed)
+{
+    // Devices holds what was read until the failure; after a contradiction, Devices[0] (67FFh)
+    // and peer.DeviceType (1000h) may name different profiles. Report it rather than trust the list.
+    Console.WriteLine($"{peer.Failure!.Message} ({peer.Devices.Count} device(s) read)");
+    return;
+}
 foreach (var device in peer.Devices)
     Console.WriteLine($"{device.Index}: {device.DeviceType}, objects from {device.ObjectAreaStart:X4}h");
 ```
