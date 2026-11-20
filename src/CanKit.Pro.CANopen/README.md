@@ -746,9 +746,8 @@ application's included, and never clears the application's bits, so an applicati
 while a communication error is active still carries bit 4. An EMCY requested in Stopped, or one
 that waited there, carries the register of the moment it is sent. An EMCY of the node's own — a
 communication error or the `0000h` that ends one — that has not been transmitted when a reset is
-processed is dropped by it, whatever the options and wherever it waits (queued behind a slow send,
-or in Stopped; #577), since the reset ended the error without an EMCY; it writes neither
-`1001h` nor `1003h`. Disposing the node ends any such wait: an application's EMCY then completes
+processed is dropped by it, since the reset ended the error without an EMCY; where it may wait and
+what it then leaves out are stated in the remarks of `ICanOpenNode.SendEmcyAsync` (#577). Disposing the node ends any such wait: an application's EMCY then completes
 its task without a frame. A communication error raised while
 an LSS slave waits for its node-id (a heartbeat-consumer timeout, in Initialisation, where only the
 boot-up object exists) is held and goes out behind the boot-up once the slave has its node-id,
