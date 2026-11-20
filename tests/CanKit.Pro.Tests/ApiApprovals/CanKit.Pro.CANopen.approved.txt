@@ -111,6 +111,7 @@ namespace CanKit.Pro.CANopen
         PeerDescriptionRequired = 1,
         Failed = 2,
         EndedByPeerDescription = 3,
+        Inconsistent = 4,
     }
     public sealed class CanOpenLogicalDeviceReadResult
     {

@@ -62,7 +62,9 @@ internal sealed partial class CanOpenNode
     /// it. An object a device description declared is not written; its profile number must be the
     /// one the application set, and a described <c>1000h</c> must announce the logical devices the
     /// node has (<see cref="RequireDescribedTopology"/>). The words themselves are checked against
-    /// the value definition first (<see cref="RequireValidWords"/>), #551.
+    /// the value definition first (<see cref="RequireValidWords"/>), #551, and a chain object behind
+    /// the attached devices that a reader reaches is checked last (<see cref="RequireReadableChain"/>),
+    /// #575.
     /// </summary>
     private void ComposeDeviceTypes()
     {
@@ -135,6 +137,8 @@ internal sealed partial class CanOpenNode
                     ObjectDictionary.EncodeU32(types[device].Value), pdoMappable: false);
             }
         }
+
+        RequireReadableChain(count);
     }
 
     /// <summary>
@@ -174,7 +178,9 @@ internal sealed partial class CanOpenNode
     /// the node has (CiA 301 v4.2.0 §7.5.2.1): <c>FFFFh</c> in its upper half when there are several, or
     /// a reader of <c>1000h</c> stops at the first and never sees the rest; and with <c>FFFFh</c>, a
     /// <c>67FFh</c> for a reader to find, declared by the file or the application, or the reader takes
-    /// the word of <c>1000h</c> for the only device's. A <c>67FFh</c> the application declared is
+    /// the word of <c>1000h</c> for the only device's; and behind it a <c>6FFFh</c>, since
+    /// <c>FFFFh</c> announces several devices and a reader that finds one calls the chain
+    /// contradictory (#575). A <c>67FFh</c> the application declared is
     /// checked here like a described one (<see cref="RequireDescribedProfile"/>): with one logical
     /// device nothing else refuses or checks it.
     /// </summary>
@@ -203,6 +209,54 @@ internal sealed partial class CanOpenNode
         var first = DeviceTypeObjectOf(0);
         if (count == 1 && described.HasFurtherLogicalDevices && !_describedObjects.Contains(first))
             RequireDescribedProfile(first, setters[0]!, types[0], $"Application '{setters[0]!.Application.Name}'");
+        // FFFFh says the node is a module of several logical devices, so behind 67FFh a reader looks
+        // for a second at 6FFFh; with none it calls the chain contradictory (CanOpenLogicalDevices,
+        // #552). With one attached device that second one can only be the file's or an object the
+        // application declared; RequireReadableChain checks its declaration (#575).
+        if (count == 1 && described.HasFurtherLogicalDevices && !_od.ContainsIndex(DeviceTypeObjectOf(1)))
+        {
+            throw OptionsError($"The device description's object 0x1000 holds 0x{described.Value:X8}, which announces several " +
+                $"logical devices, but only logical device 0 ('{setters[0]!.Application.Name}', profile {types[0].ProfileNumber}) " +
+                "is attached and neither the file nor an application declares 0x6FFF, the device type of a second one: a reader " +
+                "of the chain would find a single device behind FFFFh (CiA 301 v4.2.0 §7.5.2.1).");
+        }
+    }
+
+    /// <summary>
+    /// The device-type objects behind the attached logical devices that a reader of an announced chain
+    /// reaches: from <c>67FFh + count·800h</c> up to the first object that does not exist. No
+    /// application set their words, so there is no profile to compare, but a reader takes each for a
+    /// device's type, so each is declared as a device type is (#553): a read-only UNSIGNED32 at
+    /// sub-index 0. Anything else is read as a value that is not four bytes, or could be overwritten
+    /// over the network (#575). Nothing is checked when <c>1000h</c> announces no chain, since nothing
+    /// is read then.
+    /// </summary>
+    private void RequireReadableChain(int count)
+    {
+        if (!_od.TryReadRaw(Co.DeviceType, 0x00, out var raw) || !CanOpenDeviceType.TryParse(raw, out var published)
+            || !published.HasFurtherLogicalDevices)
+        {
+            return;
+        }
+
+        for (int device = count; device < CanOpenLogicalDeviceAddressing.MaxLogicalDevices; device++)
+        {
+            var index = DeviceTypeObjectOf(device);
+            if (!_od.ContainsIndex(index)) return;
+            if (_od.TryGet(index, 0x00, out var entry) && entry.DataType == OdDataType.Unsigned32
+                && entry.Access == OdAccess.ReadOnly)
+            {
+                continue;
+            }
+
+            var declarer = _describedObjects.Contains(index) ? "The device description" : "An application";
+            var declared = _od.TryGet(index, 0x00, out var found)
+                ? $"as {found.DataType} with access {found.Access}"
+                : "without sub-index 0";
+            throw OptionsError($"{declarer} declares object 0x{index:X4}, the device type of logical device {device}, " +
+                $"{declared}, which no application attaches: 1000h holds 0x{published.Value:X8}, so a reader of the chain " +
+                "asks for it, and a device-type object is a read-only UNSIGNED32 at sub-index 0 (CiA 301 v4.2.0 §7.5.2.1).");
+        }
     }
 
     /// <summary>The device-type object of a logical device: <c>67FFh + x·800h</c>, x the logical device
