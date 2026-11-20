@@ -325,6 +325,10 @@ public interface ICanOpenNode : IDisposable
     /// transmitted then, ahead of the one held; its task completes once it has been transmitted, and
     /// cancelling <paramref name="cancellationToken"/> while it waits withdraws it without a frame and
     /// without a write of <c>1001h</c>.
+    /// <para>Bit 6 of <paramref name="errorRegister"/> is reserved and always 0 (CiA 301 v4.2.0
+    /// §7.5.2.2, Table 54): it is transmitted and recorded in <c>1001h</c> as 0, whatever is passed,
+    /// and the call proceeds as it would with the bit clear. A later major version will refuse it.
+    /// Bit 7 is manufacturer-specific and is carried as passed.</para>
     /// </remarks>
     Task SendEmcyAsync(ushort errorCode, byte errorRegister,
         ReadOnlyMemory<byte> manufacturerSpecific = default,

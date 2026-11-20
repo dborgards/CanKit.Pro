@@ -323,6 +323,8 @@ internal sealed partial class CanOpenNode
         if (IsManagedErrorHistory(index)) return ValidateErrorHistoryWrite(subindex, value);
         switch (index)
         {
+            case Co.ErrorRegister:
+                return ClearReservedErrorRegisterBit(value);
             case Co.ErrorBehavior when _options.EnableErrorBehavior:
                 return ValidateErrorBehaviorWrite(subindex, value);
             case Co.SyncCobId:

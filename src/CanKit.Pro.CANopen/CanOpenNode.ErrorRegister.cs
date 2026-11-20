@@ -330,6 +330,30 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    /// <summary>The error register with its reserved bit 6 cleared: CiA 301 v4.2.0 §7.5.2.2, Table 54
+    /// fixes it at 0b. What <see cref="SendEmcyAsync"/> and a write of <c>1001h</c> through the
+    /// dictionary pass in is cleared here, not refused (#566): a new exception on the path an
+    /// application reports its errors through, delivered by a patch release, would suppress the EMCY
+    /// it reports, and a gateway that passes a register through would hit it. Refusing it is left to
+    /// the next major version. An attached profile's <c>RaiseError</c> refuses the bit since #554:
+    /// that host is internal, its callers are this repository's profiles, and a profile that sets
+    /// the bit has a bug to be told of.</summary>
+    private static byte WithoutReservedErrorRegisterBit(byte register)
+        => (byte)(register & ~ReservedErrorRegisterBit);
+
+    /// <summary>Validation of a write of <c>1001h</c>, local or by SDO where a description made it
+    /// writable, or a described default: a value with bit 6 set is stored with it cleared
+    /// (<see cref="WithoutReservedErrorRegisterBit"/>) and the write counts as accepted. The caller's
+    /// array is not changed. Writing thread, under the dictionary's write gate, which the store
+    /// below enters again.</summary>
+    private OdWriteDecision ClearReservedErrorRegisterBit(byte[] value)
+    {
+        // 1001h is UNSIGNED8 (§7.5.2.2), and the size was checked before validation.
+        if ((value[0] & ReservedErrorRegisterBit) == 0) return OdWriteDecision.Accept;
+        _od.WriteRawUnchecked(Co.ErrorRegister, 0x00, new[] { WithoutReservedErrorRegisterBit(value[0]) });
+        return OdWriteDecision.Handled;
+    }
+
     /// <summary>EntryWritten, on the writer's thread and under the dictionary's write gate: a write of <c>1001h</c> that is not the
     /// node's own makes the value the application's part at the next step of the EMCY chain.</summary>
     private void NoteErrorRegisterWritten(ushort index, byte subindex)

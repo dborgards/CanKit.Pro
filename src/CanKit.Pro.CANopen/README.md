@@ -737,7 +737,11 @@ repaired"), the application's bits otherwise (transition 2). The register passed
 `SendEmcyAsync` is the application's part, taken when that EMCY is transmitted: a call cancelled
 before then, or a held EMCY a reset discards, changes nothing. A value the application writes to
 `1001h` through `ObjectDictionary` since, or one a device description gives it, is the
-application's part as well. The node ORs its own bits into every EMCY, the
+application's part as well. Bit 6 is reserved and always 0 (§7.5.2.2, Table 54): passed to
+`SendEmcyAsync`, written to `1001h` or described as its value, it is cleared, and the call or
+the write otherwise proceeds as it would without it (#566); a later major version will refuse
+it. `1001h` is `ro` on the bus, so an SDO download is refused with `0601 0002h` unless a device
+description makes it writable. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
 while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
 register of the moment it is sent. Reset Node and Reset Communication end the communication

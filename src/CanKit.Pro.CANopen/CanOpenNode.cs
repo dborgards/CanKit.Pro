@@ -533,6 +533,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        // Bit 6 is reserved: transmitted and recorded as 0, whatever is passed (#566).
+        errorRegister = WithoutReservedErrorRegisterBit(errorRegister);
         var msg = new EmcyMessage(_nodeId, errorCode, errorRegister, manufacturerSpecific.Span);
         return _actor.PostAsync(() =>
         {
