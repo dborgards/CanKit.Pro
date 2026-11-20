@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
@@ -145,6 +146,52 @@ public partial class CanOpenPdoEngineTests
         await ExpectEmcyAsync(rig.Wire, 3, 0x1002, Communication);
         rig.Wire.Count(EmcyId).Should().Be(3);
         rig.Node.ObjectDictionary.ReadUnsigned(0x1003, 0).Should().Be(3u);
+    }
+
+    // The application's kind across the same state changes: it goes out, as it always has.
+    [Theory]
+    [InlineData(NmtCommand.Start, NmtState.Operational)]
+    [InlineData(NmtCommand.EnterPreOperational, NmtState.PreOperational)]
+    public async Task Application_Emcy_Queued_Behind_A_Slow_Send_Goes_Out_After_A_State_Change_With_Default_Options(
+        NmtCommand change, NmtState reached)
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions());
+        if (change == NmtCommand.EnterPreOperational)
+            await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Start, Device);
+        using var driver = new SlowEmcyDriver(rig);
+        var first = rig.Node.SendEmcyAsync(0x1000, 0);
+        await driver.Entered;
+        var queued = rig.Node.SendEmcyAsync(0x1001, 0x04);
+
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)change, Device);
+        rig.Node.State.Should().Be(reached);
+        driver.Release();
+        await first.WaitAsync(ShortTimeout);
+        await queued.WaitAsync(ShortTimeout);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1001, 0x04);
+        rig.Wire.Count(EmcyId).Should().Be(2);
+    }
+
+    // Disposing the node while an application EMCY is queued completes its task without a frame, as on
+    // the gated path (Emcy_Inhibit_Disposal_Releases_The_Wait_And_Queued_Callers) and as for one that
+    // waits (CanOpenEmcyWaitStepTests). The driver records a frame before the send completes, so once
+    // the task has completed, a frame it sent would already be in the driver's list.
+    [Fact]
+    public async Task Application_Emcy_Queued_Behind_A_Slow_Send_Completes_Without_A_Frame_When_The_Node_Is_Disposed()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions());
+        using var driver = new SlowEmcyDriver(rig);
+        var first = rig.Node.SendEmcyAsync(0x1000, 0);
+        await driver.Entered;
+        var queued = rig.Node.SendEmcyAsync(0x1001, 0x04);
+        await rig.Node.PostToActorAsync(() => { }); // the 1001h is on the chain behind the held 1000h
+
+        rig.Node.Dispose();
+        driver.Release();
+        await queued.WaitAsync(ShortTimeout);
+        queued.Status.Should().Be(TaskStatus.RanToCompletion);
+        driver.Order.Count(id => id == EmcyId).Should().Be(1, "only the held 1000h reached the driver");
+        _ = first.Exception;
     }
 
     // The gated path — EMCY inhibit (here with 1015h = 0) or error behaviour — has always dropped a
