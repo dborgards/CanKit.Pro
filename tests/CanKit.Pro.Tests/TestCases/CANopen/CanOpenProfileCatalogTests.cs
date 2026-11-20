@@ -95,7 +95,7 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
         var catalog = new CanOpenProfileCatalog(new FakeProfile(401), new FakeProfile(408));
         var result = await CanOpenLogicalDevices.ReadCoreAsync(
             new ScriptedUpload((0x1000, 0xFFFF0191u), (0x67FF, 0x00010198u), (0x6FFF, 0x000F0191u)).Upload, default);
-        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Inconsistent);
 
         using var rig = new NodeRig();
 
@@ -107,9 +107,10 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>
-    /// A peer that announces several logical devices and ends the chain before the second (#552) is
-    /// inconsistent, but <c>1000h</c> and the first device read agree on its profile, so the device
-    /// read is mapped as for any read that failed with the devices read so far.
+    /// A peer that announces several logical devices and ends the chain before the second (#552) ends
+    /// as <see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>, but <c>1000h</c> and the first device
+    /// read agree on its profile, so that device is mapped, as the devices read before a
+    /// <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> read are.
     /// </summary>
     [Theory] // FR-CO-063, #552
     [InlineData(null)] // the peer reports 67FFh as non-existent: the device is the copy of 1000h
@@ -120,7 +121,7 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
         var answers = new List<(ushort, object)> { (0x1000, 0xFFFF0191u) };
         if (at67FF is { } first) answers.Add((0x67FF, first));
         var result = await CanOpenLogicalDevices.ReadCoreAsync(new ScriptedUpload(answers.ToArray()).Upload, default);
-        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Inconsistent);
         result.Failure.Should().BeOfType<System.IO.InvalidDataException>();
 
         using var rig = new NodeRig();

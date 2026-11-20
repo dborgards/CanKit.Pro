@@ -188,16 +188,16 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
             CanOpenLogicalDeviceReadEnd.Complete, [0x00000000u, Device401], [0x1000, 0x67FF, 0x6FFF, 0x77FF], ChainFailure.None),
         new ChainCase("#552 (1): FFFFh and the peer's 0602 0000h at 67FFh",
             [(0x1000, Chain401)],
-            CanOpenLogicalDeviceReadEnd.Failed, [Chain401], [0x1000, 0x67FF], ChainFailure.EndedTooEarly),
+            CanOpenLogicalDeviceReadEnd.Inconsistent, [Chain401], [0x1000, 0x67FF], ChainFailure.EndedTooEarly),
         new ChainCase("#552 (1): FFFFh, 67FFh, and the peer's 0602 0000h at 6FFFh",
             [(0x1000, Chain401), (0x67FF, Device401)],
-            CanOpenLogicalDeviceReadEnd.Failed, [Device401], [0x1000, 0x67FF, 0x6FFF], ChainFailure.EndedTooEarly),
+            CanOpenLogicalDeviceReadEnd.Inconsistent, [Device401], [0x1000, 0x67FF, 0x6FFF], ChainFailure.EndedTooEarly),
         new ChainCase("#552 (2): 67FFh names another profile than 1000h, and nothing further is asked",
             [(0x1000, Chain401), (0x67FF, Device408), (0x6FFF, Device401)],
-            CanOpenLogicalDeviceReadEnd.Failed, [Device408], [0x1000, 0x67FF], ChainFailure.OtherProfile),
+            CanOpenLogicalDeviceReadEnd.Inconsistent, [Device408], [0x1000, 0x67FF], ChainFailure.OtherProfile),
         new ChainCase("#552 (2): profile 0000h in 1000h is compared like any other, a 67FFh of profile 401 contradicts it",
             [(0x1000, 0xFFFF0000u), (0x67FF, 0x00010191u), (0x6FFF, Device401)],
-            CanOpenLogicalDeviceReadEnd.Failed, [0x00010191u], [0x1000, 0x67FF], ChainFailure.OtherProfile),
+            CanOpenLogicalDeviceReadEnd.Inconsistent, [0x00010191u], [0x1000, 0x67FF], ChainFailure.OtherProfile),
         new ChainCase("no description bound: the gate refuses 67FFh",
             [(0x1000, Chain401), (0x67FF, Refused(0x67FF, bound: false))],
             CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired, [Chain401], [0x1000, 0x67FF], ChainFailure.None),
@@ -503,14 +503,14 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         await bootup.First;
 
         var none = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
-        none.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        none.End.Should().Be(CanOpenLogicalDeviceReadEnd.Inconsistent);
         none.Failure.Should().BeOfType<InvalidDataException>()
             .Which.InnerException.Should().BeOfType<SdoAbortException>().Which.Index.Should().Be(0x67FF);
         none.Devices.Should().ContainSingle().Which.DeviceType.Value.Should().Be(Chain401);
 
         server.ObjectDictionary.AddU32(0x67FF, 0, Device401, OdAccess.ReadOnly);
         var one = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
-        one.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        one.End.Should().Be(CanOpenLogicalDeviceReadEnd.Inconsistent);
         one.Failure.Should().BeOfType<InvalidDataException>()
             .Which.InnerException.Should().BeOfType<SdoAbortException>().Which.Index.Should().Be(0x6FFF);
         one.Devices.Should().ContainSingle().Which.DeviceType.Value.Should().Be(Device401);
@@ -539,7 +539,7 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
 
         var result = await CanOpenLogicalDevices.ReadAsync(client, 0x10).WithTimeoutAsync(ShortTimeout);
 
-        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Inconsistent);
         result.Failure.Should().BeOfType<InvalidDataException>();
         result.DeviceType.ProfileNumber.Should().Be(401);
         result.Devices.Should().ContainSingle().Which.DeviceType.ProfileNumber.Should().Be(408);

@@ -93,10 +93,12 @@ internal sealed class CanOpenProfileCatalog
     /// device in the list and <see cref="CanOpenLogicalDeviceReadResult.DeviceType"/> disagree and
     /// either word could be the wrong one. Selecting a profile from that list would pick one of them
     /// silently, so the result is refused; <see cref="CreatePeer"/> maps a device the caller has
-    /// chosen. A peer that announces several logical devices and ends the chain before the second is
-    /// inconsistent too, but there <c>1000h</c> and the device read agree on the first device's profile,
-    /// so the list is mapped like any other that failed with the devices read so far. The rule uses
-    /// public members only, so a caller can apply it to its own catalogue.</remarks>
+    /// chosen. A peer that announces several logical devices and ends the chain before the second also
+    /// ends as <see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>, but there <c>1000h</c> and the
+    /// device read agree on the first device's profile: that one device is mapped, as the devices read
+    /// before a <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> read are. The rule looks at the words,
+    /// not at <see cref="CanOpenLogicalDeviceReadResult.End"/>, and uses public members only, so a
+    /// caller can apply it to its own catalogue.</remarks>
     /// <param name="node">The node that reads the peer.</param>
     /// <param name="peerNodeId">The node-id of the peer, <c>1</c> to <c>127</c>.</param>
     /// <param name="result">The logical devices of the peer, see <see cref="CanOpenLogicalDevices.ReadAsync"/>.</param>

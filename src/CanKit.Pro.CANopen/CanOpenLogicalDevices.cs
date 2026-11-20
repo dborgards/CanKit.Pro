@@ -59,12 +59,10 @@ public enum CanOpenLogicalDeviceReadEnd
     PeerDescriptionRequired = 1,
 
     /// <summary>A read inside the chain ended in an SDO abort other than the peer's "object does
-    /// not exist", the client's own timeout included, or returned a value that is not four bytes;
-    /// or the peer's answers contradict each other: <c>67FFh</c> names another profile than
-    /// <c>1000h</c>, or <c>1000h</c> announces several logical devices and the peer reports
-    /// <c>67FFh</c> or <c>6FFFh</c> as non-existent. <see cref="CanOpenLogicalDeviceReadResult.Failure"/>
-    /// says which (its remarks tell the cases apart), and the list holds the devices read until
-    /// then, a <c>67FFh</c> that contradicts <c>1000h</c> included.</summary>
+    /// not exist", the client's own timeout included, or returned a value that is not four bytes.
+    /// <see cref="CanOpenLogicalDeviceReadResult.Failure"/> says which, and the list holds the
+    /// devices read before it. Answers that are well formed but contradict each other end as
+    /// <see cref="Inconsistent"/> instead.</summary>
     Failed = 2,
 
     /// <summary>The bound peer description does not declare the next device-type object, so the
@@ -73,6 +71,19 @@ public enum CanOpenLogicalDeviceReadEnd
     /// necessarily as far as the peer goes. When <c>1000h</c> announced further devices but the
     /// description declares no <c>67FFh</c>, the only device is the copy of <c>1000h</c>.</summary>
     EndedByPeerDescription = 3,
+
+    /// <summary>The peer's answers contradict each other: <c>1000h</c> carries <c>FFFFh</c>, which
+    /// announces several logical devices, and the peer reports <c>67FFh</c> or <c>6FFFh</c> as
+    /// non-existent; or <c>67FFh</c> names another profile number than <c>1000h</c> (CiA 301 v4.2.0
+    /// §7.5.2.1). The rule: a read is inconsistent when two answers of the peer, each well formed,
+    /// cannot both be true. A single answer that is malformed, a value that is not four bytes, is not
+    /// a contradiction but a <see cref="Failed"/> read. Nothing further is asked.
+    /// <see cref="CanOpenLogicalDeviceReadResult.Failure"/> is an <see cref="System.IO.InvalidDataException"/>
+    /// saying how, with the peer's abort as its inner exception where the peer ended the chain too
+    /// early. Both words stay as the peer returned them: <see cref="CanOpenLogicalDeviceReadResult.DeviceType"/>
+    /// holds <c>1000h</c> and the list the devices read, a <c>67FFh</c> that contradicts
+    /// <c>1000h</c> included.</summary>
+    Inconsistent = 4,
 }
 
 /// <summary>The logical devices of a peer as <see cref="CanOpenLogicalDevices.ReadAsync"/> found
@@ -88,38 +99,43 @@ public sealed class CanOpenLogicalDeviceReadResult
         Failure = failure;
     }
 
-    /// <summary>The device-type word of object <c>1000h</c> as the peer returned it.</summary>
+    /// <summary>The device-type word of object <c>1000h</c> as the peer returned it, whatever
+    /// <see cref="End"/> says; when it is <see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>, it
+    /// may name another profile than the first of <see cref="Devices"/>, and neither is
+    /// rewritten.</summary>
     public CanOpenDeviceType DeviceType { get; }
 
     /// <summary>The logical devices read, ordered by <see cref="CanOpenLogicalDevice.Index"/>.
     /// Never empty: a node without further logical devices is one logical device, and the first
     /// device is reported with the type of <c>1000h</c> when <c>67FFh</c> could not be read. Every
-    /// word is the one the peer returned: when <c>67FFh</c> names another profile than
-    /// <c>1000h</c>, the first device carries the word of <c>67FFh</c> and
-    /// <see cref="DeviceType"/> the word of <c>1000h</c>, and the reading
-    /// <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>.</summary>
+    /// word is the one the peer returned. Per <see cref="End"/>: every device the peer has for
+    /// <see cref="CanOpenLogicalDeviceReadEnd.Complete"/>; the devices read before the gate refused
+    /// or the read failed for the other ends; for <see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>
+    /// the devices read, so that a <c>67FFh</c> of another profile than <c>1000h</c> is the first
+    /// device, beside <see cref="DeviceType"/> holding <c>1000h</c>.</summary>
     public IReadOnlyList<CanOpenLogicalDevice> Devices { get; }
 
-    /// <summary>How the reading ended.</summary>
+    /// <summary>How the reading ended. What <see cref="Devices"/> and <see cref="Failure"/> hold
+    /// for each value is listed in the remarks of <see cref="CanOpenLogicalDevices.ReadAsync"/>.</summary>
     public CanOpenLogicalDeviceReadEnd End { get; }
 
-    /// <summary>The failure that ended the reading. Not <see langword="null"/> exactly when
-    /// <see cref="End"/> is <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>.</summary>
+    /// <summary>Why the reading ended early. Not <see langword="null"/> exactly when <see cref="End"/>
+    /// is <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> or
+    /// <see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>.</summary>
     /// <remarks>
-    /// What it is tells the failures apart:
     /// <list type="bullet">
-    /// <item><description>an <see cref="SdoAbortException"/>: a read inside the chain was aborted,
-    /// by the peer with a code other than "object does not exist", or locally, the client's own
-    /// timeout included;</description></item>
-    /// <item><description>an <see cref="InvalidDataException"/> whose
+    /// <item><description><see cref="CanOpenLogicalDeviceReadEnd.Failed"/>: an
+    /// <see cref="SdoAbortException"/> where a read inside the chain was aborted, by the peer with a
+    /// code other than "object does not exist" or locally, the client's own timeout included; or an
+    /// <see cref="InvalidDataException"/> without an inner exception where a device-type object did
+    /// not return four bytes.</description></item>
+    /// <item><description><see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>: an
+    /// <see cref="InvalidDataException"/> saying how the answers contradict each other. Its
     /// <see cref="Exception.InnerException"/> is the peer's <see cref="SdoAbortException"/>
-    /// "object does not exist": <c>1000h</c> announces several logical devices and the peer ended
-    /// the chain before the second;</description></item>
-    /// <item><description>an <see cref="InvalidDataException"/> without an inner exception, where the
-    /// profile number of the first of <see cref="Devices"/> differs from the one of
-    /// <see cref="DeviceType"/>: <c>67FFh</c> names another profile than <c>1000h</c>;</description></item>
-    /// <item><description>an <see cref="InvalidDataException"/> without an inner exception, where the
-    /// two profile numbers agree: a device-type object did not return four bytes.</description></item>
+    /// "object does not exist" where <c>1000h</c> announces several logical devices and the peer
+    /// ended the chain before the second; it has none where <c>67FFh</c> names another profile than
+    /// <c>1000h</c>, and then the profile numbers of <see cref="DeviceType"/> and of the first of
+    /// <see cref="Devices"/> differ.</description></item>
     /// </list>
     /// </remarks>
     public Exception? Failure { get; }
@@ -206,9 +222,10 @@ public static class CanOpenLogicalDevices
     /// <c>FFFFh</c> says the node is a module of several logical devices, and <c>1000h</c> names
     /// the profile of the first of them, whose device type is <c>67FFh</c> (CiA 301 v4.2.0
     /// §7.5.2.1; CiA 401-1 v3.1.0 §6.2.1). Answers that break either rule contradict each other:
-    /// the read ends as <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> with an
+    /// the read ends as <see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/> with an
     /// <see cref="InvalidDataException"/>, keeps every word as the peer returned it, and asks
-    /// nothing further. Only the profile numbers are compared: the additional information of
+    /// nothing further. A malformed answer, a value that is not four bytes, is not a contradiction
+    /// but a <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> read. Only the profile numbers are compared: the additional information of
     /// device 0 is its own and lives in <c>67FFh</c>. Profile number <c>0000h</c>, a device that
     /// follows no standardized profile, is compared like any other: a <c>1000h</c> of profile
     /// <c>0000h</c> over a <c>67FFh</c> of profile 401 contradicts it. That is a reading of §7.5.2.1,
@@ -225,15 +242,15 @@ public static class CanOpenLogicalDevices
     /// then "object does not exist" (<c>0602 0000h</c>) from the peer, or eight devices</term>
     /// <description><see cref="CanOpenLogicalDeviceReadEnd.Complete"/>, the devices read.</description></item>
     /// <item><term><c>FFFFh</c>; <c>0602 0000h</c> from the peer at <c>67FFh</c></term>
-    /// <description><see cref="CanOpenLogicalDeviceReadEnd.Failed"/>, one device, the copy of
+    /// <description><see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>, one device, the copy of
     /// <c>1000h</c>; the failure is an <see cref="InvalidDataException"/> whose inner exception is
     /// the peer's abort.</description></item>
     /// <item><term><c>FFFFh</c>; <c>67FFh</c> of the profile of <c>1000h</c>; <c>0602 0000h</c>
-    /// from the peer at <c>6FFFh</c></term><description><see cref="CanOpenLogicalDeviceReadEnd.Failed"/>,
+    /// from the peer at <c>6FFFh</c></term><description><see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/>,
     /// one device, read from <c>67FFh</c>; the failure is an <see cref="InvalidDataException"/> whose
     /// inner exception is the peer's abort.</description></item>
     /// <item><term><c>FFFFh</c>; <c>67FFh</c> of another profile than <c>1000h</c></term>
-    /// <description><see cref="CanOpenLogicalDeviceReadEnd.Failed"/> without asking <c>6FFFh</c>,
+    /// <description><see cref="CanOpenLogicalDeviceReadEnd.Inconsistent"/> without asking <c>6FFFh</c>,
     /// one device, read from <c>67FFh</c>, beside <see cref="CanOpenLogicalDeviceReadResult.DeviceType"/>
     /// from <c>1000h</c>; the failure is an <see cref="InvalidDataException"/> naming both
     /// words.</description></item>
@@ -326,7 +343,7 @@ public static class CanOpenLogicalDevices
                     // numbers are compared. A peer that contradicts itself is not read further.
                     if (logicalDevice == 0 && type.ProfileNumber != first.ProfileNumber)
                     {
-                        end = CanOpenLogicalDeviceReadEnd.Failed;
+                        end = CanOpenLogicalDeviceReadEnd.Inconsistent;
                         failure = new InvalidDataException(
                             $"Object 1000h holds 0x{first.Value:X8}, profile {first.ProfileNumber}, but 67FFh, the device " +
                             $"type of logical device 0, holds 0x{type.Value:X8}, profile {type.ProfileNumber}: 1000h names " +
@@ -344,7 +361,7 @@ public static class CanOpenLogicalDevices
                     // peer saying anything, and stays apart.
                     if (logicalDevice < 2)
                     {
-                        end = CanOpenLogicalDeviceReadEnd.Failed;
+                        end = CanOpenLogicalDeviceReadEnd.Inconsistent;
                         failure = new InvalidDataException(
                             $"Object 1000h holds 0x{first.Value:X8}, whose additional information FFFFh announces several " +
                             $"logical devices (CiA 301 v4.2.0 §7.5.2.1), but the peer reports {abort.Index:X4}h, the " +
