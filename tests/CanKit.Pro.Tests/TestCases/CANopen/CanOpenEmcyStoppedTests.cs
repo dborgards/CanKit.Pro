@@ -30,6 +30,11 @@ public partial class CanOpenPdoEngineTests
         private readonly ManualResetEventSlim _releaseBootUp = new();
         private readonly TaskCompletionSource<bool> _heldNodeEmcySent = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        private int _bootUpLeft;
+
+        /// <summary>Whether a held boot-up has left the hold, released or timed out.</summary>
+        internal bool BootUpLeft => Volatile.Read(ref _bootUpLeft) != 0;
+
         /// <summary>Completes when an EMCY of the node-id whose boot-up is held reaches the driver.</summary>
         internal Task EmcyOfHeldNodeSent => _heldNodeEmcySent.Task;
 
@@ -46,6 +51,7 @@ public partial class CanOpenPdoEngineTests
                 {
                     _bootUpEntered.TrySetResult(true);
                     _releaseBootUp.Wait(ShortTimeout);
+                    Volatile.Write(ref _bootUpLeft, 1);
                 }
                 // Only the first EMCY, 1000h, blocks, as a slow driver would.
                 if ((uint)frame.ID == EmcyId && frame.Data.Span[0] == 0x00 && frame.Data.Span[1] == 0x10)
@@ -208,5 +214,42 @@ public partial class CanOpenPdoEngineTests
         order.IndexOf(CanOpenCobId.Heartbeat(newId)).Should().BeGreaterThanOrEqualTo(0);
         order.IndexOf(CanOpenCobId.Heartbeat(newId)).Should().BeLessThan(order.IndexOf(CanOpenCobId.Emcy(newId)),
             "the held EMCY goes out behind the boot-up");
+    }
+
+    // Codex on #574: an EMCY that waited in Stopped and is released by a reset waits for that reset's
+    // boot-up. Cancelling its token then still withdraws it; the boot-up is not cancelled with it.
+    [Fact]
+    public async Task Emcy_Released_By_A_Reset_Is_Cancelled_By_Its_Token_While_It_Waits_For_The_Boot_Up()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions());
+        using var driver = new SlowEmcyDriver(rig, holdBootUpOf: Device);
+        using var cancellation = new CancellationTokenSource();
+        var first = rig.Node.SendEmcyAsync(0x1000, 0);
+        await driver.Entered;
+        var waiting = rig.Node.SendEmcyAsync(0x1001, 0x04, cancellationToken: cancellation.Token);
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Stop, Device);
+        driver.Release();
+        await first.WaitAsync(ShortTimeout);
+        await WaitForEmcyHeldOrCompletionAsync(rig, waiting);
+        waiting.IsCompleted.Should().BeFalse();
+
+        var waitsForBootUp = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.HeldEmcysWaitForBootUpForTests = () => waitsForBootUp.TrySetResult(true);
+        int bootUps = rig.Wire.Count(CanOpenCobId.Heartbeat(Device));
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        await driver.BootUpEntered;
+        await waitsForBootUp.Task.WaitAsync(ShortTimeout);
+
+        cancellation.Cancel();
+        await FluentActions.Awaiting(() => waiting.WaitAsync(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+        driver.BootUpLeft.Should().BeFalse("the cancellation ended the wait itself, not the boot-up leaving");
+        rig.Node.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0, "the withdrawn EMCY wrote nothing");
+        driver.ReleaseBootUp();
+        await rig.Wire.WaitForCountAsync(CanOpenCobId.Heartbeat(Device), bootUps + 1);
+
+        // The witness: had the withdrawn EMCY gone out, it would be the second frame.
+        await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1002, 0);
+        rig.Wire.Count(EmcyId).Should().Be(2);
     }
 }

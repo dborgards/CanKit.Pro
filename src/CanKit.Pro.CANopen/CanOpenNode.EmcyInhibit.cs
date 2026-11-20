@@ -70,8 +70,8 @@ internal sealed partial class CanOpenNode
     /// checks the NMT state then: in Stopped it waits in <see cref="WaitForEmcySlot"/>, which without
     /// inhibit time waits for nothing else, until the node has left Stopped, as the gated path does
     /// (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY in Stopped; #565). Its task completes once the
-    /// frame has gone out, and cancelling its token during the wait ends it without a frame or a
-    /// <c>1001h</c> write. Unlike the gated path an NMT reset does not drop it: the reset ends the
+    /// frame has gone out, and cancelling its token while it waits — for the node to leave Stopped,
+    /// or for a boot-up (below) — ends it without a frame or a <c>1001h</c> write. Unlike the gated path an NMT reset does not drop it: the reset ends the
     /// wait, the step looks again once the reset is done, and goes out on the COB-ID active then
     /// (<c>transmit</c> reads it), as an EMCY queued across a reset always has (3eb49f3e). A step that
     /// waited goes out behind a boot-up whose send is still pending, so that one released by a reset
@@ -94,12 +94,23 @@ internal sealed partial class CanOpenNode
         if (waited && !_bootUpSend.IsCompleted)
         {
             HeldEmcysWaitForBootUpForTests?.Invoke();
-            await _bootUpSend.ContinueWith(static sent => { _ = sent.Exception; },
-                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
+            await WaitForBootUpSendAsync(_bootUpSend, cancellationToken).ConfigureAwait(false);
             await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, waited: true)).ConfigureAwait(false);
             return;
         }
         await transmit().ConfigureAwait(false);
+    }
+
+    /// <summary>Completes when <paramref name="bootUp"/>'s send has ended, however it ended, or
+    /// throws <see cref="OperationCanceledException"/> when <paramref name="cancellationToken"/> is
+    /// cancelled first. Only the wait is cancelled, never the boot-up (Codex on #574).</summary>
+    private static async Task WaitForBootUpSendAsync(Task bootUp, CancellationToken cancellationToken)
+    {
+        var sent = bootUp.ContinueWith(static ended => { _ = ended.Exception; },
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(() => cancelled.TrySetCanceled(cancellationToken)))
+            await (await Task.WhenAny(sent, cancelled.Task).ConfigureAwait(false)).ConfigureAwait(false);
     }
 
     private Task<bool> WaitForEmcySlot(CancellationToken cancellationToken)
