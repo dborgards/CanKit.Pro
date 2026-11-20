@@ -1059,8 +1059,9 @@ internal sealed partial class CanOpenNode
             findings.Add(new DeviceDescriptionFinding(index, subindex, DeviceDescriptionOutcome.Corrected,
                 "the value was rejected by the rule an SDO download would hit; the default is kept", entry.Value, abort));
         }
-        else if (index == Co.ErrorRegister && od.TryReadRaw(index, subindex, out var stored) && !stored.SequenceEqual(bytes))
+        else if (index == Co.ErrorRegister && od.ReadRaw(index, subindex) is var stored && !stored.SequenceEqual(bytes))
         {
+            // ReadRaw, not TryReadRaw: the write that just succeeded proves the entry is there.
             // Accepted with reserved bit 6 cleared, as every write of 1001h is (#566): the file said
             // something the node does not hold.
             findings.Add(new DeviceDescriptionFinding(index, subindex, DeviceDescriptionOutcome.Corrected,

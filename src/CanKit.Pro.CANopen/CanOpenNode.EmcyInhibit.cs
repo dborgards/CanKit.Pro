@@ -94,7 +94,8 @@ internal sealed partial class CanOpenNode
     private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, bool dropOnReset,
         bool waited = false)
     {
-        if (Volatile.Read(ref _disposed) != 0) return;
+        // No disposal check of its own, as on the gated path: a step that runs after the disposal finds
+        // the actor refusing the redispatch (DispatchQueuedEmcy) or the send refusing the frame.
         var slot = WaitForEmcySlot(cancellationToken);
         if (!slot.IsCompleted)
         {
