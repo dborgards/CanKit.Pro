@@ -81,9 +81,10 @@ public sealed class ObjectDictionary
 
     /// <summary>
     /// Internal hook for <see cref="CanOpenNode"/>: consulted before a value is stored. Returns
-    /// the decision for the write — store, reject with an SDO abort code, or "handled, do not
-    /// store" (used by the <c>1010h</c>/<c>1011h</c> signature objects, whose write is a command
-    /// rather than a value). Runs on the writing thread, outside the lock.
+    /// the decision for the write — store, store a normalised value in its place (the reserved bit
+    /// of <c>1001h</c>, #566), reject with an SDO abort code, or "handled, do not store" (used by
+    /// the <c>1010h</c>/<c>1011h</c> signature objects, whose write is a command rather than a
+    /// value). Runs on the writing thread, outside the lock.
     /// </summary>
     internal Func<ushort, byte, byte[], OdWriteDecision>? WriteValidator { get; set; }
 
@@ -316,6 +317,16 @@ public sealed class ObjectDictionary
                 return false;
             }
             if (!decision.Store) return true;
+            // A normalised value replaces the written one in this store; the caller's array stays
+            // as it was. It must have the written value's length, which was checked against the
+            // entry above: another length is a bug of the validator, not of the write.
+            if (decision.Replacement is { } replacement)
+            {
+                if (replacement.Length != value.Length)
+                    throw new InvalidOperationException(
+                        $"The validator of OD entry 0x{index:X4}:{subindex:X2} replaced a {value.Length}-byte value with {replacement.Length} bytes.");
+                value = replacement;
+            }
         }
 
         var copy = new byte[value.Length];
@@ -549,16 +560,17 @@ public sealed class ObjectDictionary
 }
 
 /// <summary>
-/// Outcome of <see cref="ObjectDictionary.WriteValidator"/>: store the value, reject it with an
-/// SDO abort code, or treat the write as a command that was carried out and leaves the stored
-/// value unchanged.
+/// Outcome of <see cref="ObjectDictionary.WriteValidator"/>: store the value, store a normalised
+/// value in its place, reject it with an SDO abort code, or treat the write as a command that was
+/// carried out and leaves the stored value unchanged.
 /// </summary>
 internal readonly struct OdWriteDecision
 {
-    private OdWriteDecision(bool store, SdoAbortCode? abort)
+    private OdWriteDecision(bool store, SdoAbortCode? abort, byte[]? replacement = null)
     {
         Store = store;
         Abort = abort;
+        Replacement = replacement;
     }
 
     /// <summary>Whether the value is to be stored.</summary>
@@ -567,8 +579,17 @@ internal readonly struct OdWriteDecision
     /// <summary>The abort code when the write is rejected; <see langword="null"/> otherwise.</summary>
     public SdoAbortCode? Abort { get; }
 
+    /// <summary>What is stored in place of the written value; <see langword="null"/> to store the
+    /// written value. It must have the written value's length: the write throws
+    /// <see cref="InvalidOperationException"/> otherwise, a bug of the validator.</summary>
+    public byte[]? Replacement { get; }
+
     /// <summary>Accept and store the value.</summary>
     public static OdWriteDecision Accept => new(store: true, abort: null);
+
+    /// <summary>Accept the write and store <paramref name="value"/> in place of the written value:
+    /// the one store, and the one <see cref="ObjectDictionary.EntryWritten"/>, of the write.</summary>
+    public static OdWriteDecision AcceptAs(byte[] value) => new(store: true, abort: null, replacement: value);
 
     /// <summary>Accept the write as a command; do not change the stored value.</summary>
     public static OdWriteDecision Handled => new(store: false, abort: null);

@@ -380,17 +380,19 @@ internal sealed partial class CanOpenNode
     private static byte WithoutReservedErrorRegisterBit(byte register)
         => (byte)(register & ~ReservedErrorRegisterBit);
 
-    /// <summary>Validation of a write of <c>1001h</c>, local or by SDO where a description made it
-    /// writable, or a described default: a value with bit 6 set is stored with it cleared
-    /// (<see cref="WithoutReservedErrorRegisterBit"/>) and the write counts as accepted. The caller's
-    /// array is not changed. Writing thread, under the dictionary's write gate, which the store
-    /// below enters again.</summary>
-    private OdWriteDecision ClearReservedErrorRegisterBit(byte[] value)
+    /// <summary>Validation of every validated write of <c>1001h</c> — local, an SDO download or an
+    /// RPDO or MPDO store where a description made it writable, a described default: a value with
+    /// bit 6 set is accepted and stored with the bit cleared (<see cref="WithoutReservedErrorRegisterBit"/>).
+    /// The dictionary stores the replacement in place of the written value, in the write's one store,
+    /// so <c>EntryWritten</c> — and through it the application's-part notice, an application's
+    /// <c>OnEntriesWritten</c> and the event of a TPDO that maps <c>1001h</c> — is raised once and
+    /// reads the cleared value. The caller's array is not changed. Writing thread, under the
+    /// dictionary's write gate.</summary>
+    private static OdWriteDecision ClearReservedErrorRegisterBit(byte[] value)
     {
         // 1001h is UNSIGNED8 (§7.5.2.2), and the size was checked before validation.
         if ((value[0] & ReservedErrorRegisterBit) == 0) return OdWriteDecision.Accept;
-        _od.WriteRawUnchecked(Co.ErrorRegister, 0x00, new[] { WithoutReservedErrorRegisterBit(value[0]) });
-        return OdWriteDecision.Handled;
+        return OdWriteDecision.AcceptAs(new[] { WithoutReservedErrorRegisterBit(value[0]) });
     }
 
     /// <summary>EntryWritten, on the writer's thread and under the dictionary's write gate: a write of <c>1001h</c> that is not the
