@@ -744,7 +744,10 @@ it. `1001h` is `ro` on the bus, so an SDO download is refused with `0601 0002h` 
 description makes it writable. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
 while a communication error is active still carries bit 4. An EMCY held in Stopped carries the
-register of the moment it is sent. Reset Node and Reset Communication end the communication
+register of the moment it is sent. A communication error raised while an LSS slave waits for its
+node-id (a heartbeat-consumer timeout, in Initialisation, where only the boot-up object exists) is
+held and goes out behind the boot-up once the slave has its node-id, `1001h` showing it from that
+EMCY; one whose cause ends before leaves nothing on the bus, `0000h` included (#547). Reset Node and Reset Communication end the communication
 errors without an EMCY (transitions 5 and 0) and leave the application's bits in `1001h`. With
 the EMCY switched off (bit 31 of `1014h`) no error is raised, and an error that ends meanwhile
 still clears the bits. A run of short RPDO frames or SRDO pairs is not consumed while disabled:

@@ -705,8 +705,10 @@ internal sealed partial class CanOpenNode
     // So an error cleared before the boot-up leaves its entry and nothing else; a warning is not an
     // error, and no clear takes it out (#556). The errors are bounded by those active at once; the
     // warnings by what a profile sends while an LSS slave waits for its node-id. Null when empty.
+    // The node's own communication errors raised there are held in the same list, in their order
+    // among the profile's: Slot null, Communication their key (RaiseCommunicationError, #547).
     // Actor loop only.
-    private List<(ApplicationSlot Slot, ushort Code, byte[] ManufacturerSpecific, bool Warning)>? _heldProfileEmcys;
+    private List<(ApplicationSlot? Slot, ushort Code, byte[] ManufacturerSpecific, bool Warning, int? Communication)>? _heldEmcys;
 
     /// <summary>Records an error of <paramref name="slot"/>'s application and orders its EMCY: once per
     /// error event, so an error that is active already does nothing (CiA 301 §7.2.7.1). Unlike a
@@ -743,7 +745,7 @@ internal sealed partial class CanOpenNode
         var manufacturer = manufacturerSpecific.ToArray();
         if (_state == NmtState.Initializing)
         {
-            (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: false));
+            (_heldEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: false, Communication: null));
             return;
         }
         if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
@@ -762,7 +764,7 @@ internal sealed partial class CanOpenNode
         ShowProfileErrorsInRegister();
         if (_state == NmtState.Initializing)
         {
-            _heldProfileEmcys?.RemoveAll(held => !held.Warning && ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
+            _heldEmcys?.RemoveAll(held => !held.Warning && ReferenceEquals(held.Slot, slot) && held.Code == errorCode);
             return;
         }
         if (_state != NmtState.Stopped) EmcyChainWaitsForBootUp();
@@ -799,7 +801,7 @@ internal sealed partial class CanOpenNode
         switch (_state)
         {
             case NmtState.Initializing:
-                (_heldProfileEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: true));
+                (_heldEmcys ??= new()).Add((slot, errorCode, manufacturer, Warning: true, Communication: null));
                 return;
             case NmtState.Stopped:
                 return;
@@ -825,15 +827,16 @@ internal sealed partial class CanOpenNode
     private void EndProfileErrorsForReset()
     {
         _profileErrors.Clear();
-        _heldProfileEmcys = null;
+        // The node's communication errors held there end with this reset too (EndCommunicationErrorsForReset).
+        _heldEmcys = null;
         _profileResetGeneration++;
     }
 
     /// <summary>
     /// The boot-up (<paramref name="bootUp"/>) is ordered and the node has left Initialisation: the
-    /// profile EMCYs held there go out behind it, in the order they were raised, each with the
-    /// register of the moment it is released, as a held EMCY in Stopped does. A no-op when nothing
-    /// is held, which is always so on a node without applications. Actor loop.
+    /// profile EMCYs held there, and those of the node's own communication errors (#547), go out
+    /// behind it, in the order they were raised, each with the register of the moment it is
+    /// released, as a held EMCY in Stopped does. A no-op when nothing is held. Actor loop.
     /// </summary>
     /// <remarks>
     /// The boot-up travels on the heartbeat chain and the EMCY on its own, so ordering one before the
@@ -857,13 +860,17 @@ internal sealed partial class CanOpenNode
     private void ReleaseProfileEmcysAfterBootUp(Task bootUp)
     {
         _bootUpSend = bootUp;
-        var held = _heldProfileEmcys;
+        var held = _heldEmcys;
         if (held is not { Count: > 0 }) return;
-        _heldProfileEmcys = null;
+        _heldEmcys = null;
         AppendBootUpWait(bootUp);
         int generation = _profileResetGeneration;
-        foreach (var (_, code, manufacturer, warning) in held)
+        foreach (var (_, code, manufacturer, warning, communication) in held)
+        {
+            // Its 0000h will follow it on the gated path (EmitErrorReset).
+            if (communication is not null) _communicationErrorReleased = true;
             _ = EmitEmcy(new EmcyMessage(_nodeId, code, 0, manufacturer), profileResetGeneration: generation, warning: warning);
+        }
     }
 
     // The send of the boot-up the node ordered last (ReleaseProfileEmcysAfterBootUp). Actor loop only.
