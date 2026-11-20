@@ -10,7 +10,8 @@ namespace CanKit.Pro.CANopen;
 // invocations. Count conservatively from send completion, so delayed driver handoffs or
 // echo confirmations cannot compress the actual invocation interval.
 // Optional 1029h also uses this queue's Stopped/reset gate, without enabling inhibit timing, and so
-// does a profile EMCY released behind a boot-up, whatever the options (EmitEmcy, #549).
+// does a profile EMCY released behind a boot-up, whatever the options (EmitEmcy, #549). Every other
+// EMCY uses its Stopped wait, without the reset drop (SendWhenNotStoppedAsync, #565).
 internal sealed partial class CanOpenNode
 {
     private object _emcyInhibitEpoch = new();
@@ -63,6 +64,88 @@ internal sealed partial class CanOpenNode
         await transmit().ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The step of an EMCY that takes no gated path — neither EMCY inhibit nor error behaviour is
+    /// enabled, and it is not a profile's. It runs on the actor in the turn the chain gives it and
+    /// checks the NMT state then: in Stopped it waits in <see cref="WaitForEmcySlot"/>, which without
+    /// inhibit time waits for nothing else, until the node has left Stopped, as the gated path does
+    /// (CiA 301 v4.2.0 §7.3.2.2.4, Table 37: no EMCY in Stopped; #565). Its task completes once the
+    /// frame has gone out, and cancelling its token while it waits — for the node to leave Stopped,
+    /// or for a boot-up (below) — ends it without a frame or a <c>1001h</c> write.
+    /// <para>
+    /// An NMT reset ends the wait, and what happens then depends on who ordered the EMCY. Two kinds,
+    /// and this is where the rule lives:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>An EMCY the application ordered with <c>SendEmcyAsync</c> survives the reset, as an EMCY
+    /// queued across a reset always has (3eb49f3e): the step looks again once the reset is done and
+    /// goes out on the COB-ID active then (<c>transmit</c> reads it), behind the boot-up that reset
+    /// ordered, so that it does not overtake it.</item>
+    /// <item>An EMCY the node raises for its own error state (<paramref name="dropOnReset"/>: a
+    /// communication error and its <c>0000h</c>) is dropped, as the gated path drops it: the reset
+    /// ended the error it reports without an EMCY (Figure 37, transitions 5 and 0). It writes neither
+    /// <c>1001h</c> nor <c>1003h</c>; the reset has written <c>1001h</c> itself.</item>
+    /// </list>
+    /// <para>
+    /// Only a node EMCY that waited in Stopped is dropped. One merely queued behind a slow send when
+    /// the reset comes is decided after the reset, as before this rule existed.
+    /// </para>
+    /// <para>
+    /// How it holds, whenever the reset, a Start, the disposal or a cancellation comes: every wait —
+    /// for the node to leave Stopped, or for a boot-up — ends by a redispatch, and every pass of this
+    /// method begins on the actor by deciding afresh, in this order: the node disposed ends the step,
+    /// its task completed and no frame, as on the gated path (Bugbot on #574); a node EMCY that waited
+    /// and has seen a reset since (<paramref name="waitedIn"/>, the reset epoch of its first wait, is no
+    /// longer <see cref="_emcyInhibitEpoch"/>) is dropped, also when a Start woke its wait just before
+    /// the reset came (Codex on #574); Stopped waits again; a step that waited waits for a pending
+    /// boot-up; otherwise it transmits, and <c>transmit</c> honours a token cancelled meanwhile. A reset
+    /// and the disposal end both waits (<see cref="ResetEmcyInhibit"/>), so no wait outlives either.
+    /// </para>
+    /// </summary>
+    private async Task SendWhenNotStoppedAsync(Func<Task> transmit, CancellationToken cancellationToken, bool dropOnReset,
+        object? waitedIn = null)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (dropOnReset && waitedIn is not null && !ReferenceEquals(waitedIn, _emcyInhibitEpoch)) return;
+        var slot = WaitForEmcySlot(cancellationToken);
+        if (!slot.IsCompleted)
+        {
+            var epoch = waitedIn ?? _emcyInhibitEpoch;
+            // True: the node left Stopped; false: a reset or the disposal ended the wait. Either way the
+            // next pass decides, on the actor; a token cancelled during the wait throws here.
+            await slot.ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, epoch)).ConfigureAwait(false);
+            return;
+        }
+        // Completed at once: not Stopped (true), or a token cancelled already, which throws here.
+        await slot.ConfigureAwait(false);
+        if (waitedIn is not null && !_bootUpSend.IsCompleted)
+        {
+            HeldEmcysWaitForBootUpForTests?.Invoke();
+            await WaitForBootUpSendAsync(_bootUpSend, _emcyEpochEnded.Task, cancellationToken).ConfigureAwait(false);
+            await DispatchQueuedEmcy(() => SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset, waitedIn)).ConfigureAwait(false);
+            return;
+        }
+        await transmit().ConfigureAwait(false);
+    }
+
+    // Completed, and replaced, by every reset and by the disposal (ResetEmcyInhibit): what ends a step's
+    // wait for a boot-up, so that the next pass decides in the state the node is in then. Actor loop only.
+    private TaskCompletionSource<bool> _emcyEpochEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes when <paramref name="bootUp"/>'s send has ended, however it ended, or when
+    /// <paramref name="epochEnded"/> completes (a reset or the disposal); throws
+    /// <see cref="OperationCanceledException"/> when <paramref name="cancellationToken"/> is cancelled
+    /// first. Only the wait ends, never the boot-up (Codex on #574).</summary>
+    private static async Task WaitForBootUpSendAsync(Task bootUp, Task epochEnded, CancellationToken cancellationToken)
+    {
+        var sent = bootUp.ContinueWith(static ended => { _ = ended.Exception; },
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(() => cancelled.TrySetCanceled(cancellationToken)))
+            await (await Task.WhenAny(sent, epochEnded, cancelled.Task).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
     private Task<bool> WaitForEmcySlot(CancellationToken cancellationToken)
     {
         // Disabled producers still run the existing register-only step without waiting.
@@ -110,5 +193,8 @@ internal sealed partial class CanOpenNode
         _emcyInhibitEpoch = new object();
         Volatile.Write(ref _emcyLastCompletion, null);
         ReleaseEmcyInhibitWait()?.Completion.TrySetResult(false);
+        var ended = _emcyEpochEnded;
+        _emcyEpochEnded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ended.TrySetResult(true);
     }
 }

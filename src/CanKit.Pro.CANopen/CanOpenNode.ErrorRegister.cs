@@ -41,8 +41,11 @@ namespace CanKit.Pro.CANopen;
 // moment (CanOpenNode.Application.cs, ReleaseProfileEmcysAfterBootUp): in Initialisation only the
 // boot-up object exists (§7.3.2.2.1). An error the profile clears while its EMCY is still held
 // leaves nothing on the bus. The node's
-// communication errors are not held this way, so a node without applications holds nothing in
-// Initialisation.
+// communication errors raised in Initialisation — the heartbeat-consumer timeout of an LSS slave
+// waiting for its node-id; its controller and overrun monitors start only with Pre-Operational —
+// are held the same way, in the same list, and go out behind the boot-up with 1001h showing them
+// from that EMCY, as every communication error shows from its EMCY. One whose cause ends while it is
+// held leaves nothing on the bus, 0000h included (#547).
 // A warning a profile sends (host SendWarning, error codes 0001h to 00FFh, the class "error reset or
 // no error" of Table 25) is no active error: it sets no bit, writes nothing to 1001h, and its frame
 // carries the register as it is when the frame goes out (1003h enters it as any EMCY). It goes
@@ -151,17 +154,37 @@ internal sealed partial class CanOpenNode
 
     /// <summary>Reports a communication error once per error event. Nothing is raised, and the
     /// event is not used up, while the EMCY is switched off (bit 31 of <c>1014h</c>), as before
-    /// the register was kept. Actor loop only.</summary>
+    /// the register was kept. In Initialisation — an LSS slave waiting for its node-id — the EMCY is
+    /// held until the boot-up has been ordered and goes out behind it, as a profile's error raised
+    /// there does (ReleaseProfileEmcysAfterBootUp, #547): only the boot-up object exists in that
+    /// state (CiA 301 v4.2.0 §7.3.2.2.1), and before, the error was used up without any EMCY ever
+    /// being sent for it. Actor loop only.</summary>
     private void RaiseCommunicationError(CommunicationError kind, int number, ushort errorCode)
     {
-        if (!_emcyValid || !_communicationErrors.Add(CommunicationErrorKey(kind, number))) return;
+        int key = CommunicationErrorKey(kind, number);
+        if (!_emcyValid || !_communicationErrors.Add(key)) return;
+        if (_state == NmtState.Initializing)
+        {
+            (_heldEmcys ??= new()).Add((Slot: null, errorCode, Array.Empty<byte>(), Warning: false, Communication: key));
+            return;
+        }
         EmitNodeEmcy(errorCode);
     }
 
-    /// <summary>The cause of the error has ended. The last one to end sends <c>0000h</c>.</summary>
+    /// <summary>The cause of the error has ended. The last one to end sends <c>0000h</c>. In
+    /// Initialisation the error's EMCY is still held: it is dropped instead, and nothing is sent,
+    /// <c>0000h</c> included, since the bus never saw the error. Every communication error active in
+    /// Initialisation was raised there — a reset ends them all before it enters the state — so none
+    /// of them was announced and no <c>0000h</c> is owed.</summary>
     private void EndCommunicationError(CommunicationError kind, int number = 0)
     {
-        if (!_communicationErrors.Remove(CommunicationErrorKey(kind, number))) return;
+        int key = CommunicationErrorKey(kind, number);
+        if (!_communicationErrors.Remove(key)) return;
+        if (_state == NmtState.Initializing)
+        {
+            _heldEmcys?.RemoveAll(held => held.Communication == key);
+            return;
+        }
         if (_communicationErrors.Count == 0) EmitErrorReset();
     }
 
@@ -177,12 +200,27 @@ internal sealed partial class CanOpenNode
     // With the EMCY switched off — now, or by the time the frame's turn on the chain comes —
     // there is no frame, but the node's EMCY still writes the register (EmitEmcy), so the master
     // does not keep reading an error that has ended.
-    private void EmitErrorReset() => EmitNodeEmcy(ErrorResetCode);
+    // When one of the errors it ends had its EMCY released behind a boot-up, the 0000h takes that
+    // EMCY's path: gated, so that a reset that drops the released EMCY before its turn drops the
+    // 0000h behind it too, and no 0000h reaches the bus for an error the bus never saw (review of
+    // #547). Actor loop only.
+    private void EmitErrorReset()
+    {
+        bool released = _communicationErrorReleased;
+        _communicationErrorReleased = false;
+        EmitNodeEmcy(ErrorResetCode, profile: released);
+    }
 
-    // profile: an EMCY of an attached profile, raise or clear. It takes the gated path of the chain
-    // (EmitEmcy), so that its turn is decided in the state the node is in then: it waits in Stopped,
-    // and a reset drops it, whatever it waited behind (#549, #561). Held in Stopped, it keeps that
-    // when it is released (_pendingEmcyIsProfile, EmitPendingEmcy).
+    // Whether an error among the active communication errors had its EMCY held in Initialisation and
+    // released behind the boot-up (ReleaseProfileEmcysAfterBootUp). Cleared by the 0000h that ends
+    // them and by a reset. Actor loop only.
+    private bool _communicationErrorReleased;
+
+    // profile: an EMCY that takes the rules of a profile's EMCY — a profile's raise or clear, or the
+    // 0000h of communication errors released behind a boot-up (EmitErrorReset). It takes the gated path
+    // of the chain (EmitEmcy), so that its turn is decided in the state the node is in then: it waits in
+    // Stopped, and a reset drops it, whatever it waited behind (#549, #561). Held in Stopped, it keeps
+    // that when it is released (_pendingEmcyIsProfile, EmitPendingEmcy).
     private void EmitNodeEmcy(ushort errorCode, byte[]? manufacturerSpecific = null, bool profile = false)
     {
         // The register byte is filled in when the frame is transmitted (EmitEmcy).
@@ -200,9 +238,9 @@ internal sealed partial class CanOpenNode
         _ = EmitEmcy(msg, gate: profile);
     }
 
-    // Whether _pendingEmcy is an EMCY of an attached profile: released, it takes the gated path and
-    // waits for a pending boot-up, as it would have outside Stopped (EmitPendingEmcy). Never set on a
-    // node without applications. Actor loop only.
+    // Whether _pendingEmcy takes the rules of a profile's EMCY (EmitNodeEmcy): released, it takes the
+    // gated path and waits for a pending boot-up, as it would have outside Stopped (EmitPendingEmcy).
+    // Actor loop only.
     private bool _pendingEmcyIsProfile;
 
     // Whether _pendingEmcy came from SendEmcyAsync: its register is then the application's part,
@@ -242,6 +280,7 @@ internal sealed partial class CanOpenNode
         // Whether 1001h shows profile errors now: they end here, and so does their showing (below).
         bool profileErrorsShown = _profileErrors.Count > 0;
         _communicationErrors.Clear();
+        _communicationErrorReleased = false;
         EndProfileErrorsForReset();
         _heartbeatEmcyTimeouts.Clear();
         InvalidateControllerOverrunMonitoring();
@@ -328,6 +367,32 @@ internal sealed partial class CanOpenNode
         {
             Volatile.Write(ref _errorRegisterWriterThread, 0);
         }
+    }
+
+    /// <summary>The error register with its reserved bit 6 cleared: CiA 301 v4.2.0 §7.5.2.2, Table 54
+    /// fixes it at 0b. What <see cref="SendEmcyAsync"/> and a write of <c>1001h</c> through the
+    /// dictionary pass in is cleared here, not refused (#566): a new exception on the path an
+    /// application reports its errors through, delivered by a patch release, would suppress the EMCY
+    /// it reports, and a gateway that passes a register through would hit it. Refusing it is left to
+    /// the next major version. An attached profile's <c>RaiseError</c> refuses the bit since #554:
+    /// that host is internal, its callers are this repository's profiles, and a profile that sets
+    /// the bit has a bug to be told of.</summary>
+    private static byte WithoutReservedErrorRegisterBit(byte register)
+        => (byte)(register & ~ReservedErrorRegisterBit);
+
+    /// <summary>Validation of every validated write of <c>1001h</c> — local, an SDO download or an
+    /// RPDO or MPDO store where a description made it writable, a described default: a value with
+    /// bit 6 set is accepted and stored with the bit cleared (<see cref="WithoutReservedErrorRegisterBit"/>).
+    /// The dictionary stores the replacement in place of the written value, in the write's one store,
+    /// so <c>EntryWritten</c> — and through it the application's-part notice, an application's
+    /// <c>OnEntriesWritten</c> and the event of a TPDO that maps <c>1001h</c> — is raised once and
+    /// reads the cleared value. The caller's array is not changed. Writing thread, under the
+    /// dictionary's write gate.</summary>
+    private static OdWriteDecision ClearReservedErrorRegisterBit(byte[] value)
+    {
+        // 1001h is UNSIGNED8 (§7.5.2.2), and the size was checked before validation.
+        if ((value[0] & ReservedErrorRegisterBit) == 0) return OdWriteDecision.Accept;
+        return OdWriteDecision.AcceptAs(new[] { WithoutReservedErrorRegisterBit(value[0]) });
     }
 
     /// <summary>EntryWritten, on the writer's thread and under the dictionary's write gate: a write of <c>1001h</c> that is not the

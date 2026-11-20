@@ -533,6 +533,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        // Bit 6 is reserved: transmitted and recorded as 0, whatever is passed (#566).
+        errorRegister = WithoutReservedErrorRegisterBit(errorRegister);
         var msg = new EmcyMessage(_nodeId, errorCode, errorRegister, manufacturerSpecific.Span);
         return _actor.PostAsync(() =>
         {
@@ -661,10 +663,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // waits for nothing else (#549). So does every other EMCY of a profile, raise, clear and warning (gate):
         // one raised while the boot-up's send is still pending waits for it likewise (#561), and one
         // queued behind a profile EMCY that waits must not outlive a reset that drops that one. Every
-        // other EMCY keeps the path its options give it.
+        // other EMCY keeps the path its options give it, and waits in Stopped there too
+        // (SendWhenNotStoppedAsync, #565). A reset that ends such a wait drops a node EMCY (no
+        // application register: a communication error or its 0000h) and keeps an application's.
         bool gated = _options.EnableEmcyInhibit || _options.EnableErrorBehavior || profileResetGeneration is not null || gate;
         return AppendToEmcyChain(() => gated
-            ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch) : transmit());
+            ? SendWithEmcyInhibitAsync(transmit, cancellationToken, inhibitEpoch)
+            : SendWhenNotStoppedAsync(transmit, cancellationToken, dropOnReset: applicationErrorRegister is null));
     }
 
     /// <summary>Appends one step to the EMCY chain; it runs on the actor once the steps before it
