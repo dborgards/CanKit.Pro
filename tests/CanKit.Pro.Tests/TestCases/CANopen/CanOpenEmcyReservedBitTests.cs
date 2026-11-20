@@ -99,10 +99,16 @@ PDOMapping=0
 ");
 
     [Fact]
-    public async Task A_Described_1001h_Records_The_Reserved_Bit_6_As_Zero_From_Its_Default_And_An_Sdo_Download()
+    public void A_Described_1001h_Default_Records_The_Reserved_Bit_6_As_Zero()
     {
         using var rig = new EmcyInhibitRig(new CanOpenNodeOptions(), ErrorRegisterDescription("rw", "0x44"));
         rig.Node.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0x04, "the described default loses bit 6");
+    }
+
+    [Fact]
+    public async Task An_Sdo_Download_Of_A_Writable_Described_1001h_Records_The_Reserved_Bit_6_As_Zero()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions(), ErrorRegisterDescription("rw", "0"));
         await Inject(rig.Node, CanOpenCobId.SdoRx(Device), SdoFrames.BuildDownloadInit(0x1001, 0, new byte[] { 0xC8 }));
         await rig.Wire.WaitForCountAsync(CanOpenCobId.SdoTx(Device), 1);
         rig.Wire.Payloads(CanOpenCobId.SdoTx(Device))[0][0].Should().Be(0x60, "the download is accepted");
