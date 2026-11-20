@@ -332,6 +332,10 @@ public interface ICanOpenNode : IDisposable
     /// <c>EnableErrorBehavior</c> set, a reset drops it instead, and its task completes without a
     /// frame.</item>
     /// </list>
+    /// <para>That reset rule is for the EMCYs this method orders. An EMCY the node raises for its own
+    /// error state — a communication error, or the <c>0000h</c> that ends one — that waited in Stopped
+    /// is dropped by a reset whatever the options: the reset ended that error without an EMCY (CiA 301
+    /// v4.2.0 §7.2.7.1, Figure 37, transitions 5 and 0).</para>
     /// <para>Bit 6 of <paramref name="errorRegister"/> is reserved and always 0 (CiA 301 v4.2.0
     /// §7.5.2.2, Table 54): it is transmitted and recorded in <c>1001h</c> as 0, whatever is passed,
     /// and the call proceeds as it would with the bit clear. A later major version will refuse it.

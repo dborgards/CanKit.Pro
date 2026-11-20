@@ -14,9 +14,10 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 // FR-CO-011, #565: no EMCY leaves in Stopped (CiA 301 v4.2.0 §7.3.2.2.4, Table 37), also with
 // neither EMCY inhibit nor error behaviour enabled. An EMCY whose turn comes in Stopped is held and
-// goes out once the node has left Stopped; an NMT reset does to it what it did before (it goes out
-// after the reset, on the COB-ID active then: LssSlaveTests.An_Emcy_Queued_Before_The_Node_Id_
-// Changes_Uses_The_New_Cob_Id). The first EMCY's send is held in the driver
+// goes out once the node has left Stopped. Across an NMT reset an application's EMCY does what it did
+// before (it goes out after the reset, on the COB-ID active then: LssSlaveTests.An_Emcy_Queued_Before_
+// The_Node_Id_Changes_Uses_The_New_Cob_Id), and an EMCY the node raised for its own error state is
+// dropped: the reset ended that error (Bugbot on #574). The first EMCY's send is held in the driver
 // (ControllableBus.OnTransmitting), so the next ones are queued behind it on the node's EMCY chain
 // when the NMT command arrives.
 public partial class CanOpenPdoEngineTests
@@ -251,5 +252,78 @@ public partial class CanOpenPdoEngineTests
         await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
         await ExpectEmcyAsync(rig.Wire, 2, 0x1002, 0);
         rig.Wire.Count(EmcyId).Should().Be(2);
+    }
+
+    /// <summary>Waits until the head of the EMCY chain waits for the node to leave Stopped.</summary>
+    private static Task WaitForEmcyChainWaitingAsync(EmcyInhibitRig rig)
+        => WaitForEmcyHeldOrCompletionAsync(rig, new TaskCompletionSource<bool>().Task);
+
+    // Bugbot on #574: an EMCY the node raises for its own error state, which waited in Stopped, is
+    // dropped by a reset, as the gated path drops it: the reset ended the error it reports (CiA 301
+    // v4.2.0 §7.2.7.1, Figure 37, transitions 5 and 0). It writes neither 1001h nor 1003h.
+    [Fact]
+    public async Task Node_Heartbeat_Timeout_Emcy_That_Waited_In_Stopped_Is_Dropped_By_A_Reset_With_Default_Options()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions { EmitGuardingErrorEmcy = true, ErrorHistoryCapacity = 4 });
+        using var driver = new SlowEmcyDriver(rig);
+        var first = rig.Node.SendEmcyAsync(0x1000, 0);
+        await driver.Entered;
+        rig.Node.AddHeartbeatConsumer(1, TimeSpan.FromMilliseconds(100));
+        Advance(rig.Clock, rig.Node, TimeSpan.FromMilliseconds(101)); // 8130h, queued behind 1000h
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Stop, Device);
+        driver.Release();
+        await first.WaitAsync(ShortTimeout);
+        await WaitForEmcyChainWaitingAsync(rig);
+
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1002, 0);
+        rig.Wire.Count(EmcyId).Should().Be(2, "the 8130h of an error the reset ended does not go out");
+        rig.Node.ObjectDictionary.ReadUnsigned(0x1003, 0).Should().Be(2u, "1000h and 1002h; nothing for the dropped 8130h");
+        rig.Node.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Node_Rpdo_Length_Emcy_That_Waited_In_Stopped_Is_Dropped_By_A_Reset_With_Default_Options()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions());
+        rig.Node.ObjectDictionary.AddU16(0x2000, 0, 0);
+        rig.Node.ConfigureRpdo(1, new CanKit.Pro.CANopen.Pdo.PdoMapping().Add(0x2000, 0, 16));
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Start, Device);
+        using var driver = new SlowEmcyDriver(rig);
+        var first = rig.Node.SendEmcyAsync(0x1000, 0);
+        await driver.Entered;
+        await Inject(rig.Node, Rpdo1, 0x01); // one byte for a 16-bit mapping: 8210h, queued behind 1000h
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Stop, Device);
+        driver.Release();
+        await first.WaitAsync(ShortTimeout);
+        await WaitForEmcyChainWaitingAsync(rig);
+
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
+        await ExpectEmcyAsync(rig.Wire, 2, 0x1002, 0);
+        rig.Wire.Count(EmcyId).Should().Be(2, "the 8210h of an error the reset ended does not go out");
+    }
+
+    [Fact]
+    public async Task Node_Error_Reset_That_Waited_In_Stopped_Is_Dropped_By_A_Reset_With_Default_Options()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions { EmitGuardingErrorEmcy = true });
+        rig.Node.AddHeartbeatConsumer(1, TimeSpan.FromMilliseconds(100));
+        Advance(rig.Clock, rig.Node, TimeSpan.FromMilliseconds(101));
+        await ExpectEmcyAsync(rig.Wire, 1, 0x8130, Communication);
+        using var driver = new SlowEmcyDriver(rig);
+        var slow = rig.Node.SendEmcyAsync(0x1000, 0);
+        await driver.Entered;
+        await Inject(rig.Node, CanOpenCobId.Heartbeat(1), (byte)NmtState.PreOperational); // 0000h, queued
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Stop, Device);
+        driver.Release();
+        await slow.WaitAsync(ShortTimeout);
+        await WaitForEmcyChainWaitingAsync(rig);
+
+        await Inject(rig.Node, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, Device);
+        await rig.Node.SendEmcyAsync(0x1002, 0).WaitAsync(ShortTimeout);
+        await ExpectEmcyAsync(rig.Wire, 3, 0x1002, 0);
+        rig.Wire.Count(EmcyId).Should().Be(3, "8130h, 1000h and 1002h: the reset ended the error without an EMCY, and the 0000h with it");
     }
 }

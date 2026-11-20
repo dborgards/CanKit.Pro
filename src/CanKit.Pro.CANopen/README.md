@@ -744,7 +744,9 @@ as a `Corrected` finding. A later major version will refuse it. `1001h` is `ro` 
 description makes it writable. The node ORs its own bits into every EMCY, the
 application's included, and never clears the application's bits, so an application `0000h` sent
 while a communication error is active still carries bit 4. An EMCY requested in Stopped, or one
-that waited there, carries the register of the moment it is sent. A communication error raised while
+that waited there, carries the register of the moment it is sent. An EMCY of the node's own — a
+communication error or the `0000h` that ends one — that waited in Stopped is dropped by a reset,
+which ended the error without an EMCY; it writes neither `1001h` nor `1003h`. A communication error raised while
 an LSS slave waits for its node-id (a heartbeat-consumer timeout, in Initialisation, where only the
 boot-up object exists) is held and goes out behind the boot-up once the slave has its node-id,
 `1001h` showing it from that EMCY; one whose cause ends before leaves nothing on the bus, `0000h`
@@ -969,7 +971,7 @@ Table 37 of CiA 301, as the node applies it:
 | PDO | — | transmitted and received | — |
 | SDO | served | served | requests ignored; an open server session is aborted with `0800 0022h`. This row is the server's: the node's own SDO client is not gated by the NMT state, and `SdoUploadAsync` and `SdoDownloadAsync` run in Stopped too, as `SendSyncAsync` does (#254) |
 | SYNC | consumed and produced | consumed and produced | neither; the producer keeps its cycle and resumes afterwards (`SendSyncAsync` is a raw send and transmits regardless of the state and of bit 30 of `1005h`) |
-| EMCY | transmitted | transmitted | none started, whatever the options (one already handed to the driver when the Stop is processed still goes out). The most recent one *requested* in Stopped is kept back and transmitted when the node leaves Stopped; a reset discards it. One requested before, which *waits* because its turn came in Stopped, goes out when the node leaves Stopped, in order; across a reset it goes out behind that reset's boot-up on the COB-ID active then, unless `EnableEmcyInhibit` or `EnableErrorBehavior` is set, with which a reset drops it (#565) |
+| EMCY | transmitted | transmitted | none started, whatever the options (one already handed to the driver when the Stop is processed still goes out). The most recent one *requested* in Stopped is kept back and transmitted when the node leaves Stopped; a reset discards it. One requested before, which *waits* because its turn came in Stopped, goes out when the node leaves Stopped, in order. Across a reset, one the application ordered goes out behind that reset's boot-up on the COB-ID active then, unless `EnableEmcyInhibit` or `EnableErrorBehavior` is set, with which a reset drops it; one the node raised for its own error state (a communication error or its `0000h`) is dropped by the reset, which ended that error (#565) |
 | Heartbeat, guarding | active | active | active |
 
 **Reset Node and Reset Communication** abort SDO server sessions, discard an EMCY requested in Stopped, reset the
