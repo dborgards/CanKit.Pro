@@ -656,6 +656,11 @@ public partial class CanOpenApplicationSeamTests
             $"[{index:X4}]\nParameterName=Device type\nObjectType=0x7\nDataType={dataType}\nAccessType={access}\nDefaultValue={value}\n"));
     }
 
+    /// <summary>Eight logical devices, as <see cref="All_Eight_Logical_Devices_Make_A_Full_Chain"/> sets them:
+    /// device 0 of profile 401, so that the composed <c>1000h</c> agrees with <c>67FFh</c>.</summary>
+    private static readonly (int Device, uint Word)[] EightDevices =
+        Enumerable.Range(0, 8).Select(device => (device, 0x00010000u | (uint)(0x0191 + device))).ToArray();
+
     /// <summary>A node configuration and what follows from it: the open fails with a message holding
     /// <see cref="Refusal"/>, or the node opens and <see cref="CanOpenLogicalDevices.ReadAsync"/> reads
     /// <see cref="Devices"/> and ends as <see cref="End"/>.</summary>
@@ -671,12 +676,14 @@ public partial class CanOpenApplicationSeamTests
     }
 
     /// <summary>
-    /// The rows of the reader's table (remarks of <see cref="CanOpenLogicalDevices.ReadAsync"/>) that a
-    /// node with applications can be configured for. Every configuration either fails to open or
-    /// publishes a chain the reader reads as complete: none publishes what the reader calls
-    /// contradictory. The other rows are not the node's to produce: a gate refusal is the reading
-    /// client's description, and an abort other than "object does not exist" or a timeout is not a
-    /// property of the dictionary.
+    /// Hand-picked node configurations, at least one for each row of the reader's table (remarks of
+    /// <see cref="CanOpenLogicalDevices.ReadAsync"/>) that a node with applications can be configured
+    /// for, and the neighbours of the checks that keep the contradictory rows off the wire. The list is
+    /// not derived from the table: a new row there needs its configuration added here. Every
+    /// configuration either fails to open or publishes a chain the reader reads as complete: none
+    /// publishes what the reader calls contradictory. The other rows are not the node's to produce: a
+    /// gate refusal is the reading client's description, and an abort other than "object does not
+    /// exist" or a timeout is not a property of the dictionary.
     /// </summary>
     public static TheoryData<NodeChainCase> NodeChains => new()
     {
@@ -697,6 +704,13 @@ public partial class CanOpenApplicationSeamTests
             () => With(Typed("io", (0, Profile401))),
             () => DescriptionWith6000(0xFFFF0191, (0x67FF, 0x00050191), (0x6FFF, 0x00020198)),
             null, CanOpenLogicalDeviceReadEnd.Complete, [0x00050191, 0x00020198]),
+        new NodeChainCase("FFFFh: two devices attached, the file declares a valid third",
+            () => With(Typed("io", (0, Profile401)), Typed("valve", (1, Profile408))),
+            () => DescriptionWith6000(0xFFFF0191, (0x77FF, 0x00010192)),
+            null, CanOpenLogicalDeviceReadEnd.Complete, [Profile401, Profile408, 0x00010192]),
+        new NodeChainCase("FFFFh: eight devices, the full chain",
+            () => With(Typed("all", EightDevices)), () => null,
+            null, CanOpenLogicalDeviceReadEnd.Complete, EightDevices.Select(d => d.Word).ToArray()),
         new NodeChainCase("#552 (1): FFFFh without 67FFh",
             () => With(Typed("io", (0, Profile401))), () => DescriptionWith6000(deviceType: 0xFFFF0191),
             ["0x1000", "0x67FF", "io"]),
@@ -743,8 +757,9 @@ public partial class CanOpenApplicationSeamTests
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: Master);
-        // Every device-type object up to 77FFh: the peer, not the gate, ends each chain.
-        master.BindPeerDeviceDescription(Slave, PeerSdoLaboratory.Variables(0x1000, 0x67FF, 0x6FFF, 0x77FF));
+        // Every device-type object: the peer, not the gate, ends each chain.
+        master.BindPeerDeviceDescription(Slave, PeerSdoLaboratory.Variables(
+            0x1000, 0x67FF, 0x6FFF, 0x77FF, 0x7FFF, 0x87FF, 0x8FFF, 0x97FF, 0x9FFF));
         var bootups = new BootupWatch(master, Slave);
         using var slave = OpenNode(busB, chain.Options(), description: chain.Description());
         await bootups.First;
