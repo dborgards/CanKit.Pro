@@ -523,15 +523,23 @@ It reads `1000h:00`. A peer without `FFFFh` is one logical device and nothing el
 read. `Devices` is never empty: when `67FFh` was not read, the first device carries the type of
 `1000h`. `End` says how the reading ended, one of four ways:
 
-- `Complete`: the peer itself ended the chain, with no `FFFFh` in `1000h`, with the abort "object
-  does not exist", or after eight devices. Every logical device the peer has is in `Devices`.
+- `Complete`: the peer itself ended the chain, consistently with `1000h`: no `FFFFh` in `1000h`;
+  or the abort "object does not exist" after at least two devices, the first of the profile
+  `1000h` names; or eight devices. Every logical device the peer has is in `Devices`.
 - `PeerDescriptionRequired`: `1000h` announces more devices, but `67FFh` is not one of the objects
   the client may read without a peer description ([SDO client](#sdo-client-and-a-peers-device-description))
   and none is bound for this node. Nothing is sent for it. Bind a description that lists the
   objects and read again.
 - `Failed`: a read inside the chain ended in an SDO abort other than "object does not exist", the
-  client's own timeout included, or returned something other than four bytes. `Failure` holds the
-  exception and `Devices` what was read before it.
+  client's own timeout included, or returned something other than four bytes; or the peer's
+  answers contradict each other. `FFFFh` says the node holds several logical devices and `1000h`
+  names the profile of the first (CiA 301 §7.5.2.1), so a `67FFh` of another profile, or the peer
+  reporting `67FFh` or `6FFFh` as non-existent, is reported here as an `InvalidDataException`,
+  with the peer's abort as its inner exception where the peer ended the chain. `Failure` holds
+  the exception and `Devices` what was read until then, every word as the peer returned it: after
+  a `67FFh` of another profile, `DeviceType` and `Devices[0]` show both. A refusal by the client's
+  gate is not an answer of the peer and contradicts nothing. The remarks of `ReadAsync` give the
+  full table of answers and results.
 - `EndedByPeerDescription`: a peer description is bound and does not declare the next device-type
   object, so the client refused to ask for it and nothing is sent. The description is the list of
   objects the client may touch on that peer, so `Devices` is complete as far as the bound
