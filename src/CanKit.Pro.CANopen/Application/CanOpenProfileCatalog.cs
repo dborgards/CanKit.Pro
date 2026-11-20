@@ -88,11 +88,15 @@ internal sealed class CanOpenProfileCatalog
 
     /// <summary>The peer access for every logical device a read found. Performs no bus access.</summary>
     /// <remarks>A read that ended in another way than <see cref="CanOpenLogicalDeviceReadEnd.Complete"/>
-    /// is mapped as far as it got, except one whose answers contradict each other (#552): there
-    /// <c>1000h</c> and the chain disagree on what the first logical device is, or on whether there
-    /// is more than one, and either word could be the wrong one. Selecting a profile from such a list
-    /// would pick one of them silently, so the result is refused; <see cref="CreatePeer"/> maps a
-    /// device the caller has chosen.</remarks>
+    /// is mapped as far as it got, except where the list cannot be trusted to name the profile of the
+    /// first logical device: <c>67FFh</c> names another profile than <c>1000h</c> (#552), so the first
+    /// device in the list and <see cref="CanOpenLogicalDeviceReadResult.DeviceType"/> disagree and
+    /// either word could be the wrong one. Selecting a profile from that list would pick one of them
+    /// silently, so the result is refused; <see cref="CreatePeer"/> maps a device the caller has
+    /// chosen. A peer that announces several logical devices and ends the chain before the second is
+    /// inconsistent too, but there <c>1000h</c> and the device read agree on the first device's profile,
+    /// so the list is mapped like any other that failed with the devices read so far. The rule uses
+    /// public members only, so a caller can apply it to its own catalogue.</remarks>
     /// <param name="node">The node that reads the peer.</param>
     /// <param name="peerNodeId">The node-id of the peer, <c>1</c> to <c>127</c>.</param>
     /// <param name="result">The logical devices of the peer, see <see cref="CanOpenLogicalDevices.ReadAsync"/>.</param>
@@ -102,8 +106,9 @@ internal sealed class CanOpenProfileCatalog
     /// <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside <c>1</c> to
     /// <c>127</c>.</exception>
-    /// <exception cref="ArgumentException">The peer's answers in <paramref name="result"/> contradict
-    /// each other; the message carries its <see cref="CanOpenLogicalDeviceReadResult.Failure"/>.</exception>
+    /// <exception cref="ArgumentException">The first device of <paramref name="result"/> has another profile
+    /// number than its <c>1000h</c>; the message carries its
+    /// <see cref="CanOpenLogicalDeviceReadResult.Failure"/>.</exception>
     public IReadOnlyList<ICanOpenProfilePeer?> CreatePeers(ICanOpenNode node, byte peerNodeId,
         CanOpenLogicalDeviceReadResult result)
     {
@@ -112,11 +117,12 @@ internal sealed class CanOpenProfileCatalog
         CanOpenCobId.ValidateNodeId(peerNodeId);
         if (result is null)
             throw new ArgumentNullException(nameof(result));
-        if (result.Inconsistent)
+        if (result.Devices[0].DeviceType.ProfileNumber != result.DeviceType.ProfileNumber)
         {
             throw new ArgumentException(
-                $"The logical devices of node {peerNodeId} were read from answers that contradict each other, so no " +
-                $"profile is selected from them: {result.Failure!.Message}", nameof(result));
+                $"The first logical device of node {peerNodeId} has profile {result.Devices[0].DeviceType.ProfileNumber}, but " +
+                $"its 1000h names profile {result.DeviceType.ProfileNumber}, so no profile is selected from the list: " +
+                $"{result.Failure?.Message}", nameof(result));
         }
 
         var peers = new ICanOpenProfilePeer?[result.Devices.Count];

@@ -235,7 +235,6 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         result.Devices.Select(d => (d.Index, d.DeviceType.Value))
             .Should().Equal(chain.Devices.Select((word, index) => (index, word)));
         script.Asked.Should().Equal(chain.Asked);
-        result.Inconsistent.Should().Be(chain.Failure is ChainFailure.EndedTooEarly or ChainFailure.OtherProfile);
         switch (chain.Failure)
         {
             case ChainFailure.None:

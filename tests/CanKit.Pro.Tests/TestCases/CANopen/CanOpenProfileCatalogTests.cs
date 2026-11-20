@@ -85,30 +85,49 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>
-    /// A read whose answers contradict each other (#552) gives no profile to select: <c>1000h</c>
-    /// names one and <c>67FFh</c> another, or <c>1000h</c> announces several logical devices and the
-    /// peer ends the chain before the second. The catalogue refuses the whole result rather than
-    /// pick one of the two words or report a device as "no access" without saying why.
+    /// A read in which <c>67FFh</c> names another profile than <c>1000h</c> (#552) gives no profile to
+    /// select for the first device: either word could be the wrong one. The catalogue refuses the
+    /// result rather than pick one of them or report the device as "no access" without saying why.
     /// </summary>
-    [Theory] // FR-CO-063, #552
-    [InlineData(0x00010198u)] // 67FFh names profile 408 under a 1000h of profile 401
-    [InlineData(null)] // the peer reports 67FFh as non-existent
-    [InlineData(0x000F0191u)] // the peer reports 6FFFh as non-existent
-    public async Task CreatePeers_Refuses_A_Read_Whose_Answers_Contradict_Each_Other(uint? at67FF)
+    [Fact] // FR-CO-063, #552
+    public async Task CreatePeers_Refuses_A_Read_Whose_First_Device_Contradicts_1000h()
     {
         var catalog = new CanOpenProfileCatalog(new FakeProfile(401), new FakeProfile(408));
-        var answers = new List<(ushort, object)> { (0x1000, 0xFFFF0191u) };
-        if (at67FF is { } first) answers.Add((0x67FF, first));
-        var result = await CanOpenLogicalDevices.ReadCoreAsync(new ScriptedUpload(answers.ToArray()).Upload, default);
+        var result = await CanOpenLogicalDevices.ReadCoreAsync(
+            new ScriptedUpload((0x1000, 0xFFFF0191u), (0x67FF, 0x00010198u), (0x6FFF, 0x000F0191u)).Upload, default);
         result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
 
         using var rig = new NodeRig();
 
         FluentActions.Invoking(() => catalog.CreatePeers(rig.Node, PeerId, result))
             .Should().Throw<ArgumentException>().WithParameterName("result")
-            .Where(e => e.Message.Contains(result.Failure!.Message));
+            .Where(e => e.Message.Contains(result.Failure!.Message) && e.Message.Contains("408") && e.Message.Contains("401"));
         // A device the caller picks itself is still the caller's to map.
         catalog.CreatePeer(rig.Node, PeerId, result.Devices[0]).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// A peer that announces several logical devices and ends the chain before the second (#552) is
+    /// inconsistent, but <c>1000h</c> and the first device read agree on its profile, so the device
+    /// read is mapped as for any read that failed with the devices read so far.
+    /// </summary>
+    [Theory] // FR-CO-063, #552
+    [InlineData(null)] // the peer reports 67FFh as non-existent: the device is the copy of 1000h
+    [InlineData(0x000F0191u)] // the peer reports 6FFFh as non-existent: the device is 67FFh
+    public async Task CreatePeers_Maps_A_Chain_That_Ends_Too_Early_But_Agrees_On_The_First_Device(uint? at67FF)
+    {
+        var catalog = new CanOpenProfileCatalog(new FakeProfile(401));
+        var answers = new List<(ushort, object)> { (0x1000, 0xFFFF0191u) };
+        if (at67FF is { } first) answers.Add((0x67FF, first));
+        var result = await CanOpenLogicalDevices.ReadCoreAsync(new ScriptedUpload(answers.ToArray()).Upload, default);
+        result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Failed);
+        result.Failure.Should().BeOfType<System.IO.InvalidDataException>();
+
+        using var rig = new NodeRig();
+        var peers = catalog.CreatePeers(rig.Node, PeerId, result);
+
+        peers.Should().ContainSingle().Which.Should().BeOfType<FakePeer>()
+            .Which.LogicalDevice.Should().BeSameAs(result.Devices[0]);
     }
 
     /// <summary>A read that failed for another reason than a contradiction keeps the devices read

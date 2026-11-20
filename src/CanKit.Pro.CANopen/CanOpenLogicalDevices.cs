@@ -80,13 +80,12 @@ public enum CanOpenLogicalDeviceReadEnd
 public sealed class CanOpenLogicalDeviceReadResult
 {
     internal CanOpenLogicalDeviceReadResult(CanOpenDeviceType deviceType,
-        List<CanOpenLogicalDevice> devices, CanOpenLogicalDeviceReadEnd end, Exception? failure, bool inconsistent)
+        List<CanOpenLogicalDevice> devices, CanOpenLogicalDeviceReadEnd end, Exception? failure)
     {
         DeviceType = deviceType;
         Devices = devices.ToArray();
         End = end;
         Failure = failure;
-        Inconsistent = inconsistent;
     }
 
     /// <summary>The device-type word of object <c>1000h</c> as the peer returned it.</summary>
@@ -107,17 +106,6 @@ public sealed class CanOpenLogicalDeviceReadResult
     /// <summary>The failure that ended the reading. Not <see langword="null"/> exactly when
     /// <see cref="End"/> is <see cref="CanOpenLogicalDeviceReadEnd.Failed"/>.</summary>
     public Exception? Failure { get; }
-
-    /// <summary>The peer's answers contradict each other (#552): <see cref="End"/> is
-    /// <see cref="CanOpenLogicalDeviceReadEnd.Failed"/> and <see cref="Failure"/> an
-    /// <see cref="InvalidDataException"/> saying how. Internal, so that the profile catalogue can
-    /// refuse to select a profile from such a list without telling this failure from a value that
-    /// is not four bytes by its message. A caller outside sees <see cref="End"/> and
-    /// <see cref="Failure"/>: an inconsistent chain the peer ended carries the peer's abort as the
-    /// failure's <see cref="Exception.InnerException"/>; a <c>67FFh</c> of another profile than
-    /// <c>1000h</c> is told from a wrong length by the words in <see cref="DeviceType"/> and
-    /// <see cref="Devices"/>.</summary>
-    internal bool Inconsistent { get; }
 }
 
 /// <summary>
@@ -302,8 +290,6 @@ public static class CanOpenLogicalDevices
         var end = CanOpenLogicalDeviceReadEnd.Complete;
         Exception? failure = null;
 
-        var inconsistent = false;
-
         if (first.HasFurtherLogicalDevices)
         {
             for (var logicalDevice = 0; logicalDevice < MaxCount; logicalDevice++)
@@ -325,7 +311,6 @@ public static class CanOpenLogicalDevices
                             $"type of logical device 0, holds 0x{type.Value:X8}, profile {type.ProfileNumber}: 1000h names " +
                             "the profile of the first logical device (CiA 301 v4.2.0 §7.5.2.1), so the peer's answers " +
                             "contradict each other.");
-                        inconsistent = true;
                         break;
                     }
                 }
@@ -345,7 +330,6 @@ public static class CanOpenLogicalDevices
                             $"device type of logical device {logicalDevice}, as non-existent: its chain holds " +
                             $"{(logicalDevice == 0 ? "no logical device" : "one logical device")}.",
                             abort);
-                        inconsistent = true;
                     }
 
                     break;
@@ -371,7 +355,7 @@ public static class CanOpenLogicalDevices
 
         // When 67FFh was not read, the first device is described by 1000h: the list is never empty.
         if (devices.Count == 0) devices.Add(new CanOpenLogicalDevice(0, first));
-        return new CanOpenLogicalDeviceReadResult(first, devices, end, failure, inconsistent);
+        return new CanOpenLogicalDeviceReadResult(first, devices, end, failure);
     }
 
     private static async Task<CanOpenDeviceType> ReadDeviceTypeAsync(
