@@ -195,6 +195,9 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
         new ChainCase("#552 (2): 67FFh names another profile than 1000h, and nothing further is asked",
             [(0x1000, Chain401), (0x67FF, Device408), (0x6FFF, Device401)],
             CanOpenLogicalDeviceReadEnd.Failed, [Device408], [0x1000, 0x67FF], ChainFailure.OtherProfile),
+        new ChainCase("#552 (2): profile 0000h in 1000h is compared like any other, a 67FFh of profile 401 contradicts it",
+            [(0x1000, 0xFFFF0000u), (0x67FF, 0x00010191u), (0x6FFF, Device401)],
+            CanOpenLogicalDeviceReadEnd.Failed, [0x00010191u], [0x1000, 0x67FF], ChainFailure.OtherProfile),
         new ChainCase("no description bound: the gate refuses 67FFh",
             [(0x1000, Chain401), (0x67FF, Refused(0x67FF, bound: false))],
             CanOpenLogicalDeviceReadEnd.PeerDescriptionRequired, [Chain401], [0x1000, 0x67FF], ChainFailure.None),
@@ -243,6 +246,7 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
                 break;
             case ChainFailure.WrongLength:
                 result.Failure.Should().BeOfType<InvalidDataException>().Which.InnerException.Should().BeNull();
+                result.Devices[0].DeviceType.ProfileNumber.Should().Be(result.DeviceType.ProfileNumber);
                 break;
             case ChainFailure.EndedTooEarly:
                 var early = result.Failure.Should().BeOfType<InvalidDataException>().Subject;
@@ -255,8 +259,12 @@ public class CanOpenLogicalDevicesTests : IClassFixture<VirtualAdapterFixture>
             case ChainFailure.OtherProfile:
                 var other = result.Failure.Should().BeOfType<InvalidDataException>().Subject;
                 other.InnerException.Should().BeNull();
-                other.Message.Should().Contain("0xFFFF0191").And.Contain("401")
-                    .And.Contain("67FFh").And.Contain("0x00010198").And.Contain("408");
+                var chainWord = (uint)chain.Answers[0].Answer;
+                var firstWord = chain.Devices[0];
+                other.Message.Should().Contain($"0x{chainWord:X8}").And.Contain($"profile {chainWord & 0xFFFF}")
+                    .And.Contain("67FFh").And.Contain($"0x{firstWord:X8}").And.Contain($"profile {firstWord & 0xFFFF}");
+                // The public way to tell this from a wrong length (Failure, End): the words disagree.
+                result.Devices[0].DeviceType.ProfileNumber.Should().NotBe(result.DeviceType.ProfileNumber);
                 break;
         }
     }
