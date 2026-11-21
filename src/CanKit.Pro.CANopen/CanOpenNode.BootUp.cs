@@ -17,7 +17,7 @@ namespace CanKit.Pro.CANopen;
 /// The reading of <c>1F80h</c>, <c>1F81h</c>, <c>1F82h</c> and <c>1F89h</c> follows the open
 /// implementation that cites that edition. Nonzero 1F84h–1F88h expectations gate the start;
 /// RequireBootDeviceTypeUpload additionally requires 1000h even with zero expectations.
-/// Configuration download (including concise DCF) is not part of it.
+/// Configuration and error-control stages are separately opted in.
 /// </summary>
 internal sealed partial class CanOpenNode
 {
@@ -106,6 +106,9 @@ internal sealed partial class CanOpenNode
 
     private void CancelBootUp()
     {
+        StopBootErrorControl();
+        Array.Clear(_slaveErrorControlVerified, 0, _slaveErrorControlVerified.Length);
+        Array.Clear(_slaveErrorControlFailed, 0, _slaveErrorControlFailed.Length);
         CancelActiveSlaveRetries();
         Array.Clear(_slaveBootResetConfirmed, 0, _slaveBootResetConfirmed.Length);
         _bootDeadline?.Dispose();
@@ -188,6 +191,10 @@ internal sealed partial class CanOpenNode
             return;
         }
 
+        if (_slaveErrorControlFailed[nodeId]) return;
+        if (_options.EnableBootErrorControl && !_slaveErrorControlVerified[nodeId]
+            && !BeginSlaveErrorControl(nodeId)) return;
+
         // Once this boot requested Pre-operational for an update, a delayed Operational
         // announcement must not skip safety verification or the explicit final Start.
         if (_slaveConfigurationNeedsStart[nodeId]) state = RequestPreOperational;
@@ -233,6 +240,7 @@ internal sealed partial class CanOpenNode
         if (HasUnseenMandatorySlave()) return;
         if (HasUnverifiedMandatoryIdentity()) return;
         if (HasUnverifiedMandatoryConfiguration()) return;
+        if (HasUnverifiedMandatoryErrorControl()) return;
 
         uint startup = ReadStartup();
         bool mayStartSlaves = (startup & NmtSuppressSlaveStartBit) == 0;
@@ -242,7 +250,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
             _bootStartMoment = true;
-            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || BootConfigurationEnabled)
+            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || BootConfigurationEnabled || _options.EnableBootErrorControl)
             {
                 // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
                 // Start to node 0 reaches one that has not announced yet — keep-alive, running
@@ -288,7 +296,7 @@ internal sealed partial class CanOpenNode
             ArmBootDeadline();
             return;
         }
-        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity() && !HasUnverifiedMandatoryConfiguration())
+        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity() && !HasUnverifiedMandatoryConfiguration() && !HasUnverifiedMandatoryErrorControl())
         {
             TryFinishBoot();
             return;
@@ -297,7 +305,7 @@ internal sealed partial class CanOpenNode
         var unseenMandatory = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id)))
+            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id)))
             {
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
@@ -312,6 +320,7 @@ internal sealed partial class CanOpenNode
     private void ApplyBootErrorReaction(IEnumerable<byte> failedSlaves, FlyingMasterSignal signal)
     {
         _bootHalted = true;
+        StopBootErrorControl();
         CancelActiveSlaveRetries();
         // One reaction per boot: a halt from a failed verification must not be followed by the
         // boot timeout's own for a mandatory slave that is still unseen.
@@ -414,7 +423,8 @@ internal sealed partial class CanOpenNode
             // §3.3: an optional slave owes the master only its first completed attempt.
             // A later in-flight retry must not hold a mandatory slave's start moment.
             if (_slaveBootRetrying[id] && !IsMandatory(id)) continue;
-            if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) return true;
+            if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id]
+                || _slaveBootResetPending[id] || _slaveBootHeartbeatWaits[id] is not null) return true;
         }
         return false;
     }

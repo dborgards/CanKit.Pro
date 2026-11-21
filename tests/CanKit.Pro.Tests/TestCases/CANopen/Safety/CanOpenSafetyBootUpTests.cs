@@ -1017,4 +1017,29 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
                 && data[0] == (byte)NmtCommand.ResetCommunication && data[1] == 0;
         }
     }
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Boot_Error_Control_Precedes_Safety_Verification(bool valid)
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableBootErrorControl = true });
+        using var slave = OpenSlave(rig, validChecksum: valid);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
+        rig.Node.AddHeartbeatConsumer(Slave, TimeSpan.FromMilliseconds(100));
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.GetSlaveBootResults().Any(r => r.NodeId == Slave && r.Status == SlaveBootStatus.WaitingForErrorControl),
+            2000, "error control is entered before safety verification");
+        rig.Log.Snapshot().Should().NotContain(f => f.Id == 0x600 + Slave);
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        var expected = valid ? SlaveBootStatus.StartRequested : SlaveBootStatus.SafetyConfigurationInvalid;
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.GetSlaveBootResults().Any(r => r.NodeId == Slave && r.Status == expected),
+            300, "safety remains required after successful error-control startup");
+        if (valid) await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.Start, Slave), 100, "Start follows safety");
+        else Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+    }
+
 }

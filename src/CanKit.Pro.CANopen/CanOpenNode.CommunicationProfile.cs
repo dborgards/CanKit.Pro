@@ -861,8 +861,23 @@ internal sealed partial class CanOpenNode
         // and a profile told of it can write 1016h again. That write rebuilds the watches inline,
         // so it has to find this rebuild finished rather than have it reinstall, afterwards, a
         // watch the write removed (Codex on #546).
-        _heartbeatConsumer.Replace(desired);
-        ReconcileHeartbeatEmcyWatches(desired);
+        _bootHeartbeatRestartPending |= CaptureBootHeartbeatConfiguration(desired);
+        _bootHeartbeatRebuildDepth++;
+        try
+        {
+            _heartbeatConsumer.Replace(desired);
+            ReconcileHeartbeatEmcyWatches(desired);
+        }
+        finally
+        {
+            // An inner edit of an unrelated watch must not erase the outer edit's restart.
+            // Wait for the outermost recovery callback and use its final configuration.
+            if (--_bootHeartbeatRebuildDepth == 0 && _bootHeartbeatRestartPending)
+            {
+                _bootHeartbeatRestartPending = false;
+                if (_disposed == 0 && _flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
+            }
+        }
     }
 
     // =========================================================================================

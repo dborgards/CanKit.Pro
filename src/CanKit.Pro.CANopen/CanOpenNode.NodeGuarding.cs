@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen.Nmt;
@@ -36,39 +37,38 @@ internal sealed partial class CanOpenNode
             throw new ArgumentOutOfRangeException(nameof(lifeTimeFactor), lifeTimeFactor,
                 "lifeTimeFactor must be >= 1: the node life time is the guard time multiplied by the life time factor (CiA 301 §7.2.8.3.2.1).");
 
-        _actor.Post(() =>
-        {
-            if (_nodeGuardingConsumers.TryGetValue(producerNodeId, out var existing))
-            {
-                existing.PollHandle?.Dispose();
-                existing.LifeTimeDeadline?.Dispose();
-            }
-            var consumer = new NodeGuardingConsumer(producerNodeId, guardTime, lifeTimeFactor);
-            _nodeGuardingConsumers[producerNodeId] = consumer;
-            // Send the first RTR immediately so lifeTimeFactor=1 cannot expire before the
-            // initial poll/response is even possible; ScheduleNodeGuardingPoll only arms the
-            // subsequent periodic polls after guardTime.
-            SendNodeGuardingRtr(producerNodeId);
-            ScheduleNodeGuardingPoll(consumer);
-            var lifeTime = ScaleLifeTime(guardTime, lifeTimeFactor);
-            consumer.LifeTimeDeadline = _deadlines.Arm(lifeTime,
-                () => OnNodeGuardingTimeout(producerNodeId));
-        });
+        _actor.Post(() => StartNodeGuardingConsumerCore(producerNodeId, guardTime, lifeTimeFactor));
+    }
+
+    private NodeGuardingConsumer StartNodeGuardingConsumerCore(byte producerNodeId, TimeSpan guardTime,
+        byte lifeTimeFactor, byte retries = 0, CancellationToken? bootToken = null)
+    {
+        StopNodeGuardingConsumerCore(producerNodeId);
+        var consumer = new NodeGuardingConsumer(producerNodeId, guardTime, lifeTimeFactor, retries, bootToken);
+        _nodeGuardingConsumers[producerNodeId] = consumer;
+        // The first poll is queued immediately; subsequent polls run after guardTime.
+        SendNodeGuardingRtr(consumer);
+        ScheduleNodeGuardingPoll(consumer);
+        consumer.LifeTimeDeadline = _deadlines.Arm(ScaleLifeTime(guardTime, lifeTimeFactor),
+            () => OnNodeGuardingTimeout(producerNodeId));
+        return consumer;
     }
 
     /// <inheritdoc />
     public void StopNodeGuardingConsumer(byte producerNodeId)
     {
         if (_disposed != 0) return;
-        _actor.Post(() =>
-        {
-            if (_nodeGuardingConsumers.TryGetValue(producerNodeId, out var consumer))
-            {
-                consumer.PollHandle?.Dispose();
-                consumer.LifeTimeDeadline?.Dispose();
-                _nodeGuardingConsumers.Remove(producerNodeId);
-            }
-        });
+        _actor.Post(() => StopNodeGuardingConsumerCore(producerNodeId));
+    }
+
+    private void StopNodeGuardingConsumerCore(byte producerNodeId)
+    {
+        if (!_nodeGuardingConsumers.TryGetValue(producerNodeId, out var consumer)) return;
+        _nodeGuardingConsumers.Remove(producerNodeId);
+        consumer.PollHandle?.Dispose();
+        consumer.LifeTimeDeadline?.Dispose();
+        consumer.BootCancellation?.Cancel();
+        consumer.BootCancellation?.Dispose();
     }
 
     // =========================================================================================
@@ -76,9 +76,8 @@ internal sealed partial class CanOpenNode
     // =========================================================================================
     private void ScheduleNodeGuardingPoll(NodeGuardingConsumer consumer)
     {
-        // Subsequent polls fire after each guardTime interval. The initial RTR is sent
-        // synchronously from StartNodeGuardingConsumer so the life-time window starts with a
-        // real request already on the wire.
+        // Subsequent polls are queued after each guardTime interval. The initial RTR
+        // is queued when the consumer starts; driver handoff runs off the actor.
         var producer = consumer.ProducerNodeId;
         consumer.PollHandle = _actor.Schedule(consumer.GuardTime, () =>
         {
@@ -90,7 +89,7 @@ internal sealed partial class CanOpenNode
                 {
                     return; // consumer replaced or removed while we slept
                 }
-                SendNodeGuardingRtr(producer);
+                SendNodeGuardingRtr(consumer);
             }
             finally
             {
@@ -104,8 +103,9 @@ internal sealed partial class CanOpenNode
         });
     }
 
-    private void SendNodeGuardingRtr(byte producerNodeId)
+    private void SendNodeGuardingRtr(NodeGuardingConsumer consumer)
     {
+        byte producerNodeId = consumer.ProducerNodeId;
         // RTR (remote transmission request) on 0x700 + producer. CiA 301 §7.2.8.3.2.1 Figure 44
         // draws the request with DLC 1, the length of the response it asks for. CanKit derives a
         // frame's DLC from its data length and refuses data on a remote frame
@@ -127,12 +127,18 @@ internal sealed partial class CanOpenNode
         {
             try
             {
-                var conf = await SendReservedFrame(frame).ConfigureAwait(false);
+                var conf = await SendReservedFrame(frame, consumer.PollCancellation).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     RaiseBackgroundException(new CanOpenTransportException(
                         $"Node-guarding RTR on COB-ID 0x{CanOpenCobId.Heartbeat(producerNodeId):X3} failed: {conf.FailureReason}."));
                 }
+            }
+            catch (OperationCanceledException) when (consumer.PollCancellation.IsCancellationRequested)
+            {
+                // The boot ended or this consumer was replaced before its poll could finish.
+                // Cancellation is the requested outcome; do not report a transport failure.
+                return;
             }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
@@ -146,6 +152,14 @@ internal sealed partial class CanOpenNode
         var lifeTime = ScaleLifeTime(consumer.GuardTime, consumer.LifeTimeFactor);
         consumer.LifeTimeDeadline = _deadlines.Arm(lifeTime,
             () => OnNodeGuardingTimeout(producerNodeId));
+        // 1F81h retry factor counts additional missed guard-time windows after the first
+        // miss, not the producer's 100Dh life-time factor. Periodic polls supply the retries.
+        if (consumer.MissedWindows < consumer.RetryFactor)
+        {
+            consumer.MissedWindows++;
+            return;
+        }
+        consumer.MissedWindows = 0;
         RaiseNodeGuardingTimeout(producerNodeId, consumer.GuardTime, consumer.LifeTimeFactor);
     }
 
@@ -224,6 +238,7 @@ internal sealed partial class CanOpenNode
 
         consumer.HasSeenResponse = true;
         consumer.LastToggle = toggle;
+        consumer.MissedWindows = 0;
 
         var deadline = consumer.LifeTimeDeadline;
         var lifeTime = ScaleLifeTime(consumer.GuardTime, consumer.LifeTimeFactor);
@@ -404,16 +419,27 @@ internal sealed partial class CanOpenNode
 
     private sealed class NodeGuardingConsumer
     {
-        public NodeGuardingConsumer(byte producerNodeId, TimeSpan guardTime, byte lifeTimeFactor)
+        public NodeGuardingConsumer(byte producerNodeId, TimeSpan guardTime, byte lifeTimeFactor,
+            byte retries, CancellationToken? bootToken)
         {
             ProducerNodeId = producerNodeId;
             GuardTime = guardTime;
             LifeTimeFactor = lifeTimeFactor;
+            RetryFactor = retries;
+            if (bootToken is { } token)
+            {
+                BootCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+                PollCancellation = BootCancellation.Token;
+            }
         }
 
         public byte ProducerNodeId { get; }
         public TimeSpan GuardTime { get; }
         public byte LifeTimeFactor { get; }
+        public byte RetryFactor { get; }
+        public byte MissedWindows { get; set; }
+        public CancellationTokenSource? BootCancellation { get; }
+        public CancellationToken PollCancellation { get; }
         public IDisposable? PollHandle { get; set; }
         public IDeadline? LifeTimeDeadline { get; set; }
         /// <summary>True after the first response that was accepted for life-time rearm.</summary>

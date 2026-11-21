@@ -47,6 +47,23 @@ public sealed class CanOpenNodeOptions
     /// signature write is added. A failed sequence retains its acknowledged prefix.</remarks>
     public bool EnableBootConfigurationDownload { get; init; }
 
+    /// <summary>Enable the CiA 302-2 §4.1 error-control startup stage before automatic
+    /// slave Start or accepting Operational. Default false. Runs after enabled identity and
+    /// configuration checks, before safety verification. Does not enable those earlier checks.</summary>
+    /// <remarks>A configured local 1016h entry requires a fresh, valid heartbeat within its
+    /// consumer time, measured from this stage's entry. Comparable host RX timestamps are
+    /// required. Heartbeat has priority over node guarding. Otherwise nonzero guard time and
+    /// retry factor from 1F81h start guarding; zero in either field disables automatic guarding.
+    /// Retry factor N allows N additional missed guard-time windows before a timeout event;
+    /// an accepted response restores that allowance. Guarding starts without waiting for a reply.
+    /// This option replaces existing guarding consumers of assigned, boot-enabled slaves.
+    /// Boot-owned pollers stop on role loss, halt, reset or disposal; explicit later replacements
+    /// remain application-owned. Heartbeat configuration survives the master's cold reset;
+    /// relevant live edits restart boot. Failures follow the existing mandatory/optional policy.
+    /// Automatic Starts are individual. Start suppression skips this stage. Does not implement
+    /// the ongoing CiA 302-2 §4.2 error handler. Copy methods preserve the option.</remarks>
+    public bool EnableBootErrorControl { get; init; }
+
     /// <summary>
     /// Enable active slave boot with this positive delay between a failed attempt and its
     /// retry. Null (default) keeps announcement-based boot. One second is the CiA 302-2 §3.3
@@ -57,8 +74,8 @@ public sealed class CanOpenNodeOptions
     /// or identity expectation. Required Reset Communication sends must first be confirmed.
     /// Mandatory 1000h local timeouts retry until 1F89h (zero disables the deadline); other
     /// mandatory identity failures halt boot. Optional failures retry in the background until
-    /// success or boot cancellation. This does not implement configuration download or
-    /// automatic error-control setup. Copy methods preserve the setting.
+    /// success or boot cancellation. Configuration download and error-control startup have
+    /// separate opt-ins. Copy methods preserve the setting.
     /// </remarks>
     public TimeSpan? ActiveSlaveBootRetryInterval { get; init; }
 
@@ -504,6 +521,7 @@ public sealed class CanOpenNodeOptions
             ActiveSlaveBootRetryInterval = ActiveSlaveBootRetryInterval,
             RequireBootConfigurationMatch = RequireBootConfigurationMatch,
             EnableBootConfigurationDownload = EnableBootConfigurationDownload,
+            EnableBootErrorControl = EnableBootErrorControl,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,
