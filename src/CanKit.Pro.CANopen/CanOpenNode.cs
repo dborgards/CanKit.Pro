@@ -1106,7 +1106,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // front of it: HandleIncoming's first act is to classify the COB-ID, and it needs
                 // the payload for almost every class it can land in.
                 var data = frame.Data.ToArray();
-                _actor.Post(() => HandleIncomingFrame(id, data, isRtr, isFd));
+                long arrival = frameEvent.HostArrivalTimestamp;
+                _actor.Post(() =>
+                {
+                    ObserveConfigurationBootUp(id, data, isRtr, isFd, arrival);
+                    HandleIncomingFrame(id, data, isRtr, isFd);
+                });
             }
         }
         catch (OperationCanceledException) { /* Dispose */ }
@@ -2869,7 +2874,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return await HandToDriver(_service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            var reset = CaptureConfigurationReset(frame, cancellationToken);
+            var confirmation = await HandToDriver(_service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            if (reset is not null && confirmation.Confirmed)
+                RunOnActor(() => reset.Sent(confirmation.HostHandoffTimestamp));
+            return confirmation;
         }
         finally
         {

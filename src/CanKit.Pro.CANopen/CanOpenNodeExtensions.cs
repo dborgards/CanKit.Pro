@@ -50,11 +50,45 @@ public static class CanOpenNodeExtensions
         return local.DownloadConciseDcfAsync(peerNodeId, conciseDcf, cancellationToken);
     }
 
+    /// <summary>Registers or removes the concise DCF used by automatic boot for one slave.</summary>
+    /// <remarks>Requires EnableBootConfigurationDownload. Copies and validates the entire
+    /// stream before replacing the plan; null removes it, a four-byte zero count is an explicit
+    /// empty plan. Plans are local application configuration, not managed 1F22h storage, and
+    /// survive local NMT resets. A live change restarts boot and cancels the previous generation.
+    /// The plan is used only for zero/mismatching configuration expectations, after identity
+    /// verification. A bound EDS/DCF must permit every write and any selected 1011h restore.
+    /// Restore is selected by 1F81h bit 7 and nonzero 1F8Ah; Reset Node then waits for boot-up
+    /// within SdoTimeout after confirmation. Restore requires comparable host RX/handoff
+    /// timestamps from the bus service (provided by CanBusService); missing TX metadata fails
+    /// the update. Buffered boot-up frames older than the reset handoff cannot release it.
+    /// The peer SDO lease spans preflight, NMT, restore/reset and all writes.
+    /// No automatic store, signature update or safety commissioning is added. Failures retain
+    /// acknowledged writes, block Start and follow the existing mandatory/optional boot policy.
+    /// Once an update starts, its plan must finish even if partially written 1020h values match
+    /// on a retry. This incomplete marker survives local resets until success or plan replacement.</remarks>
+    /// <param name="node">A local node created by this library.</param>
+    /// <param name="peerNodeId">The slave node-id, 1–127; the local node's slot is ignored by boot.</param>
+    /// <param name="conciseDcf">Complete binary concise-DCF stream, or null to remove the plan.</param>
+    /// <exception cref="ArgumentNullException">The node is null.</exception>
+    /// <exception cref="NotSupportedException">The node is a third-party implementation.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The node-id is invalid.</exception>
+    /// <exception cref="InvalidOperationException">Automatic configuration download is disabled.</exception>
+    /// <exception cref="System.IO.InvalidDataException">The stream is malformed or a value exceeds MaxSdoTransferBytes.</exception>
+    /// <exception cref="ObjectDisposedException">The node is disposed.</exception>
+    public static void SetSlaveBootConfiguration(this ICanOpenNode node, byte peerNodeId, ReadOnlyMemory<byte>? conciseDcf)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        if (node is not CanOpenNode local)
+            throw new NotSupportedException("Boot configuration requires a node created by CanKit.Pro.");
+        local.SetSlaveBootConfiguration(peerNodeId, conciseDcf);
+    }
+
     /// <summary>Returns immutable snapshots of the assigned slaves' latest boot steps in
     /// node-id order. A new boot clears earlier results; leaving the master role clears them.
     /// StartRequested means a command was queued, not that the slave acknowledged it.
     /// Identity checking is enabled by nonzero values in 1F84h–1F88h; configuration checking
-    /// by CanOpenNodeOptions.RequireBootConfigurationMatch with 1F26h/1F27h expectations.</summary>
+    /// by RequireBootConfigurationMatch or EnableBootConfigurationDownload with
+    /// 1F26h/1F27h expectations.</summary>
     /// <exception cref="ArgumentNullException">The node is null.</exception>
     /// <exception cref="NotSupportedException">The node was not created by this library.</exception>
     /// <exception cref="ObjectDisposedException">The node has been disposed.</exception>

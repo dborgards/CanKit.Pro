@@ -346,6 +346,37 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // FR-CO-069: a successful ordinary DCF update cannot bypass the later safety gate.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Boot_Configuration_Download_Precedes_Safety_And_Individual_Start(bool valid)
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableBootConfigurationDownload = true });
+        using var slave = OpenSlave(rig, validChecksum: valid);
+        slave.ObjectDictionary.AddU32(0x2002, 0, 0);
+        var description = SlaveDcf(validChecksum: true);
+        description.Objects.Objects[0x2002] = PeerSdoLaboratory.Variables(0x2002).Objects.Objects[0x2002];
+        rig.Node.BindPeerDeviceDescription(Slave, description);
+        rig.Node.SetSlaveBootConfiguration(Slave, new byte[] { 1, 0, 0, 0, 2, 0x20, 0, 4, 0, 0, 0, 42, 0, 0, 0 });
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        var expected = valid ? SlaveBootStatus.StartRequested : SlaveBootStatus.SafetyConfigurationInvalid;
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.GetSlaveBootResults().Any(r => r.NodeId == Slave && r.Status == expected), 2000,
+            "download success still requires safety verification");
+        slave.ObjectDictionary.ReadUnsigned(0x2002, 0).Should().Be(42);
+        var frames = rig.Log.Snapshot();
+        int download = frames.FindIndex(f => f.Id == 0x600 + Slave && f.Data.Length == 8 && f.Data[1] == 2 && f.Data[2] == 0x20);
+        int safety = frames.FindIndex(f => f.Id == 0x600 + Slave && f.Data.Length == 8 && f.Data[0] == 0x40 && f.Data[2] == 0x13);
+        safety.Should().BeGreaterThan(download);
+        if (valid) await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.Start, Slave), 200, "safety verified");
+        else Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+        Logged(rig, NmtCommand.Start, 0).Should().BeFalse();
+    }
+
+
     [Fact]
     public async Task An_Unverified_Mandatory_Slave_Halts_The_Boot()
     {
