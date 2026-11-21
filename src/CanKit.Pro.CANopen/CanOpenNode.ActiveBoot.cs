@@ -39,7 +39,7 @@ internal sealed partial class CanOpenNode
         if (!CanActivelyBootSlave(nodeId) || _disposed != 0 || _bootHalted || _coldResetPending
             || _flyingMasterRole != FlyingMasterRole.Active) return;
         if (_slaveStarted[nodeId] || _slaveBootResetPending[nodeId] || _slaveIdentityVerifying[nodeId]
-            || _slaveVerifying[nodeId] || _slaveBootRetries[nodeId] is not null) return;
+            || _slaveVerifying[nodeId] || _slaveConfigurationVerifying[nodeId] || _slaveBootRetries[nodeId] is not null) return;
         if (!_slaveBootResetConfirmed[nodeId])
         {
             BeginActiveSlaveReset(nodeId);
@@ -107,6 +107,8 @@ internal sealed partial class CanOpenNode
             _slaveBootRetries[nodeId] = null;
             _slaveIdentityFailed[nodeId] = false;
             _slaveIdentityVerified[nodeId] = false;
+            _slaveConfigurationVerified[nodeId] = false;
+            _slaveConfigurationFailed[nodeId] = false;
             _slaveVerified[nodeId] = false;
             StartActiveSlaveAttempt(nodeId);
         });

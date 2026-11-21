@@ -18,7 +18,8 @@ public static class CanOpenNodeExtensions
     /// <summary>Returns immutable snapshots of the assigned slaves' latest boot steps in
     /// node-id order. A new boot clears earlier results; leaving the master role clears them.
     /// StartRequested means a command was queued, not that the slave acknowledged it.
-    /// Identity checking is enabled by nonzero values in 1F84h–1F88h.</summary>
+    /// Identity checking is enabled by nonzero values in 1F84h–1F88h; configuration checking
+    /// by CanOpenNodeOptions.RequireBootConfigurationMatch with 1F26h/1F27h expectations.</summary>
     /// <exception cref="ArgumentNullException">The node is null.</exception>
     /// <exception cref="NotSupportedException">The node was not created by this library.</exception>
     /// <exception cref="ObjectDisposedException">The node has been disposed.</exception>

@@ -172,7 +172,8 @@ internal sealed partial class CanOpenNode
     /// call, not half-way through this one. Built from one reading of the description
     /// (<see cref="DescribedObjects"/>, the same one an expectation derived from the description
     /// is built from); only what the transaction reads is kept: the declared pairs of the safety
-    /// area 1300h–13FFh, of 1018h and of 1010h (the only objects its transfers touch) and which of
+    /// area 1300h–13FFh, of 1000h/1018h, 1020h and 1010h (identity, configuration and safety
+    /// transfers) and which of
     /// them it declares read-only (the writes the pre-check refuses), the
     /// file's identity (CiA 319 §5.2), which communication records the file declares without an
     /// SRVT (CiA 319 §6.2), the highest SRDO record the file declares (the implied records), and
@@ -190,7 +191,7 @@ internal sealed partial class CanOpenNode
             IsBound = description is not null;
             if (description is null) return;
             foreach (var (index, entries) in description.Ordered(static i =>
-                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.DeviceType || i == Co.StoreParameters))
+                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.DeviceType || i == Co.VerifyConfiguration || i == Co.StoreParameters))
             {
                 foreach (var entry in entries)
                 {

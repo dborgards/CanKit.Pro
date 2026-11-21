@@ -154,6 +154,7 @@ namespace CanKit.Pro.CANopen
         public int MaxSdoTransferBytes { get; init; }
         public int PdoCount { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeProfile Profile { get; init; }
+        public bool RequireBootConfigurationMatch { get; init; }
         public bool RequireBootDeviceTypeUpload { get; init; }
         public bool RespondToNodeGuardingRtr { get; init; }
         public bool SdoBlockCrcSupported { get; init; }
@@ -824,6 +825,7 @@ namespace CanKit.Pro.CANopen.Nmt
         SlaveSafetyConfigurationInvalid = 6,
         SlaveIdentityInvalid = 7,
         SlaveBootResetFailed = 8,
+        SlaveConfigurationInvalid = 9,
     }
     public enum NmtCommand : byte
     {
@@ -863,6 +865,10 @@ namespace CanKit.Pro.CANopen.Nmt
         BootTimeout = 8,
         SafetyConfigurationInvalid = 9,
         ResetCommunicationFailed = 10,
+        VerifyingConfiguration = 11,
+        ConfigurationVerified = 12,
+        ConfigurationRequired = 13,
+        ConfigurationReadFailed = 14,
     }
 }
 namespace CanKit.Pro.CANopen.Pdo

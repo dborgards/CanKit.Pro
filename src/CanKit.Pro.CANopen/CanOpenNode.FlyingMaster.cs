@@ -599,6 +599,11 @@ internal sealed partial class CanOpenNode
         for (byte sub = 0; sub <= CanOpenCobId.MaxNodeId; sub++)
         {
             RememberOne(Co.SlaveAssignment, sub);
+            if (_options.RequireBootConfigurationMatch)
+            {
+                RememberOne(Co.ExpectedConfigurationDate, sub);
+                RememberOne(Co.ExpectedConfigurationTime, sub);
+            }
             for (ushort index = Co.ExpectedDeviceType; index <= Co.ExpectedSerialNumber; index++)
                 RememberOne(index, sub);
         }
