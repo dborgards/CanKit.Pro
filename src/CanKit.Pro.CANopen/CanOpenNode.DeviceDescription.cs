@@ -332,6 +332,7 @@ internal sealed partial class CanOpenNode
         // 1F81h and 1F89h before 1F80h, and 1F90h before both: the network list, the boot
         // timeout and the times are in the dictionary when bits 0 and 5 start the election.
         Co.SlaveAssignment or Co.BootTime => -2,
+        Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime => -2,
         >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber => -2,
         Co.FlyingMasterTiming => -1,
         >= Co.RpdoComm and < Co.RpdoComm + 0x200 => 1,
@@ -429,6 +430,7 @@ internal sealed partial class CanOpenNode
                 return ApplyManagedVariable(index, entries, findings);
             case Co.SlaveAssignment:
             case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
+            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when _options.RequireBootConfigurationMatch:
                 return ApplySlaveAssignment(index, entries, findings);
             case Co.RequestNmt:
                 return ApplyRequestNmt(entries, findings);

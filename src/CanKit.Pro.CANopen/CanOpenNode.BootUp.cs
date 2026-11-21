@@ -115,6 +115,9 @@ internal sealed partial class CanOpenNode
         Array.Clear(_slaveIdentityVerified, 0, _slaveIdentityVerified.Length);
         Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
         Array.Clear(_slaveIdentityFailed, 0, _slaveIdentityFailed.Length);
+        Array.Clear(_slaveConfigurationVerified, 0, _slaveConfigurationVerified.Length);
+        Array.Clear(_slaveConfigurationVerifying, 0, _slaveConfigurationVerifying.Length);
+        Array.Clear(_slaveConfigurationFailed, 0, _slaveConfigurationFailed.Length);
         Array.Clear(_slaveBootResults, 0, _slaveBootResults.Length);
         _bootStartMoment = false;
         _bootHalted = false;
@@ -177,6 +180,13 @@ internal sealed partial class CanOpenNode
             return;
         }
 
+        if (_slaveConfigurationFailed[nodeId]) return;
+        if (_options.RequireBootConfigurationMatch && !_slaveConfigurationVerified[nodeId])
+        {
+            if (!_slaveConfigurationVerifying[nodeId]) BeginSlaveConfigurationVerification(nodeId);
+            return;
+        }
+
         // Already operational: nothing to send. Boot-up, pre-operational and stopped are the
         // states from which the master starts the slave.
         if (state == RequestOperational)
@@ -217,6 +227,7 @@ internal sealed partial class CanOpenNode
         if (_bootHalted || _disposed != 0) return;
         if (HasUnseenMandatorySlave()) return;
         if (HasUnverifiedMandatoryIdentity()) return;
+        if (HasUnverifiedMandatoryConfiguration()) return;
 
         uint startup = ReadStartup();
         bool mayStartSlaves = (startup & NmtSuppressSlaveStartBit) == 0;
@@ -226,7 +237,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
             _bootStartMoment = true;
-            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification())
+            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || _options.RequireBootConfigurationMatch)
             {
                 // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
                 // Start to node 0 reaches one that has not announced yet — keep-alive, running
@@ -272,7 +283,7 @@ internal sealed partial class CanOpenNode
             ArmBootDeadline();
             return;
         }
-        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity())
+        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity() && !HasUnverifiedMandatoryConfiguration())
         {
             TryFinishBoot();
             return;
@@ -281,7 +292,7 @@ internal sealed partial class CanOpenNode
         var unseenMandatory = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id)))
+            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id)))
             {
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
@@ -304,6 +315,7 @@ internal sealed partial class CanOpenNode
         uint startup = ReadStartup();
         _slaveVerificationCts?.Cancel();
         Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
+        Array.Clear(_slaveConfigurationVerifying, 0, _slaveConfigurationVerifying.Length);
         Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
         bool stopAll = (startup & NmtStopAllOnErrorBit) != 0;
         bool resetAll = !stopAll && (startup & NmtResetAllOnErrorBit) != 0;
@@ -397,7 +409,7 @@ internal sealed partial class CanOpenNode
             // §3.3: an optional slave owes the master only its first completed attempt.
             // A later in-flight retry must not hold a mandatory slave's start moment.
             if (_slaveBootRetrying[id] && !IsMandatory(id)) continue;
-            if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveBootResetPending[id]) return true;
+            if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) return true;
         }
         return false;
     }
@@ -414,7 +426,7 @@ internal sealed partial class CanOpenNode
         var pending = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id)) pending.Add(id);
+            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id)) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }

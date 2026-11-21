@@ -158,6 +158,7 @@ public partial class CanOpenBootIdentityTests
     [InlineData("_slaveStarted")]
     [InlineData("_slaveIdentityVerifying")]
     [InlineData("_slaveVerifying")]
+    [InlineData("_slaveConfigurationVerifying")]
     public async Task Active_Attempts_Do_Not_Duplicate_In_Flight_Or_Completed_Work(string field)
     {
         using var rig = OpenMaster(ActiveBootOptions());

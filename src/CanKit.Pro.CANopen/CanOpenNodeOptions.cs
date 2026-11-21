@@ -19,6 +19,22 @@ namespace CanKit.Pro.CANopen;
 public sealed class CanOpenNodeOptions
 {
     /// <summary>
+    /// Require matching nonzero configuration date/time in 1F26h/1F27h against the slave's
+    /// 1020h:01/:02 before automatic Start or accepting an Operational announcement.
+    /// Default false leaves these expectation objects application-owned and performs no check.
+    /// </summary>
+    /// <remarks>
+    /// Enables managed UNSIGNED32 expectation arrays (one entry per node-id, initially zero).
+    /// A zero expectation or mismatch reports ConfigurationRequired and prevents Start;
+    /// it does not silently skip comparison or download a configuration. Uploads share the
+    /// peer SDO channel and require a bound EDS/DCF permitting both 1020h uploads.
+    /// Mandatory failures halt boot; optional failures
+    /// follow the selected announcement-based or active retry policy. Copies preserve this option.
+    /// This is the verification part of CiA 302-2 §3.5, not its restore/download procedure.
+    /// </remarks>
+    public bool RequireBootConfigurationMatch { get; init; }
+
+    /// <summary>
     /// Enable active slave boot with this positive delay between a failed attempt and its
     /// retry. Null (default) keeps announcement-based boot. One second is the CiA 302-2 §3.3
     /// recommendation above 125 kbit/s; choose a suitable interval for the network.
@@ -473,6 +489,7 @@ public sealed class CanOpenNodeOptions
         var options = new CanOpenNodeOptions
         {
             ActiveSlaveBootRetryInterval = ActiveSlaveBootRetryInterval,
+            RequireBootConfigurationMatch = RequireBootConfigurationMatch,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,

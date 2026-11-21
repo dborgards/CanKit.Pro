@@ -110,6 +110,7 @@ maintainer decision does.
 | FR-CO-064 | Optional identity gate before slave Start via `1F84h`–`1F88h`, with immutable per-slave boot results ([Boot-up](#boot-up)) |
 | FR-CO-065 | Opt-in device-type upload before automatic slave Start, even without identity expectations ([Boot-up](#boot-up)) |
 | FR-CO-066 | Opt-in active slave boot and retries without an announcement, with confirmed resets and mandatory boot deadline ([Boot-up](#boot-up)) |
+| FR-CO-067 | Opt-in configuration date/time verification against `1020h` before automatic Start ([Boot-up](#boot-up)) |
 
 ## Not built, and why
 
@@ -2113,7 +2114,7 @@ send to be confirmed by the adapter. Rejected or cancelled resets are retried, e
 A mandatory slave retries a local SDO timeout at `1000h:00` until `1F89h` expires; zero disables
 that deadline, including while waiting for the shared SDO channel. A peer abort (even code
 `05040000h`), a timeout at `1018h`, a mismatch or another mandatory verification failure halts
-boot. Optional identity and safety failures retry until success or cancellation, including
+boot. Optional identity, configuration and safety failures retry until success or cancellation, including
 after the mandatory set has started and beyond `1F89h`. Their first completed attempt releases
 the master/start moment; a pending retry does not hold it. The existing safety gate still
 runs before Start. Reset, a new boot, role loss or a boot halt cancels pending work.
@@ -2125,8 +2126,41 @@ enabled verification gates pass. Active boot never sends broadcast Start. This i
 boot policy: the full keep-alive heartbeat/guarding check, configuration download and automatic
 error-control setup remain unimplemented. See the [active boot record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-active-boot.md).
 
+**Configuration version before Start (FR-CO-067).** Set
+`CanOpenNodeOptions.RequireBootConfigurationMatch = true` when opening the master, bind a
+peer EDS/DCF permitting uploads of `1020h:01` and `1020h:02`, and set the expected date/time:
+
+```csharp
+node.BindPeerDeviceDescription(5, slaveDescription);
+node.ObjectDictionary.WriteUnsigned(0x1F26, 5, expectedConfigurationDate);
+node.ObjectDictionary.WriteUnsigned(0x1F27, 5, expectedConfigurationTime);
+// Configure 1F81h before StartFlyingMaster, as above.
+```
+
+The option defaults to false, leaving these objects application-owned. When enabled, `1F26h`
+and `1F27h` are managed UNSIGNED32 arrays with constant sub-index 0 = 127 and initially zero
+expectations at node-ids 1–127. EDS/DCF, local and SDO writes use the same validation; edits
+while active start a new boot. `StartFlyingMaster` preserves both arrays across its cold reset.
+
+Both expectations must be nonzero and exactly match four-byte replies from `1020h:01` (date)
+and `1020h:02` (time). Either zero means configuration is required, so no upload is needed;
+it does not skip a field. Zero or mismatch reports `ConfigurationRequired`. Upload failures,
+including an absent or restrictive description, report `ConfigurationReadFailed` with the
+cause. Both prevent automatic Start and raise `SlaveConfigurationInvalid`; snapshots carry
+the remote pair and expected/actual values when available. No restore or download is performed.
+
+The gate runs after enabled identity checks and before safety checks and Start. It also
+verifies an Operational announcement, a stricter opt-in policy than skipping configuration for
+a keep-alive slave. It does not itself enable the `1000h` upload. Both reads share one channel
+lease and one description snapshot; the mandatory boot deadline includes the channel wait.
+Mandatory failures halt boot, including a timeout at `1020h`. Optional failures follow the
+announcement policy above or retry under active boot. Resets, role loss, new boots and halt
+cancel old work. Excluded slaves remain excluded; starts are individual even at the simultaneous
+start moment. See the [configuration scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-configuration-check.md)
+for the boundary with the remaining CiA 302-2 §3.5 restore/download procedure.
+
 `node.GetSlaveBootResults()` returns immutable snapshots in node-id order: announcement wait,
-identity verification, Start requested, already Operational, or a failure. Identity failures carry
+identity/configuration verification, Start requested, already Operational, or a failure. Verification failures carry
 the remote index/sub-index, expected and actual value when available, and the upload exception
 (including `SdoAbortException.AbortCode`). Start requested means queued, not confirmed or remotely
 acknowledged. A broadcast Start preserves `AlreadyOperational` for a slave that was running

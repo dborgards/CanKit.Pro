@@ -27,6 +27,14 @@ public enum SlaveBootStatus
     SafetyConfigurationInvalid,
     /// <summary>The active boot's Reset Communication send was not confirmed; a retry is scheduled.</summary>
     ResetCommunicationFailed,
+    /// <summary>The expected configuration date/time is being verified over SDO.</summary>
+    VerifyingConfiguration,
+    /// <summary>Both nonzero configuration expectations matched 1020h:01/:02.</summary>
+    ConfigurationVerified,
+    /// <summary>A zero expectation or a mismatching configuration requires configuration work; Start is blocked.</summary>
+    ConfigurationRequired,
+    /// <summary>A configuration upload failed or was not UNSIGNED32.</summary>
+    ConfigurationReadFailed,
 }
 
 /// <summary>An immutable snapshot of one slave's boot progress. A new boot replaces the results.</summary>
@@ -52,7 +60,8 @@ public sealed class SlaveBootResult
     public ushort? Index { get; }
     /// <summary>The remote sub-index that failed verification, or null.</summary>
     public byte? Subindex { get; }
-    /// <summary>The configured nonzero expectation for the failed comparison, or null.</summary>
+    /// <summary>The configured expectation, or null. ConfigurationRequired may carry zero,
+    /// which requests configuration rather than bypassing its check.</summary>
     public uint? ExpectedValue { get; }
     /// <summary>The received UNSIGNED32 for a mismatch, or null.</summary>
     public uint? ActualValue { get; }

@@ -78,4 +78,7 @@ public enum FlyingMasterSignal
     SlaveIdentityInvalid,
     /// <summary>An active slave boot could not confirm Reset Communication and will retry.</summary>
     SlaveBootResetFailed,
+    /// <summary>The slave requires configuration or its 1020h upload failed. Start is blocked;
+    /// the configured boot policy decides retry or halt. GetSlaveBootResults supplies details.</summary>
+    SlaveConfigurationInvalid,
 }

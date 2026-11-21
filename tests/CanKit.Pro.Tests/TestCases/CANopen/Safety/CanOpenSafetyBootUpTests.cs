@@ -255,13 +255,28 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         rig.Node.State.Should().Be(NmtState.Operational, "an optional slave does not hold the master");
     }
 
-    [Fact]
-    public async Task Active_Optional_Safety_Failure_Retries_Without_Halting_Simultaneous_Start()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Active_Optional_Safety_Failure_Retries_Without_Halting_Simultaneous_Start(bool checkConfiguration)
     {
-        using var rig = OpenMaster(new CanOpenNodeOptions { ActiveSlaveBootRetryInterval = TimeSpan.FromMilliseconds(100) });
+        using var rig = OpenMaster(new CanOpenNodeOptions
+        {
+            ActiveSlaveBootRetryInterval = TimeSpan.FromMilliseconds(100),
+            RequireBootConfigurationMatch = checkConfiguration
+        });
         using var slave = OpenSlave(rig, validChecksum: false);
-        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        var description = SlaveDcf(validChecksum: true);
         var od = rig.Node.ObjectDictionary;
+        if (checkConfiguration)
+        {
+            description.Objects.Objects[0x1020] = CanOpenDeviceDescription.ParseEds(CanOpenBootIdentityTests.ConfigurationDescription(false)).Objects.Objects[0x1020];
+            slave.ObjectDictionary.AddU32(0x1020, 1, 1, OdAccess.ReadWrite, pdoMappable: false);
+            slave.ObjectDictionary.AddU32(0x1020, 2, 2, OdAccess.ReadWrite, pdoMappable: false);
+            od.WriteUnsigned(0x1F26, Slave, 1);
+            od.WriteUnsigned(0x1F27, Slave, 2);
+        }
+        rig.Node.BindPeerDeviceDescription(Slave, description);
         od.WriteUnsigned(Startup, 0, 0x02);
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | KeepAlive);
         Tighten(rig.Node);
@@ -280,11 +295,55 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         var mapping = new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8);
         slave.ObjectDictionary.WriteUnsigned(0x13FF, 1, SrdoCrc.Compute(parameter, mapping));
         slave.ObjectDictionary.WriteUnsigned(0x13FE, 0, 0xA5);
+        if (checkConfiguration) slave.ObjectDictionary.WriteUnsigned(0x1020, 2, 3);
         await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(1));
+        if (checkConfiguration)
+        {
+            await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.GetSlaveBootResults().Single().Status == SlaveBootStatus.ConfigurationRequired, 50,
+                "a retry rechecks configuration even when the previous attempt passed it");
+            Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+            slave.ObjectDictionary.WriteUnsigned(0x1020, 2, 2);
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        }
         await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational, 500, "the next attempt verifies the repaired safety configuration");
         SdoRequests(rig).Should().BeGreaterThan(requests);
         Logged(rig, NmtCommand.Start, Slave).Should().BeTrue();
         Logged(rig, NmtCommand.Start, 0).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Configuration_Version_Is_Checked_Before_Safety_And_Start(bool matches)
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { RequireBootConfigurationMatch = true });
+        using var slave = OpenSlave(rig, validChecksum: true);
+        slave.ObjectDictionary.AddU32(0x1020, 1, 1, OdAccess.ReadOnly, pdoMappable: false);
+        slave.ObjectDictionary.AddU32(0x1020, 2, matches ? 2u : 3u, OdAccess.ReadOnly, pdoMappable: false);
+        var description = SlaveDcf(validChecksum: true);
+        description.Objects.Objects[0x1020] = CanOpenDeviceDescription.ParseEds(CanOpenBootIdentityTests.ConfigurationDescription(false)).Objects.Objects[0x1020];
+        rig.Node.BindPeerDeviceDescription(Slave, description);
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F26, Slave, 1);
+        od.WriteUnsigned(0x1F27, Slave, 2);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        var expected = matches ? SlaveBootStatus.StartRequested : SlaveBootStatus.ConfigurationRequired;
+        await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.GetSlaveBootResults().Any(r => r.NodeId == Slave && r.Status == expected), 2000, "configuration precedes the safety step");
+        var requests = rig.Log.Snapshot().Where(f => f.Id == 0x600 + Slave && f.Data.Length == 8 && f.Data[0] == 0x40)
+            .Select(f => f.Data[1] | f.Data[2] << 8).ToArray();
+        requests.Take(2).Should().Equal(0x1020, 0x1020);
+        if (matches)
+        {
+            requests.Skip(2).Should().Contain(0x13FE);
+            await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.Start, Slave), 200, "safety verified before Start");
+        }
+        else
+        {
+            requests.Should().HaveCount(2);
+            Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+        }
     }
 
     [Fact]
