@@ -26,7 +26,8 @@ internal sealed partial class CanOpenNode
         => _slaveSeen[nodeId] || (CanActivelyBootSlave(nodeId) && _slaveIdentityVerified[nodeId]);
 
     private byte SlaveStateForBoot(byte nodeId)
-        => _slaveSeen[nodeId] ? (byte)_od.ReadUnsigned(Co.RequestNmt, nodeId) : (byte)0;
+        => _slaveConfigurationNeedsStart[nodeId] ? RequestPreOperational
+            : _slaveSeen[nodeId] ? (byte)_od.ReadUnsigned(Co.RequestNmt, nodeId) : (byte)0;
 
     private void ResumeActiveSlaveBoots()
     {

@@ -135,6 +135,7 @@ namespace CanKit.Pro.CANopen
         public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.CANopen.ICanOpenNode node) { }
         public static System.Threading.Tasks.Task DownloadConciseDcfAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte peerNodeId, System.ReadOnlyMemory<byte> conciseDcf, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Nmt.SlaveBootResult> GetSlaveBootResults(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+        public static void SetSlaveBootConfiguration(this CanKit.Pro.CANopen.ICanOpenNode node, byte peerNodeId, System.ReadOnlyMemory<byte>? conciseDcf) { }
     }
     public sealed class CanOpenNodeOptions
     {
@@ -145,6 +146,7 @@ namespace CanKit.Pro.CANopen
         public bool EmitControllerErrorEmcy { get; init; }
         public bool EmitControllerOverrunEmcy { get; init; }
         public bool EmitGuardingErrorEmcy { get; init; }
+        public bool EnableBootConfigurationDownload { get; init; }
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
         public bool EnableEmcyInhibit { get; init; }
@@ -870,6 +872,8 @@ namespace CanKit.Pro.CANopen.Nmt
         ConfigurationVerified = 12,
         ConfigurationRequired = 13,
         ConfigurationReadFailed = 14,
+        ConfigurationDownloaded = 15,
+        ConfigurationDownloadFailed = 16,
     }
 }
 namespace CanKit.Pro.CANopen.Pdo

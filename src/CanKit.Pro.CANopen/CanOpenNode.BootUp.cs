@@ -116,6 +116,7 @@ internal sealed partial class CanOpenNode
         Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
         Array.Clear(_slaveIdentityFailed, 0, _slaveIdentityFailed.Length);
         Array.Clear(_slaveConfigurationVerified, 0, _slaveConfigurationVerified.Length);
+        Array.Clear(_slaveConfigurationNeedsStart, 0, _slaveConfigurationNeedsStart.Length);
         Array.Clear(_slaveConfigurationVerifying, 0, _slaveConfigurationVerifying.Length);
         Array.Clear(_slaveConfigurationFailed, 0, _slaveConfigurationFailed.Length);
         Array.Clear(_slaveBootResults, 0, _slaveBootResults.Length);
@@ -141,6 +142,7 @@ internal sealed partial class CanOpenNode
         // not go out behind the reset.
         _od.WriteRawUnchecked(Co.RequestNmt, nodeId, new[] { state });
         _slaveSeen[nodeId] = true;
+        if (state == 0) _slaveConfigurationBootUps[nodeId]?.TrySetResult(true);
         if (_slaveBootResults[nodeId]?.Status == SlaveBootStatus.WaitingForAnnouncement)
             _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.Announced);
         if (_coldResetPending) return;
@@ -181,11 +183,15 @@ internal sealed partial class CanOpenNode
         }
 
         if (_slaveConfigurationFailed[nodeId]) return;
-        if (_options.RequireBootConfigurationMatch && !_slaveConfigurationVerified[nodeId])
+        if (BootConfigurationEnabled && !_slaveConfigurationVerified[nodeId])
         {
             if (!_slaveConfigurationVerifying[nodeId]) BeginSlaveConfigurationVerification(nodeId);
             return;
         }
+
+        // Once this boot requested Pre-operational for an update, a delayed Operational
+        // announcement must not skip safety verification or the explicit final Start.
+        if (_slaveConfigurationNeedsStart[nodeId]) state = RequestPreOperational;
 
         // Already operational: nothing to send. Boot-up, pre-operational and stopped are the
         // states from which the master starts the slave.
@@ -237,7 +243,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
             _bootStartMoment = true;
-            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || _options.RequireBootConfigurationMatch)
+            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || BootConfigurationEnabled)
             {
                 // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
                 // Start to node 0 reaches one that has not announced yet — keep-alive, running
@@ -426,7 +432,7 @@ internal sealed partial class CanOpenNode
         var pending = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id)) pending.Add(id);
+            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id) && _slaveConfigurationBootUps[id] is null) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }
@@ -607,7 +613,7 @@ internal sealed partial class CanOpenNode
     /// <see langword="true"/> only when the adapter confirmed the send. Cancellation faults
     /// the task. Every other failure is reported through <c>BackgroundExceptionOccurred</c>
     /// and completes with <see langword="false"/>, including an unconfirmed send.</summary>
-    private Task<bool> EnqueueNmt(NmtCommand command, byte target)
+    private Task<bool> EnqueueNmt(NmtCommand command, byte target, CancellationToken token = default)
     {
         var payload = new[] { (byte)command, target };
         var previous = _nmtOrder;
@@ -617,7 +623,7 @@ internal sealed partial class CanOpenNode
         // delegate cache on the untaken side of a branch.
         previous.ContinueWith(
             SendNextNmt,
-            (payload, done),
+            (payload, done, token),
             CancellationToken.None,
             TaskContinuationOptions.None,
             TaskScheduler.Default);
@@ -627,8 +633,8 @@ internal sealed partial class CanOpenNode
     private void SendNextNmt(Task completed, object? state)
     {
         _ = completed;
-        var (payload, done) = ((byte[], TaskCompletionSource<bool>))state!;
-        SendNmtReporting(payload).ContinueWith(
+        var (payload, done, token) = ((byte[], TaskCompletionSource<bool>, CancellationToken))state!;
+        SendNmtReporting(payload, token).ContinueWith(
             FinishNmt,
             done,
             CancellationToken.None,

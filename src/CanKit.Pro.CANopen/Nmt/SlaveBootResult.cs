@@ -27,7 +27,7 @@ public enum SlaveBootStatus
     SafetyConfigurationInvalid,
     /// <summary>The active boot's Reset Communication send was not confirmed; a retry is scheduled.</summary>
     ResetCommunicationFailed,
-    /// <summary>The expected configuration date/time is being verified over SDO.</summary>
+    /// <summary>Configuration date/time is being verified or the registered configuration is being applied.</summary>
     VerifyingConfiguration,
     /// <summary>Both nonzero configuration expectations matched 1020h:01/:02.</summary>
     ConfigurationVerified,
@@ -35,6 +35,10 @@ public enum SlaveBootStatus
     ConfigurationRequired,
     /// <summary>A configuration upload failed or was not UNSIGNED32.</summary>
     ConfigurationReadFailed,
+    /// <summary>The registered configuration stream was acknowledged in full.</summary>
+    ConfigurationDownloaded,
+    /// <summary>Preflight, a configuration write, restore or its reset/boot-up failed.</summary>
+    ConfigurationDownloadFailed,
 }
 
 /// <summary>An immutable snapshot of one slave's boot progress. A new boot replaces the results.</summary>
@@ -65,6 +69,6 @@ public sealed class SlaveBootResult
     public uint? ExpectedValue { get; }
     /// <summary>The received UNSIGNED32 for a mismatch, or null.</summary>
     public uint? ActualValue { get; }
-    /// <summary>The upload failure, including an SDO abort when supplied by the peer, or null.</summary>
+    /// <summary>The verification or configuration update failure, including an SDO abort when supplied by the peer, or null.</summary>
     public Exception? Error { get; }
 }

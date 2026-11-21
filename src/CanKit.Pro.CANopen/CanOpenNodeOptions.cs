@@ -21,18 +21,30 @@ public sealed class CanOpenNodeOptions
     /// <summary>
     /// Require matching nonzero configuration date/time in 1F26h/1F27h against the slave's
     /// 1020h:01/:02 before automatic Start or accepting an Operational announcement.
-    /// Default false leaves these expectation objects application-owned and performs no check.
+    /// With both configuration options false, expectation objects stay application-owned and no check runs.
     /// </summary>
     /// <remarks>
     /// Enables managed UNSIGNED32 expectation arrays (one entry per node-id, initially zero).
     /// A zero expectation or mismatch reports ConfigurationRequired and prevents Start;
-    /// it does not silently skip comparison or download a configuration. Uploads share the
+    /// a separate EnableBootConfigurationDownload opt-in can apply a registered configuration. Uploads share the
     /// peer SDO channel and require a bound EDS/DCF permitting both 1020h uploads.
     /// Mandatory failures halt boot; optional failures
     /// follow the selected announcement-based or active retry policy. Copies preserve this option.
-    /// This is the verification part of CiA 302-2 §3.5, not its restore/download procedure.
+    /// This option alone enables the verification part of CiA 302-2 §3.5.
     /// </remarks>
     public bool RequireBootConfigurationMatch { get; init; }
+
+    /// <summary>Enable automatic CiA 302-2 §3.5 configuration updates from streams registered
+    /// with SetSlaveBootConfiguration. Default false. Implies configuration comparison and
+    /// the 1000h device-type upload. Enables managed 1F8Ah restore sub-indexes, initially zero.</summary>
+    /// <remarks>Zero/mismatching 1F26h/1F27h expectations download a registered stream;
+    /// without one, ConfigurationRequired still blocks Start. All targets require a bound
+    /// writable EDS/DCF declaration. The slave enters Pre-operational before writing.
+    /// When 1F81h bit 7 and 1F8Ah are nonzero, acknowledged 1011h restore is followed by
+    /// confirmed Reset Node and a boot-up announcement within SdoTimeout. Successful DCF
+    /// download permits subsequent safety verification and Start; no implicit store or
+    /// signature write is added. A failed sequence retains its acknowledged prefix.</remarks>
+    public bool EnableBootConfigurationDownload { get; init; }
 
     /// <summary>
     /// Enable active slave boot with this positive delay between a failed attempt and its
@@ -490,6 +502,7 @@ public sealed class CanOpenNodeOptions
         {
             ActiveSlaveBootRetryInterval = ActiveSlaveBootRetryInterval,
             RequireBootConfigurationMatch = RequireBootConfigurationMatch,
+            EnableBootConfigurationDownload = EnableBootConfigurationDownload,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,

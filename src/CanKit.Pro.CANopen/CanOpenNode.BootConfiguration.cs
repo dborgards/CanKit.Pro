@@ -14,7 +14,7 @@ internal sealed partial class CanOpenNode
     private readonly bool[] _slaveConfigurationFailed = new bool[CanOpenCobId.MaxNodeId + 1];
 
     private bool IsMandatoryConfigurationPending(byte nodeId)
-        => _options.RequireBootConfigurationMatch && IsMandatory(nodeId)
+        => BootConfigurationEnabled && IsMandatory(nodeId)
            && (ReadStartup() & NmtSuppressSlaveStartBit) == 0
            && (Assignment(nodeId) & SlaveBootBit) != 0 && !_slaveConfigurationVerified[nodeId];
 
@@ -33,9 +33,15 @@ internal sealed partial class CanOpenNode
         uint time = _od.ReadUnsigned(Co.ExpectedConfigurationTime, nodeId);
         var token = (_slaveVerificationCts ??= new CancellationTokenSource()).Token;
         int generation = _bootGeneration;
+        var plan = _slaveBootConfigurations[nodeId];
+        byte restore = _options.EnableBootConfigurationDownload && (Assignment(nodeId) & 0x80) != 0
+            ? (byte)_od.ReadUnsigned(Co.RestoreConfiguration, nodeId) : (byte)0;
         _ = Task.Run(async () =>
         {
             var result = await VerifySlaveConfigurationAsync(nodeId, date, time, token).ConfigureAwait(false);
+            if (plan is not null && (result.Status == SlaveBootStatus.ConfigurationRequired
+                || (result.Status == SlaveBootStatus.ConfigurationVerified && plan.Incomplete)))
+                result = await DownloadSlaveConfigurationAsync(nodeId, plan, restore, token).ConfigureAwait(false);
             if (token.IsCancellationRequested) return;
             PostSlaveConfigurationResult(nodeId, generation, result);
         });
@@ -103,7 +109,7 @@ internal sealed partial class CanOpenNode
         // An abandoned forced reset rechecks; a confirmed reset cancels this generation.
         if (_coldResetPending) return;
         _slaveBootResults[nodeId] = result;
-        if (result.Status == SlaveBootStatus.ConfigurationVerified)
+        if (result.Status is SlaveBootStatus.ConfigurationVerified or SlaveBootStatus.ConfigurationDownloaded)
         {
             _slaveConfigurationVerified[nodeId] = true;
             ConsiderStart(nodeId, SlaveStateForBoot(nodeId));
