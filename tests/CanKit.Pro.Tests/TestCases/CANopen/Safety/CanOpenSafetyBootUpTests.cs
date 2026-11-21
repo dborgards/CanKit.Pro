@@ -256,6 +256,38 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Active_Optional_Safety_Failure_Retries_Without_Halting_Simultaneous_Start()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { ActiveSlaveBootRetryInterval = TimeSpan.FromMilliseconds(100) });
+        using var slave = OpenSlave(rig, validChecksum: false);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0, 0x02);
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | KeepAlive);
+        Tighten(rig.Node);
+        var signals = Record(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid), 2000, "step D failed");
+        rig.Node.GetSlaveBootResults().Single().Status.Should().Be(SlaveBootStatus.SafetyConfigurationInvalid);
+        rig.Node.State.Should().Be(NmtState.Operational, "the optional first attempt is complete");
+        Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+        Logged(rig, NmtCommand.Start, 0).Should().BeFalse();
+        int requests = SdoRequests(rig);
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(99));
+        SdoRequests(rig).Should().Be(requests);
+
+        var parameter = new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A);
+        var mapping = new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8);
+        slave.ObjectDictionary.WriteUnsigned(0x13FF, 1, SrdoCrc.Compute(parameter, mapping));
+        slave.ObjectDictionary.WriteUnsigned(0x13FE, 0, 0xA5);
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(1));
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational, 500, "the next attempt verifies the repaired safety configuration");
+        SdoRequests(rig).Should().BeGreaterThan(requests);
+        Logged(rig, NmtCommand.Start, Slave).Should().BeTrue();
+        Logged(rig, NmtCommand.Start, 0).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task An_Unverified_Mandatory_Slave_Halts_The_Boot()
     {
         using var rig = OpenMaster();

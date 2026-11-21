@@ -170,6 +170,7 @@ public class Cia401DeviceDigitalInputTests
     private static CanOpenNodeOptions EveryOptionChanged(int pdoCount) => new CanOpenNodeOptions
     {
         RequireBootDeviceTypeUpload = true,
+        ActiveSlaveBootRetryInterval = TimeSpan.FromSeconds(1),
         EnableEmcyInhibit = true,
         EmitGuardingErrorEmcy = true,
         EmitControllerErrorEmcy = true,

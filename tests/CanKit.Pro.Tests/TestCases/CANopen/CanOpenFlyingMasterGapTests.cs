@@ -1718,9 +1718,9 @@ public partial class CanOpenFlyingMasterTests
         await QuiesceAsync(witness, null);
     }
 
-    /// <summary>Holds the cold Reset Communication so a test can use the window before it completes,
+    /// <summary>Holds Reset Communication for a selected target (broadcast by default) before it completes,
     /// or cancels that one send.</summary>
-    private sealed class ColdResetGate : ICanBusService
+    internal sealed class ColdResetGate : ICanBusService
     {
         private readonly ClockedCanBusService _inner;
         private readonly TaskCompletionSource<bool> _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1730,6 +1730,7 @@ public partial class CanOpenFlyingMasterTests
         public ClockedCanBusService Confirmations => _inner;
 
         public bool Cancel { get; set; }
+        public byte ResetTarget { get; init; }
         public bool Reject { get; set; }
         /// <summary>The held send completes as unconfirmed once <see cref="Release"/> is called.</summary>
         public bool RejectOnRelease { get; set; }
@@ -1759,7 +1760,7 @@ public partial class CanOpenFlyingMasterTests
 
         public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
-            if (IsBroadcastReset(frame) && ++_resetsSeen > PassResets)
+            if (IsTargetReset(frame) && ++_resetsSeen > PassResets)
             {
                 _entered.TrySetResult(true);
                 if (Cancel) throw new OperationCanceledException();
@@ -1779,11 +1780,11 @@ public partial class CanOpenFlyingMasterTests
             _inner.Dispose();
         }
 
-        private static bool IsBroadcastReset(CanFrame frame)
+        private bool IsTargetReset(CanFrame frame)
         {
             var data = frame.Data.ToArray();
             return frame.ID == 0 && !frame.IsExtendedFrame && data.Length >= 2
-                && data[0] == (byte)NmtCommand.ResetCommunication && data[1] == 0;
+                && data[0] == (byte)NmtCommand.ResetCommunication && data[1] == ResetTarget;
         }
     }
 }
