@@ -173,7 +173,7 @@ internal sealed partial class CanOpenNode
     /// (<see cref="DescribedObjects"/>, the same one an expectation derived from the description
     /// is built from); only what the transaction reads is kept: the declared pairs of the safety
     /// area 1300h–13FFh, of 1000h/1018h, 1020h and 1010h (identity, configuration and safety
-    /// transfers) and which of
+    /// transfers), additional objects named by a concise DCF, and which of
     /// them it declares read-only (the writes the pre-check refuses), the
     /// file's identity (CiA 319 §5.2), which communication records the file declares without an
     /// SRVT (CiA 319 §6.2), the highest SRDO record the file declares (the implied records), and
@@ -186,13 +186,17 @@ internal sealed partial class CanOpenNode
         private readonly Dictionary<int, SrvtDeclaration> _srvtDeclarations = new(); // declared communication records only
         private readonly Dictionary<(ushort, byte), DescribedEntry> _mapped = new();
 
-        public PeerDescriptionBinding(DescribedObjects? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects)
+        public PeerDescriptionBinding(DescribedObjects? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects,
+            ISet<ushort>? additionalObjects = null)
         {
             IsBound = description is not null;
             if (description is null) return;
-            foreach (var (index, entries) in description.Ordered(static i =>
-                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.DeviceType || i == Co.VerifyConfiguration || i == Co.StoreParameters))
+            foreach (var (index, entries) in description.Ordered(static _ => true))
             {
+                bool included = index is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum
+                    || index == Co.Identity || index == Co.DeviceType || index == Co.VerifyConfiguration || index == Co.StoreParameters
+                    || (additionalObjects?.Contains(index) ?? false);
+                if (!included) continue;
                 foreach (var entry in entries)
                 {
                     _pairs.Add((index, entry.Subindex));
@@ -223,7 +227,7 @@ internal sealed partial class CanOpenNode
         /// <summary>The file's <c>[DeviceInfo]</c> numbers at the start (<see cref="DescribedObjects.DeviceInfoIdentity"/>); zeros when nothing was bound.</summary>
         public (uint VendorId, uint ProductCode, uint RevisionNumber) DeviceInfoIdentity { get; }
 
-        /// <summary>The pair as declared at the start; a transaction transfers the safety objects, 1018h and 1010h only.</summary>
+        /// <summary>The pair as declared at the start among the objects captured for this transaction.</summary>
         public bool Declares(ushort index, byte subindex) => _pairs.Contains((index, subindex));
 
         /// <summary>Whether the file declared the pair at the start with an access type the bus
