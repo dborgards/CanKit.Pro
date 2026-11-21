@@ -48,8 +48,10 @@ Der Update-Ablauf hält den Peer-SDO-Kanal über folgende Schritte:
 2. Individuelles NMT Pre-operational senden und dessen lokale Sendebestätigung abwarten.
 3. Wenn 1F81h Bit 7 gesetzt und 1F8Ah ungleich null ist: `load` nach 1011h am ausgewählten
    Subindex schreiben und die SDO-Bestätigung abwarten; anschließend Reset Node senden,
-   dessen Bestätigung und eine Boot-up-Meldung abwarten. Der Boot-up-Wartezeitraum ist durch
-   SdoTimeout begrenzt, die Pflicht-Bootfrist kann ihn früher beenden.
+   dessen Bestätigung und eine gültige Boot-up-Meldung abwarten. Deren Host-Empfangszeit
+   muss mindestens der Übergabezeit dieses Resets an den Bus-Service entsprechen. Der
+   Boot-up-Wartezeitraum beginnt nach der Sendebestätigung und ist durch SdoTimeout
+   begrenzt; die Pflicht-Bootfrist kann ihn früher beenden.
 4. DCF-Einträge in Reihenfolge schreiben, jeweils nach vorheriger Bestätigung.
 5. Erst nach Erfolg folgen Safety-Prüfung und individueller Start. Auch eine verzögerte
    Operational-Meldung überspringt diese Schritte nach dem angeforderten Pre-operational nicht.
@@ -117,11 +119,49 @@ sowohl den optionalen Wiederholungsversuch als auch einen neu gestarteten Master
 ## Lokale Abschlussprüfung am 21.11.2026
 
 Release-Build mit `CI=true`: keine Warnungen oder Fehler. Vollständige net10.0-Suite:
-5.741 Tests erfolgreich. `dotnet format --verify-no-changes`, frischer Pack-Lauf mit
+5.749 Tests erfolgreich. `dotnet format --verify-no-changes`, frischer Pack-Lauf mit
 `eng/verify-packages.py` (neun Pakete), net48-Kompilierung mit `CI=true` und
 Anforderungs-Traceability sind erfolgreich.
 
 Die Cobertura-Auswertung des vollständigen Laufs wurde gegen den Diff zu `b3d2bd96`
 geschnitten, einschließlich sämtlicher Klassen und generierter Zustandsautomaten:
-147 geänderte ausführbare Einträge, keine unbesetzte Zeile und keine teilweise abgedeckte
+190 geänderte ausführbare Einträge, keine unbesetzte Zeile und keine teilweise abgedeckte
 Verzweigung. Der API-Abgleich wurde aus der generierten `.received.txt` übernommen.
+
+## Review-Nachtrag
+
+Das Codex-Review von `75798b38` fand zwei weitere Fehler, die im selben PR korrigiert wurden:
+
+- Die Boot-up-Frist lief bereits, während Reset Node noch auf seine Sendung wartete. Der
+  Listener wird weiterhin vorher installiert; die Frist beginnt erst nach der bestätigten
+  Sendung. Eine während der Sendebestätigung bereits eingetroffene Boot-up-Meldung bleibt gültig.
+- Der maskierte NMT-Zustand unterschied 0x80 nicht von echtem Boot-up. Ein gemeinsamer Beobachter
+  prüft vor der Heartbeat-/Guarding-Verarbeitung den unveränderten Frame: klassischer
+  Datenframe mit genau einem Byte, Wert 0x00.
+
+`Reset_Send_Delay_Does_Not_Spend_The_Post_Reset_BootUp_Timeout` und die vier Varianten von
+`Only_A_One_Byte_Zero_Announcement_Completes_The_Restore_Reset` schlugen vor den Korrekturen
+fehl und bestanden danach. Der virtuelle Witness unterscheidet zudem die asynchrone
+Sendungs-/Timer-Vorbereitung vom tatsächlichen Warten auf Remote-Boot-up.
+
+CodeQL-Hinweise zu Interface-Casts wurden durch statische Aufrufe der öffentlichen
+Erweiterungsmethode behoben. Die erst am tatsächlichen Haltepunkt erworbene Wartefreigabe
+bleibt bewusst im `finally`: vorherige Freigabe würde den geprüften Testfehler zurückbringen;
+ein `using` auf dem anfangs noch leeren Slot würde die später erworbene Freigabe nicht erfassen.
+Der allgemeine Catch bleibt die dokumentierte Grenze zwischen dem Hintergrund-Worker und
+dem auf dem Actor ausgewerteten Boot-Ergebnis; die ursprüngliche Ausnahme bleibt erhalten.
+
+Bugbot fand anschließend eine zu frühe Freigabe durch eine alte Boot-up-Meldung, während
+der neue Reset noch auf seine Sendung wartete.
+`A_BootUp_Before_Reset_Transmission_Does_Not_Release_The_Download` schlug gegen diesen
+Zwischenstand fehl. Der Empfang behält jetzt `HostArrivalTimestamp`; die bestätigte Sendung
+übergibt `HostHandoffTimestamp` an genau den vor der Sendung erfassten Reset-Versuch.
+Früh gepufferte Antworten bleiben erhalten, zählen aber nur ab dieser Übergabezeit. Der
+Test trennt die beiden Ereignisse ausdrücklich auf der virtuellen Uhr. Weitere Prüfungen
+behandeln schnelle Antworten vor verzögerter Sendebestätigung und fehlende Übergabe-Metadaten.
+
+Restore verlangt dafür vergleichbare, positive Host-Zeitstempel vom Bus-Service.
+`CanBusService` liefert diese; fehlende TX-Metadaten brechen das Update ab, eine RX-Meldung
+ohne Zeitstempel gibt es nicht frei. Die Aussage bleibt die der bestehenden
+`TxConfirmation`: bei approximierter Bestätigung gilt die Annahme durch den Treiber,
+nicht eine zusätzliche Garantie der physikalischen Übertragung.

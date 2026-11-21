@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 
@@ -18,8 +19,58 @@ internal sealed partial class CanOpenNode
         public volatile bool Incomplete;
     }
 
+    private sealed class BootConfigurationReset(CancellationToken token)
+    {
+        public readonly CancellationToken Token = token;
+        public readonly TaskCompletionSource<bool> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private long _handoff;
+        private long _latestBootUp;
+
+        // Actor only. An RX already buffered while TX confirmation was outstanding is
+        // eligible only if it arrived after this particular reset's driver handoff.
+        public void Receive(long arrival)
+        {
+            _latestBootUp = Math.Max(_latestBootUp, arrival);
+            TryComplete();
+        }
+
+        public void Sent(long handoff)
+        {
+            if (handoff <= 0)
+            {
+                Completion.TrySetException(new InvalidOperationException("Configuration restore/reset requires a host handoff timestamp from the bus service."));
+                return;
+            }
+            _handoff = handoff;
+            TryComplete();
+        }
+
+        private void TryComplete()
+        {
+            if (_handoff > 0 && _latestBootUp >= _handoff) Completion.TrySetResult(true);
+        }
+    }
+
+    private BootConfigurationReset? CaptureConfigurationReset(CanFrame frame, CancellationToken token)
+    {
+        // Internally generated NMT frames always contain command and target. Capture the
+        // exact attempt before awaiting the service; a late confirmation cannot affect a
+        // newer attempt installed after this one was cancelled.
+        if (frame.ID != CanOpenCobId.NmtCommand || frame.Data.Span[0] != (byte)NmtCommand.ResetNode) return null;
+        var reset = Volatile.Read(ref _slaveConfigurationBootUps[frame.Data.Span[1]]);
+        return reset is not null && reset.Token == token ? reset : null;
+    }
+
+    private void ObserveConfigurationBootUp(uint cobId, byte[] data, bool isRtr, bool isFd, long arrival)
+    {
+        if (cobId <= CanOpenCobId.HeartbeatBase || cobId > CanOpenCobId.HeartbeatBase + CanOpenCobId.MaxNodeId) return;
+        if (isRtr || isFd || data.Length != 1 || data[0] != 0) return;
+        _slaveConfigurationBootUps[cobId - CanOpenCobId.HeartbeatBase]?.Receive(arrival);
+    }
+
     private readonly BootConfigurationPlan?[] _slaveBootConfigurations = new BootConfigurationPlan?[CanOpenCobId.MaxNodeId + 1];
-    private readonly TaskCompletionSource<bool>?[] _slaveConfigurationBootUps = new TaskCompletionSource<bool>?[CanOpenCobId.MaxNodeId + 1];
+    private readonly BootConfigurationReset?[] _slaveConfigurationBootUps = new BootConfigurationReset?[CanOpenCobId.MaxNodeId + 1];
+    private readonly bool[] _slaveConfigurationAwaitingBootUp = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly bool[] _slaveConfigurationNeedsStart = new bool[CanOpenCobId.MaxNodeId + 1];
     private bool BootConfigurationEnabled => _options.RequireBootConfigurationMatch || _options.EnableBootConfigurationDownload;
 
@@ -137,19 +188,27 @@ internal sealed partial class CanOpenNode
 
     private async Task ResetConfiguredSlaveAsync(byte nodeId, CancellationToken token)
     {
-        var bootUp = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reset = new BootConfigurationReset(token);
+        var bootUp = reset.Completion;
         using var cancellation = token.Register(() => bootUp.TrySetCanceled());
         Action timeout = () => bootUp.TrySetException(new TimeoutException("No boot-up announcement after configuration restore/reset."));
-        using var deadline = await _actor.PostAsync(() =>
+        await _actor.PostAsync(() =>
         {
             token.ThrowIfCancellationRequested();
-            _slaveConfigurationBootUps[nodeId] = bootUp;
-            return _deadlines.Arm(_options.SdoTimeout, timeout);
+            _slaveConfigurationBootUps[nodeId] = reset;
         }).ConfigureAwait(false);
         try
         {
             // Listen before sending: a fast peer can boot before local TX confirmation arrives.
             await SendBootConfigurationNmtAsync(nodeId, NmtCommand.ResetNode, token).ConfigureAwait(false);
+            // Queueing and LSS/adapter holds are not remote boot time. A boot-up already
+            // received during confirmation remains recorded in the installed listener.
+            using var deadline = await _actor.PostAsync(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                _slaveConfigurationAwaitingBootUp[nodeId] = true;
+                return _deadlines.Arm(_options.SdoTimeout, timeout);
+            }).ConfigureAwait(false);
             await bootUp.Task.ConfigureAwait(false);
         }
         finally
@@ -159,7 +218,11 @@ internal sealed partial class CanOpenNode
             _ = bootUp.Task.Exception;
             // The channel lease is still held. This cleanup is queued before releasing it,
             // so a later update cannot install its waiter until after this actor turn.
-            RunOnActor(() => _slaveConfigurationBootUps[nodeId] = null);
+            RunOnActor(() =>
+            {
+                _slaveConfigurationAwaitingBootUp[nodeId] = false;
+                _slaveConfigurationBootUps[nodeId] = null;
+            });
         }
     }
 }

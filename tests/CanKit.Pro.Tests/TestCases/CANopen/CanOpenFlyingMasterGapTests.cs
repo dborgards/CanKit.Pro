@@ -1735,6 +1735,8 @@ public partial class CanOpenFlyingMasterTests
         public bool Reject { get; set; }
         /// <summary>The held send completes as unconfirmed once <see cref="Release"/> is called.</summary>
         public bool RejectOnRelease { get; set; }
+        public bool HoldAfterTransmit { get; set; }
+        public bool OmitHandoffTimestamp { get; set; }
         public Exception? Fault { get; set; }
         /// <summary>How many broadcast resets pass straight through before one is held or failed.</summary>
         public int PassResets { get; set; }
@@ -1770,12 +1772,18 @@ public partial class CanOpenFlyingMasterTests
                 if (Fault is not null) throw Fault;
                 if (Reject)
                     return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
+                TxConfirmation? early = HoldAfterTransmit
+                    ? await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false) : null;
                 await _release.Task.ConfigureAwait(false);
+                if (early.HasValue) return AdjustConfirmation(early.Value);
                 if (RejectOnRelease)
                     return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
             }
-            return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+            return AdjustConfirmation(await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false));
         }
+
+        private TxConfirmation AdjustConfirmation(TxConfirmation value)
+            => OmitHandoffTimestamp ? value with { HostHandoffTimestamp = 0 } : value;
 
         public void Dispose()
         {

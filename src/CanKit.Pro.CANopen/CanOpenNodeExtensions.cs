@@ -58,7 +58,10 @@ public static class CanOpenNodeExtensions
     /// The plan is used only for zero/mismatching configuration expectations, after identity
     /// verification. A bound EDS/DCF must permit every write and any selected 1011h restore.
     /// Restore is selected by 1F81h bit 7 and nonzero 1F8Ah; Reset Node then waits for boot-up
-    /// within SdoTimeout. The peer SDO lease spans preflight, NMT, restore/reset and all writes.
+    /// within SdoTimeout after confirmation. Restore requires comparable host RX/handoff
+    /// timestamps from the bus service (provided by CanBusService); missing TX metadata fails
+    /// the update. Buffered boot-up frames older than the reset handoff cannot release it.
+    /// The peer SDO lease spans preflight, NMT, restore/reset and all writes.
     /// No automatic store, signature update or safety commissioning is added. Failures retain
     /// acknowledged writes, block Start and follow the existing mandatory/optional boot policy.
     /// Once an update starts, its plan must finish even if partially written 1020h values match

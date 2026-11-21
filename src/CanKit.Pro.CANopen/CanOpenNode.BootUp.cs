@@ -142,7 +142,6 @@ internal sealed partial class CanOpenNode
         // not go out behind the reset.
         _od.WriteRawUnchecked(Co.RequestNmt, nodeId, new[] { state });
         _slaveSeen[nodeId] = true;
-        if (state == 0) _slaveConfigurationBootUps[nodeId]?.TrySetResult(true);
         if (_slaveBootResults[nodeId]?.Status == SlaveBootStatus.WaitingForAnnouncement)
             _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.Announced);
         if (_coldResetPending) return;
@@ -432,7 +431,11 @@ internal sealed partial class CanOpenNode
         var pending = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id) && _slaveConfigurationBootUps[id] is null) pending.Add(id);
+            // Only a confirmed reset with a running timeout is a protocol wait. Before
+            // that, the worker must still enqueue its command/arm its timer; after the
+            // waiter completes it must resume before protocol time advances again.
+            bool waitingForBootUp = _slaveConfigurationAwaitingBootUp[id] && !_slaveConfigurationBootUps[id]!.Completion.Task.IsCompleted;
+            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id) && !waitingForBootUp) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }

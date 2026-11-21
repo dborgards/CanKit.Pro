@@ -41,7 +41,8 @@ public sealed class CanOpenNodeOptions
     /// without one, ConfigurationRequired still blocks Start. All targets require a bound
     /// writable EDS/DCF declaration. The slave enters Pre-operational before writing.
     /// When 1F81h bit 7 and 1F8Ah are nonzero, acknowledged 1011h restore is followed by
-    /// confirmed Reset Node and a boot-up announcement within SdoTimeout. Successful DCF
+    /// confirmed Reset Node and a valid post-handoff boot-up announcement, waiting at most
+    /// SdoTimeout after confirmation. Successful DCF
     /// download permits subsequent safety verification and Start; no implicit store or
     /// signature write is added. A failed sequence retains its acknowledged prefix.</remarks>
     public bool EnableBootConfigurationDownload { get; init; }

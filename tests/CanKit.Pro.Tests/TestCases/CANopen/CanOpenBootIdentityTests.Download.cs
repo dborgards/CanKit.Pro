@@ -63,7 +63,7 @@ public partial class CanOpenBootIdentityTests
         rig.Node.ObjectDictionary.WriteUnsigned(0x1F8A, Slave, restoreSub);
         if (restore) rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave,
             rig.Node.ObjectDictionary.ReadUnsigned(0x1F81, Slave) | 0x80u);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, BootDcf((0x2000, 0, new byte[] { 42 })));
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, BootDcf((0x2000, 0, new byte[] { 42 })));
     }
 
     private static bool IsDownload((uint Id, byte[] Data) frame, ushort index)
@@ -149,11 +149,11 @@ public partial class CanOpenBootIdentityTests
         using var rig = OpenMaster(DownloadOptions());
         using var peer = rig.OpenPeerNode(Slave);
         ConfigureDownload(rig);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, null);
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, null);
         if (remove)
         {
             var broken = BootDcf((0x2000, 0, new byte[] { 42 })).Take(8).ToArray();
-            Action register = () => ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, broken);
+            Action register = () => CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, broken);
             register.Should().Throw<InvalidDataException>();
         }
         await ElectActive(rig);
@@ -197,7 +197,7 @@ public partial class CanOpenBootIdentityTests
         using var peer = rig.OpenPeerNode(Slave);
         peer.ObjectDictionary.AddDomain(0x2000, 0, Array.Empty<byte>());
         ConfigureDownload(rig, mandatory: false, restore: restore, restoreSub: 2);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave,
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave,
             BootDcf((0x2000, 0, new byte[] { 42 }), (0x2001, 0, new byte[] { 43 }), (0x2000, 0, new byte[] { 44 })));
         await ElectActive(rig);
         TransmitHeartbeat(rig.Peer, Slave, 0x7F);
@@ -217,14 +217,14 @@ public partial class CanOpenBootIdentityTests
         peer.ObjectDictionary.AddDomain(0x2000, 0, Array.Empty<byte>());
         ConfigureDownload(rig);
         var data = BootDcf((0x2000, 0, new byte[] { 17 }));
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, data);
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, data);
         data[data.Length - 1] = 99;
         await ElectActive(rig);
         TransmitHeartbeat(rig.Peer, Slave, 0x7F);
         await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 300, "original registered bytes");
         peer.ObjectDictionary.ReadRaw(0x2000, 0).Should().Equal(17);
         rig.Log.Clear();
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, BootDcf((0x2000, 0, new byte[] { 18 })));
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, BootDcf((0x2000, 0, new byte[] { 18 })));
         TransmitHeartbeat(rig.Peer, Slave, 5);
         await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 300, "live replacement applies in a fresh generation");
         peer.ObjectDictionary.ReadRaw(0x2000, 0).Should().Equal(18);
@@ -234,11 +234,11 @@ public partial class CanOpenBootIdentityTests
     public void Boot_Configuration_Registration_Validates_Arguments_And_Opt_In()
     {
         using var rig = OpenMaster();
-        Action disabled = () => ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, new byte[4]);
+        Action disabled = () => CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, new byte[4]);
         disabled.Should().Throw<InvalidOperationException>();
         Action missing = () => CanOpenNodeExtensions.SetSlaveBootConfiguration(null!, Slave, new byte[4]);
         missing.Should().Throw<ArgumentNullException>();
-        Action zero = () => ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(0, new byte[4]);
+        Action zero = () => CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, 0, new byte[4]);
         zero.Should().Throw<ArgumentOutOfRangeException>();
         rig.Node.Dispose();
         disabled.Should().Throw<ObjectDisposedException>();

@@ -30,6 +30,12 @@ public partial class CanOpenBootIdentityTests
         return new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations), new FrameLog(bus, peer), peer, bus);
     }
 
+    private static Task ConfigurationResetCompletion(MasterRig rig)
+    {
+        var reset = ((Array)BootField(rig.Node, "_slaveConfigurationBootUps")).GetValue(Slave)!;
+        return ((TaskCompletionSource<bool>)reset.GetType().GetField("Completion")!.GetValue(reset)!).Task;
+    }
+
     private sealed class ConfigurationWithoutBootUp : IDisposable
     {
         private readonly ICanBus _bus;
@@ -55,7 +61,7 @@ public partial class CanOpenBootIdentityTests
         using var rig = OpenMaster(DownloadOptions());
         using var peer = rig.OpenPeerNode(Slave);
         ConfigureDownload(rig, mandatory: false);
-        if (empty) ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, new byte[4]);
+        if (empty) CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, new byte[4]);
         rig.Node.UnbindPeerDeviceDescription(Slave);
         await ElectActive(rig);
         TransmitHeartbeat(rig.Peer, Slave, 0x7F);
@@ -71,7 +77,7 @@ public partial class CanOpenBootIdentityTests
         using var rig = OpenMaster(DownloadOptions());
         using var peer = rig.OpenPeerNode(Slave);
         ConfigureDownload(rig);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, new byte[4]);
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, new byte[4]);
         await ElectActive(rig);
         TransmitHeartbeat(rig.Peer, Slave, 0x7F);
         await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 300, "explicit empty plan is a successful configuration");
@@ -153,6 +159,136 @@ public partial class CanOpenBootIdentityTests
         await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.PeerSdoChannelIsFreeForTests(Slave), 100, "timed-out update releases its lease");
     }
 
+    [Fact]
+    public async Task Reset_Send_Delay_Does_Not_Spend_The_Post_Reset_BootUp_Timeout()
+    {
+        using var rig = OpenDownloadGate(NmtCommand.ResetNode, out var gate);
+        using var peer = rig.OpenPeerNode(Slave);
+        IDisposable? allowed = null;
+        gate.BeforeHold = () => allowed ??= rig.Witness.AllowPeerVerificationWait(Slave);
+        peer.ObjectDictionary.AddDomain(0x2000, 0, Array.Empty<byte>());
+        ConfigureDownload(rig, mandatory: false, restore: true);
+        try
+        {
+            await ElectActive(rig);
+            TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            await UntilAsync(rig.Clock, rig.Witness, null, () => gate.Entered.IsCompleted, 300, "Reset Node is held before transmission");
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(250));
+            peer.ObjectDictionary.ReadRaw(0x2000, 0).Should().BeEmpty();
+        }
+        finally { gate.Release(); allowed?.Dispose(); }
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 300,
+            "a promptly booting slave still has its full post-reset timeout after a long send hold");
+        peer.ObjectDictionary.ReadRaw(0x2000, 0).Should().Equal(42);
+    }
+
+    [Fact]
+    public async Task A_BootUp_Before_Reset_Transmission_Does_Not_Release_The_Download()
+    {
+        using var rig = OpenDownloadGate(NmtCommand.ResetNode, out var gate);
+        using var peer = new ConfigurationWithoutBootUp(rig.Peer);
+        IDisposable? allowed = null;
+        gate.BeforeHold = () => allowed ??= rig.Witness.AllowPeerVerificationWait(Slave);
+        ConfigureDownload(rig, mandatory: false, restore: true);
+        Task waiter;
+        try
+        {
+            await ElectActive(rig);
+            TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            await UntilAsync(rig.Clock, rig.Witness, null, () => gate.Entered.IsCompleted, 300, "new reset still waits for transmission");
+            waiter = ConfigurationResetCompletion(rig);
+            TransmitHeartbeat(rig.Peer, Slave, 0); // Late announcement from an earlier reset.
+            await QuiesceAsync(rig.Witness, null);
+            waiter.IsCompleted.Should().BeFalse("a pre-transmission boot-up cannot prove this reset completed");
+            // RawCan timestamps use this rig's manual clock. Separate the two wire instants
+            // explicitly; host scheduling must not be the source of their ordering.
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(1));
+            var capture = typeof(CanOpenNode).GetMethod("CaptureConfigurationReset", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            capture.Invoke(rig.Node, new object[] { CanFrame.Classic(0, new byte[] { 0x81, Slave }, false), CancellationToken.None })
+                .Should().BeNull("an unrelated NMT sender cannot supply this attempt's handoff");
+        }
+        finally { gate.Release(); allowed?.Dispose(); }
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => ((bool[])BootField(rig.Node, "_slaveConfigurationAwaitingBootUp"))[Slave] || waiter.IsCompleted, 100, "this reset was confirmed");
+        waiter.IsCompleted.Should().BeFalse("the reset still needs its own boot-up");
+        await rig.Node.PostToActorAsync(() => InvokeBoot(rig.Node, "ObserveConfigurationBootUp", (uint)(0x700 + Slave), new byte[] { 0 }, false, false, 0L));
+        waiter.IsCompleted.Should().BeFalse("an RX without a comparable arrival timestamp is not evidence");
+        rig.Log.Snapshot().Should().NotContain(f => IsDownload(f, 0x2000));
+        TransmitHeartbeat(rig.Peer, Slave, 0);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 200, "a post-transmission announcement permits the download");
+    }
+
+    [Fact]
+    public async Task A_Fast_BootUp_Is_Retained_Until_Delayed_Transmit_Confirmation()
+    {
+        using var rig = OpenDownloadGate(NmtCommand.ResetNode, out var gate);
+        using var peer = rig.OpenPeerNode(Slave);
+        gate.HoldAfterTransmit = true;
+        IDisposable? allowed = null;
+        gate.BeforeHold = () => allowed ??= rig.Witness.AllowPeerVerificationWait(Slave);
+        peer.ObjectDictionary.AddDomain(0x2000, 0, Array.Empty<byte>());
+        ConfigureDownload(rig, mandatory: false, restore: true);
+        try
+        {
+            await ElectActive(rig);
+            rig.Log.Clear();
+            TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            await UntilAsync(rig.Clock, rig.Witness, null,
+                () => rig.Log.Snapshot().Any(f => f.Id == 0x700 + Slave && f.Data[0] == 0), 300,
+                "the peer has rebooted while local reset confirmation is still held");
+            ConfigurationResetCompletion(rig).IsCompleted.Should().BeFalse("the handoff has not been supplied yet");
+            peer.ObjectDictionary.ReadRaw(0x2000, 0).Should().BeEmpty();
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(150));
+        }
+        finally { gate.Release(); allowed?.Dispose(); }
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 300,
+            "the buffered post-handoff boot-up is eligible after confirmation");
+        peer.ObjectDictionary.ReadRaw(0x2000, 0).Should().Equal(42);
+    }
+
+    [Fact]
+    public async Task Restore_Refuses_A_Confirmation_Without_Handoff_Metadata()
+    {
+        using var rig = OpenDownloadGate(NmtCommand.ResetNode, out var gate);
+        using var peer = rig.OpenPeerNode(Slave);
+        gate.OmitHandoffTimestamp = true;
+        gate.Release();
+        ConfigureDownload(rig, mandatory: false, restore: true);
+        await ElectActive(rig);
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Result(rig).Status == SlaveBootStatus.ConfigurationDownloadFailed,
+            300, "missing timing evidence cannot approve the reset");
+        Result(rig).Error.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Contain("handoff timestamp");
+        rig.Log.Snapshot().Should().NotContain(f => IsDownload(f, 0x2000));
+        Started(rig, Slave).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Only_A_One_Byte_Zero_Announcement_Completes_The_Restore_Reset(bool guarding, bool extraByte)
+    {
+        using var rig = OpenMaster(DownloadOptions());
+        using var peer = new ConfigurationWithoutBootUp(rig.Peer);
+        ConfigureDownload(rig, mandatory: false, restore: true);
+        await ElectActive(rig);
+        if (guarding) rig.Node.StartNodeGuardingConsumer(Slave, TimeSpan.FromSeconds(10), 1);
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Any(f => IsNmt(f, NmtCommand.ResetNode, Slave)), 300, "the reset is sent");
+        var waiter = ConfigurationResetCompletion(rig);
+        Assert.NotNull(waiter);
+        byte[] malformed = extraByte ? new byte[] { 0, 0 } : new byte[] { 0x80 };
+        rig.Peer.Transmit(CanFrame.Classic(0x700 + Slave, malformed, isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+        waiter.IsCompleted.Should().BeFalse("a toggle bit or wrong DLC is not a valid boot-up frame");
+        rig.Log.Snapshot().Should().NotContain(f => IsDownload(f, 0x2000));
+        TransmitHeartbeat(rig.Peer, Slave, 0);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Started(rig, Slave), 200, "a genuine boot-up releases the download");
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -166,7 +302,7 @@ public partial class CanOpenBootIdentityTests
         ConfigureDownload(rig);
         var description = DownloadDescription();
         rig.Node.BindPeerDeviceDescription(Slave, description);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave,
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave,
             BootDcf((0x2000, 0, new byte[] { 1 }), (0x2001, 0, new byte[] { 2 })));
         var pause = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -225,7 +361,7 @@ public partial class CanOpenBootIdentityTests
         peer.ObjectDictionary.AddU32(0x1020, 1, 1);
         peer.ObjectDictionary.AddU32(0x1020, 2, ConfigurationTime);
         ConfigureDownload(rig, mandatory: false, date: ConfigurationDate, time: ConfigurationTime);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave, BootDcf(
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave, BootDcf(
             (0x1020, 1, new byte[] { 0x78, 0x56, 0x34, 0x12 }),
             (0x2000, 0, new byte[] { 42 })));
         await ElectActive(rig);
@@ -314,7 +450,7 @@ public partial class CanOpenBootIdentityTests
         peer.ObjectDictionary.AddDomain(0x2000, 0, Array.Empty<byte>());
         peer.ObjectDictionary.AddDomain(0x2001, 0, Array.Empty<byte>());
         ConfigureDownload(rig);
-        ((ICanOpenNode)rig.Node).SetSlaveBootConfiguration(Slave,
+        CanOpenNodeExtensions.SetSlaveBootConfiguration(rig.Node, Slave,
             BootDcf((0x2000, 0, new byte[] { 1 }), (0x2001, 0, new byte[] { 2 })));
         var pause = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
