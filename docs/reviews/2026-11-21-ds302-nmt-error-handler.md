@@ -85,6 +85,8 @@ zurückgenommen. Jede der folgenden Varianten ließ den angegebenen Test fehlsch
 | Alte Safety-Freigabe erhalten | `Runtime_Error_Recovery_Repeats_Safety_Verification` |
 | Gehaltenen Master-Reset ignoriert | `Runtime_Recovery_Resumes_After_An_Abandoned_Forced_Reset` |
 | Bestätigten Reset-/Boot-up-Handshake übersprungen | `Individual_Error_Recovery_Reboots_Only_The_Failed_Slave_And_Requires_A_New_Heartbeat` |
+| Laufzeitreaktion schon während initialer Identitätsprüfung zugelassen | `Initial_Runtime_Timeout_Does_Not_Reset_A_Peer_Still_In_Identity_Verification` |
+| Ausstehenden optionalen Retry bei Recovery-Fristablauf nicht entsorgt | `Runtime_Recovery_Deadline_Cancels_An_Optional_Peers_Pending_Retry` |
 
 Die zusätzliche Regression `Runtime_Broadcast_Reaction_Cannot_Outlive_Its_Master_Role`
 schlug vor der Korrektur für Stop und Reset Node, jeweils bei Rollenende und Neuzuordnung,
@@ -104,15 +106,23 @@ Identität, Konfiguration, Heartbeat und gesperrten Fehler.
 fälligen anderen Pflicht-Peer. Die normalen Freigabeprüfungen bleiben unverändert, sodass
 ein fehlgeschlagener Peer keinen noch ausstehenden Netzwerkstart freigibt.
 
+Der Codecov-Bericht zählt auch nur teilweise getroffene Verzweigungen als fehlende
+Patch-Abdeckung. Deshalb wurden zusätzlich Fehler während initialer Identitätsprüfung,
+Abbruch eines optionalen ausstehenden Retries und manuell bereits gestopptes automatisches
+Guarding geprüft. Die ersten beiden Fälle wurden zusätzlich mit den obigen Mutationen
+verifiziert; die Tests verwenden weiterhin nur die virtuelle Protokollzeit.
+
 Lokale Prüfung des abschließenden Stands:
 
 - Release-Build mit `CI=true`: keine Warnungen oder Fehler.
-- Gesamtsuite net10.0: 5.848 bestanden, keine fehlgeschlagenen oder übersprungenen Tests.
+- Gesamtsuite net10.0: 5.851 bestanden, keine fehlgeschlagenen oder übersprungenen Tests.
 - Cobertura gegen Basis `6181bf89`, alle Klassen einschließlich generierter Zustandsautomaten:
-  156/157 geänderte ausführbare Einträge und 156/168 Zweigbedingungen getroffen.
+  156/157 geänderte ausführbare Einträge und 159/168 Zweigbedingungen getroffen.
   Nicht getroffen ist der defensive `ObjectDisposedException`-Catch beim Posten des bereits
   abgeschlossenen Reset-Workers. Die normalen Abbruch-/Dispose-Pfade sind geprüft; ein
   künstlicher Scheduling-Hook allein für dieses Restfenster wurde nicht ergänzt.
+  Teilweise getroffen bleiben zusätzliche Abbruch-/Generationsprüfungen des Workers, die
+  Abwehr veralteter oder doppelter Fehler-Callbacks und die nullable Token-Prüfung beim Fehler.
   Dies ist eine lokale Diff-Auswertung, kein vorweggenommenes Codecov-Ergebnis.
 - `dotnet format --verify-no-changes`: unverändert.
 - Frisches Release-Pack und `eng/verify-packages.py`: alle neun Pakete geprüft.

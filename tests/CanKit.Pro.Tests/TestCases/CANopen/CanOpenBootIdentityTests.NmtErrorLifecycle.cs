@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.Reliability;
 using Xunit;
 using static CanKit.Pro.Tests.TestCases.CANopen.FlyingMasterRig;
 
@@ -11,6 +12,73 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenBootIdentityTests
 {
+    [Fact]
+    public async Task Initial_Runtime_Timeout_Does_Not_Reset_A_Peer_Still_In_Identity_Verification()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions
+        { EnableNmtErrorHandler = true, SdoTimeout = TimeSpan.FromMilliseconds(300) });
+        ConfigureErrorControl(rig, mandatory: false);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F84, Slave, 123);
+        await ElectActive(rig);
+        TransmitHeartbeat(rig.Peer, Slave, 0);
+        await QuiesceAsync(rig.Witness, null);
+        Result(rig).Status.Should().Be(SlaveBootStatus.VerifyingIdentity);
+        rig.Log.Clear();
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        Result(rig).Status.Should().Be(SlaveBootStatus.VerifyingIdentity);
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.ResetNode, Slave));
+    }
+
+    [Fact]
+    public async Task Runtime_Recovery_Deadline_Cancels_An_Optional_Peers_Pending_Retry()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions
+        {
+            EnableNmtErrorHandler = true,
+            ActiveSlaveBootRetryInterval = TimeSpan.FromMilliseconds(100),
+            SdoTimeout = TimeSpan.FromMilliseconds(100)
+        });
+        bool valid = true;
+        using var peer = new SilentBootPeer(rig.Peer, Slave, r => valid ? ConfigurationReply(r) : BootReply(r, 456));
+        ConfigureErrorControl(rig, mandatory: false);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F84, Slave, 123);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F89, 0, 50);
+        await StartMonitoredSlave(rig);
+        valid = false;
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        TransmitHeartbeat(rig.Peer, Slave, 0);
+        await QuiesceAsync(rig.Witness, null);
+        Result(rig).Status.Should().Be(SlaveBootStatus.IdentityMismatch);
+        var retry = ((IDeadline?[])BootField(rig.Node, "_slaveBootRetries"))[Slave]!;
+        retry.Should().NotBeNull();
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(50));
+        Result(rig).Status.Should().Be(SlaveBootStatus.ErrorRecoveryFailed);
+        retry.IsCancelled.Should().BeTrue("recovery expiry cancels the outstanding retry timer");
+        valid = true;
+        int requests = rig.Log.Snapshot().Count(f => f.Id == 0x600 + Slave);
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        rig.Log.Snapshot().Count(f => f.Id == 0x600 + Slave).Should().Be(requests);
+        Started(rig, Slave).Should().BeFalse();
+        rig.Log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.ResetNode, Slave));
+    }
+
+    [Fact]
+    public async Task Manually_Stopped_Automatic_Guarding_Remains_Stopped_When_Master_Role_Ends()
+    {
+        using var rig = OpenMaster(RuntimeErrorOptions());
+        using var probe = new BootGuardProbe(rig.Peer);
+        ConfigureErrorControl(rig, heartbeatMs: 0, guardMs: 20, retries: 1);
+        await ElectActive(rig);
+        TransmitHeartbeat(rig.Peer, Slave, 0);
+        await QuiesceAsync(rig.Witness, null);
+        await probe.FirstPoll.Task.WaitAsync(ShortTimeout);
+        rig.Node.StopNodeGuardingConsumer(Slave);
+        rig.Node.StopFlyingMaster();
+        rig.Log.Clear();
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        rig.Log.Snapshot().Should().NotContain(f => f.Id == 0x700 + Slave);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
