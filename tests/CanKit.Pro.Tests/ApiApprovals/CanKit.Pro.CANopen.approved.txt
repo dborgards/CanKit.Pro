@@ -133,6 +133,7 @@ namespace CanKit.Pro.CANopen
     {
         public static void AcknowledgeControllerOverrun(this CanKit.Pro.CANopen.ICanOpenNode node) { }
         public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+        public static System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Nmt.SlaveBootResult> GetSlaveBootResults(this CanKit.Pro.CANopen.ICanOpenNode node) { }
     }
     public sealed class CanOpenNodeOptions
     {
@@ -819,6 +820,7 @@ namespace CanKit.Pro.CANopen.Nmt
         ConfigurationError = 4,
         SlaveBootTimeout = 5,
         SlaveSafetyConfigurationInvalid = 6,
+        SlaveIdentityInvalid = 7,
     }
     public enum NmtCommand : byte
     {
@@ -834,6 +836,29 @@ namespace CanKit.Pro.CANopen.Nmt
         Stopped = 4,
         Operational = 5,
         PreOperational = 127,
+    }
+    public sealed class SlaveBootResult
+    {
+        public uint? ActualValue { get; }
+        public System.Exception? Error { get; }
+        public uint? ExpectedValue { get; }
+        public ushort? Index { get; }
+        public byte NodeId { get; }
+        public CanKit.Pro.CANopen.Nmt.SlaveBootStatus Status { get; }
+        public byte? Subindex { get; }
+    }
+    public enum SlaveBootStatus
+    {
+        WaitingForAnnouncement = 0,
+        Announced = 1,
+        VerifyingIdentity = 2,
+        IdentityVerified = 3,
+        StartRequested = 4,
+        AlreadyOperational = 5,
+        IdentityMismatch = 6,
+        IdentityReadFailed = 7,
+        BootTimeout = 8,
+        SafetyConfigurationInvalid = 9,
     }
 }
 namespace CanKit.Pro.CANopen.Pdo

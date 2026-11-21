@@ -70,4 +70,9 @@ public enum FlyingMasterSignal
     /// not verified; step D is "before NMT Start". While a safety slave is assigned, a
     /// simultaneous start (<c>1F80h</c> bit 1) starts each slave on its own, never node 0.</summary>
     SlaveSafetyConfigurationInvalid,
+
+    /// <summary>A slave did not match its nonzero 1F84h–1F88h identity expectations, or an
+    /// upload failed. It is not started; a mandatory slave or simultaneous start halts the boot.
+    /// GetSlaveBootResults supplies the remote object, expected/actual value and upload error.</summary>
+    SlaveIdentityInvalid,
 }

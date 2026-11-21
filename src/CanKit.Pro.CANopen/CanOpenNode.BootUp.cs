@@ -15,8 +15,8 @@ namespace CanKit.Pro.CANopen;
 /// <summary>
 /// Boot-up of the network list once this node is the active NMT master (CiA 302-2 version 4.1.0).
 /// The reading of <c>1F80h</c>, <c>1F81h</c>, <c>1F82h</c> and <c>1F89h</c> follows the open
-/// implementation that cites that edition. Configuration of a slave (identity <c>1F84h</c> to
-/// <c>1F88h</c>, concise DCF) is not part of it; the package README says what is left open.
+/// implementation that cites that edition. Nonzero 1F84h–1F88h expectations gate the start.
+/// Configuration download (including concise DCF) is not part of it.
 /// </summary>
 internal sealed partial class CanOpenNode
 {
@@ -69,6 +69,8 @@ internal sealed partial class CanOpenNode
     private void BeginBootUp()
     {
         CancelBootUp();
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+            if (IsAssignedSlave(id)) _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.WaitingForAnnouncement);
 
         if ((ReadStartup() & NmtSuppressSlaveStartBit) == 0)
         {
@@ -102,6 +104,10 @@ internal sealed partial class CanOpenNode
         _bootDeadline = null;
         Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
         Array.Clear(_slaveStarted, 0, _slaveStarted.Length);
+        Array.Clear(_slaveIdentityVerified, 0, _slaveIdentityVerified.Length);
+        Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
+        Array.Clear(_slaveIdentityFailed, 0, _slaveIdentityFailed.Length);
+        Array.Clear(_slaveBootResults, 0, _slaveBootResults.Length);
         _bootStartMoment = false;
         _bootHalted = false;
         _bootSelfStarted = false;
@@ -124,6 +130,8 @@ internal sealed partial class CanOpenNode
         // not go out behind the reset.
         _od.WriteRawUnchecked(Co.RequestNmt, nodeId, new[] { state });
         _slaveSeen[nodeId] = true;
+        if (_slaveBootResults[nodeId]?.Status == SlaveBootStatus.WaitingForAnnouncement)
+            _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.Announced);
         if (_coldResetPending) return;
 
         ConsiderStart(nodeId, state);
@@ -152,11 +160,19 @@ internal sealed partial class CanOpenNode
         if ((startup & NmtSuppressSlaveStartBit) != 0) return;
         if ((Assignment(nodeId) & (SlaveAssignedBit | SlaveBootBit)) != (SlaveAssignedBit | SlaveBootBit)) return;
 
+        if (_slaveIdentityFailed[nodeId]) return;
+        if (!_slaveIdentityVerified[nodeId] && HasIdentityExpectation(nodeId))
+        {
+            if (!_slaveIdentityVerifying[nodeId]) BeginSlaveIdentityVerification(nodeId);
+            return;
+        }
+
         // Already operational: nothing to send. Boot-up, pre-operational and stopped are the
         // states from which the master starts the slave.
         if (state == RequestOperational)
         {
             _slaveStarted[nodeId] = true;
+            _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.AlreadyOperational);
             return;
         }
         if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
@@ -182,6 +198,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment) return;
 
         _slaveStarted[nodeId] = true;
+        _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.StartRequested);
         SendNmt(NmtCommand.Start, nodeId);
     }
 
@@ -189,6 +206,7 @@ internal sealed partial class CanOpenNode
     {
         if (_bootHalted || _disposed != 0) return;
         if (HasUnseenMandatorySlave()) return;
+        if (HasUnverifiedMandatoryIdentity()) return;
 
         uint startup = ReadStartup();
         bool mayStartSlaves = (startup & NmtSuppressSlaveStartBit) == 0;
@@ -198,7 +216,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
             _bootStartMoment = true;
-            if (HasAssignedSafetySlave())
+            if (HasAssignedSafetySlave() || HasAssignedIdentityExpectation())
             {
                 // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
                 // Start to node 0 reaches one that has not announced yet — keep-alive, running
@@ -212,6 +230,14 @@ internal sealed partial class CanOpenNode
             }
             else
             {
+                for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+                {
+                    if (IsAssignedSlave(id) && _slaveSeen[id] && (Assignment(id) & SlaveBootBit) != 0 && !_slaveStarted[id])
+                    {
+                        _slaveStarted[id] = true;
+                        _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.StartRequested);
+                    }
+                }
                 SendNmt(NmtCommand.Start, 0);
             }
         }
@@ -236,7 +262,7 @@ internal sealed partial class CanOpenNode
             ArmBootDeadline();
             return;
         }
-        if (!HasUnseenMandatorySlave())
+        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity())
         {
             TryFinishBoot();
             return;
@@ -245,7 +271,11 @@ internal sealed partial class CanOpenNode
         var unseenMandatory = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsMandatory(id) && !_slaveSeen[id]) unseenMandatory.Add(id);
+            if (IsMandatory(id) && (!_slaveSeen[id] || IsMandatoryIdentityPending(id)))
+            {
+                unseenMandatory.Add(id);
+                _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
+            }
         }
         ApplyBootErrorReaction(unseenMandatory, FlyingMasterSignal.SlaveBootTimeout);
     }
@@ -261,6 +291,9 @@ internal sealed partial class CanOpenNode
         _bootDeadline?.Dispose();
         _bootDeadline = null;
         uint startup = ReadStartup();
+        _slaveVerificationCts?.Cancel();
+        Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
+        Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
         bool stopAll = (startup & NmtStopAllOnErrorBit) != 0;
         bool resetAll = !stopAll && (startup & NmtResetAllOnErrorBit) != 0;
         if (stopAll || resetAll)
@@ -348,7 +381,8 @@ internal sealed partial class CanOpenNode
 
     private bool AnySlaveVerifying()
     {
-        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++) if (_slaveVerifying[id]) return true;
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+            if (_slaveVerifying[id] || _slaveIdentityVerifying[id]) return true;
         return false;
     }
 
@@ -364,7 +398,7 @@ internal sealed partial class CanOpenNode
         var pending = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (_slaveVerifying[id] && !active.Contains(id)) pending.Add(id);
+            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id]) && !active.Contains(id)) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }
@@ -431,10 +465,12 @@ internal sealed partial class CanOpenNode
         {
             // The simultaneous start is one moment for the whole network, and a mandatory slave
             // gates the network: the boot halts, with the 1F80h error reaction, as on a boot timeout.
+            _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.SafetyConfigurationInvalid);
             ApplyBootErrorReaction(new[] { nodeId }, FlyingMasterSignal.SlaveSafetyConfigurationInvalid);
             return;
         }
         _slaveStarted[nodeId] = true; // skipped: never started by this boot
+        _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.SafetyConfigurationInvalid);
         RaiseFlyingMaster(FlyingMasterSignal.SlaveSafetyConfigurationInvalid, nodeId, null);
         TryFinishBoot();
     }

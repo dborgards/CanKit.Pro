@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
+using CanKit.Pro.CANopen.Nmt;
 
 namespace CanKit.Pro.CANopen;
 
@@ -13,6 +15,21 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 public static class CanOpenNodeExtensions
 {
+    /// <summary>Returns immutable snapshots of the assigned slaves' latest boot steps in
+    /// node-id order. A new boot clears earlier results; leaving the master role clears them.
+    /// StartRequested means a command was queued, not that the slave acknowledged it.
+    /// Identity checking is enabled by nonzero values in 1F84h–1F88h.</summary>
+    /// <exception cref="ArgumentNullException">The node is null.</exception>
+    /// <exception cref="NotSupportedException">The node was not created by this library.</exception>
+    /// <exception cref="ObjectDisposedException">The node has been disposed.</exception>
+    public static IReadOnlyList<SlaveBootResult> GetSlaveBootResults(this ICanOpenNode node)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        if (node is not CanOpenNode local)
+            throw new NotSupportedException("Boot results require a node created by CanKit.Pro.");
+        return local.GetSlaveBootResults();
+    }
+
     /// <summary>
     /// Acknowledges the local node's latched controller-overrun cause (<c>8110h</c>), including
     /// both RxOverflow and TxOverflow. Idempotent when no cause is active or

@@ -78,6 +78,8 @@ internal sealed partial class CanOpenNode
         public const ushort NmtStartup = 0x1F80;
         public const ushort SlaveAssignment = 0x1F81;
         public const ushort RequestNmt = 0x1F82;
+        public const ushort ExpectedDeviceType = 0x1F84;
+        public const ushort ExpectedSerialNumber = 0x1F88;
         public const ushort BootTime = 0x1F89;
         public const ushort FlyingMasterTiming = 0x1F90;
         public const ushort RpdoComm = 0x1400;
@@ -187,6 +189,12 @@ internal sealed partial class CanOpenNode
         for (byte node = 1; node <= 0x80; node++)
             _od.AddU8(Co.RequestNmt, node, 0, rw, nm);
         _od.AddU32(Co.BootTime, 0x00, 0, rw, nm);
+        for (ushort index = Co.ExpectedDeviceType; index <= Co.ExpectedSerialNumber; index++)
+        {
+            _od.AddU8(index, 0, CanOpenCobId.MaxNodeId, ro, nm);
+            for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
+                _od.AddU32(index, node, 0, rw, nm);
+        }
         _od.AddU8(Co.FlyingMasterTiming, 0x00, 0x06, ro, nm);
         _od.AddU16(Co.FlyingMasterTiming, 0x01, 100, rw, nm);
         _od.AddU16(Co.FlyingMasterTiming, 0x02, 500, rw, nm);
@@ -280,6 +288,7 @@ internal sealed partial class CanOpenNode
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
             or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
             or Co.RequestNmt or Co.BootTime or Co.FlyingMasterTiming => true,
+        >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber => true,
         >= Co.RpdoComm and < Co.RpdoComm + Co.PdoCount => true,
         >= Co.RpdoMap and < Co.RpdoMap + Co.PdoCount => true,
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
@@ -339,6 +348,8 @@ internal sealed partial class CanOpenNode
             case Co.FlyingMasterTiming:
                 return ValidateFlyingMasterTimingWrite(subindex, value);
             case Co.SlaveAssignment:
+                return ValidateSlaveAssignmentWrite(subindex, value);
+            case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
                 return ValidateSlaveAssignmentWrite(subindex, value);
             case Co.RequestNmt:
                 return ValidateRequestNmtWrite(subindex, value);
@@ -731,6 +742,9 @@ internal sealed partial class CanOpenNode
                 // A live edit is the network list the active master boots now. It is not a
                 // power-on value: StartFlyingMaster and StoreParameters are what record one,
                 // and a reset must come back to that rather than to whatever was written since.
+                if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
+                return;
+            case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
                 if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
                 return;
             case Co.BootTime:
