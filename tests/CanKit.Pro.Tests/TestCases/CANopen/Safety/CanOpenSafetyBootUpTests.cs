@@ -1017,6 +1017,31 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
                 && data[0] == (byte)NmtCommand.ResetCommunication && data[1] == 0;
         }
     }
+    [Fact]
+    public async Task Runtime_Error_Recovery_Repeats_Safety_Verification()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableNmtErrorHandler = true });
+        using var slave = OpenSlave(rig, validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
+        rig.Node.AddHeartbeatConsumer(Slave, TimeSpan.FromMilliseconds(100));
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.GetSlaveBootResults().Any(r => r.NodeId == Slave && r.Status == SlaveBootStatus.WaitingForErrorControl),
+            2000, "initial heartbeat gate is ready");
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.Start, Slave), 300, "initial safety check passes");
+        rig.Log.Clear();
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        Logged(rig, NmtCommand.ResetNode, Slave).Should().BeTrue();
+        rig.Node.GetSlaveBootResults().Single(r => r.NodeId == Slave).Status.Should().Be(SlaveBootStatus.WaitingForErrorControl);
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        await QuiesceAsync(rig.Witness, null);
+        SdoRequests(rig).Should().BeGreaterThan(0, "the previous safety verification cannot approve the rebooted device");
+        Logged(rig, NmtCommand.Start, Slave).Should().BeTrue();
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

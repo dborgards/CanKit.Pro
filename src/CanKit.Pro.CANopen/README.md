@@ -112,6 +112,7 @@ maintainer decision does.
 | FR-CO-066 | Opt-in active slave boot and retries without an announcement, with confirmed resets and mandatory boot deadline ([Boot-up](#boot-up)) |
 | FR-CO-067 | Opt-in configuration date/time verification against `1020h` before automatic Start ([Boot-up](#boot-up)) |
 | FR-CO-070 | Opt-in heartbeat/guarding startup before automatic Start ([Boot error control](#boot-error-control-fr-co-070)) |
+| FR-CO-071 | Opt-in runtime NMT error reactions and per-peer recovery ([NMT error handler](#runtime-nmt-error-handler-fr-co-071)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -2242,7 +2243,7 @@ addressed to its own node-id, and a broadcast reset or stop does not take the ma
 (including the echo of a reset it sent itself).
 
 The upper bytes of each `1F81h` entry carry retry factor (byte 1) and guard time in milliseconds
-(bytes 2–3). They start guarding only with `EnableBootErrorControl`; ordinary heartbeat
+(bytes 2–3). They start guarding with `EnableBootErrorControl` or `EnableNmtErrorHandler`; ordinary heartbeat
 configuration remains available independently.
 
 Heartbeats, including the boot-up byte `0x00`, update `1F82h` at that node-id. Reading `1F82h`
@@ -2296,6 +2297,36 @@ Starts are individual, including simultaneous startup. Suppressed starts and sla
 `1F81h` boot bit 2 skip this stage. No remote `1017h`/`100Ch`/`100Dh` writes, keep-alive
 procedure of §3.6, or ongoing boot-error handler of §4.2 are added. The general heartbeat and
 guarding events remain available. See the [scope and validation record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-error-control.md).
+
+### Runtime NMT error handler (FR-CO-071)
+
+`EnableNmtErrorHandler = true` opts into CiA 302-2 §4.2 reactions to heartbeat and guarding
+timeouts. It defaults to false, survives option copies and includes the boot error-control
+stage above. Identity and configuration options remain independent. This increment handles
+assigned slaves after their automatic boot gates have passed, plus application-owned slaves
+(boot bit 2 clear or automatic starts suppressed). Errors during initial automatic boot retain
+their existing policy; the independent §4.3 boot-up handler is not included.
+
+For a mandatory slave, `1F80h` bit 6 requests **broadcast Stop** (target 0); otherwise bit 4
+requests **broadcast Reset Node**. Stop takes precedence. Both halt automatic boot until a
+new boot/configuration or role cycle. Other errors request **individual Reset Node**, wait for
+confirmed transmission and a fresh valid boot-up, then repeat all enabled boot gates and
+request individual Start. An application-owned slave is reset but neither configured nor
+started. A healthy peer's completed boot and queued Start remain intact.
+
+The reset shares the peer SDO channel. `SdoTimeout` bounds its boot-up wait after TX
+confirmation; a nonzero `1F89h` additionally bounds the entire recovery of each peer, including
+channel/queue waits and subsequent verification. This per-peer deadline is library policy.
+Duplicate events coalesce while recovery is running. Reset/boot-up failure or deadline expiry
+reports `ErrorRecoveryFailed` and `SlaveErrorRecoveryFailed` and stays latched until a new boot,
+relevant configuration edit or role cycle; subsequent gate failures use the existing boot
+policy. Cancellation also invalidates that peer's previously queued automatic Start.
+
+`HeartbeatTimeout`/`NodeGuardingTimeout` and the new `SlaveErrorControlEvent` indication are
+queued before the reaction is requested. Public event delivery remains asynchronous and is
+not a veto barrier. `ErrorControlReactionRequested` is the boot snapshot while requesting the
+reaction. No remote monitoring-object writes or automatic restart after a broadcast reaction
+are added. See the [scope and validation record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-nmt-error-handler.md).
 
 ## Quick start
 

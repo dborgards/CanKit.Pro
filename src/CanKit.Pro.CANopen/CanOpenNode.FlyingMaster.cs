@@ -595,7 +595,7 @@ internal sealed partial class CanOpenNode
         // The cold Reset Communication would otherwise drop the network list and the boot
         // timeout, and the master that just won would start nobody.
         RememberOne(Co.BootTime, 0x00);
-        if (_options.EnableBootErrorControl)
+        if (BootErrorControlEnabled)
         {
             int count = (int)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0);
             for (int sub = 0; sub <= count; sub++) RememberOne(Co.ConsumerHeartbeat, (byte)sub);

@@ -31,7 +31,7 @@ internal sealed partial class CanOpenNode
         _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.VerifyingConfiguration);
         uint date = _od.ReadUnsigned(Co.ExpectedConfigurationDate, nodeId);
         uint time = _od.ReadUnsigned(Co.ExpectedConfigurationTime, nodeId);
-        var token = (_slaveVerificationCts ??= new CancellationTokenSource()).Token;
+        var token = SlaveBootToken(nodeId);
         int generation = _bootGeneration;
         var plan = _slaveBootConfigurations[nodeId];
         byte restore = _options.EnableBootConfigurationDownload && (Assignment(nodeId) & 0x80) != 0

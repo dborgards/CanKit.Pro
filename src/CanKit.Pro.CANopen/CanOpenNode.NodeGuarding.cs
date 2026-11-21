@@ -409,12 +409,14 @@ internal sealed partial class CanOpenNode
 
     private void RaiseNodeGuardingTimeout(byte producer, TimeSpan guardTime, byte lifeTimeFactor)
     {
+        int generation = _bootGeneration;
         var args = new NodeGuardingTimeoutEventArgs(producer, guardTime, lifeTimeFactor);
         EnqueueEvent(() =>
         {
             try { DeliverToSubscribers(NodeGuardingTimeout, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.NodeGuardingTimeout(producer), emcyProducer: -1, producer);
+        HandleRuntimeNmtError(producer, generation);
     }
 
     private sealed class NodeGuardingConsumer

@@ -45,6 +45,10 @@ public enum SlaveBootStatus
     ErrorControlReady,
     /// <summary>No valid heartbeat was received within the error-control startup window.</summary>
     ErrorControlFailed,
+    /// <summary>A runtime error-control event requested Reset Node or broadcast Stop.</summary>
+    ErrorControlReactionRequested,
+    /// <summary>The runtime reset/boot-up handshake or recovery deadline failed.</summary>
+    ErrorRecoveryFailed,
 }
 
 /// <summary>An immutable snapshot of one slave's boot progress. A new boot replaces the results.</summary>
