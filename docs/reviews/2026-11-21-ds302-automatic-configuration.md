@@ -76,7 +76,7 @@ impliziten 1020h-Schreibzugriff, Store-Auftrag oder erneuten Signaturvergleich. 
 liegen diese Schreibzugriffe im gelieferten DCF. Die Sperre koordiniert nur den lokalen
 Knoten; sie ist keine netzweite Transaktion. Safety-Kommissionierung bleibt gesondert.
 
-Nicht enthalten sind insbesondere automatische Error-Control-Einrichtung nach §3.6,
+Nicht enthalten sind insbesondere automatische Error-Control-Einrichtung nach §4.1,
 Software-Download nach anderen Teilen der CiA-302-Reihe und vollständiges Management
 sämtlicher Konfigurationsobjekte. Dies ist daher kein Anspruch auf vollständige DS302-Konformität.
 
