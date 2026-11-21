@@ -81,4 +81,7 @@ public enum FlyingMasterSignal
     /// <summary>The slave requires configuration or its 1020h upload failed. Start is blocked;
     /// the configured boot policy decides retry or halt. GetSlaveBootResults supplies details.</summary>
     SlaveConfigurationInvalid,
+    /// <summary>The opted-in error-control startup did not receive a valid heartbeat in time.
+    /// The slave is not started; the configured boot policy decides retry or halt.</summary>
+    SlaveErrorControlFailed,
 }

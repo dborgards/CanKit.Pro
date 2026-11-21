@@ -39,6 +39,12 @@ public enum SlaveBootStatus
     ConfigurationDownloaded,
     /// <summary>Preflight, a configuration write, restore or its reset/boot-up failed.</summary>
     ConfigurationDownloadFailed,
+    /// <summary>The error-control startup stage is waiting for a fresh heartbeat.</summary>
+    WaitingForErrorControl,
+    /// <summary>A heartbeat was received in time, guarding was started, or neither was configured.</summary>
+    ErrorControlReady,
+    /// <summary>No valid heartbeat was received within the error-control startup window.</summary>
+    ErrorControlFailed,
 }
 
 /// <summary>An immutable snapshot of one slave's boot progress. A new boot replaces the results.</summary>
@@ -60,7 +66,8 @@ public sealed class SlaveBootResult
     public byte NodeId { get; }
     /// <summary>The latest step or outcome; StartRequested is not a remote acknowledgement.</summary>
     public SlaveBootStatus Status { get; }
-    /// <summary>The remote object that failed verification, or null.</summary>
+    /// <summary>The object associated with the failed step, or null. Error-control startup
+    /// refers to the local consumer-heartbeat object (1016h).</summary>
     public ushort? Index { get; }
     /// <summary>The remote sub-index that failed verification, or null.</summary>
     public byte? Subindex { get; }

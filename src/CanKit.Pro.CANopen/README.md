@@ -111,6 +111,7 @@ maintainer decision does.
 | FR-CO-065 | Opt-in device-type upload before automatic slave Start, even without identity expectations ([Boot-up](#boot-up)) |
 | FR-CO-066 | Opt-in active slave boot and retries without an announcement, with confirmed resets and mandatory boot deadline ([Boot-up](#boot-up)) |
 | FR-CO-067 | Opt-in configuration date/time verification against `1020h` before automatic Start ([Boot-up](#boot-up)) |
+| FR-CO-070 | Opt-in heartbeat/guarding startup before automatic Start ([Boot error control](#boot-error-control-fr-co-070)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -2165,8 +2166,9 @@ An SDO answer establishes contact, not an NMT state: `1F82h` keeps the last actu
 An Operational announcement in the current boot avoids Start; a byte left by a previous boot
 does not. Without a current announcement the library requests individual Start after the
 enabled verification gates pass. Active boot never sends broadcast Start. This is an incremental
-boot policy: the full keep-alive heartbeat/guarding check, automatic configuration download and automatic
-error-control setup remain unimplemented. See the [active boot record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-active-boot.md).
+boot policy: the full keep-alive check remains separate. Automatic configuration download is available
+through `EnableBootConfigurationDownload` ([scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-automatic-configuration.md));
+error-control startup has its own opt-in below. See the [active boot record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-active-boot.md).
 
 **Configuration version before Start (FR-CO-067).** Set
 `CanOpenNodeOptions.RequireBootConfigurationMatch = true` when opening the master, bind a
@@ -2239,9 +2241,9 @@ A broadcast is not used there. While this node is the active flying master it ig
 addressed to its own node-id, and a broadcast reset or stop does not take the master down
 (including the echo of a reset it sent itself).
 
-The guard time and life time stored in the upper bytes of each `1F81h` entry are kept as
-written and are not used to start node guarding. Heartbeat (`1016h` / `1017h`) is the
-keep-alive this node runs.
+The upper bytes of each `1F81h` entry carry retry factor (byte 1) and guard time in milliseconds
+(bytes 2–3). They start guarding only with `EnableBootErrorControl`; ordinary heartbeat
+configuration remains available independently.
 
 Heartbeats, including the boot-up byte `0x00`, update `1F82h` at that node-id. Reading `1F82h`
 returns the last state byte, or 0 when none has been seen. Writing it, while this node is the
@@ -2255,6 +2257,45 @@ slave that was never seen raises `FlyingMasterChanged` with `SlaveBootTimeout`, 
 stops before this node enters Operational and before a simultaneous NMT Start. The error
 reaction is the `1F80h` bit 6 / bit 4 row above. With both clear, only the missing slave
 receives NMT Reset Node.
+
+### Boot error control (FR-CO-070)
+
+Open the master with `new CanOpenNodeOptions { EnableBootErrorControl = true }` to run
+CiA 302-2 §4.1 after enabled identity/configuration work and before safety and automatic Start.
+The option defaults to false and does not itself enable identity uploads or configuration.
+Configure the local heartbeat consumer before `StartFlyingMaster`:
+
+```csharp
+node.AddHeartbeatConsumer(5, TimeSpan.FromMilliseconds(500));
+// Assign slave 5 in 1F81h and select startup policy as above.
+```
+
+A local nonzero `1016h` consumer has priority over guarding. Its full interval starts on entry
+into this stage, with `WaitingForErrorControl`; only a new, classical one-byte heartbeat in
+Stopped, Operational or Pre-operational completes it. Boot-up is not sufficient. Buffered
+frames from before entry and frames without a positive, comparable `HostArrivalTimestamp`
+are rejected. Custom bus services must use the node's monotonic time domain. The actor must
+process the indication before the timeout callback; this is not a real-time delivery guarantee.
+
+Without a heartbeat consumer, nonzero guard time and retry factor in `1F81h` start periodic
+RTR polling without waiting for the first response. Either field zero disables automatic
+guarding. Retry factor N allows N additional missed guard-time windows after the initial miss;
+an accepted guarding response restores the allowance. The existing `NodeGuardingTimeout`
+event reports the eventual timeout. Its `LifeTimeFactor` is 1 for these consumers; the retry
+factor is a separate `1F81h` field, not the producer's `100Dh` life-time factor.
+
+The stage replaces existing guarding for its selected slaves. Role loss, reset, halt and
+disposal cancel its waits and owned pollers; a later explicit `StartNodeGuardingConsumer`
+replacement remains application-owned. Relevant `1016h` changes restart the boot. The master's
+cold reset preserves the configured consumer entries. Failure reports `ErrorControlFailed`,
+local index `1016h`, and `SlaveErrorControlFailed`, and follows the existing mandatory/optional
+boot policy. `1F89h` includes this wait. Successful completion can briefly report
+`ErrorControlReady` before subsequent boot statuses replace it.
+
+Starts are individual, including simultaneous startup. Suppressed starts and slaves without
+`1F81h` boot bit 2 skip this stage. No remote `1017h`/`100Ch`/`100Dh` writes, keep-alive
+procedure of §3.6, or ongoing boot-error handler of §4.2 are added. The general heartbeat and
+guarding events remain available. See the [scope and validation record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-error-control.md).
 
 ## Quick start
 

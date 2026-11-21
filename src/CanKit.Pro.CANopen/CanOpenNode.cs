@@ -1110,6 +1110,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 _actor.Post(() =>
                 {
                     ObserveConfigurationBootUp(id, data, isRtr, isFd, arrival);
+                    ObserveBootErrorControlHeartbeat(id, data, isRtr, isFd, arrival);
                     HandleIncomingFrame(id, data, isRtr, isFd);
                 });
             }

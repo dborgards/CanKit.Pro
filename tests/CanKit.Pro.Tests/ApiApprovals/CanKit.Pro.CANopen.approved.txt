@@ -147,6 +147,7 @@ namespace CanKit.Pro.CANopen
         public bool EmitControllerOverrunEmcy { get; init; }
         public bool EmitGuardingErrorEmcy { get; init; }
         public bool EnableBootConfigurationDownload { get; init; }
+        public bool EnableBootErrorControl { get; init; }
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
         public bool EnableEmcyInhibit { get; init; }
@@ -829,6 +830,7 @@ namespace CanKit.Pro.CANopen.Nmt
         SlaveIdentityInvalid = 7,
         SlaveBootResetFailed = 8,
         SlaveConfigurationInvalid = 9,
+        SlaveErrorControlFailed = 10,
     }
     public enum NmtCommand : byte
     {
@@ -874,6 +876,9 @@ namespace CanKit.Pro.CANopen.Nmt
         ConfigurationReadFailed = 14,
         ConfigurationDownloaded = 15,
         ConfigurationDownloadFailed = 16,
+        WaitingForErrorControl = 17,
+        ErrorControlReady = 18,
+        ErrorControlFailed = 19,
     }
 }
 namespace CanKit.Pro.CANopen.Pdo

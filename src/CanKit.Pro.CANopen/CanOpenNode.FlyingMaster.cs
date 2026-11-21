@@ -28,8 +28,7 @@ internal sealed partial class CanOpenNode
 
     // 1F81h, one UNSIGNED32 per node-id. Bit 0 assigns the slave, bit 2 lets the master boot
     // it, bit 3 marks it mandatory, bit 4 is keep-alive (Reset Communication is not sent).
-    // The guard time and life time in the upper bytes are stored with the entry. Heartbeat is
-    // the keep-alive this node uses; node guarding is not started from those bytes.
+    // EnableBootErrorControl uses the upper bytes as guard time and retry factor (§6.3).
     private const uint SlaveAssignedBit = 0x0000_0001;
     private const uint SlaveBootBit = 0x0000_0004;
     private const uint SlaveMandatoryBit = 0x0000_0008;
@@ -596,6 +595,11 @@ internal sealed partial class CanOpenNode
         // The cold Reset Communication would otherwise drop the network list and the boot
         // timeout, and the master that just won would start nobody.
         RememberOne(Co.BootTime, 0x00);
+        if (_options.EnableBootErrorControl)
+        {
+            int count = (int)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0);
+            for (int sub = 0; sub <= count; sub++) RememberOne(Co.ConsumerHeartbeat, (byte)sub);
+        }
         for (byte sub = 0; sub <= CanOpenCobId.MaxNodeId; sub++)
         {
             RememberOne(Co.SlaveAssignment, sub);
