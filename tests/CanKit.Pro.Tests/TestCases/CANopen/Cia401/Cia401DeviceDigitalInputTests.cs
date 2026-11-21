@@ -169,6 +169,7 @@ public class Cia401DeviceDigitalInputTests
     /// one of them back to its default shows.</summary>
     private static CanOpenNodeOptions EveryOptionChanged(int pdoCount) => new CanOpenNodeOptions
     {
+        RequireBootDeviceTypeUpload = true,
         EnableEmcyInhibit = true,
         EmitGuardingErrorEmcy = true,
         EmitControllerErrorEmcy = true,

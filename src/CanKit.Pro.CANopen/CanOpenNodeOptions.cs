@@ -19,6 +19,20 @@ namespace CanKit.Pro.CANopen;
 public sealed class CanOpenNodeOptions
 {
     /// <summary>
+    /// Require an SDO upload of <c>1000h:00</c> before automatic slave Start, even when
+    /// <c>1F84h</c> is zero (CiA 302-2 v4.1.0 §3.4, step c). Default false preserves
+    /// expectation-only identity checks. A zero expectation skips comparison, not this upload.
+    /// </summary>
+    /// <remarks>
+    /// Applies to assigned, boot-enabled slaves after their announcement, including slaves
+    /// already Operational. Requires a four-byte reply and respects the bound peer description.
+    /// Failures use the existing identity boot results and error policy. Suppresses broadcast
+    /// Start so an unseen slave cannot bypass verification. This does not enable discovery,
+    /// configuration download or automatic error-control setup. Copy methods preserve it.
+    /// </remarks>
+    public bool RequireBootDeviceTypeUpload { get; init; }
+
+    /// <summary>
     /// Manage optional <c>1029h</c>: constant sub-index 0 = 1 and read/write UNSIGNED8
     /// communication-error behavior at sub-index 1 (0 = Pre-Operational, 1 = unchanged,
     /// 2 = Stopped; default 0). Default false preserves existing NMT and data-only behavior.
@@ -442,6 +456,7 @@ public sealed class CanOpenNodeOptions
     {
         var options = new CanOpenNodeOptions
         {
+            RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,
             EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,

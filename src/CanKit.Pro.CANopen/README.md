@@ -108,6 +108,7 @@ maintainer decision does.
 | FR-CO-062 | Pre-defined error field `1003h`, opt-in by `ErrorHistoryCapacity` or a description that declares it ([Error control](#error-control)) |
 | FR-CO-063 | Device type `1000h` split into profile number and additional information, and a peer's logical devices read from `1000h` and `67FFh + x·800h` through the peer-SDO gate ([Device type and logical devices](#device-type-and-logical-devices)) |
 | FR-CO-064 | Optional identity gate before slave Start via `1F84h`–`1F88h`, with immutable per-slave boot results ([Boot-up](#boot-up)) |
+| FR-CO-065 | Opt-in device-type upload before automatic slave Start, even without identity expectations ([Boot-up](#boot-up)) |
 
 ## Not built, and why
 
@@ -2062,10 +2063,24 @@ device type (`1000h:00`), vendor-id, product code, revision and serial number (`
 Device type, vendor-id, product code and serial number must match exactly. For the revision,
 §6.9 requires equal major revisions (bits 16..31) and an actual minor revision (bits 0..15)
 at least as high as expected; a compatible newer minor revision is accepted.
-A zero expectation skips that comparison. With all five zero, the existing announcement-based
-boot runs without identity SDOs. This is an opt-in identity gate, not the complete §3.4 boot
-procedure: unconditional reachability uploads, configuration download and automatic error-control
-setup are still outside this implementation.
+A zero expectation skips that comparison. By default, with all five zero, the existing
+announcement-based boot runs without identity SDOs.
+
+Set `CanOpenNodeOptions.RequireBootDeviceTypeUpload = true` to require `1000h:00` first for
+every assigned, boot-enabled slave, even when `1F84h` is zero (CiA 302-2 §3.4 step c).
+The reply must be four bytes; zero `1F84h` accepts any UNSIGNED32 value. Nonzero expectations
+still compare as above, and `1000h` is read only once. The option defaults to false and is
+preserved by the options copy methods. A bound EDS/DCF must permit the upload. Read failures
+use `IdentityReadFailed` and `SlaveIdentityInvalid`, with `Index = 1000h`, `Subindex = 0` and
+no `ExpectedValue` when no comparison was configured. The existing mandatory/optional failure,
+boot-deadline and cancellation rules apply. With this option there is no broadcast Start.
+
+Both modes still begin verification after a slave announcement, including an Operational
+heartbeat; an already Operational slave is verified but gets no Start. Suppressed slave boot
+and unassigned or boot-disabled slaves do not initiate uploads. Explicit application NMT
+commands remain outside this gate. This is a gate on the existing boot path, not the complete
+§3.4 procedure: it does not actively find silent slaves, download configuration or automatically
+set up error control. See the [source and follow-up record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-boot-followup.md).
 
 An assigned, boot-enabled slave with any nonzero expectation is verified before Start, including
 one that announced Operational. The uploads share the peer SDO channel, hold it for the whole

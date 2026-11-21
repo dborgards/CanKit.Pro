@@ -15,7 +15,8 @@ namespace CanKit.Pro.CANopen;
 /// <summary>
 /// Boot-up of the network list once this node is the active NMT master (CiA 302-2 version 4.1.0).
 /// The reading of <c>1F80h</c>, <c>1F81h</c>, <c>1F82h</c> and <c>1F89h</c> follows the open
-/// implementation that cites that edition. Nonzero 1F84h–1F88h expectations gate the start.
+/// implementation that cites that edition. Nonzero 1F84h–1F88h expectations gate the start;
+/// RequireBootDeviceTypeUpload additionally requires 1000h even with zero expectations.
 /// Configuration download (including concise DCF) is not part of it.
 /// </summary>
 internal sealed partial class CanOpenNode
@@ -161,7 +162,7 @@ internal sealed partial class CanOpenNode
         if ((Assignment(nodeId) & (SlaveAssignedBit | SlaveBootBit)) != (SlaveAssignedBit | SlaveBootBit)) return;
 
         if (_slaveIdentityFailed[nodeId]) return;
-        if (!_slaveIdentityVerified[nodeId] && HasIdentityExpectation(nodeId))
+        if (!_slaveIdentityVerified[nodeId] && RequiresSlaveIdentityVerification(nodeId))
         {
             if (!_slaveIdentityVerifying[nodeId]) BeginSlaveIdentityVerification(nodeId);
             return;
@@ -216,7 +217,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
             _bootStartMoment = true;
-            if (HasAssignedSafetySlave() || HasAssignedIdentityExpectation())
+            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification())
             {
                 // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
                 // Start to node 0 reaches one that has not announced yet — keep-alive, running
