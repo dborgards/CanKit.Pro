@@ -138,6 +138,7 @@ namespace CanKit.Pro.CANopen
     public sealed class CanOpenNodeOptions
     {
         public CanOpenNodeOptions() { }
+        public System.TimeSpan? ActiveSlaveBootRetryInterval { get; init; }
         public System.TimeSpan DefaultTpdoEventTimerInterval { get; init; }
         public bool EmitBusOffRecoveryEmcy { get; init; }
         public bool EmitControllerErrorEmcy { get; init; }
@@ -822,6 +823,7 @@ namespace CanKit.Pro.CANopen.Nmt
         SlaveBootTimeout = 5,
         SlaveSafetyConfigurationInvalid = 6,
         SlaveIdentityInvalid = 7,
+        SlaveBootResetFailed = 8,
     }
     public enum NmtCommand : byte
     {
@@ -860,6 +862,7 @@ namespace CanKit.Pro.CANopen.Nmt
         IdentityReadFailed = 7,
         BootTimeout = 8,
         SafetyConfigurationInvalid = 9,
+        ResetCommunicationFailed = 10,
     }
 }
 namespace CanKit.Pro.CANopen.Pdo

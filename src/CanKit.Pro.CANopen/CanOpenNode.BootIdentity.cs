@@ -28,7 +28,7 @@ internal sealed partial class CanOpenNode
 
     private bool RequiresSlaveIdentityVerification(byte nodeId)
     {
-        if (_options.RequireBootDeviceTypeUpload) return true;
+        if (_options.RequireBootDeviceTypeUpload || ActiveSlaveBootEnabled) return true;
         for (ushort index = Co.ExpectedDeviceType; index <= Co.ExpectedSerialNumber; index++)
             if (_od.ReadUnsigned(index, nodeId) != 0) return true;
         return false;
@@ -101,7 +101,7 @@ internal sealed partial class CanOpenNode
             {
                 // A zero 1F84h disables the comparison, but the opted-in reachability
                 // upload still precedes 1018h (CiA 302-2 §3.4 c-e).
-                if (expectations[i] == 0 && (i != 0 || !_options.RequireBootDeviceTypeUpload)) continue;
+                if (expectations[i] == 0 && (i != 0 || !(_options.RequireBootDeviceTypeUpload || ActiveSlaveBootEnabled))) continue;
                 token.ThrowIfCancellationRequested();
                 index = i == 0 ? Co.DeviceType : Co.Identity;
                 subindex = (byte)i;
@@ -143,11 +143,16 @@ internal sealed partial class CanOpenNode
         if (result.Status == SlaveBootStatus.IdentityVerified)
         {
             _slaveIdentityVerified[nodeId] = true;
-            ConsiderStart(nodeId, (byte)_od.ReadUnsigned(Co.RequestNmt, nodeId));
+            ConsiderStart(nodeId, SlaveStateForBoot(nodeId));
             TryFinishBoot();
             return;
         }
         _slaveIdentityFailed[nodeId] = true;
+        if (ActiveSlaveBootEnabled && (!IsMandatory(nodeId) || IsDeviceTypeNoResponse(result)))
+        {
+            ScheduleActiveSlaveRetry(nodeId, FlyingMasterSignal.SlaveIdentityInvalid);
+            return;
+        }
         uint startup = ReadStartup();
         bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
         if (IsMandatory(nodeId) || simultaneous)

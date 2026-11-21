@@ -25,6 +25,8 @@ public enum SlaveBootStatus
     BootTimeout,
     /// <summary>The bound safety configuration did not verify before Start.</summary>
     SafetyConfigurationInvalid,
+    /// <summary>The active boot's Reset Communication send was not confirmed; a retry is scheduled.</summary>
+    ResetCommunicationFailed,
 }
 
 /// <summary>An immutable snapshot of one slave's boot progress. A new boot replaces the results.</summary>

@@ -19,9 +19,25 @@ namespace CanKit.Pro.CANopen;
 public sealed class CanOpenNodeOptions
 {
     /// <summary>
+    /// Enable active slave boot with this positive delay between a failed attempt and its
+    /// retry. Null (default) keeps announcement-based boot. One second is the CiA 302-2 §3.3
+    /// recommendation above 125 kbit/s; choose a suitable interval for the network.
+    /// </summary>
+    /// <remarks>
+    /// Assigned, boot-enabled slaves are probed through 1000h even without an announcement
+    /// or identity expectation. Required Reset Communication sends must first be confirmed.
+    /// Mandatory 1000h local timeouts retry until 1F89h (zero disables the deadline); other
+    /// mandatory identity failures halt boot. Optional failures retry in the background until
+    /// success or boot cancellation. This does not implement configuration download or
+    /// automatic error-control setup. Copy methods preserve the setting.
+    /// </remarks>
+    public TimeSpan? ActiveSlaveBootRetryInterval { get; init; }
+
+    /// <summary>
     /// Require an SDO upload of <c>1000h:00</c> before automatic slave Start, even when
     /// <c>1F84h</c> is zero (CiA 302-2 v4.1.0 §3.4, step c). Default false preserves
-    /// expectation-only identity checks. A zero expectation skips comparison, not this upload.
+    /// expectation-only identity checks when active boot is off. A zero expectation skips
+    /// comparison, not this upload. ActiveSlaveBootRetryInterval implies the upload too.
     /// </summary>
     /// <remarks>
     /// Applies to assigned, boot-enabled slaves after their announcement, including slaves
@@ -456,6 +472,7 @@ public sealed class CanOpenNodeOptions
     {
         var options = new CanOpenNodeOptions
         {
+            ActiveSlaveBootRetryInterval = ActiveSlaveBootRetryInterval,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,
@@ -490,6 +507,9 @@ public sealed class CanOpenNodeOptions
 
     internal void Validate()
     {
+        if (ActiveSlaveBootRetryInterval is { } retry && retry <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(ActiveSlaveBootRetryInterval), retry,
+                "Active slave boot retry interval must be positive, or null for announcement-based boot.");
         if (PdoCount is < 1 or > 512)
             throw new ArgumentOutOfRangeException(nameof(PdoCount), PdoCount, "PDO count must be 1..512.");
         if (SdoTimeout <= TimeSpan.Zero)

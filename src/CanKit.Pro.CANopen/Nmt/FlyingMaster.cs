@@ -64,7 +64,8 @@ public enum FlyingMasterSignal
     /// did not verify — 13FEh is not A5h, a checksum or a record differs from the file, or the
     /// uploads failed. <see cref="CanKit.Pro.CANopen.FlyingMasterChangedEventArgs.OtherNodeId"/>
     /// is that slave. It is not started; a mandatory one, or any one under a simultaneous start,
-    /// halts the boot like <see cref="SlaveBootTimeout"/>.
+    /// halts the boot like <see cref="SlaveBootTimeout"/>. Active slave boot instead retries
+    /// optional failures in the background, including under simultaneous start.
     /// A safety slave that is already Operational when first seen — because it was running before
     /// this master took over, or is keep-alive — is not started by this master and is therefore
     /// not verified; step D is "before NMT Start". While a safety slave is assigned, a
@@ -72,7 +73,9 @@ public enum FlyingMasterSignal
     SlaveSafetyConfigurationInvalid,
 
     /// <summary>A slave did not match its nonzero 1F84h–1F88h identity expectations, or an
-    /// upload failed. It is not started; a mandatory slave or simultaneous start halts the boot.
+    /// upload failed. It is not started; the configured boot policy decides retry or halt.
     /// GetSlaveBootResults supplies the remote object, expected/actual value and upload error.</summary>
     SlaveIdentityInvalid,
+    /// <summary>An active slave boot could not confirm Reset Communication and will retry.</summary>
+    SlaveBootResetFailed,
 }

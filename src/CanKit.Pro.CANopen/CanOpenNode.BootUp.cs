@@ -71,20 +71,25 @@ internal sealed partial class CanOpenNode
     {
         CancelBootUp();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
             if (IsAssignedSlave(id)) _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.WaitingForAnnouncement);
+            _slaveBootResetConfirmed[id] = KeepsAlive(id);
+        }
 
         if ((ReadStartup() & NmtSuppressSlaveStartBit) == 0)
         {
             for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
             {
                 if (!IsAssignedSlave(id) || KeepsAlive(id)) continue;
-                SendNmt(NmtCommand.ResetCommunication, id);
+                if (CanActivelyBootSlave(id)) BeginActiveSlaveReset(id);
+                else SendNmt(NmtCommand.ResetCommunication, id);
             }
         }
 
         // 1F89h is UNSIGNED32. A signed cast would skip the deadline for every value from
         // 0x80000000 upward, and a mandatory slave would then stay unseen.
         ArmBootDeadline();
+        ResumeActiveSlaveBoots();
         TryFinishBoot();
     }
 
@@ -101,6 +106,8 @@ internal sealed partial class CanOpenNode
 
     private void CancelBootUp()
     {
+        CancelActiveSlaveRetries();
+        Array.Clear(_slaveBootResetConfirmed, 0, _slaveBootResetConfirmed.Length);
         _bootDeadline?.Dispose();
         _bootDeadline = null;
         Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
@@ -151,6 +158,7 @@ internal sealed partial class CanOpenNode
             byte state = (byte)_od.ReadUnsigned(Co.RequestNmt, id);
             ConsiderStart(id, state);
         }
+        ResumeActiveSlaveBoots();
         TryFinishBoot();
     }
 
@@ -160,6 +168,7 @@ internal sealed partial class CanOpenNode
         uint startup = ReadStartup();
         if ((startup & NmtSuppressSlaveStartBit) != 0) return;
         if ((Assignment(nodeId) & (SlaveAssignedBit | SlaveBootBit)) != (SlaveAssignedBit | SlaveBootBit)) return;
+        if (ActiveSlaveBootEnabled && (!_slaveBootResetConfirmed[nodeId] || _slaveBootRetries[nodeId] is not null)) return;
 
         if (_slaveIdentityFailed[nodeId]) return;
         if (!_slaveIdentityVerified[nodeId] && RequiresSlaveIdentityVerification(nodeId))
@@ -226,7 +235,7 @@ internal sealed partial class CanOpenNode
                 // verified; one announcing later is started on its own as it announces.
                 for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
                 {
-                    if (_slaveSeen[id]) ConsiderStart(id, (byte)_od.ReadUnsigned(Co.RequestNmt, id));
+                    if (HasSlaveBootContact(id)) ConsiderStart(id, SlaveStateForBoot(id));
                 }
             }
             else
@@ -272,7 +281,7 @@ internal sealed partial class CanOpenNode
         var unseenMandatory = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsMandatory(id) && (!_slaveSeen[id] || IsMandatoryIdentityPending(id)))
+            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id)))
             {
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
@@ -287,6 +296,7 @@ internal sealed partial class CanOpenNode
     private void ApplyBootErrorReaction(IEnumerable<byte> failedSlaves, FlyingMasterSignal signal)
     {
         _bootHalted = true;
+        CancelActiveSlaveRetries();
         // One reaction per boot: a halt from a failed verification must not be followed by the
         // boot timeout's own for a mandatory slave that is still unseen.
         _bootDeadline?.Dispose();
@@ -383,7 +393,12 @@ internal sealed partial class CanOpenNode
     private bool AnySlaveVerifying()
     {
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
-            if (_slaveVerifying[id] || _slaveIdentityVerifying[id]) return true;
+        {
+            // §3.3: an optional slave owes the master only its first completed attempt.
+            // A later in-flight retry must not hold a mandatory slave's start moment.
+            if (_slaveBootRetrying[id] && !IsMandatory(id)) continue;
+            if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveBootResetPending[id]) return true;
+        }
         return false;
     }
 
@@ -399,7 +414,7 @@ internal sealed partial class CanOpenNode
         var pending = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id]) && !active.Contains(id)) pending.Add(id);
+            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id)) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }
@@ -455,13 +470,19 @@ internal sealed partial class CanOpenNode
             // without a safety DCF at the verification looks again — a DCF bound since is
             // verified now, none means a start as for a slave without SRDOs. Not latched: a skip
             // is no verification.
-            byte state = (byte)_od.ReadUnsigned(Co.RequestNmt, nodeId);
+            byte state = SlaveStateForBoot(nodeId);
             ConsiderStart(nodeId, state);
             TryFinishBoot();
             return;
         }
         uint startup = ReadStartup();
         bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
+        if (ActiveSlaveBootEnabled && !IsMandatory(nodeId))
+        {
+            _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.SafetyConfigurationInvalid);
+            ScheduleActiveSlaveRetry(nodeId, FlyingMasterSignal.SlaveSafetyConfigurationInvalid);
+            return;
+        }
         if (IsMandatory(nodeId) || simultaneous)
         {
             // The simultaneous start is one moment for the whole network, and a mandatory slave
@@ -552,7 +573,7 @@ internal sealed partial class CanOpenNode
     private bool HasUnseenMandatorySlave()
     {
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
-            if (IsMandatory(id) && !_slaveSeen[id]) return true;
+            if (IsMandatory(id) && !HasSlaveBootContact(id)) return true;
         return false;
     }
 

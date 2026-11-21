@@ -109,6 +109,7 @@ maintainer decision does.
 | FR-CO-063 | Device type `1000h` split into profile number and additional information, and a peer's logical devices read from `1000h` and `67FFh + x·800h` through the peer-SDO gate ([Device type and logical devices](#device-type-and-logical-devices)) |
 | FR-CO-064 | Optional identity gate before slave Start via `1F84h`–`1F88h`, with immutable per-slave boot results ([Boot-up](#boot-up)) |
 | FR-CO-065 | Opt-in device-type upload before automatic slave Start, even without identity expectations ([Boot-up](#boot-up)) |
+| FR-CO-066 | Opt-in active slave boot and retries without an announcement, with confirmed resets and mandatory boot deadline ([Boot-up](#boot-up)) |
 
 ## Not built, and why
 
@@ -2075,7 +2076,7 @@ use `IdentityReadFailed` and `SlaveIdentityInvalid`, with `Index = 1000h`, `Subi
 no `ExpectedValue` when no comparison was configured. The existing mandatory/optional failure,
 boot-deadline and cancellation rules apply. With this option there is no broadcast Start.
 
-Both modes still begin verification after a slave announcement, including an Operational
+Without active boot (below), both modes begin verification after a slave announcement, including an Operational
 heartbeat; an already Operational slave is verified but gets no Start. Suppressed slave boot
 and unassigned or boot-disabled slaves do not initiate uploads. Explicit application NMT
 commands remain outside this gate. This is a gate on the existing boot path, not the complete
@@ -2089,7 +2090,7 @@ the boot timeout still bounds a mandatory slave's wait when `1F89h` is nonzero. 
 return exactly four bytes. A mismatch, an abort, a timeout or a refused peer-description access
 prevents Start and raises `SlaveIdentityInvalid`. A mandatory slave, or any slave under
 simultaneous start, halts the boot with the existing error reaction; an optional failure is
-skipped. While any assigned slave has an expectation there is no Start to node 0: simultaneous
+skipped. Active boot below overrides this retry policy. While any assigned slave has an expectation there is no Start to node 0: simultaneous
 start retains its moment but addresses verified slaves individually. Manual NMT commands and
 `1F82h` requests remain explicit application actions and do not run this gate.
 
@@ -2097,6 +2098,32 @@ Local and SDO writes to the expectation arrays have the same effect: an edit whi
 a new boot. EDS/DCF values use that same validated path. `StartFlyingMaster` keeps the expectations
 across its cold reset, together with the network list and timing. A reset, role loss or new boot
 cancels the old verification; late completions cannot start a slave in the newer boot.
+
+**Active slave boot (FR-CO-066, CiA 302-2 §3.3).** Set
+`CanOpenNodeOptions.ActiveSlaveBootRetryInterval = TimeSpan.FromSeconds(1)` to begin attempts
+for assigned, boot-enabled slaves without waiting for a heartbeat or boot-up announcement.
+Null is the default and preserves the modes above; a configured interval must be positive
+and survives options copies. One second is the specification's recommendation above
+125 kbit/s. Here the interval is a delay from a failed attempt to its next attempt.
+
+This mode implies the four-byte `1000h:00` upload, even without expectations or
+`RequireBootDeviceTypeUpload`. Non-keep-alive slaves first wait for their Reset Communication
+send to be confirmed by the adapter. Rejected or cancelled resets are retried, exposed as
+`ResetCommunicationFailed` / `SlaveBootResetFailed`; the snapshot carries a failure exception.
+A mandatory slave retries a local SDO timeout at `1000h:00` until `1F89h` expires; zero disables
+that deadline, including while waiting for the shared SDO channel. A peer abort (even code
+`05040000h`), a timeout at `1018h`, a mismatch or another mandatory verification failure halts
+boot. Optional identity and safety failures retry until success or cancellation, including
+after the mandatory set has started and beyond `1F89h`. Their first completed attempt releases
+the master/start moment; a pending retry does not hold it. The existing safety gate still
+runs before Start. Reset, a new boot, role loss or a boot halt cancels pending work.
+
+An SDO answer establishes contact, not an NMT state: `1F82h` keeps the last actual announcement.
+An Operational announcement in the current boot avoids Start; a byte left by a previous boot
+does not. Without a current announcement the library requests individual Start after the
+enabled verification gates pass. Active boot never sends broadcast Start. This is an incremental
+boot policy: the full keep-alive heartbeat/guarding check, configuration download and automatic
+error-control setup remain unimplemented. See the [active boot record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-active-boot.md).
 
 `node.GetSlaveBootResults()` returns immutable snapshots in node-id order: announcement wait,
 identity verification, Start requested, already Operational, or a failure. Identity failures carry
