@@ -99,7 +99,8 @@ internal sealed partial class CanOpenNode
     private void ScheduleActiveSlaveRetry(byte nodeId, FlyingMasterSignal signal)
     {
         _slaveBootRetrying[nodeId] = true;
-        _slaveBootRetries[nodeId]?.Dispose();
+        // Only one attempt can complete per slave. Its retry clears this slot before
+        // starting the next attempt, so there is no older retry to replace here.
         _slaveBootRetries[nodeId] = _deadlines.Arm(_options.ActiveSlaveBootRetryInterval!.Value, () =>
         {
             // The actor skips disposed deadlines; cancelling the boot disposes every retry.

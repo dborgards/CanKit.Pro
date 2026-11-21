@@ -248,6 +248,20 @@ public partial class CanOpenBootIdentityTests
         Started(rig, Slave).Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData(null, 0, false)]
+    [InlineData(0x1000, null, false)]
+    [InlineData(0x1000, 1, false)]
+    [InlineData(0x1000, 0, true)]
+    public void A_Local_Timeout_Requires_A_Known_Device_Type_Pair_For_Retry(int? index, int? subindex, bool retry)
+    {
+        var result = new SlaveBootResult(Slave, SlaveBootStatus.IdentityReadFailed,
+            (ushort?)index, (byte?)subindex,
+            error: new SdoAbortException(0x1000, 0, SdoAbortCode.SdoProtocolTimedOut, SdoAbortOrigin.Local));
+        var classify = typeof(CanOpenNode).GetMethod("IsDeviceTypeNoResponse", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        ((bool)classify.Invoke(null, new object[] { result })!).Should().Be(retry);
+    }
+
     [Fact]
     public async Task Role_Loss_Cancels_A_Scheduled_Retry()
     {
