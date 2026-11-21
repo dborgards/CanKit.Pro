@@ -332,7 +332,7 @@ internal sealed partial class CanOpenNode
         // 1F81h and 1F89h before 1F80h, and 1F90h before both: the network list, the boot
         // timeout and the times are in the dictionary when bits 0 and 5 start the election.
         Co.SlaveAssignment or Co.BootTime => -2,
-        Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime => -2,
+        Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime or Co.RestoreConfiguration => -2,
         >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber => -2,
         Co.FlyingMasterTiming => -1,
         >= Co.RpdoComm and < Co.RpdoComm + 0x200 => 1,
@@ -430,7 +430,8 @@ internal sealed partial class CanOpenNode
                 return ApplyManagedVariable(index, entries, findings);
             case Co.SlaveAssignment:
             case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
-            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when _options.RequireBootConfigurationMatch:
+            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when BootConfigurationEnabled:
+            case Co.RestoreConfiguration when _options.EnableBootConfigurationDownload:
                 return ApplySlaveAssignment(index, entries, findings);
             case Co.RequestNmt:
                 return ApplyRequestNmt(entries, findings);
@@ -646,9 +647,10 @@ internal sealed partial class CanOpenNode
                     $"{index:X4}h implements sub-indices 01h to 7Fh; this sub-index is not created", entry.Value));
                 continue;
             }
-            _od.Declare(index, entry.Subindex, OdDataType.Unsigned32, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            var type = index == Co.RestoreConfiguration ? OdDataType.Unsigned8 : OdDataType.Unsigned32;
+            _od.Declare(index, entry.Subindex, type, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
             loaded++;
-            ApplyManagedValue(index, entry.Subindex, OdDataType.Unsigned32, entry, findings);
+            ApplyManagedValue(index, entry.Subindex, type, entry, findings);
         }
         return loaded;
     }

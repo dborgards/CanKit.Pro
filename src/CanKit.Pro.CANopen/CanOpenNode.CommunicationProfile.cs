@@ -80,6 +80,7 @@ internal sealed partial class CanOpenNode
         public const ushort RequestNmt = 0x1F82;
         public const ushort ExpectedDeviceType = 0x1F84;
         public const ushort VerifyConfiguration = 0x1020;
+        public const ushort RestoreConfiguration = 0x1F8A;
         public const ushort ExpectedConfigurationDate = 0x1F26;
         public const ushort ExpectedConfigurationTime = 0x1F27;
         public const ushort ExpectedSerialNumber = 0x1F88;
@@ -192,7 +193,13 @@ internal sealed partial class CanOpenNode
         for (byte node = 1; node <= 0x80; node++)
             _od.AddU8(Co.RequestNmt, node, 0, rw, nm);
         _od.AddU32(Co.BootTime, 0x00, 0, rw, nm);
-        if (_options.RequireBootConfigurationMatch)
+        if (_options.EnableBootConfigurationDownload)
+        {
+            _od.AddU8(Co.RestoreConfiguration, 0, CanOpenCobId.MaxNodeId, ro, nm);
+            for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
+                _od.AddU8(Co.RestoreConfiguration, node, 0, rw, nm);
+        }
+        if (BootConfigurationEnabled)
         {
             for (ushort index = Co.ExpectedConfigurationDate; index <= Co.ExpectedConfigurationTime; index++)
             {
@@ -296,7 +303,8 @@ internal sealed partial class CanOpenNode
     {
         Co.EmcyInhibitTime => _options.EnableEmcyInhibit,
         Co.ErrorBehavior => _options.EnableErrorBehavior,
-        Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime => _options.RequireBootConfigurationMatch,
+        Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime => BootConfigurationEnabled,
+        Co.RestoreConfiguration => _options.EnableBootConfigurationDownload,
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.SyncWindow or Co.SyncCounterOverflow or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
             or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
@@ -363,7 +371,10 @@ internal sealed partial class CanOpenNode
             case Co.SlaveAssignment:
                 return ValidateSlaveAssignmentWrite(subindex, value);
             case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
-            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when _options.RequireBootConfigurationMatch:
+            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when BootConfigurationEnabled:
+                return ValidateSlaveAssignmentWrite(subindex, value);
+            case Co.RestoreConfiguration when _options.EnableBootConfigurationDownload:
+                if (value[0] > CanOpenCobId.MaxNodeId) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                 return ValidateSlaveAssignmentWrite(subindex, value);
             case Co.RequestNmt:
                 return ValidateRequestNmtWrite(subindex, value);
@@ -759,7 +770,8 @@ internal sealed partial class CanOpenNode
                 if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
                 return;
             case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
-            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when _options.RequireBootConfigurationMatch:
+            case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when BootConfigurationEnabled:
+            case Co.RestoreConfiguration when _options.EnableBootConfigurationDownload:
                 if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
                 return;
             case Co.BootTime:

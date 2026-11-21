@@ -172,6 +172,7 @@ public class Cia401DeviceDigitalInputTests
         RequireBootDeviceTypeUpload = true,
         ActiveSlaveBootRetryInterval = TimeSpan.FromSeconds(1),
         RequireBootConfigurationMatch = true,
+        EnableBootConfigurationDownload = true,
         EnableEmcyInhibit = true,
         EmitGuardingErrorEmcy = true,
         EmitControllerErrorEmcy = true,

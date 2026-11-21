@@ -39,9 +39,7 @@ internal sealed partial class CanOpenNode
                 throw new InvalidOperationException("Concise DCF download requires a bound peer EDS or DCF. Nothing was sent.");
             foreach (var write in writes)
             {
-                EnsurePeerSdoAccess(peerNodeId, write.Index, write.Subindex, binding);
-                if (binding.DeclaresReadOnly(write.Index, write.Subindex))
-                    throw new InvalidOperationException($"The peer description declares {write.Index:X4}h:{write.Subindex:X2}h read-only. Nothing was sent.");
+                EnsureConfigurationWrite(peerNodeId, write.Index, write.Subindex, binding);
             }
             foreach (var write in writes)
             {

@@ -440,23 +440,24 @@ public partial class CanOpenPdoEngineTests
     }
 
     [Theory]
-    [InlineData(0x50)]
-    [InlineData(0x110)]
-    [InlineData(0x610)]
-    [InlineData(0x780)]
-    public async Task Extended_Pdo_Ids_Do_Not_Inherit_Base_Frame_Restrictions(uint id)
+    [InlineData(0, 0x81)]
+    [InlineData(0x50, 42)]
+    [InlineData(0x110, 42)]
+    [InlineData(0x610, 42)]
+    [InlineData(0x780, 42)]
+    public async Task Extended_Pdo_Ids_Do_Not_Inherit_Base_Frame_Restrictions(uint id, byte value)
     {
         var session = NewSession();
         using var bus = Open(session, 0);
         using var wire = new Wire(session, 2);
         using var node = CanOpen.OpenNode(bus, Device);
-        node.ObjectDictionary.AddU8(0x2000, 0, 42);
+        node.ObjectDictionary.AddU8(0x2000, 0, value);
         uint cobId = CanOpenCobId.ExtendedFrameBit | id;
         node.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0, 8), cobId: cobId);
         await StartAsync(wire, node);
         await node.TriggerTpdoAsync(1);
         await wire.WaitForCountAsync(cobId, 1);
-        wire.Payloads(cobId)[0].Should().Equal(42);
+        wire.Payloads(cobId)[0].Should().Equal(value);
     }
 
     [Fact]
