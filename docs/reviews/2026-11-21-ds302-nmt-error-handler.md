@@ -92,12 +92,24 @@ fehl: Eine gehaltene Broadcast-Reaktion wurde danach noch gesendet. Die Reaktion
 nun einen eigenen Abbruch-Token, der das interne Halt überlebt, aber bei neuem Boot oder
 Rollenende verworfen wird.
 
+Der Fristbefund aus dem [Codex-Thread](https://github.com/dborgards/CanKit.Pro/pull/589#discussion_r4654982249)
+und dem [Bugbot-Thread](https://github.com/dborgards/CanKit.Pro/pull/589#discussion_r4654989771)
+wurde gegen `2c39b76a` reproduziert: Die ursprüngliche 1F89h-Bootfrist ersetzte den Status
+laufender oder bereits gesperrter Recovery durch BootTimeout und brach sie ab. Alle sechs
+neuen Fälle schlugen vor der Korrektur fehl. `OnBootTimeout` nimmt nun Runtime-Episoden aus
+seiner Fehlerliste heraus; andere initial noch ausstehende Pflicht-Peers behalten ihre Frist.
+`Runtime_Recovery_Is_Not_Truncated_By_The_Initial_Boot_Deadline` prüft Reset-Wartezeit,
+Identität, Konfiguration, Heartbeat und gesperrten Fehler.
+`Runtime_Recovery_Does_Not_Disable_Another_Peers_Initial_Boot_Deadline` prüft den weiterhin
+fälligen anderen Pflicht-Peer. Die normalen Freigabeprüfungen bleiben unverändert, sodass
+ein fehlgeschlagener Peer keinen noch ausstehenden Netzwerkstart freigibt.
+
 Lokale Prüfung des abschließenden Stands:
 
 - Release-Build mit `CI=true`: keine Warnungen oder Fehler.
-- Gesamtsuite net10.0: 5.842 bestanden, keine fehlgeschlagenen oder übersprungenen Tests.
+- Gesamtsuite net10.0: 5.848 bestanden, keine fehlgeschlagenen oder übersprungenen Tests.
 - Cobertura gegen Basis `6181bf89`, alle Klassen einschließlich generierter Zustandsautomaten:
-  151/152 geänderte ausführbare Einträge und 141/154 Zweigbedingungen getroffen.
+  156/157 geänderte ausführbare Einträge und 156/168 Zweigbedingungen getroffen.
   Nicht getroffen ist der defensive `ObjectDisposedException`-Catch beim Posten des bereits
   abgeschlossenen Reset-Workers. Die normalen Abbruch-/Dispose-Pfade sind geprüft; ein
   künstlicher Scheduling-Hook allein für dieses Restfenster wurde nicht ergänzt.

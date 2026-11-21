@@ -12,6 +12,79 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 public partial class CanOpenBootIdentityTests
 {
     [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task Runtime_Recovery_Is_Not_Truncated_By_The_Initial_Boot_Deadline(int stage)
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions
+        {
+            EnableNmtErrorHandler = true,
+            RequireBootConfigurationMatch = stage == 2,
+            SdoTimeout = TimeSpan.FromMilliseconds(stage == 4 ? 25 : 300)
+        });
+        bool respond = true;
+        using var peer = new SilentBootPeer(rig.Peer, Slave, r => respond ? ConfigurationReply(r) : null);
+        if (stage == 2)
+        {
+            ConfigureVersion(rig);
+            rig.Node.AddHeartbeatConsumer(Slave, TimeSpan.FromMilliseconds(100));
+        }
+        else ConfigureErrorControl(rig);
+        if (stage == 1) rig.Node.ObjectDictionary.WriteUnsigned(0x1F84, Slave, 123);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F89, 0, 150);
+        await StartMonitoredSlave(rig);
+        respond = false;
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        if (stage is 1 or 2 or 3)
+        {
+            TransmitHeartbeat(rig.Peer, Slave, 0);
+            await QuiesceAsync(rig.Witness, null);
+        }
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(50));
+        Result(rig).Status.Should().Be(stage switch
+        {
+            1 => SlaveBootStatus.VerifyingIdentity,
+            2 => SlaveBootStatus.VerifyingConfiguration,
+            3 => SlaveBootStatus.WaitingForErrorControl,
+            4 => SlaveBootStatus.ErrorRecoveryFailed,
+            _ => SlaveBootStatus.ErrorControlReactionRequested
+        }, "the initial boot deadline cannot own this runtime episode");
+        if (stage == 3)
+        {
+            TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            await QuiesceAsync(rig.Witness, null);
+            Started(rig, Slave).Should().BeTrue();
+        }
+        else
+        {
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+            Result(rig).Status.Should().Be(SlaveBootStatus.ErrorRecoveryFailed);
+            Started(rig, Slave).Should().BeFalse();
+        }
+        rig.Log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.ResetNode, Slave));
+    }
+
+    [Fact]
+    public async Task Runtime_Recovery_Does_Not_Disable_Another_Peers_Initial_Boot_Deadline()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions
+        { EnableNmtErrorHandler = true, SdoTimeout = TimeSpan.FromMilliseconds(300) });
+        ConfigureErrorControl(rig);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, 6, Assigned | BootSlave | MandatorySlave | 0x10u);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F89, 0, 150);
+        await StartMonitoredSlave(rig);
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(50));
+        Result(rig).Status.Should().Be(SlaveBootStatus.ErrorControlReactionRequested);
+        rig.Node.GetSlaveBootResults().Single(r => r.NodeId == 6).Status.Should().Be(SlaveBootStatus.BootTimeout);
+        rig.Log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.ResetNode, Slave));
+        rig.Log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.ResetNode, 6));
+    }
+
+    [Theory]
     [InlineData(NmtCommand.Stop, false)]
     [InlineData(NmtCommand.Stop, true)]
     [InlineData(NmtCommand.ResetNode, false)]

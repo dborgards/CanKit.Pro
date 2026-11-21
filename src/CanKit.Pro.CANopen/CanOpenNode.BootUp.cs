@@ -299,20 +299,22 @@ internal sealed partial class CanOpenNode
             ArmBootDeadline();
             return;
         }
-        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity() && !HasUnverifiedMandatoryConfiguration() && !HasUnverifiedMandatoryErrorControl())
-        {
-            TryFinishBoot();
-            return;
-        }
-
         var unseenMandatory = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id)))
+            // Runtime episodes own a fresh per-peer deadline, including a latched failure.
+            // The original initial-boot timer must still govern other unfinished peers.
+            if (!_slaveNmtErrorRecovering[id] && IsMandatory(id)
+                && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id)))
             {
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
             }
+        }
+        if (unseenMandatory.Count == 0)
+        {
+            TryFinishBoot();
+            return;
         }
         ApplyBootErrorReaction(unseenMandatory, FlyingMasterSignal.SlaveBootTimeout);
     }

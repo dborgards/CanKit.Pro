@@ -2317,6 +2317,8 @@ started. A healthy peer's completed boot and queued Start remain intact.
 The reset shares the peer SDO channel. `SdoTimeout` bounds its boot-up wait after TX
 confirmation; a nonzero `1F89h` additionally bounds the entire recovery of each peer, including
 channel/queue waits and subsequent verification. This per-peer deadline is library policy.
+The original initial-boot deadline continues to govern other unfinished peers, but cannot
+truncate an active or latched runtime recovery.
 Duplicate events coalesce while recovery is running. Reset/boot-up failure or deadline expiry
 reports `ErrorRecoveryFailed` and `SlaveErrorRecoveryFailed` and stays latched until a new boot,
 relevant configuration edit or role cycle; subsequent gate failures use the existing boot
