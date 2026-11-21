@@ -134,7 +134,12 @@ internal sealed partial class CanOpenNode
                         $"Node-guarding RTR on COB-ID 0x{CanOpenCobId.Heartbeat(producerNodeId):X3} failed: {conf.FailureReason}."));
                 }
             }
-            catch (OperationCanceledException) when (consumer.PollCancellation.IsCancellationRequested) { }
+            catch (OperationCanceledException) when (consumer.PollCancellation.IsCancellationRequested)
+            {
+                // The boot ended or this consumer was replaced before its poll could finish.
+                // Cancellation is the requested outcome; do not report a transport failure.
+                return;
+            }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }

@@ -17,13 +17,15 @@ internal sealed partial class CanOpenNode
     }
 
     private IReadOnlyDictionary<byte, TimeSpan> _bootHeartbeatConfiguration = new Dictionary<byte, TimeSpan>();
+    private bool _bootHeartbeatRestartPending;
+    private int _bootHeartbeatRebuildDepth;
     private readonly BootHeartbeatWait?[] _slaveBootHeartbeatWaits = new BootHeartbeatWait?[CanOpenCobId.MaxNodeId + 1];
     private readonly bool[] _slaveErrorControlVerified = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly bool[] _slaveErrorControlFailed = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly NodeGuardingConsumer?[] _bootGuardingConsumers = new NodeGuardingConsumer?[CanOpenCobId.MaxNodeId + 1];
 
     // Capture before publishing heartbeat-error recovery, whose application callbacks may
-    // edit 1016h again. The caller restarts only if this is still the current snapshot.
+    // edit 1016h again. The caller retains the restart across nested rebuilds.
     private bool CaptureBootHeartbeatConfiguration(IReadOnlyDictionary<byte, TimeSpan> desired)
     {
         if (!_options.EnableBootErrorControl) return false;

@@ -59,7 +59,8 @@ nicht behauptet.
 ## Prüfung
 
 Tests liegen in `CanOpenBootIdentityTests.ErrorControl.cs`, `.ErrorControlLifecycle.cs`,
-`.ErrorControlSends.cs` und `CanOpenSafetyBootUpTests`. Sie verwenden den virtuellen Bus,
+`.ErrorControlSends.cs`, `CanOpenSafetyBootUpTests` sowie
+`CanOpenApplicationSeamTests.BootErrorControl.cs`. Sie verwenden den virtuellen Bus,
 eine gemeinsame manuelle Uhr und den vorhandenen Actor-/Send-Witness. Guarding-Intervalle
 werden einzeln vorgerückt, damit jede erneute Deadline tatsächlich eingeplant wird.
 
@@ -81,15 +82,23 @@ Die folgenden Varianten kompilieren und lassen jeweils den zugehörigen Test feh
 
 | Abbruch-Token beim wartenden Poll nicht weitergegeben | `Cancelled_Boot_Guarding_Cannot_Send_A_Queued_Poll` |
 
+Der Bugbot-Befund im [Originalthread](https://github.com/dborgards/CanKit.Pro/pull/588#discussion_r4654637633)
+wurde mit `A_Reentrant_Heartbeat_Edit_Preserves_The_Pending_Boot_Restart` auf `ee9f0868`
+reproduziert: Die Änderung eines anderen Consumer-Eintrags aus dem Recovery-Callback ließ
+den Boot-Neustart ausfallen. Ein ausstehender Neustart bleibt nun über verschachtelte
+Rebuilds erhalten und wird erst nach dem äußersten Callback mit dem letzten Snapshot
+ausgeführt. Weitere Testfälle ändern denselben Slave, beenden die Masterrolle oder entsorgen
+den Knoten im Callback. Nach Rollenende/Disposal darf kein neuer Boot beginnen.
+
 Abschließende lokale Prüfung dieses Stands:
 
 - Release-Build der Solution mit `CI=true`: keine Warnungen oder Fehler.
-- Gesamtsuite unter net10.0: 5.798 bestanden, keine übersprungenen oder fehlgeschlagenen Tests.
+- Gesamtsuite unter net10.0: 5.802 bestanden, keine übersprungenen oder fehlgeschlagenen Tests.
 - `dotnet format --verify-no-changes`: unverändert.
 - Frisches Release-Pack und `eng/verify-packages.py`: alle neun Pakete geprüft.
 - net48-Testprojekt mit `CanKitProTestNetFrameworkLeg=true` und `CI=true`: kompiliert;
   die Windows-Laufzeitprüfung bleibt der CI vorbehalten.
 - Anforderungsnachverfolgung: keine neuen ungetraceten Must-Anforderungen.
 - Cobertura gegen Basis `fa16f7d4`, alle Klassen einschließlich generierter Zustandsautomaten:
-  143/143 geänderte ausführbare Einträge getroffen; 145/152 Zweigbedingungen getroffen.
+  154/154 geänderte ausführbare Einträge getroffen; 148/154 Zweigbedingungen getroffen.
   Dies ist eine lokale Diff-Auswertung, kein vorweggenommenes Codecov-Ergebnis.
