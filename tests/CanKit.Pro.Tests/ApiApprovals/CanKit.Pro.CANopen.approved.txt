@@ -133,6 +133,7 @@ namespace CanKit.Pro.CANopen
     {
         public static void AcknowledgeControllerOverrun(this CanKit.Pro.CANopen.ICanOpenNode node) { }
         public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+        public static System.Threading.Tasks.Task DownloadConciseDcfAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte peerNodeId, System.ReadOnlyMemory<byte> conciseDcf, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Nmt.SlaveBootResult> GetSlaveBootResults(this CanKit.Pro.CANopen.ICanOpenNode node) { }
     }
     public sealed class CanOpenNodeOptions

@@ -111,6 +111,7 @@ maintainer decision does.
 | FR-CO-065 | Opt-in device-type upload before automatic slave Start, even without identity expectations ([Boot-up](#boot-up)) |
 | FR-CO-066 | Opt-in active slave boot and retries without an announcement, with confirmed resets and mandatory boot deadline ([Boot-up](#boot-up)) |
 | FR-CO-067 | Opt-in configuration date/time verification against `1020h` before automatic Start ([Boot-up](#boot-up)) |
+| FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
 
@@ -1007,6 +1008,47 @@ returned — so a master that reacts to the boot-up never reads an application o
 had not reached. `NmtCommandReceived` is the notification of the command, delivered on the event
 queue, and can arrive after the boot-up. A handler of `ApplicationReset` writes the dictionary
 and returns; it must not wait for the node.
+
+### Concise DCF download
+
+`DownloadConciseDcfAsync` explicitly transfers the binary concise-DCF format from CiA 302-3
+v4.1.0 §3.3, Figure 1. This is the data stream that may be stored in `1F22h`; the extension
+does not manage that object or automatically run when a boot reports `ConfigurationRequired`.
+
+```csharp
+node.BindPeerDeviceDescription(5, peerDescription);
+byte[] conciseDcf = File.ReadAllBytes("slave5.cdc");
+await node.DownloadConciseDcfAsync(5, conciseDcf, cancellationToken);
+```
+
+The little-endian stream starts with an UNSIGNED32 entry count. Each entry contains an
+UNSIGNED16 index, UNSIGNED8 sub-index, UNSIGNED32 data length and that many data bytes.
+The complete stream is copied and structurally checked before any write: truncated counts,
+headers or values, inconsistent counts, trailing bytes and any value larger than
+`MaxSdoTransferBytes` fail with `InvalidDataException`. The limit applies per value, not to
+the combined stream. Zero entries are a no-op; zero-length values remain valid SDO downloads.
+
+A nonempty download waits for the peer SDO channel, then holds it through the whole sequence.
+At ownership it takes one snapshot of the bound EDS/DCF and preflights every pair through the
+peer gate, including declared `ro`/`const` access. Missing/restrictive descriptions fail before
+the first write. Rebinding or editing that description later affects the next call. Other
+local SDO calls to the same peer are refused as busy; transactions wait, while other peers
+remain independent. This does not exclude another physical CANopen master from the bus.
+
+Records are sent in their original order, including duplicates, with each SDO acknowledged
+before the next starts. Auto mode selects expedited, segmented or block transfer as usual.
+The first failure ends the sequence and propagates its exception; `SdoAbortException` retains
+the failing pair, abort code and origin. Cancellation stops the channel wait or remaining
+transfers; disposing the node cancels the operation too. Earlier writes may already have
+taken effect and are not rolled back. Payload semantics and the peer's current write rules
+are still checked by the peer, so preflight is not an atomic commit guarantee.
+
+Only the supplied writes are sent. The operation adds no identity/signature check, restore,
+NMT command, storage request or automatic boot policy. Such object writes in the supplied
+stream remain explicit application actions. Use `ConfigurePeerSafetyAsync` for its separate
+safety commissioning and verification procedure. The next boot-manager step still needs
+restore/reset coordination and automatic application of a selected configuration; see the
+[source and scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-concise-dcf-download.md).
 
 ### SDO block transfer
 
@@ -2056,8 +2098,8 @@ Sub-index 0 is constant 127. Each other sub-index is the node-id, an UNSIGNED32:
 | 4 | Keep-alive. NMT Reset Communication is not sent to this slave. |
 
 Bits 8–31 hold the guard time and life time. They are stored. Heartbeat is preferred, and
-node guarding is not started from them. Configuration download, including concise DCF, is
-not implemented.
+node guarding is not started from them. Automatic configuration download during boot is not
+implemented; explicit [concise-DCF download](#concise-dcf-download) is available separately.
 
 **Identity before Start (CiA 302-2 v4.1.0 §3.4, §6.6–§6.10).** `1F84h`–`1F88h` are managed
 UNSIGNED32 arrays, sub-index 0 constant 127 and one expectation per node-id, initially 0:
@@ -2123,7 +2165,7 @@ An SDO answer establishes contact, not an NMT state: `1F82h` keeps the last actu
 An Operational announcement in the current boot avoids Start; a byte left by a previous boot
 does not. Without a current announcement the library requests individual Start after the
 enabled verification gates pass. Active boot never sends broadcast Start. This is an incremental
-boot policy: the full keep-alive heartbeat/guarding check, configuration download and automatic
+boot policy: the full keep-alive heartbeat/guarding check, automatic configuration download and automatic
 error-control setup remain unimplemented. See the [active boot record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-active-boot.md).
 
 **Configuration version before Start (FR-CO-067).** Set

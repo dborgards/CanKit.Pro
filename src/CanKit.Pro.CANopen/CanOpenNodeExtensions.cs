@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Nmt;
 
@@ -15,6 +16,40 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 public static class CanOpenNodeExtensions
 {
+    /// <summary>Downloads a CiA 302-3 §3.3 concise-DCF stream to one peer, in record order.</summary>
+    /// <remarks>
+    /// Copies and validates the complete little-endian stream (U32 count, then U16 index,
+    /// U8 sub-index, U32 byte length and data) before sending. Repeated pairs and empty values
+    /// retain their order; a zero entry count is a no-op. Each value must fit MaxSdoTransferBytes.
+    /// Waits for and holds the peer SDO channel for the entire sequence. A bound EDS/DCF is
+    /// required for nonempty streams; every pair and its declared write access are checked
+    /// against one snapshot acquired with the channel before any write. Rebinding later affects
+    /// the next call. SDO Auto mode selects expedited, segmented or block downloads.
+    /// Stops on the first error or cancellation, preserving the SDO exception and its object pair.
+    /// Acknowledged writes are not rolled back. Disposal cancels a waiting or running sequence.
+    /// This explicit tool operation sends only the supplied writes. It adds no restore/store
+    /// requests, NMT commands, 1F22h management, identity/signature checks or automatic boot.
+    /// Safety commissioning still requires ConfigurePeerSafetyAsync and its verification steps.
+    /// </remarks>
+    /// <param name="node">The local node created by this library.</param>
+    /// <param name="peerNodeId">The peer node-id, 1–127.</param>
+    /// <param name="conciseDcf">The entire binary concise-DCF data stream, including its entry count.</param>
+    /// <param name="cancellationToken">Cancels the channel wait and subsequent SDOs.</param>
+    /// <exception cref="ArgumentNullException">The node is null.</exception>
+    /// <exception cref="NotSupportedException">The node is a third-party implementation.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The peer node-id is invalid.</exception>
+    /// <exception cref="System.IO.InvalidDataException">The stream is malformed or a value exceeds the configured limit.</exception>
+    /// <exception cref="InvalidOperationException">A peer description is missing, omits a pair or declares it read-only.</exception>
+    /// <exception cref="ObjectDisposedException">The node has already been disposed.</exception>
+    public static Task DownloadConciseDcfAsync(this ICanOpenNode node, byte peerNodeId,
+        ReadOnlyMemory<byte> conciseDcf, CancellationToken cancellationToken = default)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        if (node is not CanOpenNode local)
+            throw new NotSupportedException("Concise DCF download requires a node created by CanKit.Pro.");
+        return local.DownloadConciseDcfAsync(peerNodeId, conciseDcf, cancellationToken);
+    }
+
     /// <summary>Returns immutable snapshots of the assigned slaves' latest boot steps in
     /// node-id order. A new boot clears earlier results; leaving the master role clears them.
     /// StartRequested means a command was queued, not that the slave acknowledged it.
