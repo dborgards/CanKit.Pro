@@ -26,8 +26,9 @@ internal sealed partial class CanOpenNode
     private IReadOnlyList<SlaveBootResult> CaptureSlaveBootResults()
         => Array.AsReadOnly(_slaveBootResults.OfType<SlaveBootResult>().ToArray());
 
-    private bool HasIdentityExpectation(byte nodeId)
+    private bool RequiresSlaveIdentityVerification(byte nodeId)
     {
+        if (_options.RequireBootDeviceTypeUpload) return true;
         for (ushort index = Co.ExpectedDeviceType; index <= Co.ExpectedSerialNumber; index++)
             if (_od.ReadUnsigned(index, nodeId) != 0) return true;
         return false;
@@ -35,10 +36,10 @@ internal sealed partial class CanOpenNode
 
     // A Start to node 0 would reach failed or unseen slaves too. As with safety slaves, keep
     // the simultaneous start moment but address each announced, verified slave individually.
-    private bool HasAssignedIdentityExpectation()
+    private bool HasAssignedIdentityVerification()
     {
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
-            if (IsAssignedSlave(id) && HasIdentityExpectation(id)) return true;
+            if (IsAssignedSlave(id) && RequiresSlaveIdentityVerification(id)) return true;
         return false;
     }
 
@@ -51,7 +52,7 @@ internal sealed partial class CanOpenNode
 
     private bool IsMandatoryIdentityPending(byte nodeId)
         => (ReadStartup() & NmtSuppressSlaveStartBit) == 0 && IsMandatory(nodeId)
-           && (Assignment(nodeId) & SlaveBootBit) != 0 && HasIdentityExpectation(nodeId)
+           && (Assignment(nodeId) & SlaveBootBit) != 0 && RequiresSlaveIdentityVerification(nodeId)
            && !_slaveIdentityVerified[nodeId];
 
     private void BeginSlaveIdentityVerification(byte nodeId)
@@ -98,19 +99,21 @@ internal sealed partial class CanOpenNode
                 ? DescribedObjects.Capture(description) : null, Array.Empty<(ushort, byte)>());
             for (int i = 0; i < expectations.Length; i++)
             {
-                if (expectations[i] == 0) continue;
+                // A zero 1F84h disables the comparison, but the opted-in reachability
+                // upload still precedes 1018h (CiA 302-2 §3.4 c-e).
+                if (expectations[i] == 0 && (i != 0 || !_options.RequireBootDeviceTypeUpload)) continue;
                 token.ThrowIfCancellationRequested();
                 index = i == 0 ? Co.DeviceType : Co.Identity;
                 subindex = (byte)i;
-                expected = expectations[i];
+                expected = expectations[i] == 0 ? null : expectations[i];
                 var raw = await SdoUploadCoreAsync(nodeId, index, subindex, SdoTransferMode.Auto, token,
                     transaction: binding).ConfigureAwait(false);
                 if (raw.Length != 4) throw new InvalidDataException($"Identity 0x{index:X4}:{subindex:X2} is not UNSIGNED32.");
                 uint actual = (uint)raw[0] | ((uint)raw[1] << 8) | ((uint)raw[2] << 16) | ((uint)raw[3] << 24);
                 // CiA 302-2 §6.9 permits a newer minor revision within the same major.
-                bool matches = i == 3
+                bool matches = expected is null || (i == 3
                     ? (actual >> 16) == (expectations[i] >> 16) && (actual & 0xFFFF) >= (expectations[i] & 0xFFFF)
-                    : actual == expectations[i];
+                    : actual == expectations[i]);
                 if (!matches)
                     return new SlaveBootResult(nodeId, SlaveBootStatus.IdentityMismatch, index, subindex, expected, actual);
             }

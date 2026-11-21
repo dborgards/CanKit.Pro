@@ -1317,6 +1317,7 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   commissioning, CiA 801; #304, #305, #306, #309, #331). Not built: bit-rate detection as an LSS
   command (index 9 is rejected by the slave), switching the open channel's bit rate without an
   adapter callback (README § "Not built, and why").
+- **Addendum 2026-11-21:** CiA 302-2 v4.1.0 is now available as an identified standalone full text. The source and outstanding audit are recorded in the [DS302 follow-up](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-boot-followup.md); this does not retroactively establish conformance of the original implementation based on public descriptions.
 
 ### ADR-14 (decided, not implemented): Application seam in the core, device profiles as packages of their own
 - **Context:** Device profiles (CiA 401, CiA 408) sit above the communication profile and each

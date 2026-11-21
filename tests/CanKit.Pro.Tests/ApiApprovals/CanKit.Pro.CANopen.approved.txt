@@ -153,6 +153,7 @@ namespace CanKit.Pro.CANopen
         public int MaxSdoTransferBytes { get; init; }
         public int PdoCount { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeProfile Profile { get; init; }
+        public bool RequireBootDeviceTypeUpload { get; init; }
         public bool RespondToNodeGuardingRtr { get; init; }
         public bool SdoBlockCrcSupported { get; init; }
         public int SdoBlockMaxRetransmissions { get; init; }

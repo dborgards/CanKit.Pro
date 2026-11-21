@@ -357,6 +357,11 @@ Reihenfolge.
 
 ## Außerhalb dieser Runde
 
+Nachtrag (21.11.2026): Teil 2 v4.1.0 ist inzwischen als eigenes Dokument identifiziert;
+Normquelle, der mit #582 ergänzte Identitätsvergleich und die weitere Boot-Arbeit stehen im
+[DS302-Nachtrag](2026-11-21-ds302-boot-followup.md). Die folgende Liste beschreibt den
+Abgrenzungsstand dieser Profilrunde vom 17.11., keinen heutigen Konformitätsnachweis.
+
 - **Weitere Teile von CiA 302** (in der Sammlung: Teile 1, 3–9; aus Teil 2 fehlen laut
   `CanOpenNode.BootUp.cs` die Identitätsprüfung `1F84h`–`1F88h` und die Konfiguration eines
   Slaves). Eigene Zuschnitt-Runde je Teil, Muster ADR-13.

@@ -9,9 +9,9 @@ public enum SlaveBootStatus
     WaitingForAnnouncement,
     /// <summary>The slave announced itself; automatic Start may be disabled.</summary>
     Announced,
-    /// <summary>The configured identity is being read over SDO.</summary>
+    /// <summary>The required device-type upload or configured identity is being read over SDO.</summary>
     VerifyingIdentity,
-    /// <summary>All nonzero identity expectations matched.</summary>
+    /// <summary>The device-type upload, when required, succeeded and all nonzero expectations matched.</summary>
     IdentityVerified,
     /// <summary>NMT Start was queued; this does not confirm Operational on the slave.</summary>
     StartRequested,

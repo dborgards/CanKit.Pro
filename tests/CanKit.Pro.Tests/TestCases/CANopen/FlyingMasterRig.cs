@@ -86,13 +86,13 @@ internal static class FlyingMasterRig
         => peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
             new[] { (byte)command, target }, isExtendedFrame: false));
 
-    internal static MasterRig OpenMaster()
+    internal static MasterRig OpenMaster(CanOpenNodeOptions? options = null)
     {
         var session = NewSession();
         var nodeBus = Open(session, 0);
         var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations);
+        var node = OpenClockedNode(nodeBus, LeftId, clock, out var nodeConfirmations, options: options);
         return new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, nodeConfirmations),
             new FrameLog(nodeBus, peer), peer, nodeBus);
     }

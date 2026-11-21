@@ -1317,6 +1317,7 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   Inbetriebnahme, CiA 801; #304, #305, #306, #309, #331). Nicht gebaut: Bitratenerkennung als LSS-Kommando (Index 9
   wird vom Slave abgelehnt), Umschalten der Bitrate des offenen Kanals ohne Adapter-Callback
   (README § „Not built, and why").
+- **Nachtrag 21.11.2026:** Der Volltext CiA 302-2 v4.1.0 liegt nun separat identifiziert vor. Normquelle und verbleibender Audit stehen im [DS302-Nachtrag](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-boot-followup.md); die ursprüngliche Umsetzung nach öffentlichen Beschreibungen ist damit nicht rückwirkend als konform geprüft.
 
 ### ADR-14 (entschieden, nicht umgesetzt): Anwendungsnaht im Kern, Geräteprofile als eigene Pakete
 - **Kontext:** Geräteprofile (CiA 401, CiA 408) liegen oberhalb des Kommunikationsprofils und
