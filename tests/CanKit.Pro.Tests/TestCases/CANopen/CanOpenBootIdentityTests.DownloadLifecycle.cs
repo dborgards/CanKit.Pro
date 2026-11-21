@@ -159,6 +159,17 @@ public partial class CanOpenBootIdentityTests
         await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.PeerSdoChannelIsFreeForTests(Slave), 100, "timed-out update releases its lease");
     }
 
+    [Theory]
+    [InlineData(128)]
+    [InlineData(255)]
+    public async Task Configuration_Reset_Observation_Does_Not_Change_Manual_Nmt_Targets(byte target)
+    {
+        using var rig = OpenMaster();
+        await rig.Node.SendNmtCommandAsync(NmtCommand.ResetNode, target);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.ResetNode, target));
+    }
+
     [Fact]
     public async Task Reset_Send_Delay_Does_Not_Spend_The_Post_Reset_BootUp_Timeout()
     {

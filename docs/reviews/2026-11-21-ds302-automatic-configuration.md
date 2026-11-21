@@ -119,13 +119,13 @@ sowohl den optionalen Wiederholungsversuch als auch einen neu gestarteten Master
 ## Lokale Abschlussprüfung am 21.11.2026
 
 Release-Build mit `CI=true`: keine Warnungen oder Fehler. Vollständige net10.0-Suite:
-5.749 Tests erfolgreich. `dotnet format --verify-no-changes`, frischer Pack-Lauf mit
+5.752 Tests erfolgreich. `dotnet format --verify-no-changes`, frischer Pack-Lauf mit
 `eng/verify-packages.py` (neun Pakete), net48-Kompilierung mit `CI=true` und
 Anforderungs-Traceability sind erfolgreich.
 
 Die Cobertura-Auswertung des vollständigen Laufs wurde gegen den Diff zu `b3d2bd96`
 geschnitten, einschließlich sämtlicher Klassen und generierter Zustandsautomaten:
-190 geänderte ausführbare Einträge, keine unbesetzte Zeile und keine teilweise abgedeckte
+192 geänderte ausführbare Einträge, keine unbesetzte Zeile und keine teilweise abgedeckte
 Verzweigung. Der API-Abgleich wurde aus der generierten `.received.txt` übernommen.
 
 ## Review-Nachtrag
@@ -165,3 +165,10 @@ Restore verlangt dafür vergleichbare, positive Host-Zeitstempel vom Bus-Service
 ohne Zeitstempel gibt es nicht frei. Die Aussage bleibt die der bestehenden
 `TxConfirmation`: bei approximierter Bestätigung gilt die Annahme durch den Treiber,
 nicht eine zusätzliche Garantie der physikalischen Übertragung.
+
+Die eigene Prüfung des gemeinsam verwendeten Sendepfads fand danach eine Regression für
+Extended-PDO-ID 0 mit Nutzbyte 0x81 sowie manuelle Reset-Node-Ziele oberhalb 127. Die
+Beobachtung interpretierte diese als indizierbaren Slave-Reset und verhinderte die Sendung.
+Die erweiterte PDO-Prüfung und beide manuellen Zielprüfungen schlugen vor dem Fix fehl.
+Extended-Frames und Ziele außerhalb der Slave-Tabelle werden nun von der Reset-Beobachtung
+ausgenommen; ihr bisheriger Sendepfad bleibt erhalten.

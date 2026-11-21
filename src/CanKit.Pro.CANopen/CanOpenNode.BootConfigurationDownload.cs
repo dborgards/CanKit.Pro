@@ -53,11 +53,15 @@ internal sealed partial class CanOpenNode
 
     private BootConfigurationReset? CaptureConfigurationReset(CanFrame frame, CancellationToken token)
     {
-        // Internally generated NMT frames always contain command and target. Capture the
-        // exact attempt before awaiting the service; a late confirmation cannot affect a
-        // newer attempt installed after this one was cancelled.
-        if (frame.ID != CanOpenCobId.NmtCommand || frame.Data.Span[0] != (byte)NmtCommand.ResetNode) return null;
-        var reset = Volatile.Read(ref _slaveConfigurationBootUps[frame.Data.Span[1]]);
+        // Extended PDO ID zero is not NMT. Internally generated standard NMT frames
+        // contain command and target; an application-selected target can be outside our
+        // slave table. Observation must not change transmission of either kind of frame.
+        if (frame.IsExtendedFrame || frame.ID != CanOpenCobId.NmtCommand || frame.Data.Span[0] != (byte)NmtCommand.ResetNode) return null;
+        byte target = frame.Data.Span[1];
+        if (target > CanOpenCobId.MaxNodeId) return null;
+        // Capture this exact attempt before awaiting the service; a late confirmation
+        // cannot affect a newer attempt installed after this one was cancelled.
+        var reset = Volatile.Read(ref _slaveConfigurationBootUps[target]);
         return reset is not null && reset.Token == token ? reset : null;
     }
 
