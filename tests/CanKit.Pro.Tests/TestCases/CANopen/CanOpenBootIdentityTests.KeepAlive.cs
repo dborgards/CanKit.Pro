@@ -155,6 +155,12 @@ public partial class CanOpenBootIdentityTests
         TransmitHeartbeat(rig.Peer, Slave, 0x7F);
         await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(200));
         rig.Node.GetSlaveBootResults().Should().NotContain(r => r.NodeId == Slave);
-        rig.Log.Snapshot().Should().NotContain(f => f.Id == 0);
+        if (action == 2)
+        {
+            // Removing the assignment starts a new pass; this ID is now an unlisted target.
+            rig.Log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.ResetCommunication, Slave));
+            rig.Log.Snapshot().Should().NotContain(f => f.Id == 0 && f.Data[0] == (byte)NmtCommand.Start);
+        }
+        else rig.Log.Snapshot().Should().NotContain(f => f.Id == 0);
     }
 }

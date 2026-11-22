@@ -82,6 +82,8 @@ public partial class CanOpenFlyingMasterTests
         {
             if (e.Signal == FlyingMasterSignal.BecameStandby) standby++;
         };
+        // Keep this claim-only test independent of the unlisted-node startup reset.
+        left.ObjectDictionary.WriteUnsigned(0x1F81, RightId, Assigned | 0x10u);
         Tighten(left);
         Tighten(right);
         left.StartFlyingMaster(0, Heartbeat);
@@ -112,6 +114,8 @@ public partial class CanOpenFlyingMasterTests
         {
             if (e.Signal == FlyingMasterSignal.BecameStandby) standby++;
         };
+        // Keep this claim-only test independent of the unlisted-node startup reset.
+        left.ObjectDictionary.WriteUnsigned(0x1F81, RightId, Assigned | 0x10u);
         Tighten(left);
         Tighten(right);
         left.StartFlyingMaster(0, Heartbeat);
