@@ -52,7 +52,8 @@ internal sealed partial class CanOpenNode
     private ushort? _activeFlyingMasterPriority;
     private TimeSpan? _flyingMasterHeartbeatTimeout;
     private byte? _flyingMasterInstalledWatch;
-    private IDeadline? _flyingMasterDeadline;
+    private volatile IDeadline? _flyingMasterDeadline;
+    private Task _periodicForceSend = Task.CompletedTask;
     // The continuation that hands the latest cold or forced reset's send outcome to the actor.
     private Task _resetOutcome = Task.CompletedTask;
 
@@ -378,6 +379,9 @@ internal sealed partial class CanOpenNode
     private void OnFlyingMasterForce()
     {
         if (!FlyingMasterEnabled || _flyingMasterRole == FlyingMasterRole.Inactive) return;
+        // Figure 17 addresses the active master. A periodic check leaves a standby
+        // listening for its master's heartbeat until an actual broadcast reset arrives.
+        if (_options.EnablePeriodicFlyingMasterForce && _flyingMasterRole != FlyingMasterRole.Active) return;
         _flyingMasterFromPowerOn = false;
         if (_flyingMasterRole == FlyingMasterRole.Active)
         {
@@ -423,6 +427,18 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterDetectCycle()
     {
+        if (_options.EnablePeriodicFlyingMasterForce)
+        {
+            ArmActiveDetectCycle();
+            // A worker that misses this period must not send a stale force after the
+            // master stops, changes role or reconfigures the period. Coalesce held sends.
+            var period = _flyingMasterDeadline;
+            if (period is not null && _periodicForceSend.IsCompleted)
+                _periodicForceSend = SendControlFrame(CanOpenCobId.FlyingMasterForce, Array.Empty<byte>(),
+                    canTransmit: () => _disposed == 0 && _flyingMasterDeadline == period);
+            return;
+        }
+
         // Stay Active. Leaving for Negotiating would drop a slave heartbeat and a boot deadline
         // that only run in that role, and NMT aimed at this node would apply again.
         _confirmingActiveMaster = true;
@@ -454,6 +470,8 @@ internal sealed partial class CanOpenNode
         int cycle = ReadTiming(TimingDetectCycle);
         if (cycle > 0)
             ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
+        else
+            CancelFlyingMasterDeadline();
     }
 
     private void EnterStandby(ushort priority, byte nodeId)

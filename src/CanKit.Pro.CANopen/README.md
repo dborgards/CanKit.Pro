@@ -2047,7 +2047,7 @@ or bit 5, or calling `StopFlyingMaster`, leaves the election and stops the boot-
 | `03h` | Priority level, 0..2 | 2 |
 | `04h` | Priority time slot | 1500 |
 | `05h` | Device time slot | 10 |
-| `06h` | While active, repeat the negotiation trigger after this long; 0 disables the repeat | 4000 + 10 × node-id |
+| `06h` | Multiple-master detection period while active (0 disables the cycle) | 4000 + 10 × node-id |
 
 `04h` must be greater than 127 times `05h`, so a better priority level always finishes before a
 worse one, whatever the node-ids are. The defaults satisfy that (1500 > 127 × 10). A priority
@@ -2063,6 +2063,22 @@ to separately from the `080h`–`77Fh` range:
 | `0x071` | 2 | The answer, and the claim: priority, then node-id |
 | `0x072` | 0 | Start (or restart) the timeslot race |
 | `0x076` | 0 | Force a new election |
+
+Set `CanOpenNodeOptions.EnablePeriodicFlyingMasterForce = true` for CiA 302-2 §5.5.3
+on a Normal-mode channel verified to suppress its own transmissions. Normal mode alone
+does not guarantee this. An empty `0x076` has no sender identity, so a returned copy
+can cause a network-wide reset. Opening an opted-in node in another work mode throws
+`ArgumentException`.
+
+With the option enabled, the active master sends an empty `0x076` every `1F90h:06`
+milliseconds and remains active. A second active master that receives it broadcasts Reset
+Communication to node zero. Both masters then take part in the warm election. A standby
+continues monitoring the active master's heartbeat when it hears the periodic request.
+Writing `1F90h:06` on an active master restarts the period, and zero cancels it.
+A busy transmitter skips missed probes to avoid a burst when it becomes available.
+Configure different periods for different masters so coincident probes can separate on the
+next cycle. By default the periodic check sends `0x072` and reasserts the claim after
+the negotiation timeslot.
 
 After the delay the node asks with `0x073`. A reply whose priority number is lower than or
 equal to ours — a better master, or an equal one — puts this node on standby. An equal claim

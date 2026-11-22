@@ -161,6 +161,13 @@ public sealed class CanOpenNodeOptions
     /// commands on CAN-ID zero share a FIFO. The initial interval is zero.</summary>
     public bool EnableNmtInhibit { get; init; }
 
+    /// <summary>Use the CiA 302-2 §5.5.3 periodic force request (076h) while this node is
+    /// the active flying master. The default uses a negotiation trigger (072h) and a claim.</summary>
+    /// <remarks>Enable only on a Normal-mode channel verified to suppress reception of its own transmissions.
+    /// A force request carries no sender identity. Opening the node in another work mode with this
+    /// option throws <see cref="ArgumentException"/>.</remarks>
+    public bool EnablePeriodicFlyingMasterForce { get; init; }
+
     /// <summary>
     /// Emit optional <c>8130h</c> EMCYs for heartbeat-consumer timeouts and this node's life-
     /// guarding timeout. Defaults to <see langword="false"/>; timeout events remain available
@@ -576,6 +583,7 @@ public sealed class CanOpenNodeOptions
             EmitControllerOverrunEmcy = EmitControllerOverrunEmcy,
             EnableEmcyInhibit = EnableEmcyInhibit,
             EnableNmtInhibit = EnableNmtInhibit,
+            EnablePeriodicFlyingMasterForce = EnablePeriodicFlyingMasterForce,
             EnableErrorBehavior = enableErrorBehavior ?? EnableErrorBehavior,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
