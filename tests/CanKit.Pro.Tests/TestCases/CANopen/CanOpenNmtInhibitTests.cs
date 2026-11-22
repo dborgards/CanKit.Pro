@@ -72,14 +72,39 @@ public partial class CanOpenPdoEngineTests
         var waiting = rig.Node.SendNmtCommandAsync(NmtCommand.Start, 2);
         using var cancel = new CancellationTokenSource();
         var cancelled = rig.Node.SendNmtCommandAsync(NmtCommand.ResetNode, 3, cancel.Token);
+        Settle(rig.Node);
         cancel.Cancel();
-        await FluentActions.Awaiting(() => cancelled.WaitAsync(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled.WaitAsync(ShortTimeout));
+        error.CancellationToken.Should().Be(cancel.Token);
         await Inject(rig.Node, 0, (byte)NmtCommand.ResetCommunication, Device);
         await waiting.WaitAsync(ShortTimeout);
         await rig.Node.SendNmtCommandAsync(NmtCommand.Start, 4).WaitAsync(ShortTimeout);
         await rig.Wire.WaitForCountAsync(0, 3);
         rig.Wire.Payloads(0).Select(frame => frame[1]).Should().Equal(1, 2, 4);
         rig.Node.ObjectDictionary.ReadUnsigned(NmtInhibit, 0).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Nmt_Inhibit_Cancellation_During_Send_Preserves_The_Caller_Token()
+    {
+        using var rig = new EmcyInhibitRig(new CanOpenNodeOptions { EnableNmtInhibit = true });
+        using var caller = new CancellationTokenSource();
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Node.BeforeControlFrameSendForTests = id => id == 0 && entered.TrySetResult(true)
+            ? release.Task : Task.CompletedTask;
+        var send = rig.Node.SendNmtCommandAsync(NmtCommand.Stop, 1, caller.Token);
+        try
+        {
+            await entered.Task.WaitAsync(ShortTimeout);
+            caller.Cancel();
+        }
+        finally { release.TrySetResult(true); }
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        error.CancellationToken.Should().Be(caller.Token);
+        await rig.Node.SendNmtCommandAsync(NmtCommand.Start, 2).WaitAsync(ShortTimeout);
+        await rig.Wire.WaitForCountAsync(0, 1);
+        rig.Wire.Payloads(0).Select(frame => frame[1]).Should().Equal(2);
     }
 
     [Theory]

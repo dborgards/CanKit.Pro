@@ -704,10 +704,12 @@ internal sealed partial class CanOpenNode
     }
 
     private void FinishNmt(Task<bool> send, object? state)
+        => FinishNmt(send, (TaskCompletionSource<bool>)state!, CancellationToken.None);
+
+    private void FinishNmt(Task<bool> send, TaskCompletionSource<bool> done, CancellationToken caller)
     {
-        var done = (TaskCompletionSource<bool>)state!;
         if (IsNmtCancellation(send))
-            done.TrySetCanceled();
+            done.TrySetCanceled(caller.IsCancellationRequested ? caller : CancellationToken.None);
         else if (send.IsFaulted)
         {
             // Same report as SendControlFrame. Completing with false, rather than

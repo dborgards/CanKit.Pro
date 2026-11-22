@@ -38,7 +38,7 @@ internal sealed partial class CanOpenNode
     {
         var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var send = RunTimedNmt(_nmtOrder, payload, masterOwned, token, result);
-        _nmtOrder = send.ContinueWith(FinishNmt, result, CancellationToken.None,
+        _nmtOrder = send.ContinueWith(completed => FinishNmt(completed, result, token), CancellationToken.None,
             TaskContinuationOptions.None, TaskScheduler.Default);
         return result.Task;
     }
@@ -50,7 +50,7 @@ internal sealed partial class CanOpenNode
         var token = lifetime.Token;
         // A cancelled caller can leave immediately. Its queue position stays behind its
         // predecessor so that a third command can never overtake an in-flight send.
-        using (token.Register(() => result.TrySetCanceled(token)))
+        using (token.Register(() => result.TrySetCanceled(caller.IsCancellationRequested ? caller : token)))
         {
             await previous.ConfigureAwait(false);
             await WaitForNmtInterval(token).ConfigureAwait(false);
