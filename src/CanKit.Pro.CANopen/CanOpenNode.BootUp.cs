@@ -106,6 +106,7 @@ internal sealed partial class CanOpenNode
 
     private void CancelBootUp()
     {
+        CancelNmtErrorRecovery();
         StopBootErrorControl();
         Array.Clear(_slaveErrorControlVerified, 0, _slaveErrorControlVerified.Length);
         Array.Clear(_slaveErrorControlFailed, 0, _slaveErrorControlFailed.Length);
@@ -171,7 +172,7 @@ internal sealed partial class CanOpenNode
 
     private void ConsiderStart(byte nodeId, byte state)
     {
-        if (_bootHalted || _slaveStarted[nodeId]) return;
+        if (_bootHalted || _slaveStarted[nodeId] || _slaveNmtErrorResetting[nodeId] || _slaveNmtErrorFailed[nodeId]) return;
         uint startup = ReadStartup();
         if ((startup & NmtSuppressSlaveStartBit) != 0) return;
         if ((Assignment(nodeId) & (SlaveAssignedBit | SlaveBootBit)) != (SlaveAssignedBit | SlaveBootBit)) return;
@@ -192,7 +193,7 @@ internal sealed partial class CanOpenNode
         }
 
         if (_slaveErrorControlFailed[nodeId]) return;
-        if (_options.EnableBootErrorControl && !_slaveErrorControlVerified[nodeId]
+        if (BootErrorControlEnabled && !_slaveErrorControlVerified[nodeId]
             && !BeginSlaveErrorControl(nodeId)) return;
 
         // Once this boot requested Pre-operational for an update, a delayed Operational
@@ -205,6 +206,7 @@ internal sealed partial class CanOpenNode
         {
             _slaveStarted[nodeId] = true;
             _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.AlreadyOperational);
+            FinishNmtErrorRecovery(nodeId);
             return;
         }
         if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
@@ -231,7 +233,8 @@ internal sealed partial class CanOpenNode
 
         _slaveStarted[nodeId] = true;
         _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.StartRequested);
-        SendNmt(NmtCommand.Start, nodeId);
+        FinishNmtErrorRecovery(nodeId);
+        _ = EnqueueNmt(NmtCommand.Start, nodeId, _options.EnableNmtErrorHandler ? SlaveBootToken(nodeId) : default);
     }
 
     private void TryFinishBoot()
@@ -250,7 +253,7 @@ internal sealed partial class CanOpenNode
         if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
             _bootStartMoment = true;
-            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || BootConfigurationEnabled || _options.EnableBootErrorControl)
+            if (HasAssignedSafetySlave() || HasAssignedIdentityVerification() || BootConfigurationEnabled || BootErrorControlEnabled)
             {
                 // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
                 // Start to node 0 reaches one that has not announced yet — keep-alive, running
@@ -296,20 +299,22 @@ internal sealed partial class CanOpenNode
             ArmBootDeadline();
             return;
         }
-        if (!HasUnseenMandatorySlave() && !HasUnverifiedMandatoryIdentity() && !HasUnverifiedMandatoryConfiguration() && !HasUnverifiedMandatoryErrorControl())
-        {
-            TryFinishBoot();
-            return;
-        }
-
         var unseenMandatory = new List<byte>();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsMandatory(id) && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id)))
+            // Runtime episodes own a fresh per-peer deadline, including a latched failure.
+            // The original initial-boot timer must still govern other unfinished peers.
+            if (!_slaveNmtErrorRecovering[id] && IsMandatory(id)
+                && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id)))
             {
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
             }
+        }
+        if (unseenMandatory.Count == 0)
+        {
+            TryFinishBoot();
+            return;
         }
         ApplyBootErrorReaction(unseenMandatory, FlyingMasterSignal.SlaveBootTimeout);
     }
@@ -319,18 +324,8 @@ internal sealed partial class CanOpenNode
     /// a failed safety verification (SlaveSafetyConfigurationInvalid).</summary>
     private void ApplyBootErrorReaction(IEnumerable<byte> failedSlaves, FlyingMasterSignal signal)
     {
-        _bootHalted = true;
-        StopBootErrorControl();
-        CancelActiveSlaveRetries();
-        // One reaction per boot: a halt from a failed verification must not be followed by the
-        // boot timeout's own for a mandatory slave that is still unseen.
-        _bootDeadline?.Dispose();
-        _bootDeadline = null;
+        HaltBootWork();
         uint startup = ReadStartup();
-        _slaveVerificationCts?.Cancel();
-        Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
-        Array.Clear(_slaveConfigurationVerifying, 0, _slaveConfigurationVerifying.Length);
-        Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
         bool stopAll = (startup & NmtStopAllOnErrorBit) != 0;
         bool resetAll = !stopAll && (startup & NmtResetAllOnErrorBit) != 0;
         if (stopAll || resetAll)
@@ -346,6 +341,22 @@ internal sealed partial class CanOpenNode
             if (!stopAll && !resetAll) SendNmt(NmtCommand.ResetNode, id);
             RaiseFlyingMaster(signal, id, null);
         }
+    }
+
+    private void HaltBootWork()
+    {
+        _bootHalted = true;
+        CancelNmtErrorRecovery();
+        StopBootErrorControl();
+        CancelActiveSlaveRetries();
+        // One reaction per boot: a halt from a failed verification must not be followed by the
+        // boot timeout's own for a mandatory slave that is still unseen.
+        _bootDeadline?.Dispose();
+        _bootDeadline = null;
+        _slaveVerificationCts?.Cancel();
+        Array.Clear(_slaveIdentityVerifying, 0, _slaveIdentityVerifying.Length);
+        Array.Clear(_slaveConfigurationVerifying, 0, _slaveConfigurationVerifying.Length);
+        Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
     }
 
     /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
@@ -424,7 +435,7 @@ internal sealed partial class CanOpenNode
             // A later in-flight retry must not hold a mandatory slave's start moment.
             if (_slaveBootRetrying[id] && !IsMandatory(id)) continue;
             if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id]
-                || _slaveBootResetPending[id] || _slaveBootHeartbeatWaits[id] is not null) return true;
+                || _slaveBootResetPending[id] || _slaveNmtErrorResetting[id] || _slaveBootHeartbeatWaits[id] is not null) return true;
         }
         return false;
     }
@@ -445,7 +456,7 @@ internal sealed partial class CanOpenNode
             // that, the worker must still enqueue its command/arm its timer; after the
             // waiter completes it must resume before protocol time advances again.
             bool waitingForBootUp = _slaveConfigurationAwaitingBootUp[id] && !_slaveConfigurationBootUps[id]!.Completion.Task.IsCompleted;
-            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id]) && !active.Contains(id) && !waitingForBootUp) pending.Add(id);
+            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id] || _slaveNmtErrorResetting[id]) && !active.Contains(id) && !waitingForBootUp) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }
@@ -453,8 +464,7 @@ internal sealed partial class CanOpenNode
     private void BeginSlaveVerification(byte nodeId)
     {
         _slaveVerifying[nodeId] = true;
-        var cts = _slaveVerificationCts ??= new CancellationTokenSource();
-        var token = cts.Token;
+        var token = SlaveBootToken(nodeId);
         int generation = _bootGeneration;
         _ = Task.Run(async () =>
         {

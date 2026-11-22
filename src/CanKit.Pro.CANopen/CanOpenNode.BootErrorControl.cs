@@ -9,6 +9,8 @@ namespace CanKit.Pro.CANopen;
 
 internal sealed partial class CanOpenNode
 {
+    private bool BootErrorControlEnabled => _options.EnableBootErrorControl || _options.EnableNmtErrorHandler;
+
     private sealed class BootHeartbeatWait(long started, long due)
     {
         public readonly long Started = started;
@@ -28,7 +30,7 @@ internal sealed partial class CanOpenNode
     // edit 1016h again. The caller retains the restart across nested rebuilds.
     private bool CaptureBootHeartbeatConfiguration(IReadOnlyDictionary<byte, TimeSpan> desired)
     {
-        if (!_options.EnableBootErrorControl) return false;
+        if (!BootErrorControlEnabled) return false;
         var previous = _bootHeartbeatConfiguration;
         _bootHeartbeatConfiguration = desired;
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
@@ -42,7 +44,7 @@ internal sealed partial class CanOpenNode
     }
 
     private bool IsMandatoryErrorControlPending(byte nodeId)
-        => _options.EnableBootErrorControl && IsMandatory(nodeId)
+        => BootErrorControlEnabled && IsMandatory(nodeId)
            && (ReadStartup() & NmtSuppressSlaveStartBit) == 0
            && (Assignment(nodeId) & SlaveBootBit) != 0 && !_slaveErrorControlVerified[nodeId];
 
@@ -76,7 +78,7 @@ internal sealed partial class CanOpenNode
         byte retries = (byte)(assignment >> 8);
         if (guardMs != 0 && retries != 0)
         {
-            var token = (_slaveVerificationCts ??= new CancellationTokenSource()).Token;
+            var token = SlaveBootToken(nodeId);
             _bootGuardingConsumers[nodeId] = StartNodeGuardingConsumerCore(nodeId,
                 TimeSpan.FromMilliseconds(guardMs), lifeTimeFactor: 1, retries, token);
         }
@@ -140,11 +142,16 @@ internal sealed partial class CanOpenNode
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
             EndBootHeartbeatWait(id);
-            var owned = _bootGuardingConsumers[id];
-            _bootGuardingConsumers[id] = null;
-            // A later explicit API call owns its replacement, even after this boot ends.
-            if (owned is not null && _nodeGuardingConsumers.TryGetValue(id, out var current)
-                && ReferenceEquals(current, owned)) StopNodeGuardingConsumerCore(id);
+            StopOwnedBootGuarding(id);
         }
+    }
+
+    private void StopOwnedBootGuarding(byte nodeId)
+    {
+        var owned = _bootGuardingConsumers[nodeId];
+        _bootGuardingConsumers[nodeId] = null;
+        // A later explicit API call owns its replacement, even after this boot ends.
+        if (owned is not null && _nodeGuardingConsumers.TryGetValue(nodeId, out var current)
+            && ReferenceEquals(current, owned)) StopNodeGuardingConsumerCore(nodeId);
     }
 }

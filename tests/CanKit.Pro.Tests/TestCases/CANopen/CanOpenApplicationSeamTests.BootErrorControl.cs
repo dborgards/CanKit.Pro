@@ -12,6 +12,55 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenApplicationSeamTests
 {
+    // FR-CO-071: the synchronous application callback can invalidate the timeout's boot.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Runtime_Timeout_Does_Not_React_After_The_Application_Invalidates_It(int action)
+    {
+        var app = Watcher();
+        using var rig = FM.OpenMaster(new CanOpenNodeOptions
+        {
+            EnableNmtErrorHandler = true,
+            EnableErrorBehavior = true
+        }.WithApplication(app));
+        const byte slave = 5;
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, slave, FM.Assigned | FM.BootSlave | FM.MandatorySlave | 0x10u);
+        rig.Node.AddHeartbeatConsumer(slave, TimeSpan.FromMilliseconds(100));
+        FM.Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, FM.Heartbeat);
+        await FM.UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active,
+            1000, "master election completes");
+        FM.TransmitHeartbeat(rig.Peer, slave, 0);
+        await FM.QuiesceAsync(rig.Witness, null);
+        FM.TransmitHeartbeat(rig.Peer, slave, 0x7F);
+        await FM.QuiesceAsync(rig.Witness, null);
+        rig.Node.GetSlaveBootResults().Single(r => r.NodeId == slave).Status.Should().Be(SlaveBootStatus.StartRequested);
+        rig.Log.Clear();
+        bool called = false;
+        app.WhenFailureChanged = active =>
+        {
+            if (!active) return;
+            called = true;
+            if (action == 0) rig.Node.RemoveHeartbeatConsumer(slave);
+            else if (action == 1) rig.Node.AddHeartbeatConsumer(slave, TimeSpan.FromMilliseconds(200));
+            else if (action == 2) rig.Node.StopFlyingMaster();
+            else rig.Node.Dispose();
+        };
+        if (action == 3)
+        {
+            // The witness cannot post its barrier after the callback disposes the actor.
+            await rig.Node.PostToActorAsync(() => typeof(CanOpenNode)
+                .GetMethod("RaiseHeartbeatTimeout", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(rig.Node, new object[] { slave, TimeSpan.FromMilliseconds(100) }));
+        }
+        else await FM.AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        called.Should().BeTrue();
+        rig.Log.Snapshot().Should().NotContain(f => f.Id == 0 && f.Data[0] == (byte)NmtCommand.ResetNode);
+    }
+
     // FR-CO-070: recovery callbacks may change another watch while a boot restart is pending.
     [Theory]
     [InlineData(false, 0)]

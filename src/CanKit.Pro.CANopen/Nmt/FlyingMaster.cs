@@ -84,4 +84,8 @@ public enum FlyingMasterSignal
     /// <summary>The opted-in error-control startup did not receive a valid heartbeat in time.
     /// The slave is not started; the configured boot policy decides retry or halt.</summary>
     SlaveErrorControlFailed,
+    /// <summary>A runtime heartbeat/guarding timeout initiated the opted-in NMT error handler.</summary>
+    SlaveErrorControlEvent,
+    /// <summary>Runtime reset/boot-up recovery failed; its boot snapshot carries the cause.</summary>
+    SlaveErrorRecoveryFailed,
 }

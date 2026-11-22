@@ -23,7 +23,7 @@ internal sealed partial class CanOpenNode
     // Reachability is not an NMT state. Never write a synthetic announcement to 1F82h,
     // or reuse an Operational byte left there by an earlier boot.
     private bool HasSlaveBootContact(byte nodeId)
-        => _slaveSeen[nodeId] || (CanActivelyBootSlave(nodeId) && _slaveIdentityVerified[nodeId]);
+        => !_slaveNmtErrorFailed[nodeId] && (_slaveSeen[nodeId] || (CanActivelyBootSlave(nodeId) && _slaveIdentityVerified[nodeId]));
 
     private byte SlaveStateForBoot(byte nodeId)
         => _slaveConfigurationNeedsStart[nodeId] ? RequestPreOperational

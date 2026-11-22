@@ -64,6 +64,21 @@ public sealed class CanOpenNodeOptions
     /// the ongoing CiA 302-2 §4.2 error handler. Copy methods preserve the option.</remarks>
     public bool EnableBootErrorControl { get; init; }
 
+    /// <summary>Enable CiA 302-2 §4.2 runtime reactions to heartbeat/guarding timeouts.
+    /// Default false. Implies EnableBootErrorControl behaviour, without enabling identity or
+    /// configuration options. Applies after automatic peer boot, or to application-owned peers.</summary>
+    /// <remarks>For a mandatory peer, 1F80h bit 6 requests broadcast Stop; otherwise bit 4
+    /// requests broadcast Reset Node. Both halt automatic boot. Other assigned peers receive
+    /// individual Reset Node followed by confirmed fresh boot-up and the enabled boot gates.
+    /// Boot/start suppression still forbids configuration and Start, but not the reset reaction.
+    /// Recovery is serialized with the peer SDO channel. SdoTimeout bounds boot-up after TX
+    /// confirmation; nonzero 1F89h bounds the whole recovery, including channel waits.
+    /// Concurrent events for that peer coalesce. A failed individual reset/recovery stays latched until a
+    /// new boot, relevant configuration edit or role cycle. Initial boot errors retain their
+    /// existing policy. This does not implement the independent §4.3 boot-up handler.
+    /// Copy methods preserve the option.</remarks>
+    public bool EnableNmtErrorHandler { get; init; }
+
     /// <summary>
     /// Enable active slave boot with this positive delay between a failed attempt and its
     /// retry. Null (default) keeps announcement-based boot. One second is the CiA 302-2 §3.3
@@ -522,6 +537,7 @@ public sealed class CanOpenNodeOptions
             RequireBootConfigurationMatch = RequireBootConfigurationMatch,
             EnableBootConfigurationDownload = EnableBootConfigurationDownload,
             EnableBootErrorControl = EnableBootErrorControl,
+            EnableNmtErrorHandler = EnableNmtErrorHandler,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,

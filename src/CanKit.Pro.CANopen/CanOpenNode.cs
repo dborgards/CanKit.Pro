@@ -3132,6 +3132,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void RaiseHeartbeatTimeout(byte producer, TimeSpan timeout)
     {
+        int generation = _bootGeneration;
         if (_options.EmitGuardingErrorEmcy || _options.EnableErrorBehavior)
             _heartbeatEmcyTimeouts[producer] = timeout;
         PublishCommunicationFailure();
@@ -3149,6 +3150,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             try { DeliverToSubscribers(HeartbeatTimeout, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
+        if (_bootHeartbeatConfiguration.TryGetValue(producer, out var current) && current == timeout)
+            HandleRuntimeNmtError(producer, generation);
     }
 
     private void RaiseEmcyReceived(EmcyMessage msg, DateTime ts)

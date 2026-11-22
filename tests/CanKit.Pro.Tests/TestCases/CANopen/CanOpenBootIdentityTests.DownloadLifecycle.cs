@@ -18,15 +18,15 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenBootIdentityTests
 {
-    private static MasterRig OpenDownloadGate(NmtCommand command, out CanOpenFlyingMasterTests.ColdResetGate gate)
+    private static MasterRig OpenDownloadGate(NmtCommand command, out CanOpenFlyingMasterTests.ColdResetGate gate, CanOpenNodeOptions? options = null, byte target = Slave)
     {
         var session = NewSession();
         var bus = Open(session, 0);
         var peer = Open(session, 1);
         var clock = new ManualTimeSource();
         gate = new CanOpenFlyingMasterTests.ColdResetGate(new ClockedCanBusService(bus, clock, sendGate: clock))
-        { ResetTarget = Slave, ResetCommand = command };
-        var node = new CanOpenNode(gate, LeftId, DownloadOptions(), ownsService: true, timeSource: clock);
+        { ResetTarget = target, ResetCommand = command };
+        var node = new CanOpenNode(gate, LeftId, options ?? DownloadOptions(), ownsService: true, timeSource: clock);
         return new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations), new FrameLog(bus, peer), peer, bus);
     }
 

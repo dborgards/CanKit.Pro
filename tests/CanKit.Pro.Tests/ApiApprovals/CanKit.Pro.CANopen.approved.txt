@@ -152,6 +152,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableChangeOfStateTpdo { get; init; }
         public bool EnableEmcyInhibit { get; init; }
         public bool EnableErrorBehavior { get; init; }
+        public bool EnableNmtErrorHandler { get; init; }
         public int ErrorHistoryCapacity { get; init; }
         public int EventQueueCapacity { get; init; }
         public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }
@@ -831,6 +832,8 @@ namespace CanKit.Pro.CANopen.Nmt
         SlaveBootResetFailed = 8,
         SlaveConfigurationInvalid = 9,
         SlaveErrorControlFailed = 10,
+        SlaveErrorControlEvent = 11,
+        SlaveErrorRecoveryFailed = 12,
     }
     public enum NmtCommand : byte
     {
@@ -879,6 +882,8 @@ namespace CanKit.Pro.CANopen.Nmt
         WaitingForErrorControl = 17,
         ErrorControlReady = 18,
         ErrorControlFailed = 19,
+        ErrorControlReactionRequested = 20,
+        ErrorRecoveryFailed = 21,
     }
 }
 namespace CanKit.Pro.CANopen.Pdo

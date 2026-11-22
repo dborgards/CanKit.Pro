@@ -62,7 +62,7 @@ internal sealed partial class CanOpenNode
         var expectations = new uint[5];
         for (int i = 0; i < expectations.Length; i++)
             expectations[i] = _od.ReadUnsigned((ushort)(Co.ExpectedDeviceType + i), nodeId);
-        var token = (_slaveVerificationCts ??= new CancellationTokenSource()).Token;
+        var token = SlaveBootToken(nodeId);
         int generation = _bootGeneration;
         _ = Task.Run(async () =>
         {
