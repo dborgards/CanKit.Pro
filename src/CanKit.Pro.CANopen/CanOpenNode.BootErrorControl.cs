@@ -9,7 +9,7 @@ namespace CanKit.Pro.CANopen;
 
 internal sealed partial class CanOpenNode
 {
-    private bool BootErrorControlEnabled => _options.EnableBootErrorControl || _options.EnableNmtErrorHandler || _options.EnableNmtBootupHandler;
+    private bool BootErrorControlEnabled => _options.EnableBootErrorControl || _options.EnableNmtErrorHandler || _options.EnableNmtBootupHandler || _options.EnableBootKeepAlive;
 
     private sealed class BootHeartbeatWait(long started, long due)
     {
@@ -33,14 +33,16 @@ internal sealed partial class CanOpenNode
         if (!BootErrorControlEnabled) return false;
         var previous = _bootHeartbeatConfiguration;
         _bootHeartbeatConfiguration = desired;
+        bool restart = false;
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (!IsAssignedSlave(id) || (Assignment(id) & SlaveBootBit) == 0) continue;
             previous.TryGetValue(id, out var before);
             desired.TryGetValue(id, out var after);
-            if (before != after) return true;
+            if (before == after) continue;
+            if (_options.EnableBootKeepAlive) _keepAliveHeartbeatArrival[id] = 0;
+            if (IsAssignedSlave(id) && (Assignment(id) & SlaveBootBit) != 0) restart = true;
         }
-        return false;
+        return restart;
     }
 
     private bool IsMandatoryErrorControlPending(byte nodeId)

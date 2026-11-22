@@ -49,6 +49,12 @@ public enum SlaveBootStatus
     ErrorControlReactionRequested,
     /// <summary>The runtime reset/boot-up handshake or recovery deadline failed.</summary>
     ErrorRecoveryFailed,
+    /// <summary>The keep-alive branch is checking state or awaiting Reset Communication/boot-up.</summary>
+    CheckingKeepAlive,
+    /// <summary>No current state was available, or the keep-alive reset handshake failed.</summary>
+    KeepAliveFailed,
+    /// <summary>Keep-alive found Operational; configuration and Start were skipped (CiA 302-2 status L).</summary>
+    InitiallyOperational,
 }
 
 /// <summary>An immutable snapshot of one slave's boot progress. A new boot replaces the results.</summary>

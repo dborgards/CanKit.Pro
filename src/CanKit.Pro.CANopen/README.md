@@ -114,6 +114,7 @@ maintainer decision does.
 | FR-CO-070 | Opt-in heartbeat/guarding startup before automatic Start ([Boot error control](#boot-error-control-fr-co-070)) |
 | FR-CO-071 | Opt-in runtime NMT error reactions and per-peer recovery ([NMT error handler](#runtime-nmt-error-handler-fr-co-071)) |
 | FR-CO-072 | Opt-in peer boot-up handling and fresh verification ([Boot-up handler](#boot-up-handler-fr-co-072)) |
+| FR-CO-073 | Opt-in keep-alive state check ([Keep-alive boot branch](#keep-alive-boot-branch-fr-co-073)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -2098,7 +2099,7 @@ Sub-index 0 is constant 127. Each other sub-index is the node-id, an UNSIGNED32:
 | 0 | This node-id is a slave. The sub-index equal to the master's own id is ignored. |
 | 2 | The master may boot it: after it is seen, NMT Start is sent. |
 | 3 | Mandatory. The master does not finish boot-up until this slave has been seen. |
-| 4 | Keep-alive. NMT Reset Communication is not sent to this slave. |
+| 4 | Keep-alive. The initial per-slave Reset Communication is skipped. With `EnableBootKeepAlive`, a verified non-Operational state subsequently requires Reset Communication. |
 
 Bits 8–31 hold the guard time and life time. They are stored. Heartbeat is preferred, and
 node guarding is not started from them. Automatic configuration download during boot is not
@@ -2168,7 +2169,7 @@ An SDO answer establishes contact, not an NMT state: `1F82h` keeps the last actu
 An Operational announcement in the current boot avoids Start; a byte left by a previous boot
 does not. Without a current announcement the library requests individual Start after the
 enabled verification gates pass. Active boot never sends broadcast Start. This is an incremental
-boot policy: the full keep-alive check remains separate. Automatic configuration download is available
+boot policy. `EnableBootKeepAlive` adds the separate state-check branch described below. Automatic configuration download is available
 through `EnableBootConfigurationDownload` ([scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-automatic-configuration.md));
 error-control startup has its own opt-in below. See the [active boot record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-active-boot.md).
 
@@ -2584,3 +2585,34 @@ package rather than forked.
 MIT — see [LICENSE](https://github.com/dborgards/CanKit.Pro/blob/main/LICENSE).
 CanKit itself is a separate project licensed under Apache-2.0; see
 [THIRD-PARTY-NOTICES.md](https://github.com/dborgards/CanKit.Pro/blob/main/THIRD-PARTY-NOTICES.md).
+
+
+### Keep-alive boot branch (FR-CO-073)
+
+`EnableBootKeepAlive` defaults to false and opts into CiA 302-2 §3.4/§3.6 for slaves
+with 1F81h bits 0, 2 and 4 set. It runs after enabled identity checks and includes
+boot error-control startup (FR-CO-070). Set `ActiveSlaveBootRetryInterval` as well
+when the master must discover peers without waiting for an announcement.
+
+A local 1016h heartbeat entry selects the latest valid heartbeat, provided its consumer
+time has not elapsed. Boot-up, toggled guarding data, malformed frames and unknown RX
+timestamps do not count. With no heartbeat entry, the master sends one guarding RTR
+and requires a valid state within 100 ms of its driver handoff. TX confirmation and
+positive, comparable host timestamps are required. A reply received in that window
+can remain valid while local confirmation is held. The RTR has DLC 0 because the
+upstream frame model cannot encode RTR DLC 1 (the same limitation as ordinary guarding).
+
+An Operational result bypasses configuration and Start. After error-control startup,
+`GetSlaveBootResults` reports `InitiallyOperational`, CiA 302-2 status L. For other
+valid states, confirmed Reset Communication and a fresh post-handoff boot-up precede
+configuration and subsequent gates. `SdoTimeout` bounds this boot-up wait after TX
+confirmation. `KeepAliveFailed` carries state-check or reset failure; the existing
+mandatory/optional failure policy and active retry settings apply. Simultaneous starts
+remain individually addressed. A known reboot processed by the boot-up/runtime handler
+already establishes that the peer was not kept Operational and avoids another reset.
+
+This option preserves the existing flying-master election, including its cold-election
+broadcast reset. It does not implement software-version management or guarantee that
+a guarding peer receives Reset Communication within its remote life time. The
+[detailed scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-22-ds302-keep-alive.md) distinguishes
+this increment from a full DS302 conformance claim.

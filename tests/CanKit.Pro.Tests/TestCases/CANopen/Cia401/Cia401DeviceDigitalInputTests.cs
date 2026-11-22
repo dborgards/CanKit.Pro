@@ -176,6 +176,7 @@ public class Cia401DeviceDigitalInputTests
         EnableBootErrorControl = true,
         EnableNmtErrorHandler = true,
         EnableNmtBootupHandler = true,
+        EnableBootKeepAlive = true,
         EnableEmcyInhibit = true,
         EmitGuardingErrorEmcy = true,
         EmitControllerErrorEmcy = true,

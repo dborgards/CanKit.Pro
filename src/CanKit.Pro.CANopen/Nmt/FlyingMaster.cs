@@ -90,4 +90,6 @@ public enum FlyingMasterSignal
     SlaveErrorRecoveryFailed,
     /// <summary>The opted-in active master received a valid boot-up from a peer. Delivery is asynchronous.</summary>
     SlaveBootupReceived,
+    /// <summary>The opted-in keep-alive state check or subsequent reset failed.</summary>
+    SlaveKeepAliveFailed,
 }

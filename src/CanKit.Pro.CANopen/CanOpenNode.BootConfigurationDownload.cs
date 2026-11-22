@@ -19,9 +19,10 @@ internal sealed partial class CanOpenNode
         public volatile bool Incomplete;
     }
 
-    private sealed class BootConfigurationReset(CancellationToken token)
+    private sealed class BootConfigurationReset(CancellationToken token, NmtCommand command)
     {
         public readonly CancellationToken Token = token;
+        public readonly NmtCommand Command = command;
         public readonly TaskCompletionSource<bool> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private long _handoff;
         private long _latestBootUp;
@@ -56,13 +57,13 @@ internal sealed partial class CanOpenNode
         // Extended PDO ID zero is not NMT. Internally generated standard NMT frames
         // contain command and target; an application-selected target can be outside our
         // slave table. Observation must not change transmission of either kind of frame.
-        if (frame.IsExtendedFrame || frame.ID != CanOpenCobId.NmtCommand || frame.Data.Span[0] != (byte)NmtCommand.ResetNode) return null;
+        if (frame.IsExtendedFrame || frame.ID != CanOpenCobId.NmtCommand || frame.Data.Length != 2) return null;
         byte target = frame.Data.Span[1];
         if (target > CanOpenCobId.MaxNodeId) return null;
         // Capture this exact attempt before awaiting the service; a late confirmation
         // cannot affect a newer attempt installed after this one was cancelled.
         var reset = Volatile.Read(ref _slaveConfigurationBootUps[target]);
-        return reset is not null && reset.Token == token ? reset : null;
+        return reset is not null && reset.Token == token && frame.Data.Span[0] == (byte)reset.Command ? reset : null;
     }
 
     private void ObserveConfigurationBootUp(uint cobId, byte[] data, bool isRtr, bool isFd, long arrival)
@@ -190,9 +191,9 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    private async Task ResetConfiguredSlaveAsync(byte nodeId, CancellationToken token)
+    private async Task ResetConfiguredSlaveAsync(byte nodeId, CancellationToken token, NmtCommand command = NmtCommand.ResetNode)
     {
-        var reset = new BootConfigurationReset(token);
+        var reset = new BootConfigurationReset(token, command);
         var bootUp = reset.Completion;
         using var cancellation = token.Register(() => bootUp.TrySetCanceled());
         Action timeout = () => bootUp.TrySetException(new TimeoutException("No boot-up announcement after configuration restore/reset."));
@@ -204,7 +205,7 @@ internal sealed partial class CanOpenNode
         try
         {
             // Listen before sending: a fast peer can boot before local TX confirmation arrives.
-            await SendBootConfigurationNmtAsync(nodeId, NmtCommand.ResetNode, token).ConfigureAwait(false);
+            await SendBootConfigurationNmtAsync(nodeId, command, token).ConfigureAwait(false);
             // Queueing and LSS/adapter holds are not remote boot time. A boot-up already
             // received during confirmation remains recorded in the installed listener.
             using var deadline = await _actor.PostAsync(() =>
