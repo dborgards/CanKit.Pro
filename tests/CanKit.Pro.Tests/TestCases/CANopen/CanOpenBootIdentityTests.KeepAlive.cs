@@ -88,7 +88,7 @@ public partial class CanOpenBootIdentityTests
     [InlineData(0)]
     [InlineData(0x80)]
     [InlineData(0x06)]
-    public async Task KeepAlive_Guarding_Rejects_Non_State_Bytes(byte value)
+    public async Task KeepAlive_Guarding_Non_State_Bytes_Do_Not_Approve_Operational(byte value)
     {
         using var rig = OpenMaster(KeepAliveOptions());
         Configure(rig, mandatory: false);
@@ -98,8 +98,18 @@ public partial class CanOpenBootIdentityTests
         await QuiesceAsync(rig.Witness, null);
         TransmitHeartbeat(rig.Peer, Slave, value);
         await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
-        Result(rig).Status.Should().Be(SlaveBootStatus.KeepAliveFailed);
-        Started(rig, Slave).Should().BeFalse();
+        if (value == 0)
+        {
+            // A genuine boot-up cancels the probe and resumes normal boot. It does not
+            // approve an Operational shortcut; this peer still requires explicit Start.
+            Result(rig).Status.Should().Be(SlaveBootStatus.StartRequested);
+            Started(rig, Slave).Should().BeTrue();
+        }
+        else
+        {
+            Result(rig).Status.Should().Be(SlaveBootStatus.KeepAliveFailed);
+            Started(rig, Slave).Should().BeFalse();
+        }
     }
 
     [Theory]

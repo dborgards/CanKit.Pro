@@ -59,12 +59,14 @@ public partial class CanOpenBootIdentityTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task KeepAlive_Reset_Requires_Confirmed_Transmission_And_A_Post_Handoff_Bootup(bool fastBootup)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task KeepAlive_Reset_Requires_Confirmed_Transmission_And_A_Post_Handoff_Bootup(bool fastBootup, bool heartbeat)
     {
         using var rig = OpenDownloadGate(NmtCommand.ResetCommunication, out var gate, KeepAliveOptions());
-        ConfigureErrorControl(rig);
+        ConfigureErrorControl(rig, heartbeatMs: heartbeat ? 100 : 0);
         gate.HoldAfterTransmit = fastBootup;
         IDisposable? allowed = null;
         gate.BeforeHold = () => allowed ??= rig.Witness.AllowPeerVerificationWait(Slave);
@@ -73,6 +75,11 @@ public partial class CanOpenBootIdentityTests
             await ElectActive(rig);
             rig.Log.Clear();
             TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            if (!heartbeat)
+            {
+                await QuiesceAsync(rig.Witness, null);
+                TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            }
             await UntilAsync(rig.Clock, rig.Witness, null, () => gate.Entered.IsCompleted, 100, "keep-alive reset is held");
             TransmitHeartbeat(rig.Peer, Slave, 0);
             await QuiesceAsync(rig.Witness, null);
@@ -88,9 +95,12 @@ public partial class CanOpenBootIdentityTests
                 TransmitHeartbeat(rig.Peer, Slave, 0);
                 await QuiesceAsync(rig.Witness, null);
             }
-            Result(rig).Status.Should().Be(SlaveBootStatus.WaitingForErrorControl);
-            TransmitHeartbeat(rig.Peer, Slave, 0x7F);
-            await QuiesceAsync(rig.Witness, null);
+            if (heartbeat)
+            {
+                Result(rig).Status.Should().Be(SlaveBootStatus.WaitingForErrorControl);
+                TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+                await QuiesceAsync(rig.Witness, null);
+            }
             Started(rig, Slave).Should().BeTrue();
         }
         finally { gate.Release(); allowed?.Dispose(); }
