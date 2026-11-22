@@ -167,7 +167,8 @@ public partial class CanOpenBootIdentityTests
         await gate.Entered.WaitAsync(ShortTimeout);
         try
         {
-            if (unassign) rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, 0);
+            // Off-actor OD writes only enqueue the boot reset. Apply it before releasing TX.
+            if (unassign) await rig.Node.PostToActorAsync(() => rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, 0));
             else rig.Node.StopFlyingMaster();
         }
         finally { gate.Release(); }
@@ -273,7 +274,8 @@ public partial class CanOpenBootIdentityTests
             await gate.Entered.WaitAsync(ShortTimeout);
             if (action == 0) rig.Node.StopFlyingMaster();
             else if (action == 1) await rig.Node.PostToActorAsync(() => InvokeBoot(rig.Node, "EnterStandby", (ushort)0, (byte)1));
-            else if (action == 2) rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, 0);
+            // Complete the actor-side unassignment before the held Reset Node can resume.
+            else if (action == 2) await rig.Node.PostToActorAsync(() => rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, 0));
             else rig.Node.Dispose();
         }
         finally { gate.Release(); allowed?.Dispose(); }
