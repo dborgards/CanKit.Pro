@@ -25,7 +25,9 @@ internal sealed partial class CanOpenNode
         if (recovering)
         {
             _ = SlaveBootToken(nodeId);
-            ArmPeerRecoveryDeadline(nodeId);
+            // A held master reset prevents all boot gates. Start the peer's budget when
+            // ResumeHeldBoot can actually resume them, not while the announcement is held.
+            if (!_coldResetPending) ArmPeerRecoveryDeadline(nodeId);
         }
         bool bootSlave = (Assignment(nodeId) & SlaveBootBit) != 0 && (ReadStartup() & NmtSuppressSlaveStartBit) == 0;
         if (!bootSlave) FinishNmtErrorRecovery(nodeId);

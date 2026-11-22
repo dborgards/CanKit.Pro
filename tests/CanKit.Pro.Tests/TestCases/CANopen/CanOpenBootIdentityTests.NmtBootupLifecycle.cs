@@ -160,11 +160,15 @@ public partial class CanOpenBootIdentityTests
         rig.Log.Snapshot().Should().ContainSingle(f => IsDownload(f, 0x1011));
     }
 
-    [Fact]
-    public async Task Bootup_Held_Behind_A_Master_Reset_Resumes_With_Fresh_Checks()
+    [Theory]
+    [InlineData(0u, true)]
+    [InlineData(100u, true)]
+    [InlineData(100u, false)]
+    public async Task Bootup_Held_Behind_A_Master_Reset_Resumes_With_Fresh_Checks(uint bootMs, bool complete)
     {
         using var rig = OpenMaster(BootupOptions());
-        ConfigureErrorControl(rig);
+        ConfigureErrorControl(rig, heartbeatMs: 300);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F89, 0, bootMs);
         await StartMonitoredSlave(rig);
         await rig.Node.PostToActorAsync(() => SetBootField(rig.Node, "_coldResetPending", true));
         TransmitHeartbeat(rig.Peer, Slave, 0);
@@ -177,9 +181,21 @@ public partial class CanOpenBootIdentityTests
             InvokeBoot(rig.Node, "ResumeHeldBoot");
         });
         Result(rig).Status.Should().Be(SlaveBootStatus.WaitingForErrorControl);
-        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
-        await QuiesceAsync(rig.Witness, null);
-        Started(rig, Slave).Should().BeTrue();
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(99));
+        await rig.Node.PostToActorAsync(() => InvokeBoot(rig.Node, "ResumeHeldBoot"));
+        Result(rig).Status.Should().Be(SlaveBootStatus.WaitingForErrorControl);
+        if (complete)
+        {
+            TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+            await QuiesceAsync(rig.Witness, null);
+            Started(rig, Slave).Should().BeTrue();
+        }
+        else
+        {
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(1));
+            Result(rig).Status.Should().Be(SlaveBootStatus.ErrorRecoveryFailed);
+            Started(rig, Slave).Should().BeFalse();
+        }
     }
 
     [Theory]

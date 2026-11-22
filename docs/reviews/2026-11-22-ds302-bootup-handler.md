@@ -36,7 +36,9 @@ nichtnull 1F89h. Das ist Bibliothekspolitik für den gesamten erneuten Boot-Vers
 Frisches Boot-up kann eine einzelne Recovery-Sperre aufheben, niemals den Netzwerk-Halt.
 Wiederholte Boot-ups starten den Peer-Versuch erneut. Während eines gehaltenen Master-Resets
 bleibt die Ankündigung erhalten; nach Verwerfen des Resets setzen frische Prüfungen fort.
-Rollenende, Neuzuordnung und Disposal verwerfen alte Arbeit.
+Die neue Peer-Frist beginnt erst beim Fortsetzen, damit die gehaltene Ankündigung nicht
+schon vor Beginn ihrer Prüfungen gesperrt wird. Rollenende, Neuzuordnung und Disposal
+verwerfen alte Arbeit.
 
 Dies ist keine vollständige DS302-Konformitätsbehauptung. Insbesondere bleibt der
 Keep-alive-Ablauf nach §3.6 ein eigener offener Schritt. Die vorhandenen Boot-Gates behalten
@@ -81,12 +83,23 @@ abgeleitet. Die zunächst überlebende Mutation des Resetting-Guards führte zum
 Fall mit belegtem Peer-SDO-Kanal: Dort ist noch kein Reset-Listener registriert, und das
 Entfernen des Guards lässt den Test fehlschlagen.
 
+Der [Codex-Reviewbefund](https://github.com/dborgards/CanKit.Pro/pull/591#discussion_r4656861800)
+wurde gegen `641f3ca4` reproduziert: Bei 1F89h = 100 ms und 150 ms gehaltenem Master-Reset
+wurde die neue Boot-up-Episode bereits während des Halts als ErrorRecoveryFailed gesperrt.
+Die Peer-Frist wird nun erst in ResumeHeldBoot aktiviert. Ein bestehender Timer wird dabei
+nicht verlängert und ein bereits gesperrter Fehler nicht wieder aktiviert. Der erweiterte
+Test prüft deaktivierte Frist, erfolgreichen Start kurz vor Ablauf der frischen Frist und
+deren Ablauf nach dem Fortsetzen. Sowohl vorzeitiges Aktivieren als auch Weglassen der
+Frist beim Fortsetzen ließ den erweiterten Test in gezielten Mutationen fehlschlagen.
+
 Lokale Prüfung des abschließenden Stands:
 
 - Release-Build mit `CI=true`: keine Warnungen oder Fehler.
-- Gesamtsuite net10.0: 5.890 bestanden, keine fehlgeschlagenen oder übersprungenen Tests.
+- Gesamtsuite net10.0: 5.892 bestanden, keine fehlgeschlagenen oder übersprungenen Tests.
 - Cobertura gegen Basis `84680df3`, alle Klassen einschließlich generierter Zustandsautomaten:
-  54/54 geänderte ausführbare Einträge und 52/52 Zweigbedingungen getroffen.
+  56/56 geänderte ausführbare Einträge und 59/60 Zweigbedingungen getroffen.
+  Teilweise getroffen bleibt in ResumeHeldBoot die Abwehr einer bereits gesperrten Recovery;
+  der normale Friststart und das Nichtverlängern einer laufenden Frist werden durchlaufen.
   Dies ist die lokale Diff-Auswertung, kein vorweggenommenes Codecov-Ergebnis.
 - `dotnet format --verify-no-changes`: unverändert.
 - Frisches Release-Pack und `eng/verify-packages.py`: alle neun Pakete geprüft.

@@ -163,6 +163,8 @@ internal sealed partial class CanOpenNode
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
             if (!_slaveSeen[id]) continue;
+            if (_slaveNmtErrorRecovering[id] && !_slaveNmtErrorFailed[id] && _slaveNmtErrorDeadlines[id] is null)
+                ArmPeerRecoveryDeadline(id);
             byte state = (byte)_od.ReadUnsigned(Co.RequestNmt, id);
             ConsiderStart(id, state);
         }

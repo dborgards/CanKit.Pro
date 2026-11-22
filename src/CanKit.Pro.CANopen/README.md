@@ -2351,7 +2351,8 @@ Repeated initial boot-ups retain the original 1F89h boot deadline. A peer that a
 completed boot, or is in runtime recovery, receives a fresh per-peer 1F89h deadline; zero
 disables that deadline. A fresh boot-up can release a latched peer recovery failure, but
 cannot clear a network-wide boot halt. Repeated boot-ups restart the peer attempt. A held
-master reset retains the announcement and resumes fresh checks if the reset is abandoned.
+master reset retains the announcement and resumes fresh checks if the reset is abandoned;
+the new peer deadline starts when those checks can resume.
 Role loss, reassignment and disposal cancel obsolete work.
 
 See the [scope and validation record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-22-ds302-bootup-handler.md).

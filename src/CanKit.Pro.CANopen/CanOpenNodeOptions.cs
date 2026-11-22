@@ -88,7 +88,8 @@ public sealed class CanOpenNodeOptions
     /// forbids configuration and Start. Expected reset replies remain owned by their handshake.
     /// Initial boots retain their original deadline; after a completed boot, nonzero 1F89h
     /// bounds each new recovery. A fresh boot-up can release a per-peer failed recovery latch,
-    /// but cannot release a network-wide boot halt. No extra NMT reset is sent.</remarks>
+    /// but cannot release a network-wide boot halt. A boot-up held behind a master reset
+    /// starts its new deadline when verification resumes. No extra NMT reset is sent.</remarks>
     public bool EnableNmtBootupHandler { get; init; }
 
     /// <summary>
