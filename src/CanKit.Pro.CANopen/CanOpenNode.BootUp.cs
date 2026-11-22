@@ -108,6 +108,7 @@ internal sealed partial class CanOpenNode
 
     private void CancelBootUp()
     {
+        CancelTimedMasterCommands();
         CancelNmtErrorRecovery();
         ClearKeepAliveChecks();
         StopBootErrorControl();
@@ -365,6 +366,7 @@ internal sealed partial class CanOpenNode
     private void HaltBootWork()
     {
         _bootHalted = true;
+        CancelTimedMasterCommands();
         CancelNmtErrorRecovery();
         ClearKeepAliveChecks();
         StopBootErrorControl();
@@ -670,6 +672,11 @@ internal sealed partial class CanOpenNode
     private Task<bool> EnqueueNmt(NmtCommand command, byte target, CancellationToken token = default)
     {
         var payload = new[] { (byte)command, target };
+        if (_options.EnableNmtInhibit)
+        {
+            if (!token.CanBeCanceled) token = (_timedMasterCommands ??= new CancellationTokenSource()).Token;
+            return QueueTimedNmt(payload, token, masterOwned: true);
+        }
         var previous = _nmtOrder;
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _nmtOrder = done.Task;

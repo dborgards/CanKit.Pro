@@ -155,6 +155,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableErrorBehavior { get; init; }
         public bool EnableNmtBootupHandler { get; init; }
         public bool EnableNmtErrorHandler { get; init; }
+        public bool EnableNmtInhibit { get; init; }
         public int ErrorHistoryCapacity { get; init; }
         public int EventQueueCapacity { get; init; }
         public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }
