@@ -2075,8 +2075,13 @@ broadcasts NMT Reset Communication (`0x82`, node 0) and runs the election again 
 so the timeslot race is not racing traffic from before the reset. That reset restores power-on
 values, which is why `StartFlyingMaster` records `1F80h`, `1F81h`, `1F89h` and `1F90h` as
 power-on values before it starts. Call `StoreParameters` first if the rest of the configuration
-must survive the same reset. A later loss of the active master starts a warm election and does
-not broadcast Reset Communication again. The active master is who sends Reset Communication when
+must survive the same reset. Loss of the active master's heartbeat also requires broadcast
+Reset Communication before the warm election (CiA 302-2 §5.5.2). The standby waits for
+confirmation or actual reception of that reset; a rejected, cancelled or failed send does
+not start the election. Stop/Dispose invalidates its pending local reset continuation.
+After a failed master-loss reset, flying-master control frames remain blocked until an
+actual NMT reset or explicit restart; `StartFlyingMaster` begins a fresh cold-start attempt.
+The active master is who sends Reset Communication when
 it receives `0x076`. Winning then runs the boot-up below.
 
 The flying master composes those two modules and does not keep a heartbeat timer of its own.
@@ -2611,8 +2616,11 @@ mandatory/optional failure policy and active retry settings apply. Simultaneous 
 remain individually addressed. A known reboot processed by the boot-up/runtime handler
 already establishes that the peer was not kept Operational and avoids another reset.
 
-This option preserves the existing flying-master election, including its cold-election
-broadcast reset. It does not implement software-version management or guarantee that
+This option does not suppress the broadcast resets required for a cold flying-master start
+(§3.7 d) or loss of the active master (§5.5.2). It therefore does not promise an uninterrupted
+keep-alive slave across those elections. The [election-reset audit](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-22-ds302-election-reset.md)
+separates them from the subsequent slave-boot reset selection (§3.1 d).
+It does not implement software-version management or guarantee that
 a guarding peer receives Reset Communication within its remote life time. The
 [detailed scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-22-ds302-keep-alive.md) distinguishes
 this increment from a full DS302 conformance claim.

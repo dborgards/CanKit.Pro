@@ -46,6 +46,7 @@ internal sealed partial class CanOpenNode
     private bool _suppressFlyingMasterStartup;
     private bool _confirmingActiveMaster;
     private bool _coldResetPending;
+    private bool _masterLossResetRequired;
     private bool _ignoreBroadcastResetEcho;
     private byte? _activeFlyingMasterNodeId;
     private ushort? _activeFlyingMasterPriority;
@@ -220,17 +221,25 @@ internal sealed partial class CanOpenNode
             // The echo applies the reset when it comes back; if the bus does not echo, the
             // confirmed send applies the same reset once. A rejected, thrown or unconfirmed
             // send leaves the network as it is and does not start the election.
-            _flyingMasterFromPowerOn = false;
-            _coldResetPending = true;
-            var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
-            System.Threading.Volatile.Write(ref _resetOutcome, sent.ContinueWith(
-                PostColdResetOutcome,
-                System.Threading.CancellationToken.None,
-                System.Threading.Tasks.TaskContinuationOptions.None,
-                System.Threading.Tasks.TaskScheduler.Default));
+            BeginElectionReset();
             return;
         }
         BeginNegotiation(transmitTrigger: true);
+    }
+
+    // Shared by power-on without a master (§3.7 d) and loss of its heartbeat (§5.5.2).
+    // Both require target zero, then the same confirmed-reset/warm-start handshake.
+    private void BeginElectionReset()
+    {
+        CancelFlyingMasterDeadline();
+        _flyingMasterFromPowerOn = false;
+        _coldResetPending = true;
+        var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
+        System.Threading.Volatile.Write(ref _resetOutcome, sent.ContinueWith(
+            PostColdResetOutcome,
+            System.Threading.CancellationToken.None,
+            System.Threading.Tasks.TaskContinuationOptions.None,
+            System.Threading.Tasks.TaskScheduler.Default));
     }
 
     private void PostColdResetOutcome(Task<bool> send) => PostResetOutcome(send, forced: false);
@@ -469,7 +478,7 @@ internal sealed partial class CanOpenNode
 
     /// <summary>
     /// Subscribes the flying master to the consumer module. A missed heartbeat from the master
-    /// this node is standing by for starts a warm election. The producer module is not involved.
+    /// this node is standing by for requests the broadcast reset that starts a warm election.
     /// </summary>
     private void AttachFlyingMasterHeartbeatWatch()
     {
@@ -482,8 +491,14 @@ internal sealed partial class CanOpenNode
         if (_activeFlyingMasterNodeId.GetValueOrDefault() != producerNodeId) return;
         byte lost = producerNodeId;
         ushort? priority = _activeFlyingMasterPriority;
-        _flyingMasterFromPowerOn = false;
-        BeginFlyingMaster();
+        // §5.5.2 requires Reset Communication to node zero before negotiating again.
+        // Leave Standby so repeated timeouts cannot enqueue another reset. No election
+        // deadline is armed until the confirmed send (or its actual echo) applies locally.
+        _flyingMasterRole = FlyingMasterRole.Detecting;
+        _activeFlyingMasterNodeId = null;
+        _activeFlyingMasterPriority = null;
+        _masterLossResetRequired = true;
+        BeginElectionReset();
         RaiseFlyingMaster(FlyingMasterSignal.ActiveMasterLost, lost, priority);
     }
 
@@ -525,6 +540,7 @@ internal sealed partial class CanOpenNode
         _confirmingActiveMaster = false;
         _coldResetPending = false;
         _ignoreBroadcastResetEcho = false;
+        _masterLossResetRequired = false;
         _flyingMasterRole = FlyingMasterRole.Inactive;
         _activeFlyingMasterNodeId = null;
         _activeFlyingMasterPriority = null;
@@ -533,9 +549,10 @@ internal sealed partial class CanOpenNode
 
     private void HandleFlyingMasterFrame(uint cobId, byte[] data)
     {
-        // The cold reset is already committed. A claim in this window must not move us to
-        // standby and then have the reset tear down the master we just accepted.
-        if (_coldResetPending) return;
+        // A committed reset must not tear down a newly accepted master. After a failed
+        // master-loss reset, control frames still cannot replace that required reset.
+        // A real NMT reset or an explicit stop/start clears the requirement via cleanup.
+        if (_coldResetPending || _masterLossResetRequired) return;
         // The caller only hands over the four flying-master COB-IDs. The last one is the else,
         // so the chain has no default the compiler would emit and nothing would take.
         if (cobId == CanOpenCobId.FlyingMasterClaim)
