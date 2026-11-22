@@ -29,20 +29,11 @@ virtual bus in one process.
 
 ## Coverage
 
-This is a **subset of CiA 301**, not a complete implementation of it. What the subset covers is
-every requirement of SRS §4.3.2 — the requirements this repository set itself. FR-CO-013 to
-FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
-(`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
-scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
-(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-035 to FR-CO-046 are CANopen
-Safety after CiA DSP 304 V1.0, decided on 9 October 2026
-(`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
-v3.0.0. FR-CO-048 is the LSS slave in the node, including the pending node-id and
-`LSS_Supported` in a device description. FR-CO-049 is commissioning on the master: Fastscan,
-node-id assignment, bit timing, store and inquire. FR-CO-050 is CiA 801 automatic bit-rate
-detection, the procedure behind table 0 index 9. FR-CO-051 is the configuration entity after CiA 319 v2.0.0 (17 October 2026). FR-CO-052 to FR-CO-057 add the PDO extensions. FR-CO-058 and FR-CO-059 are the device side of CiA 319 (20 October 2026). The SRS's "Quelle"
-column says for each of them whether a standard requires it, the architecture does, or a
-maintainer decision does.
+This package implements the CANopen subset defined in
+[SRS §4.3.2](https://github.com/dborgards/CanKit.Pro/blob/main/docs/requirements/SRS-CanKit.Pro-en.md#432-canopen-cia-301).
+It does not claim complete conformance to the referenced standards. The table below
+summarises the features; the SRS defines their requirements and identifies the standard,
+architecture or maintainer decision behind each one.
 
 | SRS id | Feature |
 | --- | --- |
@@ -2120,9 +2111,13 @@ through `BackgroundExceptionOccurred`, without creating an assigned-slave result
 The conservative individual path remains separate from the mandatory election
 broadcasts. `1F80h` bit 3 suppresses this startup reset pass as before.
 
-Bits 8–31 hold the guard time and life time. They are stored. Heartbeat is preferred, and
-node guarding is not started from them. Automatic configuration download during boot is not
-implemented; explicit [concise-DCF download](#concise-dcf-download) is available separately.
+Bits 8–31 encode the guard time and retry factor used by the optional
+[boot error-control stage](#boot-error-control-fr-co-070), which prefers a configured
+heartbeat consumer over guarding. Automatic boot configuration is available through
+`EnableBootConfigurationDownload`, which defaults to false; see the
+[automatic configuration scope](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-automatic-configuration.md)
+for registering a configuration and the restore/reset sequence. Explicit
+[concise-DCF download](#concise-dcf-download) remains available separately.
 
 **Identity before Start (CiA 302-2 v4.1.0 §3.4, §6.6–§6.10).** `1F84h`–`1F88h` are managed
 UNSIGNED32 arrays, sub-index 0 constant 127 and one expectation per node-id, initially 0:
@@ -2213,17 +2208,21 @@ and `1020h:02` (time). Either zero means configuration is required, so no upload
 it does not skip a field. Zero or mismatch reports `ConfigurationRequired`. Upload failures,
 including an absent or restrictive description, report `ConfigurationReadFailed` with the
 cause. Both prevent automatic Start and raise `SlaveConfigurationInvalid`; snapshots carry
-the remote pair and expected/actual values when available. No restore or download is performed.
+the remote pair and expected/actual values when available. The comparison option alone
+performs no restore or download; `EnableBootConfigurationDownload` enables the separate
+update procedure described in the linked automatic configuration scope above.
 
 The gate runs after enabled identity checks and before safety checks and Start. It also
-verifies an Operational announcement, a stricter opt-in policy than skipping configuration for
-a keep-alive slave. It does not itself enable the `1000h` upload. Both reads share one channel
-lease and one description snapshot; the mandatory boot deadline includes the channel wait.
+verifies an Operational announcement unless the enabled
+[keep-alive branch](#keep-alive-boot-branch-fr-co-073) has established that the slave was
+initially Operational. The comparison option does not itself enable the `1000h` upload.
+Both reads share one channel lease and one description snapshot; the mandatory boot
+deadline includes the channel wait.
 Mandatory failures halt boot, including a timeout at `1020h`. Optional failures follow the
 announcement policy above or retry under active boot. Resets, role loss, new boots and halt
 cancel old work. Excluded slaves remain excluded; starts are individual even at the simultaneous
 start moment. See the [configuration scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-configuration-check.md)
-for the boundary with the remaining CiA 302-2 §3.5 restore/download procedure.
+for the scope of comparison without the separate automatic update option.
 
 `node.GetSlaveBootResults()` returns immutable snapshots in node-id order: announcement wait,
 identity/configuration verification, Start requested, already Operational, or a failure. Verification failures carry
