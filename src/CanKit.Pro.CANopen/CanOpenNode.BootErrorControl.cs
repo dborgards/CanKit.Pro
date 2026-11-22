@@ -9,7 +9,7 @@ namespace CanKit.Pro.CANopen;
 
 internal sealed partial class CanOpenNode
 {
-    private bool BootErrorControlEnabled => _options.EnableBootErrorControl || _options.EnableNmtErrorHandler;
+    private bool BootErrorControlEnabled => _options.EnableBootErrorControl || _options.EnableNmtErrorHandler || _options.EnableNmtBootupHandler;
 
     private sealed class BootHeartbeatWait(long started, long due)
     {

@@ -208,7 +208,7 @@ public partial class CanOpenBootIdentityTests
         rig.Node.Dispose();
         // The worker can pass its cancellation check just before Dispose closes the mailbox.
         Action post = () => typeof(CanOpenNode).GetMethod("PostSlaveIdentityResult", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(rig.Node, new object[] { Slave, 0, new SlaveBootResult(Slave, SlaveBootStatus.IdentityVerified) });
+            .Invoke(rig.Node, new object[] { Slave, 0, new SlaveBootResult(Slave, SlaveBootStatus.IdentityVerified), CancellationToken.None });
         post.Should().NotThrow();
         Started(rig, Slave).Should().BeFalse();
     }

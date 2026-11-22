@@ -79,6 +79,18 @@ public sealed class CanOpenNodeOptions
     /// Copy methods preserve the option.</remarks>
     public bool EnableNmtErrorHandler { get; init; }
 
+    /// <summary>Enable the CiA 302-2 §4.3 boot-up handler on the active master. Default false.
+    /// Includes boot error-control startup, without enabling the runtime error handler or
+    /// identity/configuration options. Copy methods preserve the setting.</summary>
+    /// <remarks>A valid classical one-byte boot-up from a peer queues SlaveBootupReceived.
+    /// Assigned peers repeat their enabled boot gates; their old work and queued Start are
+    /// cancelled. Unassigned peers only notify the application. Boot/start suppression still
+    /// forbids configuration and Start. Expected reset replies remain owned by their handshake.
+    /// Initial boots retain their original deadline; after a completed boot, nonzero 1F89h
+    /// bounds each new recovery. A fresh boot-up can release a per-peer failed recovery latch,
+    /// but cannot release a network-wide boot halt. No extra NMT reset is sent.</remarks>
+    public bool EnableNmtBootupHandler { get; init; }
+
     /// <summary>
     /// Enable active slave boot with this positive delay between a failed attempt and its
     /// retry. Null (default) keeps announcement-based boot. One second is the CiA 302-2 §3.3
@@ -538,6 +550,7 @@ public sealed class CanOpenNodeOptions
             EnableBootConfigurationDownload = EnableBootConfigurationDownload,
             EnableBootErrorControl = EnableBootErrorControl,
             EnableNmtErrorHandler = EnableNmtErrorHandler,
+            EnableNmtBootupHandler = EnableNmtBootupHandler,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,

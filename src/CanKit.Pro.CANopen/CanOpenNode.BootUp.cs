@@ -234,7 +234,7 @@ internal sealed partial class CanOpenNode
         _slaveStarted[nodeId] = true;
         _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.StartRequested);
         FinishNmtErrorRecovery(nodeId);
-        _ = EnqueueNmt(NmtCommand.Start, nodeId, _options.EnableNmtErrorHandler ? SlaveBootToken(nodeId) : default);
+        _ = EnqueueNmt(NmtCommand.Start, nodeId, PeerBootCancellationEnabled ? SlaveBootToken(nodeId) : default);
     }
 
     private void TryFinishBoot()
@@ -482,9 +482,18 @@ internal sealed partial class CanOpenNode
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
             catch (Exception ex) { failure = ex; } // a cancellation of anything else is a failure
-            try { _actor.Post(() => OnSlaveVerified(nodeId, generation, outcome, failure)); }
-            catch (ObjectDisposedException) { }
+            PostSlaveSafetyResult(nodeId, generation, outcome, failure, token);
         });
+    }
+
+    private void PostSlaveSafetyResult(byte nodeId, int generation, SlaveVerification outcome, Exception? failure, CancellationToken token)
+    {
+        try { _actor.Post(() => { if (!token.IsCancellationRequested) OnSlaveVerified(nodeId, generation, outcome, failure); }); }
+        catch (ObjectDisposedException)
+        {
+            // Disposal may close the mailbox after verification; no live boot remains.
+            return;
+        }
     }
 
     private void OnSlaveVerified(byte nodeId, int generation, SlaveVerification outcome, Exception? failure)

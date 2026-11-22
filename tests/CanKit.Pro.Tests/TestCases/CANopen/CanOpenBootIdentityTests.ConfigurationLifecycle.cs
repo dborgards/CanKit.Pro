@@ -329,7 +329,7 @@ public partial class CanOpenBootIdentityTests
     {
         using var rig = OpenMaster(ConfigurationOptions());
         rig.Node.Dispose();
-        InvokeBoot(rig.Node, "PostSlaveConfigurationResult", Slave, 0, new SlaveBootResult(Slave, SlaveBootStatus.ConfigurationVerified));
+        InvokeBoot(rig.Node, "PostSlaveConfigurationResult", Slave, 0, new SlaveBootResult(Slave, SlaveBootStatus.ConfigurationVerified), CancellationToken.None);
     }
 
     [Fact]

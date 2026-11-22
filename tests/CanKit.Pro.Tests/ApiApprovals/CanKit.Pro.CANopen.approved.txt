@@ -152,6 +152,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableChangeOfStateTpdo { get; init; }
         public bool EnableEmcyInhibit { get; init; }
         public bool EnableErrorBehavior { get; init; }
+        public bool EnableNmtBootupHandler { get; init; }
         public bool EnableNmtErrorHandler { get; init; }
         public int ErrorHistoryCapacity { get; init; }
         public int EventQueueCapacity { get; init; }
@@ -834,6 +835,7 @@ namespace CanKit.Pro.CANopen.Nmt
         SlaveErrorControlFailed = 10,
         SlaveErrorControlEvent = 11,
         SlaveErrorRecoveryFailed = 12,
+        SlaveBootupReceived = 13,
     }
     public enum NmtCommand : byte
     {
