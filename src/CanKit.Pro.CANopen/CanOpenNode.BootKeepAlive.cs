@@ -76,7 +76,11 @@ internal sealed partial class CanOpenNode
         byte id = (byte)(cobId - CanOpenCobId.HeartbeatBase);
         if (id == _nodeId) return;
         byte state = (byte)(data[0] & 0x7F);
-        if (data[0] == 0 && arrival >= _keepAliveHeartbeatArrival[id]) _keepAliveHeartbeatArrival[id] = 0;
+        if (data[0] == 0 && arrival >= _keepAliveHeartbeatArrival[id])
+        {
+            _keepAliveHeartbeatArrival[id] = 0;
+            InvalidateOperationalKeepAlive(id, state);
+        }
         if (state is not (RequestStopped or RequestOperational or RequestPreOperational)) return;
         if (_bootHeartbeatConfiguration.ContainsKey(id))
         {
@@ -85,6 +89,7 @@ internal sealed partial class CanOpenNode
             {
                 _keepAliveHeartbeatArrival[id] = arrival;
                 _keepAliveHeartbeatState[id] = state;
+                InvalidateOperationalKeepAlive(id, state);
             }
         }
         else if (_slaveKeepAliveProbes[id] is { } probe)
@@ -93,6 +98,18 @@ internal sealed partial class CanOpenNode
                 && consumer.LastToggle == ((data[0] & 0x80) != 0)) return;
             probe.Receive(arrival, state);
         }
+    }
+
+    private void InvalidateOperationalKeepAlive(byte id, byte state)
+    {
+        // Only a new valid state indication may revoke this boot shortcut. A cached
+        // 1F82h byte can precede the guarding reply that established Operational.
+        if (!_slaveInitiallyOperational[id] || _slaveStarted[id] || state == RequestOperational) return;
+        RestartSlaveBootChecks(id, recovering: false);
+        // An observed reboot replaces the reset; Pre-operational/Stopped require a new
+        // keep-alive check. HandleIncomingFrame records this state and resumes the gates.
+        _slaveKeepAliveChecked[id] = state == 0;
+        _slaveConfigurationNeedsStart[id] = state == 0;
     }
 
     private void BeginKeepAliveCheck(byte id)
