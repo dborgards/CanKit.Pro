@@ -106,12 +106,12 @@ internal sealed partial class CanOpenNode
     {
         // Only a new valid state indication may revoke this boot shortcut. A cached
         // 1F82h byte can precede the guarding reply that established Operational.
-        // A guarding reply can still be buffered behind TX confirmation, or its worker
-        // result can be queued. Cancel that attempt too, but not an expected reset reply.
-        bool pendingGuardingReboot = state == 0 && _slaveKeepAliveChecking[id]
-            && !_bootHeartbeatConfiguration.ContainsKey(id) && _slaveConfigurationBootUps[id] is null
+        // A state check may await the channel/TX confirmation, or its worker result may
+        // be queued. Cancel either method's attempt too, but not an expected reset reply.
+        bool pendingReboot = state == 0 && _slaveKeepAliveChecking[id]
+            && _slaveConfigurationBootUps[id] is null
             && arrival >= _keepAliveCheckStateArrival[id];
-        if ((!_slaveInitiallyOperational[id] && !pendingGuardingReboot)
+        if ((!_slaveInitiallyOperational[id] && !pendingReboot)
             || _slaveStarted[id] || state == RequestOperational) return;
         RestartSlaveBootChecks(id, recovering: false);
         // An observed reboot replaces the reset; Pre-operational/Stopped require a new
