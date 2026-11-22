@@ -50,9 +50,10 @@ public partial class CanOpenBootIdentityTests
         Volatile.Read(ref errors).Should().Be(0);
     }
 
-    private sealed class GuardPollGate(ClockedCanBusService inner) : ICanBusService
+    private sealed class GuardPollGate(ClockedCanBusService inner, bool holdAfterTransmit = false) : ICanBusService
     {
         private int _held;
+        public int FailureMode { get; set; }
         public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -73,12 +74,16 @@ public partial class CanOpenBootIdentityTests
         {
             if (frame.IsRemoteFrame && frame.ID == 0x700 + Slave && Interlocked.Exchange(ref _held, 1) == 0)
             {
+                if (FailureMode == 1) return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
+                if (FailureMode == 2) return new TxConfirmation { Confirmed = true, HostHandoffTimestamp = 0 };
+                TxConfirmation? sent = holdAfterTransmit ? await inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false) : null;
                 using (cancellationToken.Register(() => Cancelled.TrySetResult(true)))
                 {
                     Entered.TrySetResult(true);
                     await Release.Task.ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                 }
+                if (sent is { } confirmation) return confirmation;
             }
             return await inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
         }

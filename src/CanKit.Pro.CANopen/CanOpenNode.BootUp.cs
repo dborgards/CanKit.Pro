@@ -107,6 +107,7 @@ internal sealed partial class CanOpenNode
     private void CancelBootUp()
     {
         CancelNmtErrorRecovery();
+        ClearKeepAliveChecks();
         StopBootErrorControl();
         Array.Clear(_slaveErrorControlVerified, 0, _slaveErrorControlVerified.Length);
         Array.Clear(_slaveErrorControlFailed, 0, _slaveErrorControlFailed.Length);
@@ -187,8 +188,14 @@ internal sealed partial class CanOpenNode
             return;
         }
 
+        if (RequiresKeepAliveCheck(nodeId) && !_slaveKeepAliveChecked[nodeId])
+        {
+            if (!_slaveKeepAliveChecking[nodeId] && !_slaveKeepAliveFailed[nodeId]) BeginKeepAliveCheck(nodeId);
+            return;
+        }
+
         if (_slaveConfigurationFailed[nodeId]) return;
-        if (BootConfigurationEnabled && !_slaveConfigurationVerified[nodeId])
+        if (BootConfigurationEnabled && !_slaveInitiallyOperational[nodeId] && !_slaveConfigurationVerified[nodeId])
         {
             if (!_slaveConfigurationVerifying[nodeId]) BeginSlaveConfigurationVerification(nodeId);
             return;
@@ -197,6 +204,14 @@ internal sealed partial class CanOpenNode
         if (_slaveErrorControlFailed[nodeId]) return;
         if (BootErrorControlEnabled && !_slaveErrorControlVerified[nodeId]
             && !BeginSlaveErrorControl(nodeId)) return;
+
+        if (_slaveInitiallyOperational[nodeId])
+        {
+            _slaveStarted[nodeId] = true;
+            _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.InitiallyOperational);
+            FinishNmtErrorRecovery(nodeId);
+            return;
+        }
 
         // Once this boot requested Pre-operational for an update, a delayed Operational
         // announcement must not skip safety verification or the explicit final Start.
@@ -243,7 +258,7 @@ internal sealed partial class CanOpenNode
     {
         if (_bootHalted || _disposed != 0) return;
         if (HasUnseenMandatorySlave()) return;
-        if (HasUnverifiedMandatoryIdentity()) return;
+        if (HasUnverifiedMandatoryIdentity() || HasPendingMandatoryKeepAlive()) return;
         if (HasUnverifiedMandatoryConfiguration()) return;
         if (HasUnverifiedMandatoryErrorControl()) return;
 
@@ -307,7 +322,7 @@ internal sealed partial class CanOpenNode
             // Runtime episodes own a fresh per-peer deadline, including a latched failure.
             // The original initial-boot timer must still govern other unfinished peers.
             if (!_slaveNmtErrorRecovering[id] && IsMandatory(id)
-                && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id)))
+                && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id) || IsMandatoryKeepAlivePending(id)))
             {
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
@@ -349,6 +364,7 @@ internal sealed partial class CanOpenNode
     {
         _bootHalted = true;
         CancelNmtErrorRecovery();
+        ClearKeepAliveChecks();
         StopBootErrorControl();
         CancelActiveSlaveRetries();
         // One reaction per boot: a halt from a failed verification must not be followed by the
@@ -437,7 +453,7 @@ internal sealed partial class CanOpenNode
             // A later in-flight retry must not hold a mandatory slave's start moment.
             if (_slaveBootRetrying[id] && !IsMandatory(id)) continue;
             if (_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id]
-                || _slaveBootResetPending[id] || _slaveNmtErrorResetting[id] || _slaveBootHeartbeatWaits[id] is not null) return true;
+                || _slaveKeepAliveChecking[id] || _slaveBootResetPending[id] || _slaveNmtErrorResetting[id] || _slaveBootHeartbeatWaits[id] is not null) return true;
         }
         return false;
     }
@@ -458,7 +474,9 @@ internal sealed partial class CanOpenNode
             // that, the worker must still enqueue its command/arm its timer; after the
             // waiter completes it must resume before protocol time advances again.
             bool waitingForBootUp = _slaveConfigurationAwaitingBootUp[id] && !_slaveConfigurationBootUps[id]!.Completion.Task.IsCompleted;
-            if ((_slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id] || _slaveNmtErrorResetting[id]) && !active.Contains(id) && !waitingForBootUp) pending.Add(id);
+            bool waitingForGuard = _slaveKeepAliveProbes[id] is { Deadline: not null } probe && !probe.Completion.Task.IsCompleted;
+            bool keepAliveWorker = _slaveKeepAliveChecking[id] && !waitingForGuard;
+            if ((keepAliveWorker || _slaveVerifying[id] || _slaveIdentityVerifying[id] || _slaveConfigurationVerifying[id] || _slaveBootResetPending[id] || _slaveNmtErrorResetting[id]) && !active.Contains(id) && !waitingForBootUp) pending.Add(id);
         }
         return (pending.ToArray(), transfers.ToArray());
     }

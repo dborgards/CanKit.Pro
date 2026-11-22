@@ -14,7 +14,7 @@ internal sealed partial class CanOpenNode
     private readonly bool[] _slaveNmtErrorFailed = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly IDeadline?[] _slaveNmtErrorDeadlines = new IDeadline?[CanOpenCobId.MaxNodeId + 1];
 
-    private bool PeerBootCancellationEnabled => _options.EnableNmtErrorHandler || _options.EnableNmtBootupHandler;
+    private bool PeerBootCancellationEnabled => _options.EnableNmtErrorHandler || _options.EnableNmtBootupHandler || _options.EnableBootKeepAlive;
 
     private CancellationToken SlaveBootToken(byte nodeId)
     {
@@ -78,6 +78,11 @@ internal sealed partial class CanOpenNode
         _slaveNmtErrorFailed[nodeId] = false;
         _slaveStarted[nodeId] = false;
         _slaveSeen[nodeId] = false;
+        // A known reboot already proves that the peer was not kept Operational.
+        _slaveKeepAliveChecked[nodeId] = true;
+        _slaveInitiallyOperational[nodeId] = false;
+        _slaveKeepAliveChecking[nodeId] = false;
+        _slaveKeepAliveFailed[nodeId] = false;
         _slaveIdentityVerified[nodeId] = false;
         _slaveIdentityFailed[nodeId] = false;
         _slaveConfigurationVerified[nodeId] = false;
@@ -144,6 +149,7 @@ internal sealed partial class CanOpenNode
     {
         if (!_slaveNmtErrorRecovering[nodeId] || _slaveNmtErrorFailed[nodeId]) return;
         _slaveNmtErrorFailed[nodeId] = true;
+        _slaveKeepAliveChecking[nodeId] = false;
         _slaveNmtErrorResetting[nodeId] = false;
         _slaveNmtErrorDeadlines[nodeId]?.Dispose();
         _slaveNmtErrorDeadlines[nodeId] = null;

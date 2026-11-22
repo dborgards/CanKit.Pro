@@ -92,6 +92,18 @@ public sealed class CanOpenNodeOptions
     /// starts its new deadline when verification resumes. No extra NMT reset is sent.</remarks>
     public bool EnableNmtBootupHandler { get; init; }
 
+    /// <summary>Enable the CiA 302-2 §3.4/§3.6 keep-alive branch for boot-enabled slaves
+    /// with 1F81h bit 4. Default false. Includes error-control startup. Copies preserve it.</summary>
+    /// <remarks>After enabled identity checks, use a still-current heartbeat from local 1016h,
+    /// or request the state by guarding with a 100 ms response window. Operational peers skip
+    /// configuration and Start and finish as InitiallyOperational (status L) after error control.
+    /// Other states require confirmed Reset Communication and fresh boot-up before configuration.
+    /// SdoTimeout bounds that boot-up wait. Failures follow the mandatory/optional boot policy.
+    /// ActiveSlaveBootRetryInterval is still required to begin without an announcement.
+    /// Comparable positive host RX/TX timestamps are required. This is not a real-time guarantee
+    /// that reset reaches a guarding slave within its configured life time.</remarks>
+    public bool EnableBootKeepAlive { get; init; }
+
     /// <summary>
     /// Enable active slave boot with this positive delay between a failed attempt and its
     /// retry. Null (default) keeps announcement-based boot. One second is the CiA 302-2 §3.3
@@ -552,6 +564,7 @@ public sealed class CanOpenNodeOptions
             EnableBootErrorControl = EnableBootErrorControl,
             EnableNmtErrorHandler = EnableNmtErrorHandler,
             EnableNmtBootupHandler = EnableNmtBootupHandler,
+            EnableBootKeepAlive = EnableBootKeepAlive,
             RequireBootDeviceTypeUpload = RequireBootDeviceTypeUpload,
             EmitGuardingErrorEmcy = EmitGuardingErrorEmcy,
             EmitControllerErrorEmcy = EmitControllerErrorEmcy,

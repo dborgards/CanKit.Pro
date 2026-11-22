@@ -16,7 +16,7 @@ internal sealed partial class CanOpenNode
     private bool IsMandatoryConfigurationPending(byte nodeId)
         => BootConfigurationEnabled && IsMandatory(nodeId)
            && (ReadStartup() & NmtSuppressSlaveStartBit) == 0
-           && (Assignment(nodeId) & SlaveBootBit) != 0 && !_slaveConfigurationVerified[nodeId];
+           && (Assignment(nodeId) & SlaveBootBit) != 0 && !_slaveInitiallyOperational[nodeId] && !_slaveConfigurationVerified[nodeId];
 
     private bool HasUnverifiedMandatoryConfiguration()
     {

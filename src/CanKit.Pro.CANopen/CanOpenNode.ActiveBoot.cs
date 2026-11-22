@@ -107,6 +107,9 @@ internal sealed partial class CanOpenNode
         {
             // The actor skips disposed deadlines; cancelling the boot disposes every retry.
             _slaveBootRetries[nodeId] = null;
+            _slaveKeepAliveChecked[nodeId] = false;
+            _slaveKeepAliveFailed[nodeId] = false;
+            _slaveInitiallyOperational[nodeId] = false;
             _slaveIdentityFailed[nodeId] = false;
             _slaveIdentityVerified[nodeId] = false;
             _slaveConfigurationVerified[nodeId] = false;
