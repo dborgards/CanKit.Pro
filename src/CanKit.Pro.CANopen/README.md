@@ -2079,6 +2079,8 @@ must survive the same reset. Loss of the active master's heartbeat also requires
 Reset Communication before the warm election (CiA 302-2 §5.5.2). The standby waits for
 confirmation or actual reception of that reset; a rejected, cancelled or failed send does
 not start the election. Stop/Dispose invalidates its pending local reset continuation.
+After a failed master-loss reset, flying-master control frames remain blocked until an
+actual NMT reset or explicit restart; `StartFlyingMaster` begins a fresh cold-start attempt.
 The active master is who sends Reset Communication when
 it receives `0x076`. Winning then runs the boot-up below.
 

@@ -46,6 +46,7 @@ internal sealed partial class CanOpenNode
     private bool _suppressFlyingMasterStartup;
     private bool _confirmingActiveMaster;
     private bool _coldResetPending;
+    private bool _masterLossResetRequired;
     private bool _ignoreBroadcastResetEcho;
     private byte? _activeFlyingMasterNodeId;
     private ushort? _activeFlyingMasterPriority;
@@ -496,6 +497,7 @@ internal sealed partial class CanOpenNode
         _flyingMasterRole = FlyingMasterRole.Detecting;
         _activeFlyingMasterNodeId = null;
         _activeFlyingMasterPriority = null;
+        _masterLossResetRequired = true;
         BeginElectionReset();
         RaiseFlyingMaster(FlyingMasterSignal.ActiveMasterLost, lost, priority);
     }
@@ -538,6 +540,7 @@ internal sealed partial class CanOpenNode
         _confirmingActiveMaster = false;
         _coldResetPending = false;
         _ignoreBroadcastResetEcho = false;
+        _masterLossResetRequired = false;
         _flyingMasterRole = FlyingMasterRole.Inactive;
         _activeFlyingMasterNodeId = null;
         _activeFlyingMasterPriority = null;
@@ -546,9 +549,10 @@ internal sealed partial class CanOpenNode
 
     private void HandleFlyingMasterFrame(uint cobId, byte[] data)
     {
-        // The cold reset is already committed. A claim in this window must not move us to
-        // standby and then have the reset tear down the master we just accepted.
-        if (_coldResetPending) return;
+        // A committed reset must not tear down a newly accepted master. After a failed
+        // master-loss reset, control frames still cannot replace that required reset.
+        // A real NMT reset or an explicit stop/start clears the requirement via cleanup.
+        if (_coldResetPending || _masterLossResetRequired) return;
         // The caller only hands over the four flying-master COB-IDs. The last one is the else,
         // so the chain has no default the compiler would emit and nothing would take.
         if (cobId == CanOpenCobId.FlyingMasterClaim)

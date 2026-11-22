@@ -70,3 +70,29 @@ Der abschließende lokale Prüflauf bestand:
 
 Die net48-Laufzeitprüfung erfolgt zusätzlich in Windows CI. Die Tests verwenden den
 virtuellen CAN-Bus; Hardware-Interoperabilität wurde hier nicht gemessen.
+
+## Reviewkorrektur: Sperre nach fehlgeschlagenem Reset
+
+[Bugbot meldete](https://github.com/dborgards/CanKit.Pro/pull/595#discussion_r4658468295),
+dass das Löschen der Sendesperre nach einem fehlgeschlagenen Reset die normalen
+Wahltelegramm-Handler wieder freigab. Trigger, Force und Masteransprüche konnten so
+ohne den erforderlichen Reset einen anderen Wahlzustand herstellen.
+
+Acht kontrollierte Fälle scheiterten gegen `18eb142a`: vier Arten von Steuertelegrammen,
+jeweils mit tatsächlichem Reset beziehungsweise erneutem `StartFlyingMaster` als späterem
+Wiederanlauf. Der Masterverlust hält jetzt eine gesonderte Reset-Anforderung fest, die
+ein Sendefehler nicht löscht. Die Bereinigung bei tatsächlichem NMT-Reset oder explizitem
+Stop/Start gibt sie frei. Das verändert den bestehenden kalten oder erzwungenen Reset-Pfad
+nicht; die Sperre wird nur bei Masterverlust gesetzt.
+
+Die Wiederanlauffälle prüfen zusätzlich, dass ein späterer besserer Master wieder
+angenommen wird. Eine kompilierende Mutation, die das Löschen der neuen Sperre aus
+`StopFlyingMasterCore` entfernt, ließ alle acht Fälle an genau dieser Wiederfreigabe
+scheitern. Die Produktionsquelle wurde anschließend wiederhergestellt.
+
+Der erneute vollständige `net10.0`-Lauf bestand mit **5961 bestandenen Tests**, ohne
+Fehler oder übersprungene Fälle. Die erneute Cobertura-Auswertung gegen `d69bc7f9`
+erfasst **18/18 geänderte ausführbare Einträge** und **4/4 Zweigbedingungen**.
+Auch Release-Build mit `CI=true`, Formatprüfung, frisches Pack samt Validierung,
+net48-Kompilierung, Requirements-Traceability und strikter Dokumentationsbuild
+bestanden erneut nach der Reviewkorrektur.
