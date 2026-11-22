@@ -2614,5 +2614,5 @@ already establishes that the peer was not kept Operational and avoids another re
 This option preserves the existing flying-master election, including its cold-election
 broadcast reset. It does not implement software-version management or guarantee that
 a guarding peer receives Reset Communication within its remote life time. The
-[detailed scope record](../../docs/reviews/2026-11-22-ds302-keep-alive.md) distinguishes
+[detailed scope record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-22-ds302-keep-alive.md) distinguishes
 this increment from a full DS302 conformance claim.

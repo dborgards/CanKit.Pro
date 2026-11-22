@@ -48,8 +48,10 @@ public partial class CanOpenBootIdentityTests
             {
                 node.StopFlyingMaster();
                 await gate.Cancelled.Task.WaitAsync(ShortTimeout);
-                await UntilAsync(clock, rig.Witness, null, () => node.PeerSdoChannelIsFreeForTests(Slave), 20,
+                var channel = ConfigurationChannel(rig);
+                (await channel.WaitAsync(ShortTimeout)).Should().BeTrue(
                     "cancelled keep-alive releases the channel while TX is still held");
+                channel.Release();
             }
             gate.Release.TrySetResult(true);
             allowed.Dispose();
@@ -124,7 +126,11 @@ public partial class CanOpenBootIdentityTests
                         InvokeBoot(node, "ObserveKeepAliveState", (uint)(0x700 + Slave), new byte[] { 5 }, false, false, clock.GetTimestamp());
                 });
             }
-            await UntilAsync(clock, rig.Witness, null, () => Result(rig).Status == SlaveBootStatus.KeepAliveFailed, 20,
+            // The send may remain held, but the worker now owes a completion. Do not
+            // exempt it from the witness and advance protocol time while waiting for CPU.
+            allowed.Dispose();
+            await QuiesceAsync(rig.Witness, null);
+            Result(rig).Status.Should().Be(SlaveBootStatus.KeepAliveFailed,
                 "a failed or untimed transmission and bounded-buffer overflow cannot approve the peer");
             Result(rig).Error.Should().BeOfType<InvalidOperationException>();
             if (mode == 3) await gate.Cancelled.Task.WaitAsync(ShortTimeout);

@@ -99,21 +99,20 @@ internal sealed partial class CanOpenNode
     {
         _slaveKeepAliveChecking[id] = true;
         _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.CheckingKeepAlive);
-        byte? heartbeatState = null;
-        if (_bootHeartbeatConfiguration.TryGetValue(id, out var timeout))
+        bool useHeartbeat = _bootHeartbeatConfiguration.ContainsKey(id);
+        if (useHeartbeat)
         {
-            long arrival = _keepAliveHeartbeatArrival[id];
-            long now = _actor.TimeSource.GetTimestamp();
-            if (arrival <= 0 || arrival > now || now >= TickMath.DueAt(arrival, timeout, _actor.TimeSource.Frequency)
-                || _nodeGuardingConsumers.ContainsKey(id))
+            try
             {
-                CompleteKeepAliveCheck(id, 0, new TimeoutException("No current heartbeat for keep-alive."));
-                return;
+                if (ReadCurrentKeepAliveHeartbeat(id) == RequestOperational)
+                {
+                    CompleteKeepAliveCheck(id, RequestOperational, null);
+                    return;
+                }
             }
-            heartbeatState = _keepAliveHeartbeatState[id];
-            if (heartbeatState == RequestOperational)
+            catch (TimeoutException ex)
             {
-                CompleteKeepAliveCheck(id, RequestOperational, null);
+                CompleteKeepAliveCheck(id, 0, ex);
                 return;
             }
         }
@@ -130,7 +129,13 @@ internal sealed partial class CanOpenNode
                 // Serialize the optional reset with configuration/runtime reset listeners.
                 await channel.WaitAsync(token).ConfigureAwait(false);
                 held = true;
-                state = heartbeatState ?? await ProbeKeepAliveStateAsync(id, token).ConfigureAwait(false);
+                // A heartbeat may change or expire while another operation owns the channel.
+                // Re-read it on the actor after acquisition, before deciding to reset the peer.
+                state = useHeartbeat ? await _actor.PostAsync(() =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    return ReadCurrentKeepAliveHeartbeat(id);
+                }).ConfigureAwait(false) : await ProbeKeepAliveStateAsync(id, token).ConfigureAwait(false);
                 if (state != RequestOperational)
                 {
                     if (await _actor.PostAsync(() => _coldResetPending).ConfigureAwait(false)) state = 0;
@@ -152,6 +157,17 @@ internal sealed partial class CanOpenNode
             }
             catch (ObjectDisposedException) { return; }
         });
+    }
+
+    private byte ReadCurrentKeepAliveHeartbeat(byte id)
+    {
+        long arrival = _keepAliveHeartbeatArrival[id];
+        long now = _actor.TimeSource.GetTimestamp();
+        if (!_bootHeartbeatConfiguration.TryGetValue(id, out var timeout)
+            || arrival <= 0 || arrival > now || now >= TickMath.DueAt(arrival, timeout, _actor.TimeSource.Frequency)
+            || _nodeGuardingConsumers.ContainsKey(id))
+            throw new TimeoutException("No current heartbeat for keep-alive.");
+        return _keepAliveHeartbeatState[id];
     }
 
     private async Task<byte> ProbeKeepAliveStateAsync(byte id, CancellationToken token)
