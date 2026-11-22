@@ -429,13 +429,7 @@ internal sealed partial class CanOpenNode
     {
         if (_options.EnablePeriodicFlyingMasterForce)
         {
-            ArmActiveDetectCycle();
-            // A worker that misses this period must not send a stale force after the
-            // master stops, changes role or reconfigures the period. Coalesce held sends.
-            var period = _flyingMasterDeadline;
-            if (period is not null && _periodicForceSend.IsCompleted)
-                _periodicForceSend = SendControlFrame(CanOpenCobId.FlyingMasterForce, Array.Empty<byte>(),
-                    canTransmit: () => _disposed == 0 && _flyingMasterDeadline == period);
+            ArmActiveDetectCycle(sendForce: true);
             return;
         }
 
@@ -465,13 +459,22 @@ internal sealed partial class CanOpenNode
         BeginBootUp();
     }
 
-    private void ArmActiveDetectCycle()
+    private void ArmActiveDetectCycle(bool sendForce = false)
     {
         int cycle = ReadTiming(TimingDetectCycle);
-        if (cycle > 0)
-            ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
-        else
+        if (cycle == 0)
+        {
             CancelFlyingMasterDeadline();
+            return;
+        }
+        ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
+        if (!sendForce || !_periodicForceSend.IsCompleted) return;
+
+        // The next deadline identifies this period. Discard a worker still waiting to
+        // transmit when the period expires, is reconfigured, or this master steps down.
+        var period = _flyingMasterDeadline;
+        _periodicForceSend = SendControlFrame(CanOpenCobId.FlyingMasterForce, Array.Empty<byte>(),
+            _readerCts.Token, canTransmit: () => ReferenceEquals(_flyingMasterDeadline, period));
     }
 
     private void EnterStandby(ushort priority, byte nodeId)
