@@ -270,7 +270,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
     }
 
     [Fact]
-    public async Task Losing_The_Active_Masters_Heartbeat_Starts_A_Warm_Election()
+    public async Task Losing_The_Active_Masters_Heartbeat_Resets_Before_A_Warm_Election()
     {
         using var pair = OpenPair();
         var (clock, winner, standby, winnerWitness, standbyWitness, log) = pair;
@@ -298,7 +298,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
             "the standby claims the mastership when the winner's heartbeat times out");
 
         lost.Should().Contain(FlyingMasterSignal.ActiveMasterLost);
-        Resets(log).Should().Be(resets, "a warm election does not broadcast Reset Communication again");
+        Resets(log).Should().Be(resets + 1, "CiA 302-2 §5.5.2 requires broadcast Reset Communication before the new election");
         standby.ActiveFlyingMasterNodeId.Should().Be(RightId);
     }
 

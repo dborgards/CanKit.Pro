@@ -220,17 +220,25 @@ internal sealed partial class CanOpenNode
             // The echo applies the reset when it comes back; if the bus does not echo, the
             // confirmed send applies the same reset once. A rejected, thrown or unconfirmed
             // send leaves the network as it is and does not start the election.
-            _flyingMasterFromPowerOn = false;
-            _coldResetPending = true;
-            var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
-            System.Threading.Volatile.Write(ref _resetOutcome, sent.ContinueWith(
-                PostColdResetOutcome,
-                System.Threading.CancellationToken.None,
-                System.Threading.Tasks.TaskContinuationOptions.None,
-                System.Threading.Tasks.TaskScheduler.Default));
+            BeginElectionReset();
             return;
         }
         BeginNegotiation(transmitTrigger: true);
+    }
+
+    // Shared by power-on without a master (§3.7 d) and loss of its heartbeat (§5.5.2).
+    // Both require target zero, then the same confirmed-reset/warm-start handshake.
+    private void BeginElectionReset()
+    {
+        CancelFlyingMasterDeadline();
+        _flyingMasterFromPowerOn = false;
+        _coldResetPending = true;
+        var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
+        System.Threading.Volatile.Write(ref _resetOutcome, sent.ContinueWith(
+            PostColdResetOutcome,
+            System.Threading.CancellationToken.None,
+            System.Threading.Tasks.TaskContinuationOptions.None,
+            System.Threading.Tasks.TaskScheduler.Default));
     }
 
     private void PostColdResetOutcome(Task<bool> send) => PostResetOutcome(send, forced: false);
@@ -469,7 +477,7 @@ internal sealed partial class CanOpenNode
 
     /// <summary>
     /// Subscribes the flying master to the consumer module. A missed heartbeat from the master
-    /// this node is standing by for starts a warm election. The producer module is not involved.
+    /// this node is standing by for requests the broadcast reset that starts a warm election.
     /// </summary>
     private void AttachFlyingMasterHeartbeatWatch()
     {
@@ -482,8 +490,13 @@ internal sealed partial class CanOpenNode
         if (_activeFlyingMasterNodeId.GetValueOrDefault() != producerNodeId) return;
         byte lost = producerNodeId;
         ushort? priority = _activeFlyingMasterPriority;
-        _flyingMasterFromPowerOn = false;
-        BeginFlyingMaster();
+        // §5.5.2 requires Reset Communication to node zero before negotiating again.
+        // Leave Standby so repeated timeouts cannot enqueue another reset. No election
+        // deadline is armed until the confirmed send (or its actual echo) applies locally.
+        _flyingMasterRole = FlyingMasterRole.Detecting;
+        _activeFlyingMasterNodeId = null;
+        _activeFlyingMasterPriority = null;
+        BeginElectionReset();
         RaiseFlyingMaster(FlyingMasterSignal.ActiveMasterLost, lost, priority);
     }
 
