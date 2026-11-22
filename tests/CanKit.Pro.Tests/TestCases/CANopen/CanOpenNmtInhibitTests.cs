@@ -157,6 +157,7 @@ public partial class CanOpenPdoEngineTests
         await rig.Node.SendNmtCommandAsync(NmtCommand.Start, 1).WaitAsync(ShortTimeout);
         od.WriteUnsigned(NmtInhibit, 0, 65535);
         od.WriteUnsigned(0x1F82, 2, (byte)NmtState.Operational);
+        od.WriteUnsigned(0x1F82, 2, (byte)NmtState.Stopped);
         Settle(rig.Node);
         rig.Node.StopFlyingMaster();
         od.WriteUnsigned(NmtInhibit, 0, 0);

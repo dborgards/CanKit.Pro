@@ -37,54 +37,34 @@ internal sealed partial class CanOpenNode
     private Task<bool> QueueTimedNmt(byte[] payload, CancellationToken token, bool masterOwned)
     {
         var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var turnEnded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token, _readerCts.Token);
-        var previous = _nmtOrder;
-        _nmtOrder = turnEnded.Task;
-        _ = RunTimedNmt(previous, payload, masterOwned, lifetime, result, turnEnded);
+        var send = RunTimedNmt(_nmtOrder, payload, masterOwned, token, result);
+        _nmtOrder = send.ContinueWith(FinishNmt, result, CancellationToken.None,
+            TaskContinuationOptions.None, TaskScheduler.Default);
         return result.Task;
     }
 
-    private async Task RunTimedNmt(Task previous, byte[] payload, bool masterOwned, CancellationTokenSource lifetime,
-        TaskCompletionSource<bool> result, TaskCompletionSource<bool> turnEnded)
+    private async Task<bool> RunTimedNmt(Task previous, byte[] payload, bool masterOwned, CancellationToken caller,
+        TaskCompletionSource<bool> result)
     {
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(caller, _readerCts.Token);
         var token = lifetime.Token;
+        // A cancelled caller can leave immediately. Its queue position stays behind its
+        // predecessor so that a third command can never overtake an in-flight send.
+        using (token.Register(() => result.TrySetCanceled(token)))
+        {
+            await previous.ConfigureAwait(false);
+            await WaitForNmtInterval(token).ConfigureAwait(false);
+        }
+        token.ThrowIfCancellationRequested();
         try
         {
-            // A cancelled caller can leave immediately. Its queue position stays behind its
-            // predecessor so that a third command can never overtake an in-flight send.
-            using (token.Register(() => result.TrySetCanceled(token)))
-            {
-                await previous.ConfigureAwait(false);
-                await WaitForNmtInterval(token).ConfigureAwait(false);
-            }
-            token.ThrowIfCancellationRequested();
-            bool confirmed;
-            try
-            {
-                var send = masterOwned ? SendNmtReporting(payload, token)
-                    : SendControlFrame(CanOpenCobId.NmtCommand, payload, token);
-                confirmed = await send.ConfigureAwait(false);
-            }
-            finally
-            {
-                lock (_nmtTimingLock) _lastNmtCompletion = _actor.TimeSource.GetTimestamp();
-            }
-            result.TrySetResult(confirmed);
-        }
-        catch (OperationCanceledException)
-        {
-            result.TrySetCanceled(token);
-        }
-        catch (Exception ex)
-        {
-            RaiseBackgroundException(ex);
-            result.TrySetResult(false);
+            var send = masterOwned ? SendNmtReporting(payload, token)
+                : SendControlFrame(CanOpenCobId.NmtCommand, payload, token);
+            return await send.ConfigureAwait(false);
         }
         finally
         {
-            lifetime.Dispose();
-            turnEnded.TrySetResult(true);
+            lock (_nmtTimingLock) _lastNmtCompletion = _actor.TimeSource.GetTimestamp();
         }
     }
 
