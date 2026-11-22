@@ -88,4 +88,6 @@ public enum FlyingMasterSignal
     SlaveErrorControlEvent,
     /// <summary>Runtime reset/boot-up recovery failed; its boot snapshot carries the cause.</summary>
     SlaveErrorRecoveryFailed,
+    /// <summary>The opted-in active master received a valid boot-up from a peer. Delivery is asynchronous.</summary>
+    SlaveBootupReceived,
 }

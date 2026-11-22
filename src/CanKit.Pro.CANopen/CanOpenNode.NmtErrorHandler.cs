@@ -14,10 +14,12 @@ internal sealed partial class CanOpenNode
     private readonly bool[] _slaveNmtErrorFailed = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly IDeadline?[] _slaveNmtErrorDeadlines = new IDeadline?[CanOpenCobId.MaxNodeId + 1];
 
+    private bool PeerBootCancellationEnabled => _options.EnableNmtErrorHandler || _options.EnableNmtBootupHandler;
+
     private CancellationToken SlaveBootToken(byte nodeId)
     {
         var parent = (_slaveVerificationCts ??= new CancellationTokenSource()).Token;
-        if (!_options.EnableNmtErrorHandler) return parent;
+        if (!PeerBootCancellationEnabled) return parent;
         return (_slaveNmtErrorTokens[nodeId] ??= CancellationTokenSource.CreateLinkedTokenSource(parent)).Token;
     }
 
@@ -50,11 +52,30 @@ internal sealed partial class CanOpenNode
             return;
         }
 
+        RestartSlaveBootChecks(nodeId, recovering: true);
+        _slaveNmtErrorResetting[nodeId] = true;
+        _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.ErrorControlReactionRequested);
+        var token = SlaveBootToken(nodeId);
+        ArmPeerRecoveryDeadline(nodeId);
+        _ = ResetAfterNmtErrorAsync(nodeId, generation, bootSlave, token);
+    }
+
+    // Shared by runtime errors and observed peer boot-ups. Other peers retain their tokens.
+    private void RestartSlaveBootChecks(byte nodeId, bool recovering)
+    {
+        FinishNmtErrorRecovery(nodeId);
         _slaveNmtErrorTokens[nodeId]?.Cancel();
         _slaveNmtErrorTokens[nodeId]?.Dispose();
         _slaveNmtErrorTokens[nodeId] = null;
-        _slaveNmtErrorRecovering[nodeId] = true;
-        _slaveNmtErrorResetting[nodeId] = true;
+        _slaveBootRetries[nodeId]?.Dispose();
+        _slaveBootRetries[nodeId] = null;
+        _slaveBootResetPending[nodeId] = false;
+        _slaveIdentityVerifying[nodeId] = false;
+        _slaveConfigurationVerifying[nodeId] = false;
+        _slaveVerifying[nodeId] = false;
+        _slaveNmtErrorRecovering[nodeId] = recovering;
+        _slaveNmtErrorResetting[nodeId] = false;
+        _slaveNmtErrorFailed[nodeId] = false;
         _slaveStarted[nodeId] = false;
         _slaveSeen[nodeId] = false;
         _slaveIdentityVerified[nodeId] = false;
@@ -65,16 +86,17 @@ internal sealed partial class CanOpenNode
         _slaveErrorControlVerified[nodeId] = false;
         _slaveErrorControlFailed[nodeId] = false;
         _slaveVerified[nodeId] = false;
-        _slaveBootResetConfirmed[nodeId] = true; // Reset Node replaces Reset Communication.
+        _slaveBootResetConfirmed[nodeId] = true; // The peer reboot replaces an additional Reset Communication.
         EndBootHeartbeatWait(nodeId);
         StopOwnedBootGuarding(nodeId);
-        _slaveBootResults[nodeId] = new SlaveBootResult(nodeId, SlaveBootStatus.ErrorControlReactionRequested);
-        var token = SlaveBootToken(nodeId);
+    }
+
+    private void ArmPeerRecoveryDeadline(byte nodeId)
+    {
         uint bootMs = _od.ReadUnsigned(Co.BootTime, 0);
         if (bootMs != 0)
             _slaveNmtErrorDeadlines[nodeId] = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs),
                 () => FailNmtErrorRecovery(nodeId, new TimeoutException("The error-recovery boot deadline expired.")));
-        _ = ResetAfterNmtErrorAsync(nodeId, generation, bootSlave, token);
     }
 
     private async Task ResetAfterNmtErrorAsync(byte nodeId, int generation, bool bootSlave, CancellationToken token)

@@ -43,13 +43,13 @@ internal sealed partial class CanOpenNode
                 || (result.Status == SlaveBootStatus.ConfigurationVerified && plan.Incomplete)))
                 result = await DownloadSlaveConfigurationAsync(nodeId, plan, restore, token).ConfigureAwait(false);
             if (token.IsCancellationRequested) return;
-            PostSlaveConfigurationResult(nodeId, generation, result);
+            PostSlaveConfigurationResult(nodeId, generation, result, token);
         });
     }
 
-    private void PostSlaveConfigurationResult(byte nodeId, int generation, SlaveBootResult result)
+    private void PostSlaveConfigurationResult(byte nodeId, int generation, SlaveBootResult result, CancellationToken token)
     {
-        try { _actor.Post(() => OnSlaveConfigurationVerified(nodeId, generation, result)); }
+        try { _actor.Post(() => { if (!token.IsCancellationRequested) OnSlaveConfigurationVerified(nodeId, generation, result); }); }
         catch (ObjectDisposedException)
         {
             // Dispose can close the mailbox after the worker's cancellation check.

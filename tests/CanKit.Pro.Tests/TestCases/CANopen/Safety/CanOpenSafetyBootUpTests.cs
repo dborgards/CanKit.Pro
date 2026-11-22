@@ -886,14 +886,14 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         rig.Node.State.Should().NotBe(NmtState.Operational);
     }
 
-    private static (MasterRig Rig, SafetyBootGate Gate) OpenGatedMaster()
+    private static (MasterRig Rig, SafetyBootGate Gate) OpenGatedMaster(CanOpenNodeOptions? options = null)
     {
         var session = NewSession();
         var nodeBus = Open(session, 0);
         var peer = Open(session, 1);
         var clock = new ManualTimeSource();
         var gate = new SafetyBootGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock));
-        var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var node = new CanOpenNode(gate, LeftId, options ?? new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
         return (new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations), new FrameLog(nodeBus, peer), peer, nodeBus), gate);
     }
 
@@ -1017,6 +1017,77 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
                 && data[0] == (byte)NmtCommand.ResetCommunication && data[1] == 0;
         }
     }
+
+    [Fact]
+    public void A_Queued_Safety_Result_After_Disposal_Is_Ignored()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableNmtBootupHandler = true });
+        var verified = Enum.Parse(typeof(CanOpenNode).GetNestedType("SlaveVerification", BindingFlags.NonPublic)!, "Verified");
+        rig.Node.Dispose();
+        Action post = () => typeof(CanOpenNode).GetMethod("PostSlaveSafetyResult", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(rig.Node, new object?[] { Slave, 0, verified, null, CancellationToken.None });
+        post.Should().NotThrow();
+        Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Bootup_Discards_A_Queued_Safety_Result_From_The_Previous_Attempt()
+    {
+        var (rig, gate) = OpenGatedMaster(new CanOpenNodeOptions { EnableNmtBootupHandler = true });
+        using var ownedRig = rig;
+        using var slave = OpenSlave(rig, validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        gate.HoldSdo = true;
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => gate.SdoHeld >= 1, 2000, "first safety attempt is pending");
+        void Invoke(string method, params object?[] args) => typeof(CanOpenNode)
+            .GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(rig.Node, args);
+        var verified = Enum.Parse(typeof(CanOpenNode).GetNestedType("SlaveVerification", BindingFlags.NonPublic)!, "Verified");
+        await rig.Node.PostToActorAsync(() =>
+        {
+            var token = ((CancellationTokenSource?[])Field(rig.Node, "_slaveNmtErrorTokens"))[Slave]!.Token;
+            int generation = (int)Field(rig.Node, "_bootGeneration");
+            Invoke("PostSlaveSafetyResult", Slave, generation, verified, null, token);
+            Invoke("ObserveNmtBootup", (uint)(0x700 + Slave), new byte[] { 0 }, false, false);
+            Invoke("NoteSlaveNmtState", Slave, (byte)0);
+        });
+        await SettleUntilAsync(rig, () => gate.SdoHeld >= 2, "fresh safety attempt is pending");
+        Logged(rig, NmtCommand.Start, Slave).Should().BeFalse();
+        SlaveFlag(rig.Node, "_slaveVerifying").Should().BeTrue();
+        gate.ReleaseSdo(0, transmit: false);
+        gate.HoldSdo = false;
+        gate.ReleaseSdo(1, transmit: true);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.Start, Slave), 500, "only the fresh result permits Start");
+    }
+
+    [Fact]
+    public async Task Bootup_Repeats_Safety_Verification()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableNmtBootupHandler = true });
+        using var slave = OpenSlave(rig, validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
+        rig.Node.AddHeartbeatConsumer(Slave, TimeSpan.FromMilliseconds(100));
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.GetSlaveBootResults().Any(r => r.NodeId == Slave && r.Status == SlaveBootStatus.WaitingForErrorControl),
+            2000, "initial heartbeat gate is ready");
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.Start, Slave), 300, "initial safety check passes");
+        rig.Log.Clear();
+        TransmitHeartbeat(rig.Peer, Slave, 0);
+        await QuiesceAsync(rig.Witness, null);
+        Logged(rig, NmtCommand.ResetNode, Slave).Should().BeFalse();
+        rig.Node.GetSlaveBootResults().Single(r => r.NodeId == Slave).Status.Should().Be(SlaveBootStatus.WaitingForErrorControl);
+        TransmitHeartbeat(rig.Peer, Slave, 0x7F);
+        await QuiesceAsync(rig.Witness, null);
+        SdoRequests(rig).Should().BeGreaterThan(0, "the previous safety verification cannot approve the rebooted device");
+        Logged(rig, NmtCommand.Start, Slave).Should().BeTrue();
+    }
+
     [Fact]
     public async Task Runtime_Error_Recovery_Repeats_Safety_Verification()
     {

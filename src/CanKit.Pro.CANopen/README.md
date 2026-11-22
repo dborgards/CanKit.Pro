@@ -113,6 +113,7 @@ maintainer decision does.
 | FR-CO-067 | Opt-in configuration date/time verification against `1020h` before automatic Start ([Boot-up](#boot-up)) |
 | FR-CO-070 | Opt-in heartbeat/guarding startup before automatic Start ([Boot error control](#boot-error-control-fr-co-070)) |
 | FR-CO-071 | Opt-in runtime NMT error reactions and per-peer recovery ([NMT error handler](#runtime-nmt-error-handler-fr-co-071)) |
+| FR-CO-072 | Opt-in peer boot-up handling and fresh verification ([Boot-up handler](#boot-up-handler-fr-co-072)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -2243,7 +2244,7 @@ addressed to its own node-id, and a broadcast reset or stop does not take the ma
 (including the echo of a reset it sent itself).
 
 The upper bytes of each `1F81h` entry carry retry factor (byte 1) and guard time in milliseconds
-(bytes 2–3). They start guarding with `EnableBootErrorControl` or `EnableNmtErrorHandler`; ordinary heartbeat
+(bytes 2–3). They start guarding with `EnableBootErrorControl`, `EnableNmtErrorHandler` or `EnableNmtBootupHandler`; ordinary heartbeat
 configuration remains available independently.
 
 Heartbeats, including the boot-up byte `0x00`, update `1F82h` at that node-id. Reading `1F82h`
@@ -2305,7 +2306,7 @@ timeouts. It defaults to false, survives option copies and includes the boot err
 stage above. Identity and configuration options remain independent. This increment handles
 assigned slaves after their automatic boot gates have passed, plus application-owned slaves
 (boot bit 2 clear or automatic starts suppressed). Errors during initial automatic boot retain
-their existing policy; the independent §4.3 boot-up handler is not included.
+their existing policy; the independent §4.3 boot-up handler requires the separate option below.
 
 For a mandatory slave, `1F80h` bit 6 requests **broadcast Stop** (target 0); otherwise bit 4
 requests **broadcast Reset Node**. Stop takes precedence. Both halt automatic boot until a
@@ -2321,7 +2322,7 @@ The original initial-boot deadline continues to govern other unfinished peers, b
 truncate an active or latched runtime recovery.
 Duplicate events coalesce while recovery is running. Reset/boot-up failure or deadline expiry
 reports `ErrorRecoveryFailed` and `SlaveErrorRecoveryFailed` and stays latched until a new boot,
-relevant configuration edit or role cycle; subsequent gate failures use the existing boot
+relevant configuration edit or role cycle (or a fresh boot-up with `EnableNmtBootupHandler`); subsequent gate failures use the existing boot
 policy. Cancellation also invalidates that peer's previously queued automatic Start.
 
 `HeartbeatTimeout`/`NodeGuardingTimeout` and the new `SlaveErrorControlEvent` indication are
@@ -2329,6 +2330,32 @@ queued before the reaction is requested. Public event delivery remains asynchron
 not a veto barrier. `ErrorControlReactionRequested` is the boot snapshot while requesting the
 reaction. No remote monitoring-object writes or automatic restart after a broadcast reaction
 are added. See the [scope and validation record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-21-ds302-nmt-error-handler.md).
+
+### Boot-up handler (FR-CO-072)
+
+`EnableNmtBootupHandler = true` independently opts into CiA 302-2 §4.3. It defaults to
+false, survives option copies and includes the boot error-control stage. It does not enable
+runtime timeout reactions or additional identity/configuration options. While the master is
+active, a valid peer boot-up (standard classical data frame, one zero byte on 700h + node ID)
+queues `FlyingMasterSignal.SlaveBootupReceived`, including for unassigned peers. The local
+node is excluded. Public delivery is asynchronous and is not a veto barrier.
+
+An assigned peer restarts its enabled identity, configuration/download, error-control and
+safety gates, followed by individual Start. Only that peer's old approvals, workers, retry and
+queued Start are invalidated. No additional Reset is sent just because a boot-up arrived.
+An unassigned peer is only reported; 1F81h bit 2 clear or suppressed slave startup prevents
+configuration and Start. An expected boot-up in an existing reset/restore handshake still
+belongs to that handshake, including its TX confirmation and freshness checks.
+
+Repeated initial boot-ups retain the original 1F89h boot deadline. A peer that already
+completed boot, or is in runtime recovery, receives a fresh per-peer 1F89h deadline; zero
+disables that deadline. A fresh boot-up can release a latched peer recovery failure, but
+cannot clear a network-wide boot halt. Repeated boot-ups restart the peer attempt. A held
+master reset retains the announcement and resumes fresh checks if the reset is abandoned;
+the new peer deadline starts when those checks can resume.
+Role loss, reassignment and disposal cancel obsolete work.
+
+See the [scope and validation record](https://github.com/dborgards/CanKit.Pro/blob/main/docs/reviews/2026-11-22-ds302-bootup-handler.md).
 
 ## Quick start
 
