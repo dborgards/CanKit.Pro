@@ -125,8 +125,8 @@ public partial class CanOpenBootIdentityTests
             cancellation == 1 ? new object[] { (ushort)0, (byte)2 } : Array.Empty<object>()));
         if (cancellation != 3) await rig.Node.PostToActorAsync(() => { });
         gate.Release();
-        try { await queue.WaitAsync(ShortTimeout); }
-        catch (OperationCanceledException) { }
+        Func<Task> finishOldQueue = async () => await queue.WaitAsync(ShortTimeout);
+        await finishOldQueue.Should().ThrowAsync<OperationCanceledException>();
         if (cancellation != 3) await QuiesceAsync(rig.Witness, null);
         rig.Log.Snapshot().Should().NotContain(f => f.Id == 0 && f.Data.Length == 2
             && f.Data[0] == (byte)NmtCommand.ResetCommunication && f.Data[1] > 1);

@@ -84,5 +84,19 @@ Formatprüfung, frisches Pack samt Validierung, net48-Kompilierung, Requirements
 Traceability sowie generierte API-Dokumentation und `mkdocs build --strict`
 bestanden ebenfalls. Die net48-Laufzeitprüfung erfolgt zusätzlich in Windows CI.
 
+## Reviewkorrektur: Abbruch ausdrücklich prüfen
+
+[CodeQL meldete](https://github.com/dborgards/CanKit.Pro/pull/596#discussion_r4658690551)
+den leeren `catch` im Abbruchtest. Statt eine `OperationCanceledException` nur zu
+akzeptieren, verlangt der Test sie jetzt ausdrücklich von der alten Warteschlange.
+Damit ist auch ein unerwartet normaler Abschluss ein Testfehler. Alle vier Fälle
+bestanden mit dieser stärkeren Assertion; die Produktionslogik blieb unverändert.
+Die erneut kompilierte Mutation ohne Boot-Token ließ nun alle vier Fälle scheitern,
+auch Dispose: Die Transportsperre allein ersetzt keinen Abbruch der alten Queue.
+Anschließend wurde die Produktionsquelle wiederhergestellt.
+Alle oben aufgeführten lokalen Gates bestanden erneut nach der Reviewkorrektur;
+Testanzahl und vollständige Abdeckung der geänderten Produktionszeilen und
+Zweigbedingungen blieben unverändert.
+
 Die Tests verwenden den virtuellen CAN-Bus. Hardware-Interoperabilität und
 vollständige CiA-302-Konformität werden nicht behauptet.
