@@ -64,8 +64,9 @@ internal sealed partial class CanOpenNode
     /// <summary>
     /// Takes the network list. Runs only while this node is the active master, and again when
     /// <c>1F80h</c>, <c>1F81h</c> or <c>1F89h</c> change in that role. A slave that is not
-    /// keep-alive is reset individually. A broadcast Reset is not used: the cold election
-    /// already broadcast one, and the active master does not apply a broadcast reset to itself.
+    /// keep-alive is reset individually. The pass also includes unlisted node IDs (§3.1 d),
+    /// excludes this master and preserves keep-alive entries. It is separate from the
+    /// broadcast reset required by the cold election or recovery after master loss.
     /// </summary>
     private void BeginBootUp()
     {
@@ -80,9 +81,10 @@ internal sealed partial class CanOpenNode
         {
             for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
             {
-                if (!IsAssignedSlave(id) || KeepsAlive(id)) continue;
+                if (id == _nodeId || KeepsAlive(id)) continue;
                 if (CanActivelyBootSlave(id)) BeginActiveSlaveReset(id);
-                else SendNmt(NmtCommand.ResetCommunication, id);
+                else _ = EnqueueNmt(NmtCommand.ResetCommunication, id,
+                    (_slaveVerificationCts ??= new CancellationTokenSource()).Token);
             }
         }
 

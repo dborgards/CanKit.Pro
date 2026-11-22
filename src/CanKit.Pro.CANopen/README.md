@@ -2106,6 +2106,20 @@ Sub-index 0 is constant 127. Each other sub-index is the node-id, an UNSIGNED32:
 | 3 | Mandatory. The master does not finish boot-up until this slave has been seen. |
 | 4 | Keep-alive. The initial per-slave Reset Communication is skipped. With `EnableBootKeepAlive`, a verified non-Operational state subsequently requires Reset Communication. |
 
+The initial individual Reset Communication pass includes all node IDs 1–127, even
+entries outside the assigned slave list, excluding the master itself and bit-4
+keep-alive entries. This makes unconfigured devices announce themselves on warm
+takeover as well. Unassigned devices are not automatically configured or started;
+`EnableNmtBootupHandler` reports their boot-up to the application. Queued resets
+for unassigned targets and announcement-based slave boot belong to the current boot
+and are cancelled on role loss, halt or restart.
+An adapter-held frame may already be beyond cancellation. Start commands remain
+ordered behind the reset pass. Existing confirmed-reset/retry gates for actively
+booted slaves are retained; transport failures for unassigned targets are reported
+through `BackgroundExceptionOccurred`, without creating an assigned-slave result.
+The conservative individual path remains separate from the mandatory election
+broadcasts. `1F80h` bit 3 suppresses this startup reset pass as before.
+
 Bits 8–31 hold the guard time and life time. They are stored. Heartbeat is preferred, and
 node guarding is not started from them. Automatic configuration download during boot is not
 implemented; explicit [concise-DCF download](#concise-dcf-download) is available separately.
