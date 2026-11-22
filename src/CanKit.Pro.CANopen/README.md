@@ -106,6 +106,7 @@ architecture or maintainer decision behind each one.
 | FR-CO-071 | Opt-in runtime NMT error reactions and per-peer recovery ([NMT error handler](#runtime-nmt-error-handler-fr-co-071)) |
 | FR-CO-072 | Opt-in peer boot-up handling and fresh verification ([Boot-up handler](#boot-up-handler-fr-co-072)) |
 | FR-CO-073 | Opt-in keep-alive state check ([Keep-alive boot branch](#keep-alive-boot-branch-fr-co-073)) |
+| FR-CO-074 | Configurable minimum interval between NMT commands ([NMT inhibit time](#nmt-inhibit-time)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -2011,6 +2012,16 @@ the network is acceptable, turn `RequireListenOnly` off.
 The single-dominant-bit timing of §5.2.2, the external AND/OR-gate variant of §5.2.4 for
 controllers without a listen-only mode, and the default fallback bit rate of §5.1 are not built;
 see [Not built](#not-built-and-why).
+
+## NMT inhibit time
+
+Set `EnableNmtInhibit = true` to expose `102Ah:00` as a writable UNSIGNED16.
+For example, writing 10 sets a minimum interval of 1 ms between NMT commands
+on CAN-ID zero. The default value of zero disables the delay. The public
+`SendNmtCommandAsync` method, writes to `1F82h`, and the boot manager share a
+FIFO. The node measures the interval from completion of the preceding send
+attempt, including adapter confirmation. Editing the interval or restoring a
+stored value during reset also updates a command already waiting for its turn.
 
 ## Flying master
 

@@ -611,6 +611,7 @@ internal sealed partial class CanOpenNode
             RememberOne(Co.FlyingMasterTiming, sub);
         // The cold Reset Communication would otherwise drop the network list and the boot
         // timeout, and the master that just won would start nobody.
+        if (_options.EnableNmtInhibit) RememberOne(Co.NmtInhibit, 0);
         RememberOne(Co.BootTime, 0x00);
         if (BootErrorControlEnabled)
         {

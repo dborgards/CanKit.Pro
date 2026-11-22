@@ -75,6 +75,7 @@ internal sealed partial class CanOpenNode
         public const ushort ErrorBehavior = 0x1029;
         public const ushort Identity = 0x1018;
         public const ushort SdoServer = 0x1200;
+        public const ushort NmtInhibit = 0x102A;
         public const ushort NmtStartup = 0x1F80;
         public const ushort SlaveAssignment = 0x1F81;
         public const ushort RequestNmt = 0x1F82;
@@ -185,6 +186,7 @@ internal sealed partial class CanOpenNode
         // heartbeat is the keep-alive this node runs, and node guarding is not started from
         // those bytes. The suppress bits of 1F80h follow the node's profile: a device leaves
         // self-start and slave-start allowed, a tool suppresses both.
+        if (_options.EnableNmtInhibit) _od.AddU16(Co.NmtInhibit, 0, 0, rw, nm);
         _od.AddU32(Co.NmtStartup, 0x00, DefaultNmtStartup(), rw, nm);
         _od.AddU8(Co.SlaveAssignment, 0x00, CanOpenCobId.MaxNodeId, ro, nm);
         for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
@@ -301,6 +303,7 @@ internal sealed partial class CanOpenNode
     /// rather than re-declares.</summary>
     private bool IsManagedCommunicationObject(ushort index) => index switch
     {
+        Co.NmtInhibit => _options.EnableNmtInhibit,
         Co.EmcyInhibitTime => _options.EnableEmcyInhibit,
         Co.ErrorBehavior => _options.EnableErrorBehavior,
         Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime => BootConfigurationEnabled,
@@ -651,6 +654,12 @@ internal sealed partial class CanOpenNode
         // §5.4 runs the same check once, after everything stored is back (RestoreValues).
         if (!_restoringValues && index == Co.SrdoConfigurationValid)
             VerifyConfigurationValidAndTakeImage();
+        // Public NMT senders can run on the writing thread before another actor turn.
+        if (index == Co.NmtInhibit)
+        {
+            ApplyNmtInhibit();
+            return;
+        }
         RunOnActor(() => ApplyCommunicationObject(index, subindex));
     }
 

@@ -405,6 +405,7 @@ internal sealed partial class CanOpenNode
         {
             case Co.ErrorBehavior when _options.EnableErrorBehavior:
                 return ApplyErrorBehaviorDescription(entries, findings);
+            case Co.NmtInhibit when _options.EnableNmtInhibit:
             case Co.EmcyInhibitTime when _options.EnableEmcyInhibit:
                 return ApplyManagedVariable(index, entries, findings);
             case Co.SdoServer:

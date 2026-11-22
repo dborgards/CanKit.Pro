@@ -157,6 +157,10 @@ public sealed class CanOpenNodeOptions
     /// Stopped pauses a queued transmission until communication resumes.</remarks>
     public bool EnableEmcyInhibit { get; init; }
 
+    /// <summary>Enable the CiA 302-2 NMT inhibit time (102Ah:00). Application and boot-manager
+    /// commands on CAN-ID zero share a FIFO. The initial interval is zero.</summary>
+    public bool EnableNmtInhibit { get; init; }
+
     /// <summary>
     /// Emit optional <c>8130h</c> EMCYs for heartbeat-consumer timeouts and this node's life-
     /// guarding timeout. Defaults to <see langword="false"/>; timeout events remain available
@@ -571,6 +575,7 @@ public sealed class CanOpenNodeOptions
             EmitBusOffRecoveryEmcy = EmitBusOffRecoveryEmcy,
             EmitControllerOverrunEmcy = EmitControllerOverrunEmcy,
             EnableEmcyInhibit = EnableEmcyInhibit,
+            EnableNmtInhibit = EnableNmtInhibit,
             EnableErrorBehavior = enableErrorBehavior ?? EnableErrorBehavior,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,

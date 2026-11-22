@@ -48,7 +48,7 @@ public partial class CanOpenBootIdentityTests
         rig.Node.GetSlaveBootResults().Should().NotContain(r => r.NodeId == 1 || r.NodeId == LeftId);
     }
 
-    private static MasterRig OpenUnlistedResetMaster(out CanOpenFlyingMasterTests.ColdResetGate gate)
+    private static MasterRig OpenUnlistedResetMaster(out CanOpenFlyingMasterTests.ColdResetGate gate, bool inhibit = false)
     {
         var session = NewSession();
         var bus = Open(session, 0);
@@ -56,7 +56,7 @@ public partial class CanOpenBootIdentityTests
         var clock = new ManualTimeSource();
         gate = new CanOpenFlyingMasterTests.ColdResetGate(new ClockedCanBusService(bus, clock, sendGate: clock))
         { ResetTarget = 1 };
-        var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions { EnableNmtInhibit = inhibit }, ownsService: true, timeSource: clock);
         return new MasterRig(clock, node, new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations),
             new FrameLog(bus, peer), peer, bus);
     }
@@ -133,12 +133,15 @@ public partial class CanOpenBootIdentityTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(2)]
-    public async Task Failed_Unlisted_Reset_Does_Not_Create_A_Slave_Result_Or_Break_The_Queue(int failure)
+    [InlineData(0, false)]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    [InlineData(2, true)]
+    public async Task Failed_Unlisted_Reset_Does_Not_Create_A_Slave_Result_Or_Break_The_Queue(int failure, bool inhibit)
     {
-        using var rig = OpenUnlistedResetMaster(out var gate);
+        using var rig = OpenUnlistedResetMaster(out var gate, inhibit);
         Configure(rig);
         gate.Reject = failure == 0;
         gate.Cancel = failure == 1;

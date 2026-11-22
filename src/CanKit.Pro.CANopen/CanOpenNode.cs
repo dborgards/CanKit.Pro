@@ -348,6 +348,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             throw;
         }
 
+        ApplyNmtInhibit();
+
         // Enter Pre-Operational immediately and announce a bootup on the wire. Bootup is a
         // one-shot 1-byte frame with data[0] == 0 on COB-ID 0x700 + nodeId
         // (CiA 301 §7.2.8.3.2). We do it here at construction so tests can observe it.
@@ -388,7 +390,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         ThrowIfDisposed();
         var payload = new byte[] { (byte)command, targetNodeId };
-        return SendControlFrame(CanOpenCobId.NmtCommand, payload, cancellationToken);
+        if (!_options.EnableNmtInhibit) return SendControlFrame(CanOpenCobId.NmtCommand, payload, cancellationToken);
+        // Admit application requests in the same actor order as local 1F82h writes.
+        if (_actor.IsOnCurrentActor) return QueueTimedNmt(payload, cancellationToken, masterOwned: false);
+        return _actor.PostAsync(() => QueueTimedNmt(payload, cancellationToken, masterOwned: false), cancellationToken).Unwrap();
     }
 
     /// <inheritdoc />
