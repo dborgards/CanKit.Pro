@@ -346,7 +346,7 @@ flowchart TB
 | L1 Raw-CAN-Kern | vorhanden | Herstellerneutraler Frame-Zugriff, Discovery, Utilities, Diagnostics. | `ICanBus`, `CanBus.Open`, `CanRegistry` | `FR-RAW-*` |
 | L2 Raw-CAN-Dienste | vorhanden (`CanKit.Pro.RawCan`, `.Actor`, `.Addressing`, `.Reliability`) | Ein RX-Strom → N unabhängige gefilterte Consumer; Ownership-Vertrag (upstream); TX-Confirm; Aktor-Modell. | `ICanBusService` / `ISubscription` | `FR-RAW-DEMUX-*`, `FR-RAW-OWN-*`, `FR-RAW-TXC-*` |
 | L3 Transport | vorhanden (`CanKit.Pro.IsoTp`, `CanKit.Pro.J1939Tp`) | Segmentierung/Reassemblierung (ISO-TP), Sessions (J1939-TP). | `IIsoTpChannel`, `IJ1939TpChannel` | `FR-TP-*` |
-| L4 Anwendungsprotokolle | vorhanden (`CanKit.Pro.Uds`, `.CANopen`, `.J1939`) | Diagnose-/Applikationssemantik auf L3/L2. CANopen bündelt im einen Paket Gerät (CiA 301, FR-CO-001..028, 052..057), Master/Tool (Peer-SDO, fremde PDOs, Flying Master und Boot-up nach CiA 302-2, Discovery; FR-CO-029..034), Safety (CiA 304/319, `SrdoEngine`, ADR-12; FR-CO-035..046, 051, 058..059) und LSS (CiA 305/801, ADR-13; FR-CO-047..050). | `UdsClient`, `ICanOpenNode`, `CanOpenLss`, `J1939Node` | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*` |
+| L4 Anwendungsprotokolle | vorhanden (`CanKit.Pro.Uds`, `.CANopen`, `.J1939`) | Diagnose-/Applikationssemantik auf L3/L2. CANopen bündelt im einen Paket Gerät (CiA 301), Master/Tool (Peer-SDO, fremde PDOs, Flying Master und Boot-up nach CiA 302-2, Discovery), Safety (CiA 304/319, `SrdoEngine`, ADR-12) und LSS (CiA 305/801, ADR-13). | `UdsClient`, `ICanOpenNode`, `CanOpenLss`, `J1939Node` | `FR-UDS-*`, [CANopen (SRS §4.3.2)](../requirements/SRS-CanKit.Pro.md#432-canopen-cia-301), `FR-J1939-*` |
 
 ## 5.2 Ebene 2 – Zoom L1 (Raw-CAN-Kern, vorhanden)
 
