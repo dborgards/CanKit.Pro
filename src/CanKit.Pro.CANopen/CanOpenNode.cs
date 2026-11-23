@@ -331,6 +331,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 return id switch
                 {
                     CanOpenCobId.NmtCommand or CanOpenCobId.NmtMasterDetectionRequest => true,
+                    CanOpenCobId.NmtMasterDetectionResponse => _options.EnableSelfStartingNodes,
                     CanOpenCobId.GlobalFailsafeCommand => _srdoCount > 0,
                     CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
                         or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce => true,
@@ -377,6 +378,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             StartControllerOverrunMonitoring();
             StartControllerErrorMonitoring();
             NotifyNmtStateChanged(NmtState.Initializing);
+            BeginSelfStart();
         });
 
         // What the applications posted while the node was being built runs behind the start-up,
@@ -1033,6 +1035,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         EndSrdoSendPeriod(); // a disposed node sends no pair still on the chain
         _lifeGuardingDeadline?.Dispose();
         _lifeGuardingDeadline = null;
+        CancelSelfStart();
         CancelFlyingMasterDeadline();
         CancelBootUp();
 
@@ -1528,6 +1531,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             if (cobId == CanOpenCobId.NmtCommand)
             {
                 HandleNmtCommand(data);
+                return;
+            }
+            if (cobId == CanOpenCobId.NmtMasterDetectionResponse)
+            {
+                if (_selfStartAttempt is not null && !isRtr && !isFd && data.Length == 0)
+                    CancelSelfStart();
                 return;
             }
             if (cobId == CanOpenCobId.NmtMasterDetectionRequest)
