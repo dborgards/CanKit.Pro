@@ -191,9 +191,10 @@ internal sealed partial class CanOpenNode
         _od.AddU8(Co.SlaveAssignment, 0x00, CanOpenCobId.MaxNodeId, ro, nm);
         for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
             _od.AddU32(Co.SlaveAssignment, node, 0, rw, nm);
-        _od.AddU8(Co.RequestNmt, 0x00, 0x80, ro, nm);
-        for (byte node = 1; node <= 0x80; node++)
+        _od.AddU8(Co.RequestNmt, 0x00, RequestAllNodes, ro, nm);
+        for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
             _od.AddU8(Co.RequestNmt, node, 0, rw, nm);
+        _od.AddU8(Co.RequestNmt, RequestAllNodes, 0, OdAccess.WriteOnly, nm);
         _od.AddU32(Co.BootTime, 0x00, 0, rw, nm);
         if (_options.EnableBootConfigurationDownload)
         {

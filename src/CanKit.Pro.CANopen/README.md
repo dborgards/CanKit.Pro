@@ -2293,12 +2293,16 @@ The upper bytes of each `1F81h` entry carry retry factor (byte 1) and guard time
 (bytes 2–3). They start guarding with `EnableBootErrorControl`, `EnableNmtErrorHandler` or `EnableNmtBootupHandler`; ordinary heartbeat
 configuration remains available independently.
 
-Heartbeats, including the boot-up byte `0x00`, update `1F82h` at that node-id. Reading `1F82h`
-returns the last state byte, or 0 when none has been seen. Writing it, while this node is the
-active master, requests a command and does not replace that state. The value is the state, not
-the command specifier: `4` stop, `5` operational (NMT Start), `6` reset node, `7` reset
-communication, `127` pre-operational. Sub-index `80h` addresses every node. Sub-index 0 is
-constant 128. A write while this node is not the active master is rejected with `0800 0022h`.
+Heartbeats and boot-up announcements update the individual node entries in `1F82h:01h–7Fh`.
+Each entry holds the last state byte, or 0 before the first announcement. The active master's
+SDO server accepts the request values `4` (Stop), `5` (Start), `6` (Reset Node), `7`
+(Reset Communication) and `127` (Enter Pre-operational). A request preserves the tracked state.
+
+Sub-index `80h` addresses all nodes and is write-only (CiA 302-2 §6.4, Table 30).
+An SDO upload now returns abort `0601 0001h`, including on nodes opened with an EDS or DCF.
+Clients that previously read a placeholder here can query individual node entries for their states.
+Sub-index 0 is constant 128. A write while this node is not the active master is rejected with
+`0800 0022h`.
 
 `1F89h` is the boot timeout in milliseconds. 0 disables it. When it elapses, each mandatory
 slave that was never seen raises `FlyingMasterChanged` with `SlaveBootTimeout`, and the boot-up
