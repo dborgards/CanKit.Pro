@@ -249,6 +249,42 @@ public partial class CanOpenFlyingMasterTests
         rig.Node.State.Should().Be(NmtState.PreOperational);
     }
 
+    [Theory]
+    [InlineData("dispose")]
+    [InlineData("stop")]
+    [InlineData("role")]
+    public async Task SelfStart_Dispatched_Callbacks_Recheck_Their_Authority(string change)
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableSelfStartingNodes = true });
+        await BootSelfStarter(rig, 2);
+        await StepSelfStart(rig, 500);
+        var lastSend = rig.Node.SelfStartSendOutcomeForTests;
+        if (change == "stop")
+        {
+            TransmitNmt(rig.Peer, NmtCommand.Stop, LeftId);
+            await QuiesceAsync(rig.Witness, null);
+        }
+        if (change == "role") rig.Node.ObjectDictionary.WriteUnsigned(Startup, 0, 1);
+        await rig.Node.PostToActorAsync(() =>
+        {
+            // A timer can already be dispatched when the configuration changes, and Dispose
+            // publishes its flag before cleanup. Deliver the callbacks in that exact window.
+            if (change == "dispose") DisposedField.SetValue(rig.Node, 1);
+            try
+            {
+                InvokeActor(rig.Node, "BeginSelfStart");
+                InvokeActor(rig.Node, "RequestMasterDetection");
+                InvokeActor(rig.Node, "StartNetworkIfUnmanaged");
+                rig.Node.SelfStartSendOutcomeForTests.Should().BeSameAs(lastSend,
+                    "neither a probe nor a broadcast may even be queued");
+            }
+            finally
+            {
+                if (change == "dispose") DisposedField.SetValue(rig.Node, 0);
+            }
+        });
+    }
+
     private static async Task BootSelfStarter(MasterRig rig, uint startup)
     {
         rig.Node.ObjectDictionary.WriteUnsigned(Startup, 0, startup);
