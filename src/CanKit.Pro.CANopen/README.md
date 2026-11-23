@@ -2315,8 +2315,11 @@ The upper bytes of each `1F81h` entry carry retry factor (byte 1) and guard time
 (bytes 2–3). They start guarding with `EnableBootErrorControl`, `EnableNmtErrorHandler` or `EnableNmtBootupHandler`; ordinary heartbeat
 configuration remains available independently.
 
-Heartbeats and boot-up announcements update the individual node entries in `1F82h:01h–7Fh`.
-Each entry holds the last state byte, or 0 before the first announcement. The active master's
+Heartbeats, boot-up announcements and accepted guarding replies update assigned nodes in
+`1F82h:01h–7Fh`. Entries default to `00h` (unknown). During announcement-based boot,
+a mandatory slave that has not announced by the `1F89h` deadline reads as `01h` (device missing,
+CiA 302-2 §6.4, Table 28). Its next announcement replaces that value, even after boot has halted.
+A new boot clears the missing indication to unknown for assigned slaves. A timeout during verification keeps the reported NMT state. The active master's
 SDO server accepts the request values `4` (Stop), `5` (Start), `6` (Reset Node), `7`
 (Reset Communication) and `127` (Enter Pre-operational). A request preserves the tracked state.
 

@@ -266,7 +266,7 @@ public partial class CanOpenFlyingMasterTests
         await QuiesceAsync(rig.Witness, null);
         rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, plain),
             "state 0x01 is not boot-up, stopped or pre-operational");
-        od.ReadUnsigned(0x1F82, plain).Should().Be(0x01u);
+        od.ReadUnsigned(0x1F82, plain).Should().Be(0u, "a reserved heartbeat value cannot report a device missing");
     }
 
     [Fact]
