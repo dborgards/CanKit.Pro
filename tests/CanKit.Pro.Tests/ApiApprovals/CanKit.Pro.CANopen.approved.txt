@@ -25,6 +25,8 @@ namespace CanKit.Pro.CANopen
         public const byte MaxNodeId = 127;
         public const byte MinNodeId = 1;
         public const uint NmtCommand = 0u;
+        public const uint NmtMasterDetectionRequest = 117u;
+        public const uint NmtMasterDetectionResponse = 116u;
         public const uint NoRtrBit = 1073741824u;
         public const uint Rpdo1Base = 512u;
         public const uint Rpdo2Base = 768u;

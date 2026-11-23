@@ -325,12 +325,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 if (frame.IsExtendedFrame) return _extendedPdoIds.Contains((uint)frame.ID);
                 uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
-                // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
+                // 0x071..0x076 are the NMT master services, inside the identifier range CiA 301
                 // reserves and this subscription otherwise skips. 0x001 is the CiA DSP 304 global
                 // failsafe command, heard only by a node that has SRDOs.
                 return id switch
                 {
-                    CanOpenCobId.NmtCommand => true,
+                    CanOpenCobId.NmtCommand or CanOpenCobId.NmtMasterDetectionRequest => true,
                     CanOpenCobId.GlobalFailsafeCommand => _srdoCount > 0,
                     CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
                         or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce => true,
@@ -1528,6 +1528,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             if (cobId == CanOpenCobId.NmtCommand)
             {
                 HandleNmtCommand(data);
+                return;
+            }
+            if (cobId == CanOpenCobId.NmtMasterDetectionRequest)
+            {
+                // §5.1 asks about master capability even when another node holds the active role.
+                if (!isRtr && !isFd && data.Length == 0 && !LayerSettingsBlockBoot() && (ReadStartup() & NmtMasterBit) != 0)
+                    _ = SendControlFrame(CanOpenCobId.NmtMasterDetectionResponse, Array.Empty<byte>());
                 return;
             }
             // Flying-master services are broadcasts with no node-id in the CAN-ID. A claim names
