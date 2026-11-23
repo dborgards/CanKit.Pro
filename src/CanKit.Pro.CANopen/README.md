@@ -107,6 +107,7 @@ architecture or maintainer decision behind each one.
 | FR-CO-072 | Opt-in peer boot-up handling and fresh verification ([Boot-up handler](#boot-up-handler-fr-co-072)) |
 | FR-CO-073 | Opt-in keep-alive state check ([Keep-alive boot branch](#keep-alive-boot-branch-fr-co-073)) |
 | FR-CO-074 | Configurable minimum interval between NMT commands ([NMT inhibit time](#nmt-inhibit-time)) |
+| FR-CO-075 | Request a stored configuration from a remote manager ([Configuration request](#remote-configuration-request)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -1004,6 +1005,22 @@ returned — so a master that reacts to the boot-up never reads an application o
 had not reached. `NmtCommandReceived` is the notification of the command, delivered on the event
 queue, and can arrive after the boot-up. A handler of `ApplicationReset` writes the dictionary
 and returns; it must not wait for the node.
+
+### Remote configuration request
+
+A tool can ask a remote configuration manager to apply a DCF it already holds in
+`1F20h` or `1F22h` (CiA 302-3 §3.6). For example, manager 5 can configure target 12:
+
+```csharp
+node.BindPeerDeviceDescription(5, managerDescription);
+await node.RequestConfigurationAsync(managerNodeId: 5, targetNodeId: 12, cancellationToken: cancellationToken);
+```
+
+The manager’s EDS/DCF must list `1F25h` at the requested sub-index. To request all nodes
+with one write to `1F25h:80h`, call `RequestAllConfigurationsAsync(5, cancellationToken)`.
+Both tasks complete on the manager’s SDO acknowledgement. The manager performs the configuration
+separately. A missing stored DCF for an individual target can produce `SdoAbortException` with
+code `0800 0024h` or `0800 0000h`.
 
 ### Concise DCF download
 

@@ -50,6 +50,40 @@ public static class CanOpenNodeExtensions
         return local.DownloadConciseDcfAsync(peerNodeId, conciseDcf, cancellationToken);
     }
 
+    /// <summary>Asks a remote configuration manager to apply its stored configuration for one node
+    /// (CiA 302-3 §3.6, 1F25h).</summary>
+    /// <param name="node">The local SDO client.</param>
+    /// <param name="managerNodeId">Node-id of the configuration manager, 1–127.</param>
+    /// <param name="targetNodeId">Node-id whose stored configuration is requested, 1–127.
+    /// A manager ignores a request for its own node-id.</param>
+    /// <param name="cancellationToken">Cancellation token for the SDO download.</param>
+    /// <returns>A task that completes when the manager acknowledges the request. The manager
+    /// applies the stored DCF independently and can abort the request if it has no DCF for the target.</returns>
+    public static Task RequestConfigurationAsync(this ICanOpenNode node, byte managerNodeId, byte targetNodeId,
+        CancellationToken cancellationToken = default)
+    {
+        CanOpenCobId.ValidateNodeId(targetNodeId);
+        return WriteConfigurationRequestAsync(node, managerNodeId, targetNodeId, cancellationToken);
+    }
+
+    /// <summary>Asks a remote configuration manager to apply its stored configurations for all nodes
+    /// with one SDO download to 1F25h:80h (CiA 302-3 §3.6).</summary>
+    /// <param name="node">The local SDO client.</param>
+    /// <param name="managerNodeId">Node-id of the configuration manager, 1–127.</param>
+    /// <param name="cancellationToken">Cancellation token for the SDO download.</param>
+    /// <returns>A task that completes when the manager acknowledges the request.</returns>
+    public static Task RequestAllConfigurationsAsync(this ICanOpenNode node, byte managerNodeId,
+        CancellationToken cancellationToken = default)
+        => WriteConfigurationRequestAsync(node, managerNodeId, 0x80, cancellationToken);
+
+    private static Task WriteConfigurationRequestAsync(ICanOpenNode node, byte managerNodeId, byte subindex,
+        CancellationToken cancellationToken)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        CanOpenCobId.ValidateNodeId(managerNodeId);
+        return node.SdoDownloadAsync(managerNodeId, 0x1F25, subindex, "conf"u8.ToArray(), cancellationToken);
+    }
+
     /// <summary>Registers or removes the concise DCF used by automatic boot for one slave.</summary>
     /// <remarks>Requires EnableBootConfigurationDownload. Copies and validates the entire
     /// stream before replacing the plan; null removes it, a four-byte zero count is an explicit
