@@ -87,6 +87,7 @@ internal sealed partial class CanOpenNode
         public const ushort ExpectedSerialNumber = 0x1F88;
         public const ushort BootTime = 0x1F89;
         public const ushort FlyingMasterTiming = 0x1F90;
+        public const ushort SelfStartTiming = 0x1F91;
         public const ushort RpdoComm = 0x1400;
         public const ushort RpdoMap = 0x1600;
         public const ushort TpdoComm = 0x1800;
@@ -217,6 +218,13 @@ internal sealed partial class CanOpenNode
             for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
                 _od.AddU32(index, node, 0, rw, nm);
         }
+        if (_options.EnableSelfStartingNodes)
+        {
+            _od.AddU8(Co.SelfStartTiming, 0, 3, ro, nm);
+            _od.AddU16(Co.SelfStartTiming, 1, 100, rw, nm);
+            _od.AddU16(Co.SelfStartTiming, 2, 500, rw, nm);
+            _od.AddU16(Co.SelfStartTiming, 3, 15, rw, nm);
+        }
         _od.AddU8(Co.FlyingMasterTiming, 0x00, 0x06, ro, nm);
         _od.AddU16(Co.FlyingMasterTiming, 0x01, 100, rw, nm);
         _od.AddU16(Co.FlyingMasterTiming, 0x02, 500, rw, nm);
@@ -304,6 +312,7 @@ internal sealed partial class CanOpenNode
     /// rather than re-declares.</summary>
     private bool IsManagedCommunicationObject(ushort index) => index switch
     {
+        Co.SelfStartTiming => _options.EnableSelfStartingNodes,
         Co.NmtInhibit => _options.EnableNmtInhibit,
         Co.EmcyInhibitTime => _options.EnableEmcyInhibit,
         Co.ErrorBehavior => _options.EnableErrorBehavior,
@@ -370,6 +379,8 @@ internal sealed partial class CanOpenNode
             case Co.ConsumerHeartbeat:
                 if (subindex == 0) return ValidateConsumerHeartbeatCountWrite(value[0]);
                 return ValidateConsumerHeartbeatWrite(subindex, value);
+            case Co.SelfStartTiming when _options.EnableSelfStartingNodes && subindex == 0:
+                return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
             case Co.FlyingMasterTiming:
                 return ValidateFlyingMasterTimingWrite(subindex, value);
             case Co.SlaveAssignment:
@@ -775,6 +786,7 @@ internal sealed partial class CanOpenNode
                     ArmActiveDetectCycle();
                 return;
             case Co.NmtStartup:
+                if (ReadStartup() != NmtStartAllNodesBit) CancelSelfStart();
                 ApplyFlyingMasterStartup();
                 return;
             case Co.SlaveAssignment:
@@ -907,6 +919,7 @@ internal sealed partial class CanOpenNode
         // failure must not produce a transient Operational window on a new NMT Start.
         target = ResolveErrorBehaviorTarget(target);
         var previous = _state;
+        CancelSelfStart();
         if (target == NmtState.Stopped) _syncProducerGeneration++;
         if (previous == NmtState.Stopped && target is NmtState.PreOperational or NmtState.Operational)
             ResetSyncCounter();
@@ -1008,6 +1021,7 @@ internal sealed partial class CanOpenNode
             _pendingNodeId = _persistentNodeId;
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
+        CancelSelfStart();
         SuspendFlyingMasterForReset();
         var stateBeforeReset = _state;
         if (_state == NmtState.Operational)
@@ -1123,6 +1137,7 @@ internal sealed partial class CanOpenNode
         StartControllerOverrunMonitoring();
         StartControllerErrorMonitoring();
         NotifyNmtStateChanged(previous);
+        BeginSelfStart();
     }
 
     private void AbortServerSessions(SdoAbortCode code)

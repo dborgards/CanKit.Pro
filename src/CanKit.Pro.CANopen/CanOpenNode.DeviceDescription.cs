@@ -433,7 +433,9 @@ internal sealed partial class CanOpenNode
             case >= Co.ExpectedDeviceType and <= Co.ExpectedSerialNumber:
             case Co.ExpectedConfigurationDate or Co.ExpectedConfigurationTime when BootConfigurationEnabled:
             case Co.RestoreConfiguration when _options.EnableBootConfigurationDownload:
-                return ApplySlaveAssignment(index, entries, findings);
+                return ApplyFixedSizeArray(index, CanOpenCobId.MaxNodeId, entries, findings);
+            case Co.SelfStartTiming when _options.EnableSelfStartingNodes:
+                return ApplyFixedSizeArray(index, 3, entries, findings);
             case Co.RequestNmt:
                 return ApplyRequestNmt(entries, findings);
             case Co.FlyingMasterTiming:
@@ -624,32 +626,38 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    /// <summary><c>1F81h</c> and <c>1F84h</c>–<c>1F88h</c>: one UNSIGNED32 per node-id.
-    /// Sub-index <c>00h</c> stays 127. A described
-    /// entry is stored through the same checks an SDO download hits.</summary>
-    private int ApplySlaveAssignment(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
+    /// <summary>Load a fixed-size array. The node supplies the count and element type;
+    /// described values pass through the same validation as an SDO download.</summary>
+    private int ApplyFixedSizeArray(ushort index, byte highest, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
     {
         int loaded = 0;
         foreach (var entry in entries)
         {
             if (entry.Subindex == 0)
             {
-                if (ParseUnsigned(entry, out _) == CanOpenCobId.MaxNodeId) loaded++;
+                if (ParseUnsigned(entry, out _) == highest) loaded++;
                 else
                 {
                     findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
-                        $"{index:X4}h sub-index 00h is constant 127; the described count is not applied", entry.Value));
+                        $"{index:X4}h sub-index 00h is constant {highest}; the described count is not applied", entry.Value));
                 }
                 continue;
             }
-            if (entry.Subindex > CanOpenCobId.MaxNodeId || !_od.TryGet(index, entry.Subindex, out var current))
+            if (!_od.TryGet(index, entry.Subindex, out var current))
             {
                 findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
-                    $"{index:X4}h implements sub-indices 01h to 7Fh; this sub-index is not created", entry.Value));
+                    $"{index:X4}h implements sub-indices 01h to {highest:X2}h; this sub-index is not created", entry.Value));
                 continue;
             }
-            var type = index == Co.RestoreConfiguration ? OdDataType.Unsigned8 : OdDataType.Unsigned32;
-            _od.Declare(index, entry.Subindex, type, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            var type = current.DataType;
+            var access = MapAccess(entry.Access);
+            if (index == Co.SelfStartTiming && access is not (OdAccess.ReadWrite or OdAccess.WriteOnly))
+            {
+                findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Corrected,
+                    "1F91h timing parameters must be writable; read/write access is used"));
+                access = OdAccess.ReadWrite;
+            }
+            _od.Declare(index, entry.Subindex, type, access, current.GetRawValue(), pdoMappable: false);
             loaded++;
             ApplyManagedValue(index, entry.Subindex, type, entry, findings);
         }

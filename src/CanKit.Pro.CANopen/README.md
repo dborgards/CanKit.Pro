@@ -2068,8 +2068,23 @@ CiA 302-2 assigns fixed CAN-IDs to the NMT master services.
 With a valid node-ID and bit 0 of `1F80h` set, the node answers each empty, standard
 classic CAN data frame on `075h` with an empty frame on `074h`. This includes a
 standby flying master and a master configured with flying-master participation disabled.
-The response carries neither priority nor node-ID. The requester-side startup timer
-(`1F91h`) and automatic `075h` transmission are outside the implemented service.
+The response carries neither priority nor node-ID. For a startup-capable slave, set
+`CanOpenNodeOptions.EnableSelfStartingNodes = true` and configure `1F80h` in its EDS/DCF
+or save it before an NMT reset. The startup value is evaluated on boot, including boot after
+LSS assigns a valid node-ID. The option defaults to false.
+
+| Slave startup value (Table 16) | Action |
+| --- | --- |
+| `1F80h = 2` | After entering Pre-Operational, send one empty `075h` after the request delay. A valid empty `074h` suppresses the broadcast Start. If the request is confirmed by the adapter and the bus stays silent through the response timeout and the additional node slot, send NMT Start to node zero. |
+| `1F80h = 8` | Enter Operational locally after initialization, subject to the node's configured NMT error behavior. |
+
+With the option enabled, `1F91h:00` is constant 3. Its three UNSIGNED16 parameters are in
+milliseconds. Sub-index 1 is the response timeout (default 100), sub-index 2 the request delay
+(500), and sub-index 3 the slot duration (15). The additional wait is the local node-ID times
+the slot duration. The timeout and slot duration are sampled when the adapter confirms the request.
+A response also cancels a Start still waiting in the NMT transmit queue. A failed or unconfirmed
+probe, a matching NMT state command or a change away from startup mode 2 cannot authorize a
+broadcast. A reset starts a fresh attempt with the restored parameters.
 
 Set `CanOpenNodeOptions.EnablePeriodicFlyingMasterForce = true` for CiA 302-2 §5.5.3
 on a Normal-mode channel verified to suppress its own transmissions. Normal mode alone

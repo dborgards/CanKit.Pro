@@ -159,6 +159,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableNmtErrorHandler { get; init; }
         public bool EnableNmtInhibit { get; init; }
         public bool EnablePeriodicFlyingMasterForce { get; init; }
+        public bool EnableSelfStartingNodes { get; init; }
         public int ErrorHistoryCapacity { get; init; }
         public int EventQueueCapacity { get; init; }
         public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }

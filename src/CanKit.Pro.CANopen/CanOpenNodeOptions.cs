@@ -161,6 +161,11 @@ public sealed class CanOpenNodeOptions
     /// commands on CAN-ID zero share a FIFO. The initial interval is zero.</summary>
     public bool EnableNmtInhibit { get; init; }
 
+    /// <summary>Enable the CiA 302-2 Table 16 slave startup modes and the timing array
+    /// <c>1F91h</c>. At boot, <c>1F80h = 2</c> requests master detection before a possible
+    /// broadcast Start. A value of 8 starts only this node. Defaults to false.</summary>
+    public bool EnableSelfStartingNodes { get; init; }
+
     /// <summary>Use the CiA 302-2 §5.5.3 periodic force request (076h) while this node is
     /// the active flying master. The default uses a negotiation trigger (072h) and a claim.</summary>
     /// <remarks>Enable only on a Normal-mode channel verified to suppress reception of its own transmissions.
@@ -584,6 +589,7 @@ public sealed class CanOpenNodeOptions
             EnableEmcyInhibit = EnableEmcyInhibit,
             EnableNmtInhibit = EnableNmtInhibit,
             EnablePeriodicFlyingMasterForce = EnablePeriodicFlyingMasterForce,
+            EnableSelfStartingNodes = EnableSelfStartingNodes,
             EnableErrorBehavior = enableErrorBehavior ?? EnableErrorBehavior,
             PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,

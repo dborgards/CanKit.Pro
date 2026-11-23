@@ -180,6 +180,7 @@ public class Cia401DeviceDigitalInputTests
         EnableEmcyInhibit = true,
         EnableNmtInhibit = true,
         EnablePeriodicFlyingMasterForce = true,
+        EnableSelfStartingNodes = true,
         EmitGuardingErrorEmcy = true,
         EmitControllerErrorEmcy = true,
         EmitBusOffRecoveryEmcy = true,
