@@ -556,10 +556,62 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         await UntilAsync(rig.Clock, rig.Witness, null, () => timedOut.Contains(slave), 400,
             "1F89h elapses without a heartbeat from the mandatory slave");
 
+        od.ReadUnsigned(0x1F82, slave).Should().Be(1u, "the deadline establishes that the slave is missing");
         rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.ResetNode, slave),
             "with bits 4 and 6 of 1F80h clear, the missing slave is reset on its own");
         rig.Node.State.Should().Be(NmtState.PreOperational,
             "a missing mandatory slave halts the master's own start");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Request_Nmt_Reports_A_Missing_Mandatory_Slave_At_The_Boot_Deadline(bool guarding)
+    {
+        const byte slave = 0x22;
+        const byte optional = 0x23;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, slave, Assigned | MandatorySlave);
+        od.WriteUnsigned(0x1F81, optional, Assigned);
+        od.WriteUnsigned(0x1F89, 0, 100);
+        if (guarding)
+            rig.Node.StartNodeGuardingConsumer(slave, TimeSpan.FromSeconds(1), 2);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active,
+            800, "the active master is waiting for the mandatory slave");
+
+        TransmitHeartbeat(rig.Peer, slave, 0x01); // Reserved on the wire, meaningful only on 1F82h upload.
+        await AssertUpload(0x00);
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        await AssertUpload(0x01);
+        od.ReadUnsigned(0x1F82, optional).Should().Be(0u);
+        byte fdState = guarding ? (byte)0xFF : (byte)0x7F;
+        rig.Peer.Transmit(CanFrame.Fd((int)CanOpenCobId.Heartbeat(slave), new[] { fdState }, false, false, false));
+        Transmit(rig.Peer, CanOpenCobId.Heartbeat(slave), new byte[] { 0x7F, 0 });
+        await AssertUpload(0x01);
+        TransmitHeartbeat(rig.Peer, slave, guarding ? (byte)0x05 : (byte)0x85);
+        await AssertUpload(0x01); // Repeated guarding toggle or reserved heartbeat bit.
+        TransmitHeartbeat(rig.Peer, slave, guarding ? (byte)0x85 : (byte)0x05);
+        await AssertUpload(0x05);
+        rig.Node.State.Should().Be(NmtState.PreOperational, "the late reply does not restart the halted boot");
+
+        od.WriteUnsigned(0x1F81, optional, Assigned | MandatorySlave);
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100));
+        od.ReadUnsigned(0x1F82, optional).Should().Be(1u);
+        od.WriteUnsigned(0x1F81, optional, Assigned);
+        await QuiesceAsync(rig.Witness, null);
+        od.ReadUnsigned(0x1F82, optional).Should().Be(0u, "a new boot starts a fresh observation");
+
+        async Task AssertUpload(byte expected)
+        {
+            rig.Log.Clear();
+            Transmit(rig.Peer, CanOpenCobId.SdoRx(LeftId), SdoFrames.BuildUploadInit(0x1F82, slave));
+            await QuiesceAsync(rig.Witness, null);
+            rig.Log.Snapshot().Single(f => f.Id == CanOpenCobId.SdoTx(LeftId)).Data.Should()
+                .Equal(0x4F, 0x82, 0x1F, slave, expected, 0, 0, 0);
+        }
     }
 
     [Fact]

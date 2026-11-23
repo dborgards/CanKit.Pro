@@ -22,6 +22,7 @@ namespace CanKit.Pro.CANopen;
 internal sealed partial class CanOpenNode
 {
     // 1F82h is written with the NMT state byte, not with the command specifier.
+    private const byte DeviceMissing = 0x01; // 1F82h upload only (CiA 302-2 Table 28).
     private const byte RequestStopped = 0x04;
     private const byte RequestOperational = 0x05;
     private const byte RequestResetNode = 0x06;
@@ -73,7 +74,12 @@ internal sealed partial class CanOpenNode
         CancelBootUp();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (IsAssignedSlave(id)) _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.WaitingForAnnouncement);
+            if (IsAssignedSlave(id))
+            {
+                _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.WaitingForAnnouncement);
+                if (_od.ReadUnsigned(Co.RequestNmt, id) == DeviceMissing)
+                    _od.WriteRawUnchecked(Co.RequestNmt, id, new byte[] { 0 });
+            }
             _slaveBootResetConfirmed[id] = KeepsAlive(id);
         }
 
@@ -327,6 +333,10 @@ internal sealed partial class CanOpenNode
             if (!_slaveNmtErrorRecovering[id] && IsMandatory(id)
                 && (!HasSlaveBootContact(id) || IsMandatoryIdentityPending(id) || IsMandatoryConfigurationPending(id) || IsMandatoryErrorControlPending(id) || IsMandatoryKeepAlivePending(id)))
             {
+                // In announcement-based boot the deadline establishes that this slave is missing.
+                // An active probe can still be waiting for its local SDO channel at this point.
+                if (!CanActivelyBootSlave(id) && !_slaveSeen[id])
+                    _od.WriteRawUnchecked(Co.RequestNmt, id, new[] { DeviceMissing });
                 unseenMandatory.Add(id);
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.BootTimeout);
             }

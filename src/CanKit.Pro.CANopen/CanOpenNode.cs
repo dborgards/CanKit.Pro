@@ -1630,7 +1630,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // targeting *our* node-id asks the node-guarding producer to reply, and a data
             // frame is either a heartbeat / bootup broadcast from a peer or a node-guarding
             // response we requested. Bit 7 of the data byte carries the node-guarding toggle
-            // bit — the existing heartbeat consumer already masks it off via <c>data[0] &amp; 0x7F</c>.
+            // bit. Heartbeats use the NMT state byte directly.
             if (cobId is >= 0x701 and <= 0x77F)
             {
                 byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
@@ -1649,28 +1649,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     && !_nodeGuardingConsumers.ContainsKey(producer)
                     && !_heartbeatConsumer.IsWatching(producer))
                     return;
-                // Consumer role (FR-CO-009): if we have a node-guarding consumer registered
-                // for this producer, treat the incoming data frame as a node-guarding reply
-                // (toggle + state). Otherwise fall through to the heartbeat consumer, which is
-                // wire-compatible (both frames are 1 byte on 0x700 + node-id, and the toggle
-                // bit is bit 7). Node-guarding consumers take precedence because a node that
-                // was set up for node-guarding still wants heartbeat handling elsewhere gated.
-                if (_nodeGuardingConsumers.ContainsKey(producer))
+                if (data.Length == 0) return;
+                NmtState? announced = null;
+                if (_nodeGuardingConsumers.TryGetValue(producer, out var consumer))
                 {
-                    HandleNodeGuardingResponse(producer, data);
-                    // Heartbeats and boot-up use this COB-ID too. Returning here used to hide
-                    // them from the standby watch of the active master and from boot-up, so the
-                    // watch expired while the master was still producing and an assigned slave
-                    // stayed unseen.
-                    if (data.Length >= 1)
-                    {
-                        byte guardedState = (byte)(data[0] & 0x7F);
-                        NoteSlaveNmtState(producer, guardedState);
-                        NoteHeartbeatForMonitoring(producer);
-                    }
-                    return;
+                    announced = HandleNodeGuardingResponse(producer, data[0], consumer);
                 }
-                HandleHeartbeat(cobId, data);
+                else if (TryDecodeHeartbeatState(data[0], out var state))
+                {
+                    RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
+                    announced = state;
+                }
+                if (announced is { } nmtState && !isFd && data.Length == 1)
+                    NoteSlaveNmtState(producer, (byte)nmtState);
+                // The consumer and standby watch also use other traffic on this COB-ID as a sign of life.
+                NoteHeartbeatForMonitoring(producer);
                 return;
             }
             // SDO client request: 0x600 + our nodeId — targeted at *our* SDO server.
@@ -1862,27 +1855,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             case 0x7F: state = NmtState.PreOperational; return true;
             default: state = default; return false;
         }
-    }
-
-    private void HandleHeartbeat(uint cobId, byte[] data)
-    {
-        if (data.Length < 1) return;
-        byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
-        // Bit 7 is the node-guarding toggle; a heartbeat carries 0 there (§7.2.8.3.2.2, "r:
-        // reserved (always 0)"), and a guarding reply is routed to HandleNodeGuardingResponse
-        // before it gets here, so the bit is masked rather than interpreted.
-        byte stateByte = (byte)(data[0] & 0x7F);
-        // A reserved state byte still shows the producer alive and is still recorded for the NMT
-        // master, but it is not reported: as Initializing it would be indistinguishable from a
-        // boot-up and read as a restart that did not happen (#255).
-        // Bit 7 is reserved and always 0 in a heartbeat (§7.2.8.3.2.2), so a frame that sets it is
-        // not one: a bystander's guarding reply (toggle) or a malformed frame. It is not reported,
-        // which also keeps 0x80 (state 0 with the toggle set) from reading as a boot-up (#266).
-        // It still counts as a sign of life below, as before.
-        if ((data[0] & 0x80) == 0 && TryDecodeHeartbeatState(stateByte, out var state))
-            RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
-        NoteSlaveNmtState(producer, stateByte);
-        NoteHeartbeatForMonitoring(producer);
     }
 
     // =========================================================================================

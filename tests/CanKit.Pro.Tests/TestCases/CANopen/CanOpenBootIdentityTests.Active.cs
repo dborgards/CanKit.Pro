@@ -140,6 +140,8 @@ public partial class CanOpenBootIdentityTests
         using var held = rig.Witness.HoldPeerSdoChannel(Slave, channel);
         await ElectActive(rig);
         await UntilAsync(rig.Clock, rig.Witness, null, () => Result(rig).Status == SlaveBootStatus.BootTimeout, 150, "the deadline includes the channel wait");
+        rig.Node.ObjectDictionary.ReadUnsigned(0x1F82, Slave).Should().Be(0u,
+            "the active probe never acquired the channel to establish reachability");
         peer.Requests.Should().Be(0);
         held.Dispose();
         await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(300));

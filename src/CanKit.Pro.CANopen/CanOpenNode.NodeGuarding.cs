@@ -168,13 +168,8 @@ internal sealed partial class CanOpenNode
     /// <c>0x700 + producerNodeId</c> and a node-guarding consumer for that producer is
     /// registered. Rearms the life-time deadline and raises the event.
     /// </summary>
-    private void HandleNodeGuardingResponse(byte producerNodeId, byte[] data)
+    private NmtState? HandleNodeGuardingResponse(byte producerNodeId, byte b, NodeGuardingConsumer consumer)
     {
-        if (data.Length < 1) return;
-        if (!_nodeGuardingConsumers.TryGetValue(producerNodeId, out var consumer)) return;
-
-        byte b = data[0];
-
         // The boot-up message is one byte of 0x00 on this very COB-ID (CiA 301 7.3.2), and it is
         // not a guarding response: it answers no poll, and a node that answers guarding RTRs is
         // never in Initializing -- HandleNmtCommand leaves that state in the same statement pair
@@ -194,16 +189,14 @@ internal sealed partial class CanOpenNode
         {
             consumer.HasSeenResponse = false;
             // The restart still has to be observable. HandleIncoming routes this COB-ID here and
-            // returns once a guarding consumer is registered for the producer, so HandleHeartbeat
+            // returns once a guarding consumer is registered for the producer, so the heartbeat branch
             // never sees it -- and ICanOpenNode.HeartbeatReceived is documented for "a heartbeat
             // (or bootup) frame". Returning silently made a producer's reset invisible to every
             // subscriber, which the first revision of this fix did (#122, Codex).
             //
-            // Raised directly rather than through HandleHeartbeat: that path would also rearm a
-            // heartbeat consumer's deadline, which nothing did on this branch before, and a
-            // boot-up is not a heartbeat response.
+            // A boot-up does not rearm the guarding life-time deadline.
             RaiseHeartbeatReceived(producerNodeId, NmtState.Initializing, DateTime.UtcNow);
-            return;
+            return NmtState.Initializing;
         }
 
         // An unsolicited frame that is *not* boot-up would still get through here, because the
@@ -234,7 +227,7 @@ internal sealed partial class CanOpenNode
         // reply received runs on, and its expiry is the indication. The first reply sets the
         // baseline; every later one must flip bit 7 relative to the last reply received (#357 C-7).
         if (consumer.HasSeenResponse && toggle == consumer.LastToggle)
-            return;
+            return null;
 
         consumer.HasSeenResponse = true;
         consumer.LastToggle = toggle;
@@ -249,7 +242,9 @@ internal sealed partial class CanOpenNode
                 () => OnNodeGuardingTimeout(producerNodeId));
         }
 
-        if (reportable) RaiseNodeGuardingReceived(producerNodeId, state, toggle, DateTime.UtcNow);
+        if (!reportable) return null;
+        RaiseNodeGuardingReceived(producerNodeId, state, toggle, DateTime.UtcNow);
+        return state;
     }
 
     // =========================================================================================
