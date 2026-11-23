@@ -171,6 +171,8 @@ public partial class CanOpenBootIdentityTests
         await UntilAsync(rig.Clock, rig.Witness, null,
             () => Result(rig).Status == SlaveBootStatus.BootTimeout, 300, "the boot deadline also bounds channel acquisition");
         rig.Node.State.Should().Be(NmtState.PreOperational);
+        rig.Node.ObjectDictionary.ReadUnsigned(0x1F82, Slave).Should().Be(0x7Fu,
+            "the slave announced its state before the identity check timed out");
         cancel.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => occupying);
         await QuiesceAsync(rig.Witness, null);
