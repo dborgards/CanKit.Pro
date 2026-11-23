@@ -1186,15 +1186,17 @@ public partial class CanOpenFlyingMasterTests
             "the confirmed reset applies locally and starts the warm election");
     }
 
-    [Fact]
-    public async Task A_Detect_Cycle_Does_Not_Run_While_The_Force_Reset_Is_Held()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Detect_Cycle_Does_Not_Run_While_The_Force_Reset_Is_Held(bool periodicForce)
     {
         var session = NewSession();
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
         using var gate = new ColdResetGate(new ClockedCanBusService(nodeBus, clock, sendGate: clock)) { PassResets = 1 };
-        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions { EnablePeriodicFlyingMasterForce = periodicForce }, ownsService: true, timeSource: clock);
         var witness = new ActorWitness(node, peer, WitnessForLeft, gate.Confirmations);
         using var log = new FrameLog(peer);
 
@@ -1211,7 +1213,11 @@ public partial class CanOpenFlyingMasterTests
         int triggers = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
         int claims = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim);
 
+        int forces = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterForce);
+        node.ObjectDictionary.WriteUnsigned(Timing, 0x06, 10);
         await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+        log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterForce).Should().Be(forces,
+            "editing the period while a reset is pending cannot start a new probe");
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
             "the master stays active until the reset is confirmed, but it does not keep electing");
         log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger).Should().Be(triggers,

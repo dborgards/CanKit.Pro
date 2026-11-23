@@ -769,6 +769,10 @@ internal sealed partial class CanOpenNode
             case Co.ProducerHeartbeat:
                 ApplyHeartbeatProducerConfiguration();
                 return;
+            case Co.FlyingMasterTiming when subindex == TimingDetectCycle && _options.EnablePeriodicFlyingMasterForce:
+                if (_flyingMasterRole == FlyingMasterRole.Active && !_coldResetPending)
+                    ArmActiveDetectCycle();
+                return;
             case Co.NmtStartup:
                 ApplyFlyingMasterStartup();
                 return;

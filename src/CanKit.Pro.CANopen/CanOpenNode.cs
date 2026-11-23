@@ -209,6 +209,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
+        if (options.EnablePeriodicFlyingMasterForce && service.Bus.Options.WorkMode != ChannelWorkMode.Normal)
+            throw new ArgumentException("Periodic flying-master force requires a Normal-mode channel without self reception.", nameof(options));
         _pdoCount = Math.Max(_options.PdoCount, DescribedPdoCount(description));
         _tpdos = new TpdoRuntime?[_pdoCount + 1];
         _rpdos = new RpdoRuntime?[_pdoCount + 1];
@@ -1758,6 +1760,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         bool holding = _flyingMasterRole == FlyingMasterRole.Active || _confirmingActiveMaster;
         if (target == _nodeId && holding)
             return true;
+
+        // On the no-self-reception channel, another active master's broadcast resets
+        // the initiator of the periodic force along with the rest of the network.
+        if (target == 0 && _options.EnablePeriodicFlyingMasterForce && cmd == NmtCommand.ResetCommunication)
+            return false;
 
         bool reset = cmd is NmtCommand.ResetNode or NmtCommand.ResetCommunication;
         if (target == 0 && reset && _ignoreBroadcastResetEcho)

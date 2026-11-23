@@ -179,6 +179,7 @@ public class Cia401DeviceDigitalInputTests
         EnableBootKeepAlive = true,
         EnableEmcyInhibit = true,
         EnableNmtInhibit = true,
+        EnablePeriodicFlyingMasterForce = true,
         EmitGuardingErrorEmcy = true,
         EmitControllerErrorEmcy = true,
         EmitBusOffRecoveryEmcy = true,
