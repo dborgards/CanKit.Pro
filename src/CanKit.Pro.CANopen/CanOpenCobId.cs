@@ -44,6 +44,14 @@ public static class CanOpenCobId
     /// <see cref="FlyingMasterClaim"/>.</summary>
     public const uint FlyingMasterDetect = 0x073;
 
+    /// <summary>CiA 302-2 §5.1 NMT master detection response. An empty data frame indicates
+    /// that a node is configured as an NMT master.</summary>
+    public const uint NmtMasterDetectionResponse = 0x074;
+
+    /// <summary>CiA 302-2 §5.1 NMT master detection request. An empty data frame asks
+    /// configured NMT masters, including standby masters, to respond.</summary>
+    public const uint NmtMasterDetectionRequest = 0x075;
+
     /// <summary>Flying-master force. No data. Asks the active master to restart the election
     /// with a broadcast Reset Communication.</summary>
     public const uint FlyingMasterForce = 0x076;

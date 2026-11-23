@@ -2054,15 +2054,22 @@ worse one, whatever the node-ids are. The defaults satisfy that (1500 > 127 × 1
 above 2, a device time slot of 0, or a pair that breaks the rule is rejected with `0609 0030h`.
 Sub-index `00h` is constant 6 (`0601 0002h`).
 
-The services are fixed CAN-IDs, which CiA 301 reserves and which this node therefore subscribes
-to separately from the `080h`–`77Fh` range:
+CiA 302-2 assigns fixed CAN-IDs to the NMT master services.
 
 | CAN-ID | DLC | Meaning |
 | --- | --- | --- |
+| `0x075` | 0 | Is any node configured as an NMT master? |
+| `0x074` | 0 | An NMT master is present (§5.1, Figure 14) |
 | `0x073` | 0 | "Is an NMT master already active?" |
 | `0x071` | 2 | The answer, and the claim: priority, then node-id |
 | `0x072` | 0 | Start (or restart) the timeslot race |
 | `0x076` | 0 | Force a new election |
+
+With a valid node-ID and bit 0 of `1F80h` set, the node answers each empty, standard
+classic CAN data frame on `075h` with an empty frame on `074h`. This includes a
+standby flying master and a master configured with flying-master participation disabled.
+The response carries neither priority nor node-ID. The requester-side startup timer
+(`1F91h`) and automatic `075h` transmission are outside the implemented service.
 
 Set `CanOpenNodeOptions.EnablePeriodicFlyingMasterForce = true` for CiA 302-2 §5.5.3
 on a Normal-mode channel verified to suppress its own transmissions. Normal mode alone

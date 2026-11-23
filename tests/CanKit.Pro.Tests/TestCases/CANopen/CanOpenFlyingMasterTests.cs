@@ -303,6 +303,59 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
     }
 
     [Fact]
+    public async Task General_Master_Detection_Uses_The_Configured_Master_Bit()
+    {
+        using var rig = OpenMaster();
+        using var received = new FrameLog(rig.Peer);
+        var od = rig.Node.ObjectDictionary;
+        var empty = Array.Empty<byte>();
+
+        od.WriteUnsigned(Startup, 0, 1);
+        rig.Peer.Transmit(CanFrame.Classic(0x075, empty));
+        await QuiesceAsync(rig.Witness, null);
+        received.Snapshot().Where(f => f.Id == 0x074).Should().ContainSingle()
+            .Which.Data.Should().BeEmpty();
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
+
+        received.Clear();
+        rig.Peer.Transmit(CanFrame.Classic(0x075, new byte[] { 0 }));
+        rig.Peer.Transmit(CanFrame.Classic(0x075, empty, false, true));
+        rig.Peer.Transmit(CanFrame.Fd(0x075, empty, false, false, false));
+        rig.Peer.Transmit(CanFrame.Classic(0x075, empty, true));
+        rig.Peer.Transmit(CanFrame.Classic(0x073, empty));
+        await QuiesceAsync(rig.Witness, null);
+        received.Snapshot().Should().NotContain(f => f.Id == 0x074 || f.Id == 0x071);
+
+        od.WriteUnsigned(Startup, 0, 0x08); // Self-starting slave (Table 16)
+        rig.Peer.Transmit(CanFrame.Classic(0x075, empty));
+        await QuiesceAsync(rig.Witness, null);
+        received.Snapshot().Should().NotContain(f => f.Id == 0x074);
+    }
+
+    [Fact]
+    public async Task A_Standby_Answers_General_Master_Detection_And_Preserves_Its_Role()
+    {
+        using var rig = OpenMaster();
+        using var received = new FrameLog(rig.Peer);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(2, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Detecting, 200, "detection has started");
+        rig.Peer.Transmit(CanFrame.Classic(0x071, new byte[] { 0, RightId }));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby);
+
+        received.Clear();
+        rig.Peer.Transmit(CanFrame.Classic(0x073, Array.Empty<byte>()));
+        rig.Peer.Transmit(CanFrame.Classic(0x075, Array.Empty<byte>()));
+        await QuiesceAsync(rig.Witness, null);
+        received.Snapshot().Should().ContainSingle(f => f.Id == 0x074 && f.Data.Length == 0);
+        received.Snapshot().Should().NotContain(f => f.Id == 0x071 || f.Id == 0);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby);
+        rig.Node.ActiveFlyingMasterNodeId.Should().Be(RightId);
+    }
+
+    [Fact]
     public async Task An_Inactive_Node_Does_Not_Answer_And_Stop_Leaves_The_Election()
     {
         var session = NewSession();

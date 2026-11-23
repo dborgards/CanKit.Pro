@@ -260,6 +260,22 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         third.NodeId.Should().Be(0x23);
     }
 
+    [Fact]
+    public async Task General_Master_Detection_Requires_An_Active_Node_Id()
+    {
+        using var bench = new ClockedLssNodeRig();
+        var node = bench.Add();
+        node.ObjectDictionary.WriteUnsigned(0x1F80, 0, 1);
+        await bench.TransmitAsync(0x075, Array.Empty<byte>());
+        bench.NodeTransmitIds.Should().NotContain(0x074u);
+
+        await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        (await bench.RunAsync(bench.Master.ConfigureNodeIdAsync(127))).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => node.State == NmtState.PreOperational);
+        await bench.TransmitAsync(0x075, Array.Empty<byte>());
+        bench.NodeTransmitIds.Should().ContainSingle(id => id == 0x074u);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
