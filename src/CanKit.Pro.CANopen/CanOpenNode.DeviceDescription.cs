@@ -681,7 +681,14 @@ internal sealed partial class CanOpenNode
                     "1F82h implements sub-indices 01h to 80h; this sub-index is not created", entry.Value));
                 continue;
             }
-            _od.Declare(index, entry.Subindex, OdDataType.Unsigned8, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            var access = MapAccess(entry.Access);
+            if (entry.Subindex == RequestAllNodes && access != OdAccess.WriteOnly)
+            {
+                access = OdAccess.WriteOnly;
+                findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Corrected,
+                    $"1F82h:80h is the write-only NMT broadcast request; the declared access was {entry.Access}"));
+            }
+            _od.Declare(index, entry.Subindex, OdDataType.Unsigned8, access, current.GetRawValue(), pdoMappable: false);
             loaded++;
             var parsed = ParseUnsigned(entry, out var raw);
             if (parsed is null || parsed > byte.MaxValue)

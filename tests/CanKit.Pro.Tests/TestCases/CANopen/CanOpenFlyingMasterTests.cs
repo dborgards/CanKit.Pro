@@ -545,6 +545,71 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.Stop, 0));
     }
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("wo", false)]
+    [InlineData("rw", false)]
+    [InlineData("ro", true)]
+    public async Task Request_Nmt_All_Nodes_Is_A_Write_Only_Sdo_Command(string? access, bool dcf)
+    {
+        const ushort index = 0x1F82;
+        const byte allNodes = 0x80;
+        const byte slave = 0x22;
+        CanOpenDeviceDescription? description = null;
+        if (access is not null)
+        {
+            var file = NetworkListEds(accepted: true) + $"""
+
+                [1F82sub80]
+                ParameterName=All nodes
+                ObjectType=0x7
+                DataType=0x0005
+                AccessType={access}
+                DefaultValue=0
+                PDOMapping=0
+                """;
+            description = dcf ? CanOpenDeviceDescription.ParseDcf(file) : CanOpenDeviceDescription.ParseEds(file);
+        }
+
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(bus, LeftId, clock, out var confirmations, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft, confirmations);
+        using var log = new FrameLog(peer);
+        node.ObjectDictionary.WriteUnsigned(0x1F81, slave, Assigned);
+        node.ObjectDictionary.WriteUnsigned(Startup, 0, SuppressSelfStart | SuppressSlaveStart);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null, () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master can accept NMT requests");
+        TransmitHeartbeat(peer, slave, (byte)NmtState.PreOperational);
+
+        var abort = SdoFrames.BuildAbort(index, allNodes, (uint)SdoAbortCode.AttemptReadWriteOnly);
+        (await Exchange(SdoFrames.BuildUploadInit(index, allNodes))).Should().Equal(abort);
+        (await Exchange(SdoBlockFrames.BuildBlockUploadInit(index, allNodes, true, 16, 0))).Should().Equal(abort);
+        (await Exchange(SdoFrames.BuildUploadInit(index, slave))).Should().Equal(0x4F, 0x82, 0x1F, slave, 0x7F, 0, 0, 0);
+        (await Exchange(SdoFrames.BuildDownloadInit(index, allNodes, new byte[] { 4 }))).Should()
+            .Equal(0x60, 0x82, 0x1F, allNodes, 0, 0, 0, 0);
+        log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.Stop, 0));
+
+        if (description is not null)
+        {
+            var corrections = node.DeviceDescription!.Findings.Where(f =>
+                f.Index == index && f.Subindex == allNodes && f.Outcome == DeviceDescriptionOutcome.Corrected);
+            corrections.Should().HaveCount(access == "wo" ? 0 : 1);
+        }
+
+        async Task<byte[]> Exchange(byte[] request)
+        {
+            log.Clear();
+            Transmit(peer, CanOpenCobId.SdoRx(LeftId), request);
+            await QuiesceAsync(witness, null);
+            return log.Snapshot().Single(f => f.Id == CanOpenCobId.SdoTx(LeftId)).Data;
+        }
+    }
+
     [Fact]
     public void A_Tool_Starts_With_Self_Start_And_Slave_Start_Suppressed()
     {
