@@ -109,6 +109,7 @@ architecture or maintainer decision behind each one.
 | FR-CO-074 | Configurable minimum interval between NMT commands ([NMT inhibit time](#nmt-inhibit-time)) |
 | FR-CO-075 | Request a stored configuration from a remote manager ([Configuration request](#remote-configuration-request)) |
 | FR-CO-076 | Store a concise DCF on a remote configuration manager ([Remote configuration](#remote-configuration-request)) |
+| FR-CO-077 | Read and validate a stored concise DCF ([Remote configuration](#remote-configuration-request)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -1025,6 +1026,12 @@ The manager's EDS/DCF must list `1F22h` at that sub-index. The complete stream m
 `MaxSdoTransferBytes`. A four-byte zero count is transferred as supplied. Selecting the
 manager's own node-id addresses its self-configuration slot. The store completes when the
 manager acknowledges the download. Call `RequestConfigurationAsync` when ready to apply it.
+
+For a readable slot, retrieve the stored DCF with
+`await node.ReadStoredConciseDcfAsync(5, 12, cancellationToken: cancellationToken)`.
+The result contains the original bytes after validation of the count, record boundaries and
+total size. A four-byte zero count is valid. Pass `SdoTransferMode.Block` to request a block
+upload. A manager with a write-only slot can return SDO abort `0601 0001h`.
 
 The manager’s EDS/DCF must list `1F25h` at the requested sub-index. To request all nodes
 with one write to `1F25h:80h`, call `RequestAllConfigurationsAsync(5, cancellationToken)`.

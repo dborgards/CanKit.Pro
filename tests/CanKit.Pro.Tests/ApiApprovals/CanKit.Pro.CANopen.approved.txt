@@ -137,6 +137,7 @@ namespace CanKit.Pro.CANopen
         public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.CANopen.ICanOpenNode node) { }
         public static System.Threading.Tasks.Task DownloadConciseDcfAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte peerNodeId, System.ReadOnlyMemory<byte> conciseDcf, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Nmt.SlaveBootResult> GetSlaveBootResults(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+        public static System.Threading.Tasks.Task<byte[]> ReadStoredConciseDcfAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte managerNodeId, byte targetNodeId, CanKit.Pro.CANopen.Sdo.SdoTransferMode mode = 0, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Threading.Tasks.Task RequestAllConfigurationsAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte managerNodeId, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Threading.Tasks.Task RequestConfigurationAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte managerNodeId, byte targetNodeId, System.Threading.CancellationToken cancellationToken = default) { }
         public static void SetSlaveBootConfiguration(this CanKit.Pro.CANopen.ICanOpenNode node, byte peerNodeId, System.ReadOnlyMemory<byte>? conciseDcf) { }

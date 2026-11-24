@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
@@ -69,11 +70,44 @@ public static class CanOpenNodeExtensions
         CanOpenCobId.ValidateNodeId(targetNodeId);
         cancellationToken.ThrowIfCancellationRequested();
         int limit = node.Options.MaxSdoTransferBytes;
-        if (conciseDcf.Length > limit)
-            throw new System.IO.InvalidDataException("The complete concise DCF exceeds MaxSdoTransferBytes.");
+        CheckStoredDcfLength(conciseDcf.Length, limit);
         var stream = conciseDcf.ToArray();
         CanOpenNode.ReadConciseDcf(stream, limit);
         return node.SdoDownloadAsync(managerNodeId, 0x1F22, targetNodeId, stream, cancellationToken);
+    }
+
+    /// <summary>Reads the binary concise DCF stored in a remote manager's readable 1F22h slot
+    /// and checks its record structure (CiA 302-3 §3.3).</summary>
+    /// <param name="node">The local SDO client.</param>
+    /// <param name="managerNodeId">Node-id of the configuration manager, 1–127.</param>
+    /// <param name="targetNodeId">Node-id selecting the storage slot, 1–127, including the
+    /// manager's own node-id for its self-configuration.</param>
+    /// <param name="mode">Auto for a classic SDO upload, or Block to request a block upload.</param>
+    /// <param name="cancellationToken">Cancellation token for the SDO upload.</param>
+    /// <returns>The complete validated binary stream, including its four-byte entry count.</returns>
+    /// <exception cref="System.IO.InvalidDataException">The returned stream is malformed or
+    /// exceeds <see cref="CanOpenNodeOptions.MaxSdoTransferBytes"/>.</exception>
+    /// <exception cref="SdoAbortException">The SDO transfer was aborted, for example by a
+    /// manager with a write-only slot.</exception>
+    public static async Task<byte[]> ReadStoredConciseDcfAsync(this ICanOpenNode node, byte managerNodeId,
+        byte targetNodeId, SdoTransferMode mode = SdoTransferMode.Auto, CancellationToken cancellationToken = default)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        CanOpenCobId.ValidateNodeId(managerNodeId);
+        CanOpenCobId.ValidateNodeId(targetNodeId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var stream = await node.SdoUploadAsync(managerNodeId, 0x1F22, targetNodeId, mode, cancellationToken)
+            .ConfigureAwait(false);
+        int limit = node.Options.MaxSdoTransferBytes;
+        CheckStoredDcfLength(stream.Length, limit);
+        CanOpenNode.ReadConciseDcf(stream, limit);
+        return stream;
+    }
+
+    private static void CheckStoredDcfLength(int length, int limit)
+    {
+        if (length > limit)
+            throw new System.IO.InvalidDataException("The complete concise DCF exceeds MaxSdoTransferBytes.");
     }
 
     /// <summary>Asks a remote configuration manager to apply its stored configuration for one node
