@@ -55,15 +55,23 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    private static List<ConciseDcfWrite> ParseConciseDcf(byte[] stream, int maxValueBytes)
+    {
+        var writes = new List<ConciseDcfWrite>();
+        ReadConciseDcf(stream, maxValueBytes, (index, subindex, value) =>
+            writes.Add(new ConciseDcfWrite(index, subindex, value.ToArray())));
+        return writes;
+    }
+
     // CiA 302-3 v4.1.0 §3.3, Figure 1: count U32, then (index U16, sub U8, size U32, bytes).
     // Counts and sizes are bounded by the remaining stream before converting to signed lengths.
-    private static List<ConciseDcfWrite> ParseConciseDcf(byte[] stream, int maxValueBytes)
+    internal static void ReadConciseDcf(byte[] stream, int maxValueBytes,
+        Action<ushort, byte, ReadOnlyMemory<byte>>? onRecord = null)
     {
         if (stream.Length < 4) throw new InvalidDataException("Concise DCF is missing its entry count.");
         uint count = BinaryPrimitives.ReadUInt32LittleEndian(stream);
         if (count > (uint)((stream.Length - 4) / 7))
             throw new InvalidDataException("Concise DCF entry count exceeds the available record headers.");
-        var writes = new List<ConciseDcfWrite>();
         int offset = 4;
         for (uint entry = 0; entry < count; entry++)
         {
@@ -74,10 +82,9 @@ internal sealed partial class CanOpenNode
             offset += 7;
             if (length > (uint)(stream.Length - offset)) throw new InvalidDataException("Concise DCF record data is truncated.");
             if (length > (uint)maxValueBytes) throw new InvalidDataException("Concise DCF record exceeds MaxSdoTransferBytes.");
-            writes.Add(new ConciseDcfWrite(index, subindex, stream.AsSpan(offset, (int)length).ToArray()));
+            onRecord?.Invoke(index, subindex, stream.AsMemory(offset, (int)length));
             offset += (int)length;
         }
         if (offset != stream.Length) throw new InvalidDataException("Concise DCF contains trailing bytes after its declared entries.");
-        return writes;
     }
 }

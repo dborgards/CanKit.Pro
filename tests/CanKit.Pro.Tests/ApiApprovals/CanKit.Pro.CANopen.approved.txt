@@ -140,6 +140,7 @@ namespace CanKit.Pro.CANopen
         public static System.Threading.Tasks.Task RequestAllConfigurationsAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte managerNodeId, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Threading.Tasks.Task RequestConfigurationAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte managerNodeId, byte targetNodeId, System.Threading.CancellationToken cancellationToken = default) { }
         public static void SetSlaveBootConfiguration(this CanKit.Pro.CANopen.ICanOpenNode node, byte peerNodeId, System.ReadOnlyMemory<byte>? conciseDcf) { }
+        public static System.Threading.Tasks.Task StoreConciseDcfAsync(this CanKit.Pro.CANopen.ICanOpenNode node, byte managerNodeId, byte targetNodeId, System.ReadOnlyMemory<byte> conciseDcf, System.Threading.CancellationToken cancellationToken = default) { }
     }
     public sealed class CanOpenNodeOptions
     {

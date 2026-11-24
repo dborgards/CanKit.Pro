@@ -108,6 +108,7 @@ architecture or maintainer decision behind each one.
 | FR-CO-073 | Opt-in keep-alive state check ([Keep-alive boot branch](#keep-alive-boot-branch-fr-co-073)) |
 | FR-CO-074 | Configurable minimum interval between NMT commands ([NMT inhibit time](#nmt-inhibit-time)) |
 | FR-CO-075 | Request a stored configuration from a remote manager ([Configuration request](#remote-configuration-request)) |
+| FR-CO-076 | Store a concise DCF on a remote configuration manager ([Remote configuration](#remote-configuration-request)) |
 | FR-CO-068 | Explicit concise-DCF download with complete preflight, ordered SDOs and a shared channel lease ([Concise DCF](#concise-dcf-download)) |
 
 ## Not built, and why
@@ -1008,13 +1009,22 @@ and returns; it must not wait for the node.
 
 ### Remote configuration request
 
-A tool can ask a remote configuration manager to apply a DCF it already holds in
-`1F20h` or `1F22h` (CiA 302-3 §3.6). For example, manager 5 can configure target 12:
+A configuration manager can apply a DCF stored in `1F20h` or `1F22h` (CiA 302-3 §3.6).
+To stage a binary concise DCF, send it to `1F22h` at the target node's sub-index (§3.3).
+For example, these calls store a DCF on manager 5 and then ask it to configure target 12.
 
 ```csharp
 node.BindPeerDeviceDescription(5, managerDescription);
-await node.RequestConfigurationAsync(managerNodeId: 5, targetNodeId: 12, cancellationToken: cancellationToken);
+byte[] conciseDcf = File.ReadAllBytes("slave12.cdc");
+await node.StoreConciseDcfAsync(5, 12, conciseDcf, cancellationToken);
+await node.RequestConfigurationAsync(5, 12, cancellationToken);
 ```
+
+`StoreConciseDcfAsync` validates the complete stream and sends it as one DOMAIN download.
+The manager's EDS/DCF must list `1F22h` at that sub-index. The complete stream must fit
+`MaxSdoTransferBytes`. A four-byte zero count is transferred as supplied. Selecting the
+manager's own node-id addresses its self-configuration slot. The store completes when the
+manager acknowledges the download. Call `RequestConfigurationAsync` when ready to apply it.
 
 The manager’s EDS/DCF must list `1F25h` at the requested sub-index. To request all nodes
 with one write to `1F25h:80h`, call `RequestAllConfigurationsAsync(5, cancellationToken)`.

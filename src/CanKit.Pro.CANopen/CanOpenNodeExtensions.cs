@@ -50,6 +50,32 @@ public static class CanOpenNodeExtensions
         return local.DownloadConciseDcfAsync(peerNodeId, conciseDcf, cancellationToken);
     }
 
+    /// <summary>Stores one complete binary concise DCF on a remote configuration manager
+    /// at 1F22h (CiA 302-3 §3.3). Use <see cref="RequestConfigurationAsync"/> to request application separately.</summary>
+    /// <param name="node">The local SDO client.</param>
+    /// <param name="managerNodeId">Node-id of the configuration manager, 1–127.</param>
+    /// <param name="targetNodeId">Node-id selecting the manager's storage slot, 1–127.
+    /// The manager's own node-id selects its self-configuration.</param>
+    /// <param name="conciseDcf">Complete little-endian data stream including its four-byte record count.</param>
+    /// <param name="cancellationToken">Cancellation token for the SDO download.</param>
+    /// <returns>A task that completes when the manager acknowledges the DOMAIN download.</returns>
+    /// <exception cref="System.IO.InvalidDataException">The stream is malformed or its total size
+    /// exceeds the client's <see cref="CanOpenNodeOptions.MaxSdoTransferBytes"/>.</exception>
+    public static Task StoreConciseDcfAsync(this ICanOpenNode node, byte managerNodeId, byte targetNodeId,
+        ReadOnlyMemory<byte> conciseDcf, CancellationToken cancellationToken = default)
+    {
+        if (node is null) throw new ArgumentNullException(nameof(node));
+        CanOpenCobId.ValidateNodeId(managerNodeId);
+        CanOpenCobId.ValidateNodeId(targetNodeId);
+        cancellationToken.ThrowIfCancellationRequested();
+        int limit = node.Options.MaxSdoTransferBytes;
+        if (conciseDcf.Length > limit)
+            throw new System.IO.InvalidDataException("The complete concise DCF exceeds MaxSdoTransferBytes.");
+        var stream = conciseDcf.ToArray();
+        CanOpenNode.ReadConciseDcf(stream, limit);
+        return node.SdoDownloadAsync(managerNodeId, 0x1F22, targetNodeId, stream, cancellationToken);
+    }
+
     /// <summary>Asks a remote configuration manager to apply its stored configuration for one node
     /// (CiA 302-3 §3.6, 1F25h).</summary>
     /// <param name="node">The local SDO client.</param>
