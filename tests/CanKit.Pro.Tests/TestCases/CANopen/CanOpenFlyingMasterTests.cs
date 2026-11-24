@@ -615,6 +615,34 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
     }
 
     [Fact]
+    public async Task Removing_A_Missing_Slave_Clears_Its_Indication_On_The_Next_Boot()
+    {
+        const byte missing = 0x7F;
+        const byte seen = 0x23;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, missing, Assigned | MandatorySlave);
+        od.WriteUnsigned(0x1F81, seen, Assigned);
+        od.WriteUnsigned(0x1F89, 0, 100);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active,
+            800, "the master is waiting for the mandatory slave");
+        TransmitHeartbeat(rig.Peer, seen, (byte)NmtState.Operational);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => od.ReadUnsigned(0x1F82, missing) == 1,
+            400, "the mandatory slave missed the boot deadline");
+
+        od.WriteUnsigned(0x1F81, missing, 0);
+        await QuiesceAsync(rig.Witness, null);
+        Transmit(rig.Peer, CanOpenCobId.SdoRx(LeftId), SdoFrames.BuildUploadInit(0x1F82, missing));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Single(f => f.Id == CanOpenCobId.SdoTx(LeftId)).Data.Should()
+            .Equal(0x4F, 0x82, 0x1F, missing, 0, 0, 0, 0);
+        od.ReadUnsigned(0x1F82, seen).Should().Be((uint)NmtState.Operational);
+        rig.Node.GetSlaveBootResults().Should().NotContain(r => r.NodeId == missing);
+    }
+
+    [Fact]
     public async Task Request_Nmt_Sends_The_State_It_Names_And_Only_While_Active()
     {
         const byte slave = 0x22;
