@@ -74,12 +74,11 @@ internal sealed partial class CanOpenNode
         CancelBootUp();
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
+            // A missing indication belongs to the previous boot, even if the assignment was removed.
+            if (_od.ReadUnsigned(Co.RequestNmt, id) == DeviceMissing)
+                _od.WriteRawUnchecked(Co.RequestNmt, id, new byte[] { 0 });
             if (IsAssignedSlave(id))
-            {
                 _slaveBootResults[id] = new SlaveBootResult(id, SlaveBootStatus.WaitingForAnnouncement);
-                if (_od.ReadUnsigned(Co.RequestNmt, id) == DeviceMissing)
-                    _od.WriteRawUnchecked(Co.RequestNmt, id, new byte[] { 0 });
-            }
             _slaveBootResetConfirmed[id] = KeepsAlive(id);
         }
 
