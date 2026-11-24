@@ -417,7 +417,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var snifferBus = Open(session, 2);
 
         using var producer = CanOpen.OpenNode(busA, nodeId: 0x11);
-        using var consumer = CanOpen.OpenNode(busB, nodeId: 0x01);
+        using var consumer = (CanOpenNode)CanOpen.OpenNode(busB, nodeId: 0x01);
 
         producer.ObjectDictionary.AddU16(0x2000, 0x00, 0xBEEF);
         consumer.ObjectDictionary.AddU16(0x2100, 0x00, 0);
@@ -432,6 +432,11 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         // RPDO unpack wrongly triggered change-of-state, it would echo on consumerCobId.
         consumer.ConfigureTpdo(1, new PdoMapping().Add(0x2100, 0x00, 16));
 
+        var received = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        consumer.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId == producerCobId) received.TrySetResult(true);
+        };
         var consumerEmissions = 0;
         snifferBus.FrameObserved += (_, view) =>
         {
@@ -445,7 +450,10 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
         await WaitUntilOperationalAsync(producer, consumer);
         await producer.TriggerTpdoAsync(1);
-        await Task.Delay(300); // give any (wrong) echo ample time to appear
+        // The RPDO event follows unpacking. Drain the consumer's queued work and sends before
+        // inspecting the sniffer, so even a delayed change-of-state transmission is accounted for.
+        await received.Task.WithTimeoutAsync(ShortTimeout);
+        await CanOpenTransmitBarrier.DrainAsync(consumer);
 
         consumer.ObjectDictionary.ReadUnsigned(0x2100, 0x00).Should().Be((uint)0xBEEF,
             "the RPDO unpack itself must still land in the OD");
