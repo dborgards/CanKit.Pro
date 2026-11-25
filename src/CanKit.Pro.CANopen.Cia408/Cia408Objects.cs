@@ -178,7 +178,11 @@ internal static partial class Cia408Objects
     /// <summary>Object <c>6709h</c>: vflc actual value 32-bit (§9.21.6), TPDO mapping 8.</summary>
     public static Cia408ObjectDefinition VflcActualValue32 { get; }
 
-    // ---- records mandatory with a control mode beyond the default PDOs (§9) ---------------------------
+    // ---- objects mandatory with a control mode beyond the default PDOs (§9) ---------------------------
+
+    /// <summary>Object <c>640Dh</c>: vpqc power limit factor (§9.16.2), mandatory with 16-bit
+    /// valve parameters and control mode 5.</summary>
+    public static Cia408ObjectDefinition VpqcPowerLimitFactor { get; }
 
     /// <summary>Object <c>640Eh</c>: vpqc hydrostatic actual power (§9.16.3), mandatory with 16-bit
     /// parameters and control mode 5.</summary>

@@ -311,7 +311,7 @@ internal static partial class Cia408Objects
             Rec(0x63FA, "vprc target window monitoring lower threshold 32-bit", "9.15.10", ValvePressure, Integer32, Acc.Rw, Pdo.TrROrNo, If("target window monitoring type is 1"), Ds, Cms, Cms),
 
             // ---- §9.16 pQ control (vpqc): process values ----
-            Var(0x640D, "vpqc power limit factor", "9.16.2", ValvePower, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("16-bit parameters and control mode is 5"), V(65537)),
+            VpqcPowerLimitFactor = Var(0x640D, "vpqc power limit factor", "9.16.2", ValvePower, Unsigned32, Acc.Rw, Pdo.TrROrNo, If("16-bit parameters and control mode is 5"), V(65537)),
             VpqcHydrostaticActualPower = Rec(0x640E, "vpqc hydrostatic actual power", "9.16.3", ValvePower, Integer16, Acc.Ro, Pdo.T, If("16-bit parameters and control mode is 5"), V(0), Ir, P(0)),
 
             // ---- §9.20 vpqc target window monitoring ----

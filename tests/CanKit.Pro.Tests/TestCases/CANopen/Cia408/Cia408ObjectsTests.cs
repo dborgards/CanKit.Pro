@@ -627,7 +627,7 @@ public class Cia408ObjectsTests
             .GetProperties(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
             .Where(p => p.PropertyType == typeof(Cia408ObjectDefinition))
             .ToList();
-        members.Should().HaveCount(30);
+        members.Should().HaveCount(31);
         foreach (var member in members)
         {
             var value = (Cia408ObjectDefinition?)member.GetValue(null);
@@ -647,6 +647,7 @@ public class Cia408ObjectsTests
         Cia408Objects.DeviceControlWord32.Index.Should().Be(0x6044);
         Cia408Objects.DeviceStatusWord32.Index.Should().Be(0x6045);
         Cia408Objects.DeviceErrorCode.Index.Should().Be(0x604E);
+        Cia408Objects.VpqcPowerLimitFactor.Index.Should().Be(0x640D);
         Cia408Objects.VpqcHydrostaticActualPower.Index.Should().Be(0x640E);
         Cia408Objects.VpflcplPowerLimit.Index.Should().Be(0x6780);
         Cia408Objects.VpflcplPowerActualValue.Index.Should().Be(0x6781);

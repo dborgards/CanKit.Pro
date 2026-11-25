@@ -457,7 +457,7 @@ internal sealed class Cia408Configuration
     /// control mode is 3 or 4" (§9.12.2), <c>6388h</c> names 3 and 4 as well (§9.12.5), and Table 32 has no
     /// 32-bit row for pFlow — but a configured pFlow device needs a pressure setpoint, and the norm names
     /// none at 32 bit. The 16-bit one is taken because the 16-bit RPDO mapping 10 names it. A device built
-    /// from a description is not held to it (<see cref="MandatoryRecordsOf"/>).</para>
+    /// from a description is not held to it (<see cref="MandatoryObjectsOf"/>).</para>
     /// <para>The drive modes take the mapping's setpoint (Table 32). For 6, 7, 8 and 9 that object is also
     /// mandatory with the mode at any width (<c>6480h</c> §9.32.2, <c>6500h</c> §9.37.2, <c>6580h</c>
     /// §9.42.2, <c>6600h</c> §9.47.2). Mode 10 takes <c>6600h</c> from Table 32 mapping 8 only: §9.47.2
@@ -490,9 +490,8 @@ internal sealed class Cia408Configuration
     /// <para>The drive modes take the mapping's actual value (Table 13): <c>6501h</c>, <c>6581h</c> and
     /// <c>6601h</c> are "Mandatory, if 16-bit parameter and control mode is" 7, 8 and 9 (§9.37.3, §9.42.3,
     /// §9.47.3), which no drive meets, so the mapping is their only basis.</para>
-    /// <para>Not declared: <c>640Dh</c>, the pQ power limit factor, a VAR mandatory with 16-bit parameters
-    /// and mode 5 (§9.16.2), which belongs to the pQ controller this slice does not build. Nor the drive
-    /// controllers' parameter records (<c>6503h</c>, <c>6504h</c>, <c>6583h</c> to <c>6587h</c>,
+    /// <para>The device declares the pQ power limit factor separately as a VAR (§9.16.2).
+    /// It omits the drive controllers' parameter records (<c>6503h</c>, <c>6504h</c>, <c>6583h</c> to <c>6587h</c>,
     /// <c>6603h</c> to <c>6605h</c>, value records like the setpoints): §9 makes them mandatory with
     /// 16-bit parameters and mode 7, 8 or 9 (§9.38.2, §9.42.8, §9.47.5 and on), which no drive meets, so
     /// none is mandatory for any device.</para>
@@ -509,20 +508,18 @@ internal sealed class Cia408Configuration
         _ => TpdoValues(mode, wide) ?? Array.Empty<Cia408ObjectDefinition>(),
     };
 
-    /// <summary>The value records the object definitions of §9 make mandatory with <paramref name="mode"/>
-    /// in the width it runs in on this resolution: what a device description must declare for the mode
-    /// (<see cref="Cia408Device.FromDescription"/>). Each is among <see cref="SetpointsOf"/> and
-    /// <see cref="ActualValuesOf"/>; the mapping tables add to them for a configured device, which installs
-    /// default PDOs, and a description device takes those others where the file declares them.</summary>
-    internal IReadOnlyList<Cia408ObjectDefinition> MandatoryRecordsOf(Cia408ControlMode mode) => MandatoryRecords(mode, IsWide(mode));
+    /// <summary>The objects §9 makes mandatory with <paramref name="mode"/> at the configured width.
+    /// A description must declare these. A configured device also installs the records its default
+    /// PDO mappings require.</summary>
+    internal IReadOnlyList<Cia408ObjectDefinition> MandatoryObjectsOf(Cia408ControlMode mode) => MandatoryObjects(mode, IsWide(mode));
 
-    /// <summary>The records of <see cref="MandatoryRecordsOf"/>, by mode and width: each one's condition
+    /// <summary>The objects of <see cref="MandatoryObjectsOf"/>, by mode and width: each one's condition
     /// names the mode and the width, or the mode at any width.</summary>
     /// <remarks>None for mode 10 (<c>6600h</c> names 9 only, §9.47.2), 11 and 12. None of the drive
     /// actual values: <c>6501h</c>, <c>6581h</c> and <c>6601h</c> name 16-bit parameters, and a drive runs
-    /// in 32 bit. pQ (5) in 16 bit has <c>640Eh</c> only: the spool and pressure records name modes 1 to
+    /// in 32 bit. pQ (5) in 16 bit requires <c>640Dh</c> and <c>640Eh</c>: the spool and pressure records name modes 1 to
     /// 4. pFlow (14) has the flow records of its width only: the pressure records name 3 and 4.</remarks>
-    private static Cia408ObjectDefinition[] MandatoryRecords(Cia408ControlMode mode, bool wide) => (mode, wide) switch
+    private static Cia408ObjectDefinition[] MandatoryObjects(Cia408ControlMode mode, bool wide) => (mode, wide) switch
     {
         (Cia408ControlMode.SpoolPositionOpenLoop, false) => [Cia408Objects.QSetpoint], // §9.8.2
         (Cia408ControlMode.SpoolPositionOpenLoop, true) => [Cia408Objects.QSetpoint32], // §9.8.5
@@ -532,7 +529,7 @@ internal sealed class Cia408Configuration
         (Cia408ControlMode.PressureOpenLoop or Cia408ControlMode.PressureClosedLoop, true)
             => [Cia408Objects.VprcSetpoint32, Cia408Objects.VprcActualValue32], // §9.12.5, §9.12.6
         (Cia408ControlMode.PressureClosedLoop, false) => [Cia408Objects.VprcSetpoint, Cia408Objects.VprcActualValue], // §9.12.3
-        (Cia408ControlMode.PQControl, false) => [Cia408Objects.VpqcHydrostaticActualPower], // §9.16.3
+        (Cia408ControlMode.PQControl, false) => [Cia408Objects.VpqcPowerLimitFactor, Cia408Objects.VpqcHydrostaticActualPower], // §9.16.2, §9.16.3
         (Cia408ControlMode.FlowControl or Cia408ControlMode.PFlowControl, false)
             => [Cia408Objects.VflcSetpoint, Cia408Objects.VflcActualValue], // §9.21.2, §9.21.3
         (Cia408ControlMode.FlowControl or Cia408ControlMode.PFlowControl, true)

@@ -394,6 +394,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             new[] { unchecked((byte)_controlModeDefault) },
             _controlModeReadOnly ? OdAccess.ReadOnly : Cia408Objects.DeviceControlMode.Access,
             Cia408Objects.DeviceControlMode.PdoAccess != Cia408PdoAccess.No);
+        if (_controlModes.Contains((sbyte)Cia408ControlMode.PQControl))
+        {
+            var factor = Cia408Objects.VpqcPowerLimitFactor;
+            Declare(od, factor, CanOpenValueCodec.Encode(factor.ValueType, factor.DefaultValue!.Value));
+        }
         foreach (var setpoint in _setpoints.Values) DeclareRecord(od, setpoint);
         foreach (var actual in _actuals.Values) DeclareRecord(od, actual);
         Declare(od, Cia408Objects.DeviceErrorCode, CanOpenValueCodec.Encode(OdDataType.Unsigned16, 0));
@@ -682,7 +687,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         }
     }
 
-    /// <summary>Declares a variable of §9.3 at sub-index 00h with the data type, access and PDO
+    /// <summary>Declares a catalogue variable at sub-index 00h with the data type, access and PDO
     /// mappability the catalogue gives it. Constructing thread, in Attach.</summary>
     private void Declare(ObjectDictionary od, Cia408ObjectDefinition definition, byte[] initial)
         => od.AddRaw(Shift(definition), 0x00, definition.ValueType, initial, definition.Access,

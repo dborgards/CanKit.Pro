@@ -72,19 +72,19 @@ internal sealed partial class Cia408Device
     /// actual value — the object the norm adds for closed loop (§9.8.3, §9.8.6: Conditional on mode 2;
     /// §9.12.3: on mode 4, in 16 bit). At 32 bit bit 24 has no such object: <c>6388h</c> and
     /// <c>6389h</c> are mandatory with mode 3 or 4 alike (§9.12.5, §9.12.6), so mode 3's records are
-    /// mode 4's, and a 32-bit file announcing bit 24 supports both. Every mode taken must have the value records declared that the object definitions of §9
-    /// make mandatory with it at its width (<see cref="Cia408Configuration.MandatoryRecordsOf"/>); one
+    /// mode 4's, and a 32-bit file announcing bit 24 supports both. For each supported mode the file
+    /// must declare the objects §9 makes mandatory at its width (<see cref="Cia408Configuration.MandatoryObjectsOf"/>); one
     /// missing fails the open. A mapping table is no requirement here, since the device installs no
     /// default PDO: the mode's other records (<see cref="Cia408Configuration.SetpointsOf"/>,
     /// <see cref="Cia408Configuration.ActualValuesOf"/>) are the device's where the file declares them,
-    /// and absent otherwise. Without a
-    /// device type, the modes are inferred: a mode is taken where the file declares all its records
+    /// and absent otherwise. Without a device type, a mode is inferred where the file declares
+    /// its mandatory objects and all its process records
     /// (<see cref="Cia408Configuration.SetpointsOf"/>, <see cref="Cia408Configuration.ActualValuesOf"/>)
     /// in the width the resolution gives them, at least one. That is inference, not a requirement, and
     /// it uses the full set because the clause-9 records alone do not tell the modes apart: 13 and 14
     /// would look alike, as would 9 and 10, and 10 to 12 would never be found. So a mode without records
     /// (11, 12) cannot be found that way; a file with only the clause-9 records of a mode whose full set
-    /// is larger (a drive with <c>6500h</c> and no <c>6501h</c>, pQ with <c>640Eh</c> alone) does not
+    /// is larger (a drive with <c>6500h</c> and no <c>6501h</c>, pQ with only <c>640Dh</c> and <c>640Eh</c>) does not
     /// show that mode and needs a device type; and every mode whose records are there is taken
     /// (<c>6300h</c> and <c>6301h</c> give modes 1 and 2). The default control mode is the
     /// value of the file's <c>6043h</c>, which must be one of them, and the lowest mode where the file
@@ -299,8 +299,9 @@ internal sealed partial class Cia408Device
     }
 
     /// <summary>The control modes the file's device type announces, bits 23 and 24 split by the
-    /// closed-loop actual value (at 32 bit bit 24 gives both modes, whose records are the same), each with the records §9 makes mandatory with it at its width required
-    /// (<see cref="Cia408Configuration.MandatoryRecordsOf"/>; see <see cref="FromDescription"/>). A
+    /// closed-loop actual value (at 32 bit bit 24 gives both modes, whose records are the same).
+    /// Each announced mode requires the objects §9 makes mandatory at its width
+    /// (<see cref="Cia408Configuration.MandatoryObjectsOf"/>; see <see cref="FromDescription"/>). A
     /// mapping table is no requirement here: a device from a description installs no default PDO.</summary>
     private List<Cia408ControlMode> AnnouncedModes(ObjectDictionary od, Cia408Configuration shape, CanOpenDeviceType deviceType)
     {
@@ -308,17 +309,17 @@ internal sealed partial class Cia408Device
         foreach (var mode in Cia408Configuration.ControlModesOf(deviceType))
         {
             if (mode is Cia408ControlMode.SpoolPositionClosedLoop or Cia408ControlMode.PressureClosedLoop
-                && !shape.MandatoryRecordsOf(mode).All(record => od.ContainsIndex(Shift(record))))
+                && !shape.MandatoryObjectsOf(mode).All(record => od.ContainsIndex(Shift(record))))
             {
                 continue;
             }
 
-            foreach (var record in shape.MandatoryRecordsOf(mode).Where(r => !od.ContainsIndex(Shift(r))))
+            foreach (var definition in shape.MandatoryObjectsOf(mode).Where(d => !od.ContainsIndex(Shift(d))))
             {
                 throw OptionsError(string.Format(CultureInfo.InvariantCulture,
                     "The device description gives logical device {0} the device type {1}, which announces control mode {2} " +
                     "({3}), and does not declare {4:X4}h ({5}), which {6} makes mandatory with it.",
-                    _logicalDevice, deviceType, (int)mode, mode, Shift(record), record.Name, Clause(record)));
+                    _logicalDevice, deviceType, (int)mode, mode, Shift(definition), definition.Name, Clause(definition)));
             }
 
             modes.Add(mode);
@@ -373,14 +374,15 @@ internal sealed partial class Cia408Device
         return (resolution, modes);
     }
 
-    /// <summary>Whether the file declares every setpoint and actual value record a configured device
+    /// <summary>Whether the file declares every process record and mandatory object a configured device
     /// has for <paramref name="mode"/> in <paramref name="shape"/>'s width (its mapping records and the
     /// clause-9 ones), and there is at least one: the inference of the remarks on
     /// <see cref="FromDescription"/>, not a requirement.</summary>
     private bool Declares(ObjectDictionary od, Cia408Configuration shape, Cia408ControlMode mode)
     {
-        var records = shape.SetpointsOf(mode).Concat(shape.ActualValuesOf(mode)).ToList();
-        return records.Count > 0 && records.All(record => od.ContainsIndex(Shift(record)));
+        var objects = shape.SetpointsOf(mode).Concat(shape.ActualValuesOf(mode))
+            .Concat(shape.MandatoryObjectsOf(mode)).Distinct().ToList();
+        return objects.Count > 0 && objects.All(definition => od.ContainsIndex(Shift(definition)));
     }
 
     /// <summary>A configuration of <paramref name="resolution"/>, for the widths it gives each control
