@@ -112,11 +112,14 @@ So there is no reason to push a guess and let CI be the compiler. The gate:
 ```bash
 export DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1
 dotnet build  CanKit.Pro.sln -c Release -p:CI=true          # CI=true turns warnings into errors
-dotnet test   CanKit.Pro.sln -c Release --no-build --framework net10.0
+dotnet test   CanKit.Pro.sln -c Release --no-build --framework net10.0 \
+  --logger trx --results-directory artifacts/test-results
 dotnet format CanKit.Pro.sln --verify-no-changes            # the single arbiter of code style
 out=$(mktemp -d) && dotnet pack CanKit.Pro.sln -c Release -o "$out" \
   && python3 eng/verify-packages.py "$out"    # fresh dir: a stale one can hide a missing package
 ```
+
+For an xUnit `[FATAL ERROR]`, see [Before you push](CONTRIBUTING.md#before-you-push) for the TRX diagnostics.
 
 Do not report a build or test result that was not run.
 
