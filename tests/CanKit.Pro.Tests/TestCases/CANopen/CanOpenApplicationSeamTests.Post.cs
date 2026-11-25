@@ -33,7 +33,7 @@ public partial class CanOpenApplicationSeamTests
             app.Host!.Post(() =>
             {
                 ran.Add(n);
-                onActor.Add(TryRequestTransmission(app.Host));
+                onActor.Add(app.Host.IsOnActor);
                 app.Host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, (uint)n);
             });
         }
@@ -46,19 +46,22 @@ public partial class CanOpenApplicationSeamTests
         Written(app).Should().BeEmpty("a posted action is a callback of the application: its writes are its own");
     }
 
-    /// <summary>Whether an actor-loop member of the host accepts the call: <c>RequestTransmission</c>
-    /// with an empty list does nothing on the loop and throws off it.</summary>
-    private static bool TryRequestTransmission(ICanOpenApplicationHost host)
+    [Fact]
+    public async Task IsOnActor_Identifies_The_Node_Whose_Actor_Is_Running()
     {
-        try
+        using var firstBus = Open(NewSession(), 1);
+        using var secondBus = Open(NewSession(), 1);
+        var first = Entries();
+        var second = Entries();
+        using var firstNode = OpenNode(firstBus, With(first), new ManualTimeSource());
+        using var secondNode = OpenNode(secondBus, With(second), new ManualTimeSource());
+
+        first.Host!.IsOnActor.Should().BeFalse();
+        await secondNode.PostToActorAsync(() =>
         {
-            host.RequestTransmission(Array.Empty<CanOpenObjectAddress>());
-            return true;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
+            second.Host!.IsOnActor.Should().BeTrue();
+            first.Host.IsOnActor.Should().BeFalse();
+        });
     }
 
     [Fact]
