@@ -49,7 +49,8 @@ checks of the `main` ruleset, so run them first rather than letting CI be the co
 
 ```bash
 dotnet build  CanKit.Pro.sln -c Release -p:CI=true       # CI=true turns warnings into errors
-dotnet test   CanKit.Pro.sln -c Release --no-build --framework net10.0
+dotnet test   CanKit.Pro.sln -c Release --no-build --framework net10.0 \
+  --logger trx --results-directory artifacts/test-results
 dotnet format CanKit.Pro.sln --verify-no-changes         # `dotnet format CanKit.Pro.sln` fixes it
 out=$(mktemp -d) && dotnet pack CanKit.Pro.sln -c Release -o "$out" \
   && python3 eng/verify-packages.py "$out"               # fresh dir: a stale one hides a missing package
@@ -62,6 +63,12 @@ Why each step matters locally:
 - `dotnet format` is not optional: it is the single arbiter of code style and a required check.
 - Packing runs package validation (ApiCompat, `src/Directory.Build.props`), which a build never
   does; without it the first you hear of an API break is the `pack (dry run)` job.
+
+If xUnit prints `[FATAL ERROR]`, check the exit code of `dotnet test`. A runner error can set it
+to 1 even when the console counts every test as passed. Open the TRX file from that run in
+`artifacts/test-results`. In CI, download the `test-results-<os>` artifact from the workflow
+run and open the TRX for the affected framework. Under `ResultSummary`, `RunInfos` contains the
+error header and `Output/StdOut` contains the exception message and stack trace from the runner.
 
 Two more checks run in CI and are quick to run locally: `python3 eng/verify-requirements-traceability.py`
 (every `Must` requirement needs a test, and every id you cite must exist) and the SBOM pair in
