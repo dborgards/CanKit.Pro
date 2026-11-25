@@ -241,6 +241,7 @@ namespace CanKit.Pro.CANopen
         PdoDisabled = 2,
         NotImplemented = 3,
         SuppliedDefault = 4,
+        Inconsistent = 5,
     }
     public sealed class DeviceDescriptionReport
     {

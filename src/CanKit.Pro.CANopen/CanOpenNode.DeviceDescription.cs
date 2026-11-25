@@ -137,10 +137,55 @@ internal sealed partial class CanOpenNode
         // created and the managed ones it gave values to, as far as they still exist.
         foreach (var index in objects.Keys.Where(index => _od.ContainsIndex(index))) _describedObjects.Add(index);
 
+        if (_options.Applications.Count == 0) ReportDeviceTypeTopology(description, findings);
+
         _factoryDefaults = SnapshotRestorableValues();
         _powerOnValues = _factoryDefaults;
         _deviceDescription = new DeviceDescriptionReport(description, _nodeId, loaded,
             findings.OrderBy(f => f.Index).ThenBy(f => f.Subindex).ToList());
+    }
+
+    private void ReportDeviceTypeTopology(CanOpenDeviceDescription description, List<DeviceDescriptionFinding> findings)
+    {
+        if (ReadType(Co.DeviceType) is not { HasFurtherLogicalDevices: true } head) return;
+
+        for (int device = 0; device < CanOpenLogicalDevices.MaxCount; device++)
+        {
+            ushort index = DeviceTypeObjectOf(device);
+            if (!_od.ContainsIndex(index))
+            {
+                if (device < 2)
+                    Report(Co.DeviceType, $"1000h announces multiple logical devices, but 0x{index:X4} is missing.");
+                break;
+            }
+
+            var type = ReadType(index);
+            if (device == 0 && type is { } first && first.ProfileNumber != head.ProfileNumber)
+                Report(index, $"67FFh names profile {first.ProfileNumber}, while 1000h names profile {head.ProfileNumber}.");
+        }
+
+        CanOpenDeviceType? ReadType(ushort index)
+        {
+            if (!_od.TryGet(index, 0, out var entry) || entry.DataType != OdDataType.Unsigned32)
+            {
+                Report(index, "A device-type object requires an UNSIGNED32 at sub-index 0.");
+                return null;
+            }
+            if (entry.Access != OdAccess.ReadOnly)
+                Report(index, "A device-type object requires read-only access at sub-index 0.");
+
+            var type = new CanOpenDeviceType(_od.ReadUnsigned(index, 0));
+            if (type.HasReservedAdditionalInformation)
+                Report(index, "Profile 0000h allows only 0000h or FFFFh as additional information.");
+            return type;
+        }
+
+        void Report(ushort index, string reason)
+        {
+            var entry = description.Objects.Objects[index];
+            var value = EntriesOf(entry).FirstOrDefault(e => e.Subindex == 0).Value;
+            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Inconsistent, reason, value));
+        }
     }
 
     // -----------------------------------------------------------------------------------------

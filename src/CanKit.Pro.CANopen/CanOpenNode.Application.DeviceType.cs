@@ -157,8 +157,7 @@ internal sealed partial class CanOpenNode
         {
             var type = types[device];
             var setter = setters[device]!.Application.Name;
-            if (!type.FollowsStandardizedProfile
-                && type.AdditionalInformation is not (0x0000 or CanOpenDeviceType.FurtherLogicalDevices))
+            if (type.HasReservedAdditionalInformation)
             {
                 throw OptionsError($"Application '{setter}' sets logical device {device} to 0x{type.Value:X8}: profile " +
                     "number 0000h is a device without a standardized profile, whose additional information is 0000h, " +

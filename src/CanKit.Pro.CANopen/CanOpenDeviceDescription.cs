@@ -166,7 +166,7 @@ public sealed class CanOpenDeviceDescription
     }
 }
 
-/// <summary>What the node did with an entry of a device description it could not take as written.</summary>
+/// <summary>How the node handled a problem in a device description.</summary>
 public enum DeviceDescriptionOutcome
 {
     /// <summary>The entry was not created: its data type, its value or its position is one the
@@ -190,10 +190,12 @@ public enum DeviceDescriptionOutcome
     /// <summary>A mandatory object (CiA 301 §7.5.2: <c>1000h</c>, <c>1001h</c>, <c>1018h</c>) the
     /// description does not declare; the node keeps its placeholder.</summary>
     SuppliedDefault,
+
+    /// <summary>The node retains the described dictionary, but its device-type declaration is inconsistent.</summary>
+    Inconsistent,
 }
 
-/// <summary>One entry of a device description the node could not take as written, and what it
-/// did instead.</summary>
+/// <summary>A problem the node found in a device description and its handling.</summary>
 public sealed class DeviceDescriptionFinding
 {
     /// <summary>Constructs a finding.</summary>
@@ -237,8 +239,7 @@ public sealed class DeviceDescriptionFinding
 
 /// <summary>
 /// The result of applying a <see cref="CanOpenDeviceDescription"/> to a node: what was loaded and
-/// every entry that was degraded, omitted or supplied. A description whose every entry the node
-/// implements as written has no <see cref="Findings"/>.
+/// any omissions, corrections, defaults or inconsistencies found while opening the node.
 /// </summary>
 public sealed class DeviceDescriptionReport
 {
@@ -260,9 +261,9 @@ public sealed class DeviceDescriptionReport
     /// <summary>The number of <c>(index, sub-index)</c> entries the dictionary took from the description.</summary>
     public int EntriesLoaded { get; }
 
-    /// <summary>Everything the node could not take as written, in index order.</summary>
+    /// <summary>All findings from loading the description, in index order.</summary>
     public IReadOnlyList<DeviceDescriptionFinding> Findings { get; }
 
-    /// <summary>Whether every entry was applied as described.</summary>
+    /// <summary>Whether the description was applied without findings.</summary>
     public bool IsExact => Findings.Count == 0;
 }
