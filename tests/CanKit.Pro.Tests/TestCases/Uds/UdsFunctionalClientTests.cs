@@ -404,39 +404,32 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Late_Negative_Answer_To_A_Previous_Request_Does_Not_Land_In_The_Next_Window()
     {
-        var session = NewSession();
         using var clock = new WindowClock();
-        using var busTester = OpenClassic(session, 0);
-        using var busEcus = OpenClassic(session, 1);
-
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var p2 = TimeSpan.FromMilliseconds(300);
+        using var functional = OpenOnClock(bus, clock, responseWindow: p2);
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
-        busEcus.FrameObserved += (_, e) =>
-        {
-            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] != 0x90)
-                busEcus.Transmit(positive);
-        };
 
-        using var functional = OpenOnClock(busTester, clock, responseWindow: TimeSpan.FromMilliseconds(300));
+        var t0 = clock.Clock.Elapsed;
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await WaitForProvisionalWindow(clock, p2);
+        bus.DeferredEchoes.ReleaseNext();
+        (await CollectFor(clock, first, ShortCollection)).Should().BeEmpty();
 
-        using var cts = new CancellationTokenSource(ShortTimeout);
-        // A short collection window: the negative answer comes after it, and still inside P2.
-        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token);
-        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(30));
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(31));
-        await first;
+        // F191 is requested while F190 can still receive a negative answer for the same SID.
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, ShortCollection);
+        await clock.Clock.AdvanceToAsync(t0 + TimeSpan.FromMilliseconds(150));
+        bus.DeferredEchoes.Enqueued.Should().Be(1, "F190's response window is still open");
+        bus.RaiseObserved(negative, isEcho: false);
 
-        clock.Clock.Advance(TimeSpan.FromMilliseconds(120)); // 151 ms from the request: after the collection, inside P2
-        busEcus.Transmit(negative);
-        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(160)); // P2 of 300 ms is over
-
-        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
-        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
-        var responses = await RunCall(clock, second);
-
-        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
-            "F190's late negative answer is the previous request's");
+        await clock.Clock.AdvanceToAsync(t0 + p2);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
+        bus.RaiseObserved(positive, isEcho: false);
+        bus.DeferredEchoes.ReleaseNext();
+        var responses = await CollectFor(clock, second, ShortCollection);
+        responses.Should().ContainSingle().Which.Response.Should().Equal(0x62, 0xF1, 0x91, 0x02);
     }
 
     // Bugbot on #150: a collection that is cancelled still leaves the window in place.
