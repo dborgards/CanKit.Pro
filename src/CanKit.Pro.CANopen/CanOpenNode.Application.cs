@@ -996,6 +996,8 @@ internal sealed partial class CanOpenNode
 
         public ObjectDictionary ObjectDictionary => _node._od;
 
+        public bool IsOnActor => _node._actor.IsOnCurrentActor;
+
         public NmtState State => _node._state;
 
         public TimeSpan Now

@@ -39,8 +39,8 @@ public class Cia408DeviceAttachTests
         device.Attach(host);
         device.ReportFault(0x2110, Cia408FaultState.FaultInit);
         host.Posted.Should().HaveCount(2, "the start and the fault");
-        host.Posted[1]();
-        host.Posted[0]();
+        host.RunPosted(1);
+        host.RunPosted(0);
 
         changes.Should().Equal("NotReady->Init [0,1]", "Init->FaultInit [8,13]");
     }
@@ -54,8 +54,8 @@ public class Cia408DeviceAttachTests
 
         device.Attach(host);
         device.ReportFault(0x2110, Cia408FaultState.FaultInit);
-        host.Posted[1]();
-        host.Posted[0]();
+        host.RunPosted(1);
+        host.RunPosted(0);
 
         model.Seen.Should().Equal(new[] { (Cia408State.FaultInit, TimeSpan.Zero) },
             "one step once the model has started, in the state the device rests in, with no time elapsed");
@@ -91,6 +91,21 @@ public class Cia408DeviceAttachTests
         internal List<Action> Posted { get; } = new();
 
         public ObjectDictionary ObjectDictionary { get; } = new();
+
+        public bool IsOnActor { get; private set; }
+
+        internal void RunPosted(int index)
+        {
+            IsOnActor = true;
+            try
+            {
+                Posted[index]();
+            }
+            finally
+            {
+                IsOnActor = false;
+            }
+        }
 
         public NmtState State => NmtState.PreOperational;
 

@@ -469,7 +469,7 @@ public class Cia408DeviceProcessTests
     }
 
     [Fact]
-    public void The_Context_Is_Valid_During_Its_Step_Only()
+    public async Task The_Context_Is_Valid_During_Its_Step_Only()
     {
         Cia408ProcessContext? kept = null;
         var model = new RecordingModel { OnStep = c => kept = c };
@@ -477,8 +477,11 @@ public class Cia408DeviceProcessTests
         rig.Settle();
 
         kept.Should().NotBeNull();
-        ((Action)(() => _ = kept!.State)).Should().Throw<InvalidOperationException>();
-        ((Action)(() => kept!.SetStatusBit(12, true))).Should().Throw<InvalidOperationException>();
+        await rig.Node.PostToActorAsync(() =>
+        {
+            ((Action)(() => _ = kept!.State)).Should().Throw<InvalidOperationException>();
+            ((Action)(() => kept!.SetStatusBit(12, true))).Should().Throw<InvalidOperationException>();
+        });
     }
 
     [Fact]

@@ -14,6 +14,10 @@ internal interface ICanOpenApplicationHost
     /// <summary>The node's object dictionary. Any thread.</summary>
     ObjectDictionary ObjectDictionary { get; }
 
+    /// <summary>Whether this thread is executing a callback on this node's actor. Any thread.
+    /// Work handed to another thread must query the host again there.</summary>
+    bool IsOnActor { get; }
+
     /// <summary>The node's NMT state. Actor loop, or <see cref="ICanOpenApplication.Attach"/>.</summary>
     NmtState State { get; }
 
