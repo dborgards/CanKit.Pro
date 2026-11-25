@@ -213,6 +213,8 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public Action<bool>? WhenFailureChanged { get; set; }
 
+        public IReadOnlyList<CanOpenObjectAddress>? OperationalTransmissionEntries { get; set; }
+
         public IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; set; } = Array.Empty<CanOpenObjectAddress>();
 
         public Action<CanOpenObjectAddress, byte[]>? WhenCommand { get; set; }

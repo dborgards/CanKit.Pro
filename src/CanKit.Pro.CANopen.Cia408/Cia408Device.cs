@@ -286,6 +286,9 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// must come in the same order (<see cref="OnCommandWritten"/>).</summary>
     public IReadOnlyList<CanOpenObjectAddress> CommandEntries => _commandEntries;
 
+    /// <inheritdoc />
+    public IReadOnlyList<CanOpenObjectAddress>? OperationalTransmissionEntries => null;
+
     /// <summary>The state the device state machine rests in. Any thread: the state last applied on
     /// the actor loop. <see cref="Cia408State.NotReady"/> until the node has attached the device,
     /// which starts the machine (<see cref="Attach"/>).</summary>
