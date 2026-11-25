@@ -312,11 +312,10 @@ does, so a master sees the described device from its first frame:
   return `1000h`–`1FFFh` to them, or to the last "save"; Reset Node restores the application
   objects as well, which without a description the node cannot do.
 
-What the node cannot implement as written is **degraded, corrected in the dictionary and
-reported** — never ignored. `ICanOpenNode.DeviceDescription` is a `DeviceDescriptionReport`:
-`IsExact` is true when every entry was taken as written, and each `DeviceDescriptionFinding`
-names the entry, the outcome, the reason, the described value and, where an SDO rule decided,
-its abort code:
+`ICanOpenNode.DeviceDescription` provides a `DeviceDescriptionReport`. Its `IsExact` property
+is true when the report contains no findings. Each `DeviceDescriptionFinding` names the entry,
+the outcome, the reason, the described value when applicable, and any SDO abort code that
+determined the outcome.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -325,6 +324,7 @@ its abort code:
 | `PdoDisabled` | The PDO stays destroyed (bit 31 set) because its communication record or its mapping could not be applied — an invalid COB-ID, a mapping onto an object the file does not declare |
 | `NotImplemented` | Created with the described value as data, with no behaviour behind it: `1012h` (TIME), a `1200h` that differs from the default SDO server |
 | `SuppliedDefault` | A mandatory object (`1000h`, `1001h`, `1018h`) the file does not declare; the node keeps its placeholder |
+| `Inconsistent` | A node opened from a description without an application retains its device-type declarations and reports conflicts at the affected index. An announced chain needs `67FFh` and `6FFFh`, with the same profile number at `1000h` and `67FFh`. The loader checks the type, access and reserved additional information of each reachable device-type word. |
 
 The parsed model is available as `CanOpenDeviceDescription.Objects` (the `EdsDcfNet` object
 dictionary) and `DeviceInfo`, and `ParseDiagnostics` lists what the parser repaired while reading

@@ -598,17 +598,20 @@ public partial class CanOpenApplicationSeamTests
     [Fact] // #553
     public void A_Described_Device_Type_Object_Without_Sub_Index_0_Fails_The_Open()
     {
+        var failure = OptionsRefused(TwoDevices(), ChainWithoutSubindexZero());
+
+        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32 at sub-index 0").And.Contain("io");
+    }
+
+    private static CanOpenDeviceDescription ChainWithoutSubindexZero()
+    {
         // 67FFh described as a RECORD whose only entry is sub-index 1: there is no device type to read.
         var eds = EdsWith6000(0xFFFF0191, (0x67FF, Profile401));
         const string Declared = "[67FF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191\nPDOMapping=0\n";
         eds.Should().Contain(Declared);
-        var description = CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
+        return CanOpenDeviceDescription.ParseEds(eds.Replace(Declared,
             "[67FF]\nParameterName=Device type\nObjectType=0x9\nSubNumber=1\n" +
             "[67FFsub1]\nParameterName=Word\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191\nPDOMapping=0\n"));
-
-        var failure = OptionsRefused(TwoDevices(), description);
-
-        failure.Message.Should().Contain("0x67FF").And.Contain("UNSIGNED32 at sub-index 0").And.Contain("io");
     }
 
     [Theory] // #553
@@ -636,11 +639,122 @@ public partial class CanOpenApplicationSeamTests
 
         DeviceTypeOf(node, 0x67FF).Should().Be(0x00050191u, "described: the file's word");
         DeviceTypeOf(node, 0x6FFF).Should().Be(Profile408, "not described: the application's word");
+        node.DeviceDescription!.Findings.Should().NotContain(f => f.Outcome == DeviceDescriptionOutcome.Inconsistent);
     }
 
     // -----------------------------------------------------------------------------------------
     // The node and the reader agree on what a chain is (#575, #552).
     // -----------------------------------------------------------------------------------------
+
+    [Theory] // #576: public open without an application; the master's SDO reads see the original words.
+    [InlineData(0, Profile401, 0x1000, "0x67FF")]
+    [InlineData(1, Profile401, 0x1000, "0x6FFF")]
+    [InlineData(2, Profile408, 0x67FF, "401")]
+    [InlineData(2, Profile401, 0, "")]
+    [InlineData(8, Profile401, 0, "")]
+    public async Task Description_Only_Topology_Finding_Agrees_With_The_Published_Chain(
+        int count, uint first, ushort findingIndex, string reason)
+    {
+        const uint head = 0xFFFF0191;
+        var chain = Enumerable.Range(0, count)
+            .Select(i => (CanOpenLogicalDevices.DeviceTypeIndex(i), i == 0 ? first : Profile408)).ToArray();
+        var session = NewSession();
+        using var masterBus = Open(session, 0);
+        using var slaveBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(masterBus, Master);
+        master.BindPeerDeviceDescription(Slave, PeerSdoLaboratory.Variables(
+            0x1000, 0x67FF, 0x6FFF, 0x77FF, 0x7FFF, 0x87FF, 0x8FFF, 0x97FF, 0x9FFF));
+        using var slave = CanOpen.OpenNode(slaveBus, Slave, DescriptionWith6000(head, chain));
+        var findings = slave.DeviceDescription!.Findings.Where(f => f.Outcome == DeviceDescriptionOutcome.Inconsistent);
+        var result = await CanOpenLogicalDevices.ReadAsync(master, Slave).WithTimeoutAsync(ShortTimeout);
+        result.DeviceType.Value.Should().Be(head);
+
+        if (findingIndex == 0)
+        {
+            findings.Should().BeEmpty();
+            result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Complete);
+            result.Devices.Should().HaveCount(count);
+        }
+        else
+        {
+            var finding = findings.Should().ContainSingle().Which;
+            finding.Index.Should().Be(findingIndex);
+            finding.Subindex.Should().Be(0);
+            finding.Reason.Should().Contain(reason);
+            finding.DescribedValue.Should().Be($"0x{(findingIndex == 0x1000 ? head : first):X8}");
+            slave.DeviceDescription.IsExact.Should().BeFalse();
+            result.End.Should().Be(CanOpenLogicalDeviceReadEnd.Inconsistent);
+        }
+    }
+
+    [Theory]
+    [InlineData(0x00010000u, 0u, 0x1000)]
+    [InlineData(0xFFFF0191u, 0x00010000u, 0x6FFF)]
+    [InlineData(0xFFFF0191u, 0xFFFF0000u, 0)]
+    [InlineData(Profile401, 0x00010000u, 0)]
+    public void Description_Only_Topology_Checks_Reserved_Bits_Of_Reachable_Device_Types(
+        uint head, uint second, ushort findingIndex)
+    {
+        using var bus = Open(NewSession(), 1);
+        var description = DescriptionWith6000(head, (0x67FF, Profile401), (0x6FFF, second));
+        using var node = CanOpen.OpenNode(bus, Slave, description);
+        var findings = node.DeviceDescription!.Findings.Where(f => f.Outcome == DeviceDescriptionOutcome.Inconsistent);
+        if (findingIndex == 0) findings.Should().BeEmpty();
+        else findings.Should().ContainSingle().Which.Index.Should().Be(findingIndex);
+    }
+
+    [Theory]
+    [InlineData("0x0006", "ro", "UNSIGNED32")]
+    [InlineData("0x0007", "rw", "read-only")]
+    public void Description_Only_Topology_Reports_A_Malformed_Chain_Object(string dataType, string access, string reason)
+    {
+        var description = ChainWithObjectDeclaredAs(0x6FFF, dataType, access, "0x0198", 0xFFFF0191,
+            (0x67FF, Profile401), (0x6FFF, Profile408));
+        using var bus = Open(NewSession(), 1);
+        using var node = CanOpen.OpenNode(bus, Slave, description);
+        var finding = node.DeviceDescription!.Findings.Should().ContainSingle(f =>
+            f.Outcome == DeviceDescriptionOutcome.Inconsistent).Which;
+        finding.Index.Should().Be(0x6FFF);
+        finding.Reason.Should().Contain(reason);
+    }
+
+    [Fact]
+    public void Description_Only_Topology_Reports_A_Chain_Record_Without_Subindex_Zero()
+    {
+        using var bus = Open(NewSession(), 1);
+        using var node = CanOpen.OpenNode(bus, Slave, ChainWithoutSubindexZero());
+        var finding = node.DeviceDescription!.Findings.Should().ContainSingle(f =>
+            f.Index == 0x67FF && f.Outcome == DeviceDescriptionOutcome.Inconsistent).Which;
+        finding.DescribedValue.Should().BeNull();
+        finding.Reason.Should().Contain("sub-index 0");
+    }
+
+    [Fact]
+    public void Description_Only_Topology_Reports_A_Signed_Device_Type_At_1000h()
+    {
+        var eds = EdsWith6000(Profile401).Replace("DataType=0x0007\nAccessType=ro\nDefaultValue=0x000F0191",
+            "DataType=0x0004\nAccessType=ro\nDefaultValue=0x000F0191");
+        using var bus = Open(NewSession(), 1);
+        using var node = CanOpen.OpenNode(bus, Slave, CanOpenDeviceDescription.ParseEds(eds));
+        var finding = node.DeviceDescription!.Findings.Should().ContainSingle(f =>
+            f.Outcome == DeviceDescriptionOutcome.Inconsistent).Which;
+        finding.Index.Should().Be(0x1000);
+        finding.Reason.Should().Contain("UNSIGNED32");
+    }
+
+    [Fact]
+    public void Description_Only_Topology_Uses_The_Dcf_Parameter_Value()
+    {
+        var text = System.IO.File.ReadAllText(CanOpenDeviceDescriptionTests.Fixture("device.dcf"))
+            .Replace("DefaultValue=0x00030191", "DefaultValue=0x00030191\nParameterValue=0xFFFF0191");
+        using var bus = Open(NewSession(), 1);
+        using var node = CanOpen.OpenNode(bus, Slave, CanOpenDeviceDescription.ParseDcf(text));
+        var finding = node.DeviceDescription!.Findings.Should().ContainSingle(f =>
+            f.Outcome == DeviceDescriptionOutcome.Inconsistent).Which;
+        finding.Index.Should().Be(0x1000);
+        finding.DescribedValue.Should().Be("0xFFFF0191");
+        node.ObjectDictionary.ReadUnsigned(0x1000, 0).Should().Be(0xFFFF0191u);
+    }
 
     /// <summary>A copy of <see cref="EdsWith6000"/> in which the described device-type object
     /// <paramref name="index"/> is declared with <paramref name="dataType"/>, <paramref name="access"/> and

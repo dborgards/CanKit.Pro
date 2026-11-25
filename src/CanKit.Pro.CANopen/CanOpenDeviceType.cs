@@ -29,6 +29,9 @@ public readonly record struct CanOpenDeviceType(uint Value)
     /// (<c>FFFFh</c>), which marks a node with more than one logical device.</summary>
     public bool HasFurtherLogicalDevices => AdditionalInformation == FurtherLogicalDevices;
 
+    internal bool HasReservedAdditionalInformation =>
+        !FollowsStandardizedProfile && AdditionalInformation is not (0 or FurtherLogicalDevices);
+
     /// <summary>Reads the device-type word from the four bytes an SDO upload of <c>1000h:00</c>
     /// returns, least significant byte first.</summary>
     /// <param name="littleEndian">The uploaded bytes.</param>
