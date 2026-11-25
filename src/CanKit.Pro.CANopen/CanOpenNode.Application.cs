@@ -33,6 +33,8 @@ internal sealed partial class CanOpenNode
     // before the node's actor runs anything; empty for a node opened without applications.
     private ApplicationSlot[] _applications = Array.Empty<ApplicationSlot>();
 
+    private HashSet<uint>? _operationalTransmissionEntries;
+
     private sealed class ApplicationSlot
     {
         internal ApplicationSlot(ICanOpenApplication application, ApplicationHost host)
@@ -160,6 +162,16 @@ internal sealed partial class CanOpenNode
             }
             // Read once, after Attach: the list may name what the application declared there.
             commandEntries.UnionWith(ValidatedCommandEntries(slot));
+            if (slot.Application.OperationalTransmissionEntries is { } entries)
+            {
+                _operationalTransmissionEntries ??= new HashSet<uint>();
+                foreach (var entry in entries)
+                {
+                    if (!ReferenceEquals(ClaimantOf(entry.Index), slot))
+                        throw OptionsError($"Application '{slot.Application.Name}' requests startup transmission of unclaimed entry {entry.Index:X4}:{entry.Subindex:X2}.");
+                    _operationalTransmissionEntries.Add(CosKey(entry.Index, entry.Subindex));
+                }
+            }
         }
         if (commandEntries.Count > 0) _commandEntries = commandEntries;
         ComposeDeviceTypes();
@@ -626,6 +638,8 @@ internal sealed partial class CanOpenNode
                     }
                     InvokeApplication(slot, application => application.OnNmtStateChanged(from, to));
                 }
+                if (to == NmtState.Operational && _operationalTransmissionEntries is { } entries)
+                    TriggerChangeOfState(entries, includeAllProfileTpdos: true);
             }
         }
         finally

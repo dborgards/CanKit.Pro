@@ -96,6 +96,14 @@ internal interface ICanOpenApplication
     /// <summary>What the application needs from the node. Read when the node opens, once.</summary>
     CanOpenApplicationRequirements Requirements { get; }
 
+    /// <summary>Startup transmissions requested by this profile. Null opts out. Any list, including
+    /// an empty one, requests every valid profile-event TPDO (type FFh) on entry to Operational.
+    /// The listed entries also trigger their usual mapped transmissions as in
+    /// <see cref="ICanOpenApplicationHost.RequestTransmission"/>. Each must belong to the application.
+    /// The node copies and combines the lists after each application's <see cref="Attach"/> and
+    /// acts once, after the state callbacks, using the current PDO mappings.</summary>
+    IReadOnlyList<CanOpenObjectAddress>? OperationalTransmissionEntries { get; }
+
     /// <summary>The claimed entries whose every committed write the application is told of, one by
     /// one and with the value written (<see cref="OnCommandWritten"/>), instead of coalesced through
     /// <see cref="OnEntriesWritten"/>: a command word, whose edges a profile reacts to, such as the

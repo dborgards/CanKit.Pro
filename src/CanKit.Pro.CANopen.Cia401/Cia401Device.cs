@@ -115,12 +115,6 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// records has no PDOs, the default ones included, where §6.1 has a device that supports an I/O
 /// function "support the related default PDOs": the file wins (see
 /// <see cref="FromDescription"/>).</description></item>
-/// <item><description>A TPDO of transmission type <c>FFh</c> that maps no entry of the device,
-/// only objects outside its logical device's range (<c>1001h</c>, say, or another application's
-/// objects), is not sent on entering Operational, where §6.1 sends every TPDO of that type: the
-/// device can ask the node to transmit only what maps its own entries, and the application seam
-/// has no request for every TPDO of a type (issue #548; see
-/// <see cref="OnNmtStateChanged"/>).</description></item>
 /// </list>
 /// <para>
 /// Which objects a description must declare per function block: see <see cref="FromDescription"/>.
@@ -184,7 +178,7 @@ namespace CanKit.Pro.CANopen.Cia401;
 /// the writer's business. The device stores and drives the 16-bit value it is
 /// given.</description></item>
 /// <item><description><b>Entering Operational</b> sends every TPDO of transmission type
-/// <c>FFh</c> that maps an entry of the device (§6.1), an input, an output or a parameter,
+/// <c>FFh</c> on the node (§6.1), including TPDOs remapped outside the logical device,
 /// whatever <c>6005h</c> and <c>6423h</c> say (see <see cref="OnNmtStateChanged"/>): TPDOs 2 to 4,
 /// valid by default (see <see cref="Cia401Configuration.DefaultPdos"/>), go out then, while a
 /// changed analog input sends them only once <c>6423h</c> is TRUE and the condition <c>6421h</c>
@@ -244,10 +238,6 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     // True while RaiseOutputsChanged runs: a change made then (by a subscriber or the plant model)
     // is left pending, and the running call reports it. Actor loop.
     private bool _raisingOutputsChanged;
-
-    // Every entry the device owns, the request made on entering Operational (OnNmtStateChanged).
-    // Built once in Attach, before the host is published; read on the actor loop.
-    private CanOpenObjectAddress[] _ownedEntries = Array.Empty<CanOpenObjectAddress>();
 
     /// <summary>A device with what <paramref name="configuration"/> says, and the plant model
     /// <paramref name="process"/> when one is given. The configuration is read once, here.</summary>
@@ -318,6 +308,9 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <see cref="FromDescription"/>, and failure monitoring.</summary>
     public CanOpenApplicationRequirements Requirements { get; }
 
+    /// <inheritdoc />
+    public IReadOnlyList<CanOpenObjectAddress> OperationalTransmissionEntries { get; private set; } = Array.Empty<CanOpenObjectAddress>();
+
     /// <summary>None: every CiA 401-1 object is a level, which the device reads when it is told of
     /// the write (<see cref="OnEntriesWritten"/>).</summary>
     public IReadOnlyList<CanOpenObjectAddress> CommandEntries => Array.Empty<CanOpenObjectAddress>();
@@ -365,7 +358,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
                 deviceType = _deviceType;
             }
 
-            _ownedEntries = OwnedEntries(od);
+            OperationalTransmissionEntries = OwnedEntries(od);
             DigitalInputsReset(host);
             AnalogInputsReset(host, resetNode: true);
             _digitalOutputs?.Start(od);
@@ -455,32 +448,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     }
 
     /// <summary>Stopped puts the outputs in the error state while it lasts (CiA 401-1 §8.3.3).
-    /// Entering Operational sends every TPDO of transmission type <c>FFh</c> (§6.1) that maps an
-    /// entry of the device: the analog inputs first start their interrupt state afresh
-    /// (<c>6422h</c> cleared) and send the warning of §5.3 when <c>6423h</c> is FALSE (see
-    /// <see cref="SetAnalogInput"/>); then the device asks for every entry it owns, in one request,
-    /// whatever the interrupt masks and the global interrupt enables say.
+    /// On entering Operational the device clears the analog interrupt state and sends the §5.3
+    /// warning when required. After the callbacks the node processes <see cref="OperationalTransmissionEntries"/>
+    /// against the live mappings, sending every type-FFh TPDO once across all logical devices (§6.1).
     /// Leaving Initialisation with a device failure active asks the node for the state
     /// <c>1029h:01</c> names (§6.2.4; see <see cref="ReportDeviceFailure"/>). Actor loop.</summary>
-    /// <remarks>
-    /// <para>
-    /// The device cannot see the PDO mappings through the application seam, so it does not pick the
-    /// TPDOs: the request names every entry it owns, every sub-index from 01h of each object it
-    /// declared or adopted in its logical device's range, inputs, outputs and parameters alike, and
-    /// sub-index 00h of each object without further sub-indices. The list is built once, in
-    /// <see cref="Attach"/>. The node sends each TPDO that maps one of them once, however many of them
-    /// it maps, and passes over the entries no TPDO maps; a master that remaps a TPDO to
-    /// <c>6002h:01</c> gets it as it gets the default mapping. The request does for every PDO that
-    /// maps one of the entries what <see cref="ICanOpenApplicationHost.RequestTransmission"/> does:
-    /// an event-driven TPDO is sent, a synchronous-acyclic one waits for the next SYNC, a transmit
-    /// SRDO triggers, and a source MPDO sends one frame per entry of its object scanner list.
-    /// </para>
-    /// <para>
-    /// Not covered: a TPDO of transmission type <c>FFh</c> that maps only objects outside the
-    /// device's range (<c>1001h</c>, say, or another application's objects) is not sent. That needs
-    /// the node to send every TPDO of the type, which the seam does not offer (issue #548).
-    /// </para>
-    /// </remarks>
     public void OnNmtStateChanged(NmtState previous, NmtState current)
     {
         var host = AttachedHost();
@@ -492,11 +464,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
         // ReportDeviceFailure). Asked from here, the change follows once this round is told.
         if (previous == NmtState.Initializing && _deviceFailure) RequestDeviceFailureState(host);
 
-        if (current == NmtState.Operational)
-        {
-            AnalogInputsEnterOperational(host);
-            RequestTransmission(host, _ownedEntries);
-        }
+        if (current == NmtState.Operational) AnalogInputsEnterOperational(host);
         RaiseOutputsChanged();
     }
 

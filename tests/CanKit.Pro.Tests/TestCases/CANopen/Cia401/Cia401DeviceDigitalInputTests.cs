@@ -437,6 +437,33 @@ public class Cia401DeviceDigitalInputTests
             .Which.Should().Equal(new byte[] { 0x5A }, "TPDO 1 now carries the polarity 6002h:01");
     }
 
+    [Theory]
+    [InlineData(0xFF, true, 1)]
+    [InlineData(0xFE, true, 0)]
+    [InlineData(0xFF, false, 0)]
+    public async Task Each_Operational_Entry_Uses_The_Live_Type_And_Mapping_Once_Per_Node(
+        byte transmissionType, bool enabled, int framesPerEntry)
+    {
+        using var rig = new Cia401Rig(new[] { Inputs(8), Inputs(8, logicalDevice: 1) }, Cia401Rig.WritablePdoRecords);
+        uint cobId = await rig.ReadU32Async(0x1800, 0x01);
+        await rig.WriteU32Async(0x1800, 0x01, cobId | 0x8000_0000u);
+        await rig.WriteU8Async(0x1A00, 0, 0);
+        await rig.WriteU32Async(0x1A00, 1, 0x1001_0008); // error register, outside both logical devices
+        await rig.WriteU8Async(0x1A00, 0, 1);
+        await rig.WriteU8Async(0x1800, 2, transmissionType);
+        if (enabled) await rig.WriteU32Async(0x1800, 1, cobId);
+
+        await rig.StartAsync();
+        await rig.DrainAsync();
+        rig.Count(Cia401Rig.Tpdo1).Should().Be(framesPerEntry);
+        await rig.EnterPreOperationalAsync();
+        await rig.StartAsync();
+        await rig.DrainAsync();
+        var frames = rig.Payloads(Cia401Rig.Tpdo1);
+        frames.Should().HaveCount(2 * framesPerEntry);
+        foreach (var frame in frames) frame.Should().Equal(new byte[] { 0 });
+    }
+
     [Fact]
     public async Task Twenty_Inputs_Are_Three_Bytes_And_Channel_17_Is_The_Low_Bit_Of_The_Third()
     {

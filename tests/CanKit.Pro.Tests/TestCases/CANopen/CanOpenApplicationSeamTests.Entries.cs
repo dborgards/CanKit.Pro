@@ -510,6 +510,33 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public void A_Startup_Transmission_List_Must_Claim_Its_Entries()
+    {
+        var app = Entries();
+        app.OperationalTransmissionEntries = new[] { new CanOpenObjectAddress(0x1001, 0) };
+
+        OpenFails(With(app)).Message.Should().Contain(app.Name).And.Contain("1001:00");
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 1)]
+    public async Task Profile_Event_Tpdos_On_Start_Are_Opt_In(bool request, int expected)
+    {
+        var app = Entries();
+        if (request) app.OperationalTransmissionEntries = Array.Empty<CanOpenObjectAddress>();
+        using var rig = new EntryRig(With(app));
+        rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x2100, 0, 8));
+        rig.Od.WriteUnsigned(0x1800, 2, 0xFF);
+        rig.ConfigureWitness();
+
+        await rig.StartAsync();
+        await rig.WitnessAsync();
+
+        rig.Wire.Count(Tpdo1).Should().Be(expected);
+    }
+
+    [Fact]
     public async Task The_Claimant_Requests_The_Transmission()
     {
         var app = Entries();
