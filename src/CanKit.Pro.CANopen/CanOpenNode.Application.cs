@@ -350,6 +350,7 @@ internal sealed partial class CanOpenNode
         if (dirty is { Count: > 0 } && !DeliverWrittenEntries(dirty)) return;
         // Last: an application hears of an RPDO once it has been told what the RPDO wrote.
         if (receptions is not null) DeliverReceptions(receptions);
+        FlushDeferredApplicationTpdos();
     }
 
     /// <summary>Tells each claimant its entries of <paramref name="dirty"/>, sorted and each once.

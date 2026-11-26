@@ -890,8 +890,6 @@ internal sealed partial class CanOpenNode
             {
                 var rt = _tpdos[n];
                 if (rt is null || !rt.Valid || !IsChangeOfStateTriggered(rt.TransmissionType)) continue;
-                if (n == answeringRpdo && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)
-                    && rt.MappingKind < (byte)MpdoAddressMode.Source) continue;
                 if (includeAllProfileTpdos && rt.TransmissionType == CanOpenTransmissionType.EventDrivenProfile)
                 {
                     TriggerTpdoOnActor(n);
@@ -912,6 +910,12 @@ internal sealed partial class CanOpenNode
                     }
                 }
                 if (!hit) continue;
+                if (n == answeringRpdo && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)
+                    && rt.MappingKind < (byte)MpdoAddressMode.Source)
+                {
+                    (_deferredApplicationTpdos ??= new()).Add(n);
+                    continue;
+                }
                 if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
                 else RequestEventDrivenTransmission(rt);
             }

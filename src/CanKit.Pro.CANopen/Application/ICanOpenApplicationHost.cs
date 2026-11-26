@@ -227,7 +227,9 @@ internal interface ICanOpenApplicationHost
     /// </para>
     /// <para>
     /// If the application will answer <paramref name="answeringRpdo"/> from its reception callback,
-    /// that answer covers the event-driven TPDO of the same number. Other mappings, including
+    /// that answer covers the event-driven TPDO of the same number. If a callback takes the node
+    /// out of Operational first, the pending change requests its transmission before the transition,
+    /// subject to the same inhibit time. Other mappings, including
     /// synchronous-acyclic TPDOs, MPDOs and SRDOs, still follow their normal triggers.
     /// Acts only in Operational; in any other state nothing happens and nothing is kept for later.
     /// Every entry must be claimed by this application, and all are checked before any is

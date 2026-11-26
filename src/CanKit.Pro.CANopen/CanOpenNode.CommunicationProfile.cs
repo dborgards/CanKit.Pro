@@ -919,6 +919,9 @@ internal sealed partial class CanOpenNode
         // failure must not produce a transient Operational window on a new NMT Start.
         target = ResolveErrorBehaviorTarget(target);
         var previous = _state;
+        // A profile fault can request a state synchronously during RPDO command delivery. Give
+        // changes waiting for the later reception callback their last opportunity in Operational.
+        if (previous == NmtState.Operational && target != previous) FlushDeferredApplicationTpdos();
         CancelSelfStart();
         if (target == NmtState.Stopped) _syncProducerGeneration++;
         if (previous == NmtState.Stopped && target is NmtState.PreOperational or NmtState.Operational)
