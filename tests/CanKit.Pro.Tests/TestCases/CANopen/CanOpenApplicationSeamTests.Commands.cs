@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -486,9 +485,8 @@ public partial class CanOpenApplicationSeamTests
         // waits in the queue, when the reset comes.
         await WhileActorHeldAsync(rig.Node, () =>
         {
-            reset = rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
-                .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false }));
+            reset = rig.Node.ActorForTests.PostAsync(() =>
+                rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), isRtr: false));
             rig.Od.WriteUnsigned(0x6040, 0x00, 0x0009);
         });
         await reset!;
@@ -576,9 +574,8 @@ public partial class CanOpenApplicationSeamTests
 
         await WhileActorHeldAsync(rig.Node, () =>
         {
-            reset = rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
-                .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false }));
+            reset = rig.Node.ActorForTests.PostAsync(() =>
+                rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), isRtr: false));
             for (int i = 0; i < CommandQueueBound; i++) rig.Od.WriteUnsigned(0x6040, 0x00, 0x0003);
         });
         await reset!;
@@ -631,9 +628,8 @@ public partial class CanOpenApplicationSeamTests
 
         await WhileActorHeldAsync(rig.Node, () =>
         {
-            reset = rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
-                .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetCommunication), false }));
+            reset = rig.Node.ActorForTests.PostAsync(() =>
+                rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetCommunication), isRtr: false));
             rig.Od.WriteUnsigned(0x6040, 0x00, 0x0009);
             rig.Od.WriteUnsigned(0x6040, 0x00, 0x0001);
         });

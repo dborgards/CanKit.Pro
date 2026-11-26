@@ -85,9 +85,8 @@ public partial class CanOpenPdoEngineTests
         private async Task Poll()
         {
             int count = Wire.Count(CanOpenCobId.Heartbeat(Device));
-            await Node.PostToActorAsync(() => typeof(CanOpenNode)
-                .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(Node, new object[] { CanOpenCobId.Heartbeat(Device), Array.Empty<byte>(), true }));
+            await Node.PostToActorAsync(() =>
+                Node.HandleIncoming(CanOpenCobId.Heartbeat(Device), Array.Empty<byte>(), isRtr: true));
             await Wire.WaitForCountAsync(CanOpenCobId.Heartbeat(Device), count + 1);
         }
 

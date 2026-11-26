@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -34,9 +33,10 @@ public partial class CanOpenPdoEngineTests
     // Injection is still on the actor, through the frame dispatcher, but provides a precise
     // receive barrier before advancing the virtual clock. Transmission is observed on the bus.
     private static Task Inject(ICanOpenNode node, uint id, params byte[] payload)
-        => ((CanOpenNode)node).PostToActorAsync(() => typeof(CanOpenNode)
-            .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(node, new object[] { id, payload, false }));
+    {
+        var concreteNode = (CanOpenNode)node;
+        return concreteNode.PostToActorAsync(() => concreteNode.HandleIncoming(id, payload, isRtr: false));
+    }
 
     // FR-CO-052: the matching SYNC is the FIRST counted SYNC, not the first transmission for n>1.
     [Fact]

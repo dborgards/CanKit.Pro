@@ -205,9 +205,8 @@ public partial class CanOpenApplicationSeamTests
         await WhileActorHeldAsync(rig.Node, async () =>
         {
             await QueueFramesAsync(rig, (Rpdo1, new byte[] { 0x0F, 0x00, 0x42 }));
-            reset = rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
-                .GetMethod("HandleIncoming", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-                .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false }));
+            reset = rig.Node.ActorForTests.PostAsync(() =>
+                rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), isRtr: false));
         });
         await reset!;
         Settle(rig.Node);

@@ -1103,6 +1103,8 @@ namespace CanKit.Pro.Actor
             return ms >= int.MaxValue ? int.MaxValue : (int)Math.Ceiling(ms);
         }
 
+        internal int MailboxDepthForTests => _mailbox.Count;
+
         // Loop-thread-only view of the pending timer list, for tests that need to prove cancelled
         // entries are actually reclaimed rather than merely never fired. Reading _timers.Count is
         // only safe from the loop (or after joining it), hence the accessor rather than exposing the list.

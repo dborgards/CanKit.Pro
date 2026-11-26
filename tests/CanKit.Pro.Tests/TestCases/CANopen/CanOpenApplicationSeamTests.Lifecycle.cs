@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
@@ -149,9 +148,8 @@ public partial class CanOpenApplicationSeamTests
         Settle(rig.Node);
 
         // The whole reset is one actor job: the task completes once it has run, disposed node or not.
-        await rig.Node.ActorForTests.PostAsync(() => typeof(CanOpenNode)
-            .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false }));
+        await rig.Node.ActorForTests.PostAsync(() =>
+            rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), isRtr: false));
 
         rig.Od.ReadUnsigned(0x6000, 0x01).Should().Be(9u, "the reset ends where the node was disposed: nothing is restored");
         app.Log.Should().NotContain("reset ResetNode");

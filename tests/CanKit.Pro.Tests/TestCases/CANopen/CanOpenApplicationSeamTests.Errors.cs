@@ -1,6 +1,5 @@
 using System;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -805,9 +804,8 @@ public partial class CanOpenApplicationSeamTests
     }
 
     private static Task PollLifeGuarding(CanOpenNode node)
-        => node.PostToActorAsync(() => typeof(CanOpenNode)
-            .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(node, new object[] { CanOpenCobId.Heartbeat(Slave), Array.Empty<byte>(), true }));
+        => node.PostToActorAsync(() =>
+            node.HandleIncoming(CanOpenCobId.Heartbeat(Slave), Array.Empty<byte>(), isRtr: true));
 
     [Fact]
     public async Task Life_Guarding_Is_A_Communication_Failure()
@@ -921,9 +919,8 @@ public partial class CanOpenApplicationSeamTests
         Failures(app).Should().Equal("failure True");
         int mark = app.Log.Count;
 
-        await rig.Node.PostToActorAsync(() => typeof(CanOpenNode)
-            .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.ResetNode, Slave }, false }));
+        await rig.Node.PostToActorAsync(() =>
+            rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.ResetNode, Slave }, isRtr: false));
         Settle(rig.Node);
 
         // The controller is still bus-off: the sample the node takes afresh after the boot-up
