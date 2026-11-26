@@ -9,7 +9,6 @@ namespace CanKit.Pro.CANopen.Application;
 /// error, it has no access.</summary>
 internal sealed class CanOpenProfileCatalog
 {
-    private readonly List<ICanOpenProfile> _profiles = new();
     private readonly Dictionary<ushort, ICanOpenProfile> _byNumber = new();
 
     /// <summary>A catalogue of <paramref name="profiles"/>.</summary>
@@ -21,6 +20,7 @@ internal sealed class CanOpenProfileCatalog
         if (profiles is null)
             throw new ArgumentNullException(nameof(profiles));
 
+        var ordered = new List<ICanOpenProfile>();
         foreach (var profile in profiles)
         {
             if (profile is null)
@@ -34,8 +34,11 @@ internal sealed class CanOpenProfileCatalog
                     nameof(profiles));
 
             _byNumber.Add(profile.ProfileNumber, profile);
-            _profiles.Add(profile);
+            ordered.Add(profile);
         }
+
+        // A read-only wrapper around the list would expose the list through ICollection.SyncRoot.
+        Profiles = [.. ordered];
     }
 
     /// <summary>A catalogue of <paramref name="profiles"/>, see
@@ -45,8 +48,8 @@ internal sealed class CanOpenProfileCatalog
     {
     }
 
-    /// <summary>The descriptors, in the order they were given.</summary>
-    public IReadOnlyCollection<ICanOpenProfile> Profiles => _profiles;
+    /// <summary>A read-only snapshot of the descriptors in registration order.</summary>
+    public IReadOnlyCollection<ICanOpenProfile> Profiles { get; }
 
     /// <summary>The descriptor of a profile number.</summary>
     /// <param name="profileNumber">The profile number.</param>
@@ -75,6 +78,7 @@ internal sealed class CanOpenProfileCatalog
     /// <paramref name="logicalDevice"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside <c>1</c> to
     /// <c>127</c>.</exception>
+    /// <exception cref="InvalidOperationException">A registered descriptor returned a null peer.</exception>
     public ICanOpenProfilePeer? CreatePeer(ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice)
     {
         if (node is null)
@@ -111,6 +115,7 @@ internal sealed class CanOpenProfileCatalog
     /// <exception cref="ArgumentException">The first device of <paramref name="result"/> has another profile
     /// number than its <c>1000h</c>; the message carries its
     /// <see cref="CanOpenLogicalDeviceReadResult.Failure"/>.</exception>
+    /// <exception cref="InvalidOperationException">A registered descriptor returned a null peer.</exception>
     public IReadOnlyList<ICanOpenProfilePeer?> CreatePeers(ICanOpenNode node, byte peerNodeId,
         CanOpenLogicalDeviceReadResult result)
     {
@@ -134,7 +139,11 @@ internal sealed class CanOpenProfileCatalog
     }
 
     private ICanOpenProfilePeer? CreatePeerCore(ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice)
-        => _byNumber.TryGetValue(logicalDevice.DeviceType.ProfileNumber, out var profile)
-            ? profile.CreatePeer(node, peerNodeId, logicalDevice)
-            : null;
+    {
+        var number = logicalDevice.DeviceType.ProfileNumber;
+        if (!_byNumber.TryGetValue(number, out var profile)) return null;
+
+        return profile.CreatePeer(node, peerNodeId, logicalDevice) ?? throw new InvalidOperationException(
+            $"Descriptor '{profile.Name}' for profile {number} returned a null peer for node {peerNodeId}, logical device {logicalDevice.Index}.");
+    }
 }
