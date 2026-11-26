@@ -11,6 +11,7 @@ using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
+using CanKit.Pro.CANopen.Safety;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -571,6 +572,51 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task A_Requested_Acyclic_Tpdo_Is_Sent_Once_On_The_Next_Sync()
+    {
+        var app = Entries();
+        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        using var rig = new EntryRig(new CanOpenNodeOptions { EnableChangeOfStateTpdo = false }.WithApplication(app));
+        rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x6000, 1, 8), TpdoTransmission.SynchronousAcyclic);
+        rig.Node.ConfigureTpdo(2, new PdoMapping().Add(0x2101, 0, 8), TpdoTransmission.Synchronous);
+        await rig.StartAsync();
+
+        rig.Od.WriteUnsigned(0x6000, 1, 0x5A);
+        await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+        rig.Wire.Count(Tpdo1).Should().Be(0, "the request waits for SYNC");
+
+        // The cyclic TPDO witnesses each SYNC. Then drain the sends from that same actor job.
+        for (int sync = 1; sync <= 2; sync++)
+        {
+            rig.Wire.Transmit(0x080, Array.Empty<byte>());
+            await rig.Wire.WaitForCountAsync(Tpdo2, sync);
+            await CanOpenTransmitBarrier.DrainAsync(rig.Node);
+            AssertSingleFrame(rig.Wire.Payloads(Tpdo1), 0x5A);
+        }
+    }
+
+    [Fact]
+    public async Task A_Requested_Transmit_Srdo_Sends_The_Mapped_Value_And_Its_Inverse()
+    {
+        var app = Entries();
+        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        var options = new CanOpenNodeOptions { SrdoCount = 1, EnableChangeOfStateSrdo = false };
+        // Hold time before the first cyclic SRDO. Only the application request can send this pair.
+        using var rig = new EntryRig(options.WithApplication(app), new ManualTimeSource());
+        var safety = rig.Node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x6000, 1, 8), TimeSpan.FromMilliseconds(100));
+        safety.CommitSafetyConfiguration();
+        await rig.StartAsync();
+
+        rig.Od.WriteUnsigned(0x6000, 1, 0x3C);
+        const uint first = 0x0FFu + 2 * Slave;
+        await rig.Wire.WaitForCountAsync(first + 1, 1);
+
+        AssertSingleFrame(rig.Wire.Payloads(first), 0x3C);
+        AssertSingleFrame(rig.Wire.Payloads(first + 1), 0xC3);
+    }
+
+    [Fact]
     public async Task A_Requested_Transmission_Outside_Operational_Is_Dropped()
     {
         var app = Entries();
@@ -597,13 +643,17 @@ public partial class CanOpenApplicationSeamTests
         rig.Wire.Count(Tpdo1).Should().Be(0, "PDOs exist only in Operational, and the request is not kept for later");
     }
 
-    [Fact]
-    public async Task A_Request_For_A_Foreign_Entry_Is_Refused()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Request_With_A_Foreign_Entry_Is_Refused_In_Full(bool includeOwnedEntryFirst)
     {
         var app = Entries();
-        app.WhenWritten = _ => app.Host!.RequestTransmission(new[] { new CanOpenObjectAddress(0x2100, 0x00) });
-        using var rig = new EntryRig(With(app));
-        rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x2100, 0x00, 8));
+        var owned = new CanOpenObjectAddress(0x6000, 1);
+        var foreign = new CanOpenObjectAddress(0x2100, 0);
+        app.WhenWritten = _ => app.Host!.RequestTransmission(includeOwnedEntryFirst ? [owned, foreign] : [foreign]);
+        using var rig = new EntryRig(new CanOpenNodeOptions { EnableChangeOfStateTpdo = false }.WithApplication(app));
+        rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x6000, 1, 8).Add(0x2100, 0, 8));
         rig.ConfigureWitness();
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         rig.Node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
@@ -614,7 +664,7 @@ public partial class CanOpenApplicationSeamTests
         var failure = await reported.Task.WithTimeoutAsync(ShortTimeout);
         await rig.WitnessAsync();
         failure.Should().BeOfType<ArgumentException>().Which.Message.Should().Contain("2100:00");
-        rig.Wire.Count(Tpdo1).Should().Be(0, "the entry the TPDO maps is not the application's to transmit");
+        rig.Wire.Count(Tpdo1).Should().Be(0, "a rejected list transmits nothing, including its valid prefix");
     }
 
     [Fact]
