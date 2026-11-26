@@ -53,10 +53,7 @@ internal sealed partial class CanOpenNode
         try
         {
             for (int i = resources.Count - 1; i >= 0; i--)
-            {
-                try { resources[i].Dispose(); }
-                catch (Exception ex) { RaiseBackgroundException(ex); }
-            }
+                DisposeReportingFailure(resources[i]);
         }
         finally
         {

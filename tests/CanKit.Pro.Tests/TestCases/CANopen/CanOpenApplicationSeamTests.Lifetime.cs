@@ -128,6 +128,42 @@ public partial class CanOpenApplicationSeamTests
         order.Should().Equal("return", "release");
     }
 
+    [Theory]
+    [InlineData(typeof(OutOfMemoryException))]
+    [InlineData(typeof(StackOverflowException))]
+    [InlineData(typeof(AccessViolationException))]
+    public async Task A_Fatal_Cleanup_Failure_Propagates_And_Releases_Disposal_Waiters(Type exceptionType)
+    {
+        // Exercise the exception policy using a constructed exception, with a healthy runtime.
+        var failure = (Exception)Activator.CreateInstance(exceptionType)!;
+        var app = Entries();
+        app.AttachmentResource = () => new AttachmentResource(() => throw failure);
+        using var bus = Open(NewSession(), 1);
+        var node = OpenNode(bus, With(app));
+        Settle(node);
+
+        Record.Exception(node.Dispose).Should().BeSameAs(failure);
+        await node.DisposeAsync().AsTask().WithTimeoutAsync(ShortTimeout);
+    }
+
+    [Fact]
+    public async Task An_Application_Post_Queued_Behind_Dispose_Cannot_Use_The_Attachment()
+    {
+        var app = Entries();
+        using var bus = Open(NewSession(), 1);
+        using var node = OpenNode(bus, With(app));
+        bool ran = false;
+        Task? drained = null;
+        await WhileActorHeldAsync(node, () =>
+        {
+            var closing = node.ActorForTests.PostAsync(node.Dispose);
+            app.Host!.Post(() => ran = true);
+            drained = Task.WhenAll(closing, node.ActorForTests.PostAsync(() => { }));
+        });
+        await drained!.WithTimeoutAsync(ShortTimeout);
+        ran.Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_Dictionary_Writer_Finishes_Validation_Before_The_Attachment_Is_Released()
     {

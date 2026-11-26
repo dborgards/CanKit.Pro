@@ -493,12 +493,7 @@ internal sealed partial class CanOpenNode
         }
         if (Volatile.Read(ref _disposed) != 0) return;
 
-        Action work = () =>
-        {
-            // Queued before the disposal and not started when it came: the node is gone.
-            if (Volatile.Read(ref _disposed) != 0) return;
-            InvokeApplication(slot, _ => action());
-        };
+        Action work = () => InvokeApplication(slot, _ => action());
         lock (_applicationPostGate)
         {
             if (_applicationPostsClosed) return;
@@ -555,11 +550,7 @@ internal sealed partial class CanOpenNode
         // Built once, outside work: nested in it, the lambda would get a lazily cached delegate whose
         // second use never comes, as each callback runs once.
         Action<ICanOpenApplication> callback = _ => onExpired();
-        Action work = () =>
-        {
-            if (Volatile.Read(ref _disposed) != 0) return;
-            InvokeApplication(slot, callback);
-        };
+        Action work = () => InvokeApplication(slot, callback);
         lock (_applicationPostGate)
         {
             if (_applicationPostsClosed) return;

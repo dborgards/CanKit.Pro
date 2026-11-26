@@ -388,11 +388,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CompleteEventQueue();
         try
         {
-            try { _subscription?.Dispose(); }
-            catch (Exception ex) { RaiseBackgroundException(ex); }
-            DisposeControllerOverrunMonitor();
-            DisposeControllerErrorMonitor();
-            _actor.Dispose();
+            try { DisposeReportingFailure(_subscription); }
+            finally
+            {
+                DisposeControllerOverrunMonitor();
+                DisposeControllerErrorMonitor();
+                _actor.Dispose();
+            }
         }
         finally { EndApplications(); }
     }
@@ -1079,6 +1081,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private static void Release(IDisposable? handle) => handle?.Dispose();
 
+    // A profile or adapter supplies this cleanup. Report ordinary failures so the remaining
+    // resources can be released, using the same fatal-exception policy as controller teardown.
+    private void DisposeReportingFailure(IDisposable? resource)
+    {
+        try { resource?.Dispose(); }
+        catch (Exception ex) when (ex is not OutOfMemoryException
+            and not StackOverflowException and not AccessViolationException)
+        {
+            RaiseBackgroundException(ex);
+        }
+    }
+
     private void FinishDispose()
     {
         Callbacks.Enter(CallbackKind.Finishing, this);
@@ -1092,10 +1106,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         finally
         {
-            EndApplications();
-            Callbacks.Leave(CallbackKind.Finishing, this);
-            // Whatever a Dispose above threw, a caller waiting for this disposal is released.
-            _disposeDone.TrySetResult(true);
+            try { EndApplications(); }
+            finally
+            {
+                Callbacks.Leave(CallbackKind.Finishing, this);
+                // Whatever a Dispose above threw, a caller waiting for this disposal is released.
+                _disposeDone.TrySetResult(true);
+            }
         }
     }
 
