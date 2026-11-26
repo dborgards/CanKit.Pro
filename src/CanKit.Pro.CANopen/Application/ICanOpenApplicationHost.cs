@@ -226,6 +226,9 @@ internal interface ICanOpenApplicationHost
     /// not a request.
     /// </para>
     /// <para>
+    /// If the application will answer <paramref name="answeringRpdo"/> from its reception callback,
+    /// that answer covers the event-driven TPDO of the same number. Other mappings, including
+    /// synchronous-acyclic TPDOs, MPDOs and SRDOs, still follow their normal triggers.
     /// Acts only in Operational; in any other state nothing happens and nothing is kept for later.
     /// Every entry must be claimed by this application, and all are checked before any is
     /// triggered: a list with one foreign entry triggers nothing. An empty list does nothing.
@@ -234,7 +237,7 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="ArgumentNullException"><paramref name="entries"/> is null.</exception>
     /// <exception cref="InvalidOperationException">Called off the node's actor loop.</exception>
     /// <exception cref="ArgumentException">An entry is not claimed by this application.</exception>
-    void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries);
+    void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries, int? answeringRpdo = null);
 
     /// <summary>Asks the node to send TPDO <paramref name="pdoNumber"/> once, an event of the
     /// application's for an event-driven TPDO. Actor loop.</summary>

@@ -133,7 +133,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         var values = new List<byte[]>();
-        app.WhenCommand = (_, value) =>
+        app.WhenCommand = (_, value, _) =>
         {
             values.Add(value);
             if (values.Count == 1) value[0] = 0xEE; // must change nothing the node or a later call holds
@@ -195,6 +195,8 @@ public partial class CanOpenApplicationSeamTests
     public async Task Sdo_Rpdo_And_Local_Command_Writes_Are_Delivered_In_Commit_Order()
     {
         var app = Commands();
+        var sources = new List<CanOpenWriteSource>();
+        app.WhenCommand = (_, _, source) => sources.Add(source);
         using var rig = new EntryRig(With(app));
         rig.Node.ConfigureRpdo(1, new PdoMapping().Add(0x6040, 0x00, 16));
         await rig.StartAsync();
@@ -214,6 +216,8 @@ public partial class CanOpenApplicationSeamTests
 
         rig.Wire.Payloads(SdoResponse)[0][0].Should().Be(0x60, "the download was accepted");
         CommandCalls(app).Should().Equal(Command(0x0001), Command(0x0002), Command(0x0003), Command(0x0004));
+        sources.Should().Equal(new CanOpenWriteSource(CanOpenWriteKind.Dictionary),
+            new(CanOpenWriteKind.Sdo), new(CanOpenWriteKind.Rpdo), new(CanOpenWriteKind.Dictionary));
     }
 
     [Fact]
@@ -221,7 +225,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         bool thrown = false;
-        app.WhenCommand = (_, _) =>
+        app.WhenCommand = (_, _, _) =>
         {
             if (thrown) return;
             thrown = true;
@@ -449,7 +453,7 @@ public partial class CanOpenApplicationSeamTests
         app.OnAttach = host =>
         {
             declare(host);
-            host.ObjectDictionary.EntryStored += (index, subindex) =>
+            host.ObjectDictionary.EntryStored += (index, subindex, _) =>
             {
                 if (!armed || index != 0x6040) return;
                 armed = false;
@@ -647,7 +651,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         using var rig = new EntryRig(With(app));
-        app.WhenCommand = (_, _) => rig.Node.Dispose();
+        app.WhenCommand = (_, _, _) => rig.Node.Dispose();
         Task? after = null;
 
         await WhileActorHeldAsync(rig.Node, () =>

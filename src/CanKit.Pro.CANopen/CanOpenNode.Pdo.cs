@@ -702,7 +702,7 @@ internal sealed partial class CanOpenNode
                 // rejected write here means the entry was re-declared since; that is reported
                 // rather than swallowed, because a PDO whose data silently never lands is the
                 // kind of defect nothing else would show.
-                try { _od.WriteRaw(entry.Index, entry.Subindex, chunk); }
+                try { _od.WriteRawFrom(entry.Index, entry.Subindex, chunk, new(CanOpenWriteKind.Rpdo, rp.PdoIndex)); }
                 catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or KeyNotFoundException)
                 {
                     RaiseBackgroundException(new InvalidOperationException(
@@ -880,7 +880,7 @@ internal sealed partial class CanOpenNode
     /// (<see cref="CanOpenNodeOptions.EnableChangeOfStateTpdo"/>, <see cref="CanOpenNodeOptions.EnableChangeOfStateSrdo"/>)
     /// are the caller's to apply: an application that asks for a transmission is not the automatism.
     /// </summary>
-    private void TriggerChangeOfState(HashSet<uint> dirty, bool tpdos = true, bool srdos = true, bool includeAllProfileTpdos = false)
+    private void TriggerChangeOfState(HashSet<uint> dirty, bool tpdos = true, bool srdos = true, bool includeAllProfileTpdos = false, int? answeringRpdo = null)
     {
         if (_disposed != 0 || _state != NmtState.Operational) return;
 
@@ -890,6 +890,8 @@ internal sealed partial class CanOpenNode
             {
                 var rt = _tpdos[n];
                 if (rt is null || !rt.Valid || !IsChangeOfStateTriggered(rt.TransmissionType)) continue;
+                if (n == answeringRpdo && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)
+                    && rt.MappingKind < (byte)MpdoAddressMode.Source) continue;
                 if (includeAllProfileTpdos && rt.TransmissionType == CanOpenTransmissionType.EventDrivenProfile)
                 {
                     TriggerTpdoOnActor(n);

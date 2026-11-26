@@ -162,8 +162,10 @@ public class Cia408DeviceTests
     public async Task One_Control_Word_Over_Rpdo1_Walks_Init_To_Active_And_Tpdo1_Carries_The_Status()
     {
         using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Node.ConfigureTpdo(2, new PdoMapping().Add(StatusWord16, 0, 16));
         await rig.StartAsync();
         await rig.DrainAsync();
+        int otherBefore = rig.Count(CanOpenProfileRig.Tpdo2);
         int before = rig.Count(CanOpenProfileRig.Tpdo1);
 
         await rig.SendRpdo1Async(0x07, 0x00);
@@ -172,8 +174,10 @@ public class Cia408DeviceTests
 
         rig.Device.State.Should().Be(Cia408State.Active);
         rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Select(p => BitConverter.ToString(p)).Should().Equal(
-            new[] { "0F-00", "0F-00" },
-            "ACTIVE is RMHD 1111b (Table 4): the change sends one TPDO and the RPDO's answer (§8.4.1) another");
+            new[] { "0F-00" },
+            "ACTIVE is RMHD 1111b (Table 4): the RPDO answer (§8.4.1) carries the changed status once");
+        rig.Payloads(CanOpenProfileRig.Tpdo2).Skip(otherBefore).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x0F, 0x00 }, "TPDO 2 independently maps the changed status");
         Describe(rig.Changes.Last()).Should().Be("Init->Active [2,3,4]");
         rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_000Fu);
 

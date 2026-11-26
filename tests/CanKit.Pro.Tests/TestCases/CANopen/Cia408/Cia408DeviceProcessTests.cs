@@ -338,6 +338,39 @@ public class Cia408DeviceProcessTests
             .And.OnlyContain(p => p.SequenceEqual(new byte[] { 0x0B, 0x00 }), "HOLD, also in the answer");
     }
 
+    [Fact]
+    public async Task A_State_Changing_Rpdo_Answers_Once_At_The_First_Allowed_Time()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        uint cobId = rig.Od.ReadUnsigned(0x1800, 1);
+        rig.Od.WriteUnsigned(0x1800, 1, cobId | 0x8000_0000u);
+        rig.Od.WriteUnsigned(0x1800, 3, 100); // 10 ms
+        rig.Od.WriteUnsigned(0x1800, 1, cobId);
+        await rig.StartAsync();
+        rig.Advance(TimeSpan.FromMilliseconds(10));
+        await rig.DrainAsync();
+        int before = rig.Count(CanOpenProfileRig.Tpdo1);
+
+        await rig.SendRpdo1Async(0x03, 0x00); // HOLD, inhibit free
+        await rig.DrainAsync();
+        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x0B, 0x00 });
+        rig.Advance(TimeSpan.FromMilliseconds(10));
+        await rig.DrainAsync();
+        rig.Count(CanOpenProfileRig.Tpdo1).Should().Be(before + 1, "the first answer also carried the change");
+
+        await rig.SendRpdo1Async(0x03, 0x00); // unchanged, its answer opens another inhibit interval
+        await rig.DrainAsync();
+        await rig.SendRpdo1Async(0x07, 0x00); // ACTIVE, inhibit running
+        rig.Advance(TimeSpan.FromMilliseconds(9));
+        await rig.DrainAsync();
+        rig.Count(CanOpenProfileRig.Tpdo1).Should().Be(before + 2);
+        rig.Advance(TimeSpan.FromMilliseconds(1));
+        await rig.DrainAsync();
+        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before + 2).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x0F, 0x00 });
+    }
+
     // ---- the process model ------------------------------------------------------------------------
 
     [Fact]

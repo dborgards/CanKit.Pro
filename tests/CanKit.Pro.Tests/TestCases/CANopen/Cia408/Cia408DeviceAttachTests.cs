@@ -129,7 +129,7 @@ public class Cia408DeviceAttachTests
         {
         }
 
-        public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries)
+        public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries, int? answeringRpdo = null)
         {
         }
 

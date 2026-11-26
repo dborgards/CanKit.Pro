@@ -217,7 +217,7 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public IReadOnlyList<CanOpenObjectAddress> CommandEntries { get; set; } = Array.Empty<CanOpenObjectAddress>();
 
-        public Action<CanOpenObjectAddress, byte[]>? WhenCommand { get; set; }
+        public Action<CanOpenObjectAddress, byte[], CanOpenWriteSource>? WhenCommand { get; set; }
 
         public Action<int>? WhenRpdo { get; set; }
 
@@ -257,10 +257,10 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
             WhenWritten?.Invoke(entries);
         }
 
-        public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+        public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value, CanOpenWriteSource source)
         {
             Record($"command {entry.Index:X4}:{entry.Subindex:X2}={string.Concat(value.Select(b => b.ToString("X2")))}");
-            WhenCommand?.Invoke(entry, value);
+            WhenCommand?.Invoke(entry, value, source);
         }
 
         public void OnRpdoReceived(int pdoNumber)

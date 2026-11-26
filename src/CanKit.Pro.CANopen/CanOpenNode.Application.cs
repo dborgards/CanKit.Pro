@@ -267,7 +267,7 @@ internal sealed partial class CanOpenNode
     /// (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for what the claimant writes from
     /// inside its own callback, and not for a restore of values in a reset: neither is news to it.
     /// </summary>
-    private void OnOdEntryWrittenForApplications(ushort index, byte subindex)
+    private void OnOdEntryWrittenForApplications(ushort index, byte subindex, CanOpenWriteSource source)
     {
         if (_applications.Length == 0) return;
         // Taken by this write or by none: a reservation belongs to the write it was made for, which
@@ -294,7 +294,9 @@ internal sealed partial class CanOpenNode
         {
             if (command is not null)
             {
-                (_queuedCommands ??= new()).Add((claimant, new CanOpenObjectAddress(index, subindex), command, _commandWriteGeneration));
+                if (source.AnsweringRpdo is { } rpdo && !ReferenceEquals(PdoOwnerOf(rpdo), claimant))
+                    source = source with { AnsweringRpdo = null };
+                (_queuedCommands ??= new()).Add(new(claimant, new(index, subindex), command, _commandWriteGeneration, source));
             }
             else (_applicationDirty ??= new HashSet<uint>()).Add(key);
             post = !_applicationEvaluationPosted;
@@ -331,7 +333,7 @@ internal sealed partial class CanOpenNode
     private void EvaluateApplicationEntriesOnActor()
     {
         HashSet<uint>? dirty;
-        List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)>? commands;
+        List<QueuedCommand>? commands;
         List<(ApplicationSlot Slot, int PdoNumber)>? receptions;
         lock (_applicationGate)
         {
@@ -1045,7 +1047,7 @@ internal sealed partial class CanOpenNode
         public void SetDefaultRpdo(int pdoNumber, PdoMapping mapping)
             => _node.SetApplicationDefaultPdo(Slot, isTpdo: false, pdoNumber, mapping, enabled: true);
 
-        public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries)
+        public void RequestTransmission(IReadOnlyList<CanOpenObjectAddress> entries, int? answeringRpdo = null)
         {
             if (entries is null) throw new ArgumentNullException(nameof(entries));
             if (!_node._actor.IsOnCurrentActor)
@@ -1070,7 +1072,7 @@ internal sealed partial class CanOpenNode
 
             // Both kinds, whatever EnableChangeOfStateTpdo and EnableChangeOfStateSrdo say: those
             // switch the automatism off, and this is a request, not the automatism.
-            _node.TriggerChangeOfState(dirty);
+            _node.TriggerChangeOfState(dirty, answeringRpdo: answeringRpdo);
         }
 
         public NmtState? ErrorBehaviorTarget(byte subindex)

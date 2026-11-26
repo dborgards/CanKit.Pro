@@ -193,6 +193,9 @@ internal interface ICanOpenApplication
     /// write, in the order the writes were committed, with a copy of the value each stored.</summary>
     /// <remarks>
     /// <para>
+    /// <paramref name="source"/> identifies the service at commit, even for a nested dictionary write.
+    /// Its answering RPDO number is present when this claimant will receive the corresponding
+    /// <see cref="OnRpdoReceived"/> callback. Reset Communication cancels that reception.
     /// Every write that stored a value counts, from wherever it came — an SDO download, an RPDO, the
     /// local user through <see cref="ObjectDictionary"/> — also when it stored the value the entry
     /// held already, and also when a second write followed before the actor loop came round: two
@@ -251,7 +254,7 @@ internal interface ICanOpenApplication
     /// that job came first; a round already queued ahead of the reset tells its writes before it.
     /// </para>
     /// </remarks>
-    void OnCommandWritten(CanOpenObjectAddress entry, byte[] value);
+    void OnCommandWritten(CanOpenObjectAddress entry, byte[] value, CanOpenWriteSource source);
 
     /// <summary>RPDO <paramref name="pdoNumber"/> was received and its data written: once per frame
     /// the node took, also when it carried the data of the last one.</summary>
