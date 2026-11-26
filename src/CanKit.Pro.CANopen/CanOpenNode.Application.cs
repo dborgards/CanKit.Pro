@@ -493,7 +493,8 @@ internal sealed partial class CanOpenNode
         }
         if (Volatile.Read(ref _disposed) != 0) return;
 
-        Action work = () => InvokeApplication(slot, _ => action());
+        Action<ICanOpenApplication> callback = _ => action();
+        Action work = () => InvokeApplication(slot, callback);
         lock (_applicationPostGate)
         {
             if (_applicationPostsClosed) return;
