@@ -371,6 +371,25 @@ public class Cia408DeviceProcessTests
             .Which.Should().Equal(new byte[] { 0x0F, 0x00 });
     }
 
+    [Fact]
+    public async Task A_Command_Mapped_To_An_Acyclic_Tpdo_Still_Waits_For_Sync()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Od.WriteUnsigned(0x1800, 2, 0); // synchronous-acyclic TPDO 1
+        await rig.StartAsync();
+        await rig.DrainAsync();
+        int before = rig.Count(CanOpenProfileRig.Tpdo1);
+
+        await rig.SendRpdo1Async(0x03, 0x00);
+        await rig.DrainAsync();
+        rig.Count(CanOpenProfileRig.Tpdo1).Should().Be(before);
+        rig.Transmit(CanOpenCobId.Sync, Array.Empty<byte>());
+        await rig.FenceAsync();
+        await rig.DrainAsync();
+        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x0B, 0x00 });
+    }
+
     // ---- the process model ------------------------------------------------------------------------
 
     [Fact]

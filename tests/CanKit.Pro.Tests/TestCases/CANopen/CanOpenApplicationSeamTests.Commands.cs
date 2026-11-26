@@ -220,6 +220,47 @@ public partial class CanOpenApplicationSeamTests
             new(CanOpenWriteKind.Sdo), new(CanOpenWriteKind.Rpdo), new(CanOpenWriteKind.Dictionary));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Command_Is_Reported_As_Sdo_Only_After_The_Final_Segment_Is_Accepted(bool block)
+    {
+        var app = Commands();
+        var sources = new List<CanOpenWriteSource>();
+        app.WhenCommand = (_, _, source) => sources.Add(source);
+        app.Validate = (_, _, value) => value[0] == 9
+            ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
+        using var rig = new EntryRig(With(app));
+
+        async Task<byte[]> Exchange(byte[] request)
+        {
+            int count = rig.Wire.Count(SdoResponse);
+            rig.Wire.Transmit(SdoRequest, request);
+            await rig.Wire.WaitForCountAsync(SdoResponse, count + 1);
+            return rig.Wire.Payloads(SdoResponse)[count];
+        }
+
+        async Task<byte[]> Download(byte value)
+        {
+            byte[] data = { value, 0 };
+            if (block)
+            {
+                await Exchange(SdoBlockFrames.BuildBlockDownloadInit(0x6040, 0, false, true, 2));
+                await Exchange(SdoBlockFrames.BuildSegment(1, true, data));
+                return await Exchange(SdoBlockFrames.BuildEnd(SdoBlockFrames.CcsBlockDownloadEndBase, 5, 0));
+            }
+
+            await Exchange(new byte[] { 0x21, 0x40, 0x60, 0, 2, 0, 0, 0 });
+            return await Exchange(SdoFrames.BuildSegment(SdoFrames.CcsDownloadSegmentBase, false, true, data));
+        }
+
+        AbortCode(await Download(9)).Should().Be((uint)SdoAbortCode.ValueRangeExceeded);
+        (await Download(3))[0].Should().Be(block ? (byte)0xA1 : (byte)0x20);
+        Settle(rig.Node);
+        CommandCalls(app).Should().Equal(Command(3));
+        sources.Should().Equal(new CanOpenWriteSource(CanOpenWriteKind.Sdo));
+    }
+
     [Fact]
     public async Task A_Throwing_Command_Callback_Does_Not_Keep_The_Next_Write_From_Its_Call()
     {

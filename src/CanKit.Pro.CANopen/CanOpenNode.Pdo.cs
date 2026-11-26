@@ -910,13 +910,8 @@ internal sealed partial class CanOpenNode
                     }
                 }
                 if (!hit) continue;
-                if (n == answeringRpdo && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)
-                    && rt.MappingKind < (byte)MpdoAddressMode.Source)
-                {
-                    (_deferredApplicationTpdos ??= new()).Add(n);
-                    continue;
-                }
                 if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
+                else if (n == answeringRpdo) (_deferredApplicationTpdos ??= new()).Add(n);
                 else RequestEventDrivenTransmission(rt);
             }
         }
