@@ -32,7 +32,10 @@ internal sealed partial class CanOpenNode
         }
         // The last callback can be ValidateWrite, still inside the dictionary write gate. A
         // resource may join a worker that needs that gate, so run late cleanup off this stack.
-        _ = Task.Run(ReleaseAttachmentResources);
+        // An exception escaping deferred cleanup has no synchronous Dispose caller to observe it.
+        _ = Task.Run(ReleaseAttachmentResources).ContinueWith(
+            failed => DispatchBackgroundException(failed.Exception!.InnerException!),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
     }
 
     private void EndApplications()

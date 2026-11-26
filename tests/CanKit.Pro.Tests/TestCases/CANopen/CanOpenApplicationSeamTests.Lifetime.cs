@@ -129,6 +129,25 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Theory]
+    [InlineData(typeof(InvalidOperationException))]
+    [InlineData(typeof(OutOfMemoryException))]
+    public async Task A_Resource_Released_After_Reentrant_Dispose_Reports_Its_Failure(Type exceptionType)
+    {
+        var failure = (Exception)Activator.CreateInstance(exceptionType)!;
+        var app = Entries();
+        app.AttachmentResource = () => new AttachmentResource(() => throw failure);
+        using var bus = Open(NewSession(), 1);
+        using var node = OpenNode(bus, With(app));
+        Settle(node);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        app.Host!.Post(node.Dispose);
+
+        (await reported.Task.WithTimeoutAsync(ShortTimeout)).Should().BeSameAs(failure);
+    }
+
+    [Theory]
     [InlineData(typeof(OutOfMemoryException))]
     [InlineData(typeof(StackOverflowException))]
     [InlineData(typeof(AccessViolationException))]

@@ -1089,7 +1089,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         catch (Exception ex) when (ex is not OutOfMemoryException
             and not StackOverflowException and not AccessViolationException)
         {
-            RaiseBackgroundException(ex);
+            DispatchBackgroundException(ex);
         }
     }
 
@@ -3136,12 +3136,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // it would be blocking (#356, T-2); each subscriber on its own (#381).
     private void RaiseBackgroundException(Exception ex)
     {
+        // A subscriber or a timed-out send can outlive the node. Cleanup owned by the disposal
+        // itself uses the dispatcher directly, including a release deferred until a callback returns.
+        if (!_disposeDone.Task.IsCompleted) DispatchBackgroundException(ex);
+    }
+
+    private void DispatchBackgroundException(Exception ex)
+    {
         var handler = BackgroundExceptionOccurred;
         if (handler is null) return;
-        // Nothing is reported once the disposal has finished: a subscriber or a timed-out send that
-        // outlived it and fails late has nobody to tell. Decided here, where the failure happens,
-        // not where it is delivered: one that happened before the disposal finished is reported.
-        if (_disposeDone.Task.IsCompleted) return;
         _backgroundReports.Post(() =>
         {
             // One subscriber that disposes the node ends the round for the rest, as for the other

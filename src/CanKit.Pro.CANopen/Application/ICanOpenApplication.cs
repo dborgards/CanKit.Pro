@@ -135,7 +135,8 @@ internal interface ICanOpenApplication
     /// <returns>An optional resource for this attachment. The node disposes resources once in reverse
     /// attach order on shutdown or a later opening failure. A throwing Attach cleans up its own
     /// partial work. Cleanup runs on the closing thread when no callback is active. Otherwise it runs on the thread pool
-    /// after the last callback returns, including one that disposed the node itself. No further callbacks from this node
+    /// after the last callback returns, including one that disposed the node itself. A failure during deferred cleanup is reported through
+    /// <see cref="ICanOpenNode.BackgroundExceptionOccurred"/>. No further callbacks from this node
     /// enter the application after cleanup starts. NMT resets keep the attachment.</returns>
     IDisposable? Attach(ICanOpenApplicationHost host);
 

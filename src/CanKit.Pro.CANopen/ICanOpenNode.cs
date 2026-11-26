@@ -178,7 +178,7 @@ public interface ICanOpenNode : IDisposable
     event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent;
 
     /// <summary>
-    /// Raised on background exceptions from the actor loop / subscription reader.
+    /// Reports exceptions from the actor loop, subscription reader, and resource cleanup.
     /// <para>
     /// Raised on a thread-pool thread, never on the node's actor loop or its event pump, so a
     /// handler may wait on the node -- an SDO transfer, <see cref="StoreParameters"/>, a
@@ -186,10 +186,11 @@ public interface ICanOpenNode : IDisposable
     /// (#356). Reports are delivered one at a time, in the order they were made; a handler that
     /// blocks holds up the reports behind it, not the node. Each handler is called on its own,
     /// so one that throws does not keep the report from the handlers after it; its exception is
-    /// dropped. A failure that happens once the disposal has finished is not reported; one that
-    /// happened before may reach its handlers after <see cref="IDisposable.Dispose"/> has
-    /// returned. A handler that disposes the node ends that report's round: the handlers after
-    /// it are not called, unless the node was already disposed when the round began.
+    /// dropped. Ordinary background reporting ends when disposal completes. A report already
+    /// queued can still be delivered, and a profile resource released after its final callback
+    /// can still report a cleanup failure after <see cref="IDisposable.Dispose"/> returns.
+    /// If a handler disposes the node during a report, delivery of that report ends. If the
+    /// node was already disposed when delivery began, every handler receives the report.
     /// </para>
     /// </summary>
     event EventHandler<Exception>? BackgroundExceptionOccurred;
