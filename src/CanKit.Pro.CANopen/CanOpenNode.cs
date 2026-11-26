@@ -2186,7 +2186,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // Route the write through ObjectDictionary.WriteRaw so it lands under the OD's
         // internal lock, giving readers on other threads a proper acquire/release pairing
         // rather than relying on OdEntry field-level memory ordering.
-        if (!_od.TryWriteRaw(index, subindex, payload, out var abort))
+        if (!_od.TryWriteRaw(index, subindex, payload, out var abort, new(CanOpenWriteKind.Sdo)))
         {
             SendSdoServerAbort(index, subindex, abort ?? SdoAbortCode.General);
             return;
@@ -2301,7 +2301,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // This download has finished receiving: do not abort it as an unfinished session
             // from inside its own write callback, then send a second terminal response.
             if (_options.EnableErrorBehavior) ClearSdoServerSession();
-            if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort))
+            if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort, new(CanOpenWriteKind.Sdo)))
             {
                 SendSdoServerAbort(session.Index, session.Subindex, abort ?? SdoAbortCode.General);
                 return;

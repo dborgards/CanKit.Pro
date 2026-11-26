@@ -194,10 +194,14 @@ public partial class CanOpenApplicationSeamTests
         Receptions(app).Should().Equal(new[] { "rpdo 1" }, "one frame's data was applied, so one reception is told");
     }
 
-    [Fact]
-    public async Task A_Reset_Drops_The_Receptions_Not_Yet_Told()
+    [Theory]
+    [InlineData(NmtCommand.ResetNode)]
+    [InlineData(NmtCommand.ResetCommunication)]
+    public async Task A_Reset_Drops_The_Receptions_Not_Yet_Told(NmtCommand command)
     {
         var app = Responder();
+        var sources = new List<CanOpenWriteSource>();
+        app.WhenCommand = (_, _, source) => sources.Add(source);
         using var rig = new EntryRig(With(app));
         await rig.StartAsync();
         Task? reset = null;
@@ -206,14 +210,15 @@ public partial class CanOpenApplicationSeamTests
         {
             await QueueFramesAsync(rig, (Rpdo1, new byte[] { 0x0F, 0x00, 0x42 }));
             reset = rig.Node.ActorForTests.PostAsync(() =>
-                rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), isRtr: false));
+                rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(command), isRtr: false));
         });
         await reset!;
         Settle(rig.Node);
 
-        app.Log.Should().Contain("reset ResetNode");
+        app.Log.Should().Contain($"reset {command}");
         Receptions(app).Should().BeEmpty("the reset came before the reception was told");
-        CommandCalls(app).Should().BeEmpty("and the RPDO's command write with it");
+        if (command == NmtCommand.ResetNode) sources.Should().BeEmpty();
+        else sources.Should().Equal(new CanOpenWriteSource(CanOpenWriteKind.Rpdo));
     }
 
     // -----------------------------------------------------------------------------------------

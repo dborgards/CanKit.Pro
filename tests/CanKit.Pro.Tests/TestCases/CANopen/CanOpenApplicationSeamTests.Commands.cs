@@ -133,7 +133,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         var values = new List<byte[]>();
-        app.WhenCommand = (_, value) =>
+        app.WhenCommand = (_, value, _) =>
         {
             values.Add(value);
             if (values.Count == 1) value[0] = 0xEE; // must change nothing the node or a later call holds
@@ -195,6 +195,8 @@ public partial class CanOpenApplicationSeamTests
     public async Task Sdo_Rpdo_And_Local_Command_Writes_Are_Delivered_In_Commit_Order()
     {
         var app = Commands();
+        var sources = new List<CanOpenWriteSource>();
+        app.WhenCommand = (_, _, source) => sources.Add(source);
         using var rig = new EntryRig(With(app));
         rig.Node.ConfigureRpdo(1, new PdoMapping().Add(0x6040, 0x00, 16));
         await rig.StartAsync();
@@ -214,6 +216,49 @@ public partial class CanOpenApplicationSeamTests
 
         rig.Wire.Payloads(SdoResponse)[0][0].Should().Be(0x60, "the download was accepted");
         CommandCalls(app).Should().Equal(Command(0x0001), Command(0x0002), Command(0x0003), Command(0x0004));
+        sources.Should().Equal(new CanOpenWriteSource(CanOpenWriteKind.Dictionary),
+            new(CanOpenWriteKind.Sdo), new(CanOpenWriteKind.Rpdo), new(CanOpenWriteKind.Dictionary));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Command_Is_Reported_As_Sdo_Only_After_The_Final_Segment_Is_Accepted(bool block)
+    {
+        var app = Commands();
+        var sources = new List<CanOpenWriteSource>();
+        app.WhenCommand = (_, _, source) => sources.Add(source);
+        app.Validate = (_, _, value) => value[0] == 9
+            ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
+        using var rig = new EntryRig(With(app));
+
+        async Task<byte[]> Exchange(byte[] request)
+        {
+            int count = rig.Wire.Count(SdoResponse);
+            rig.Wire.Transmit(SdoRequest, request);
+            await rig.Wire.WaitForCountAsync(SdoResponse, count + 1);
+            return rig.Wire.Payloads(SdoResponse)[count];
+        }
+
+        async Task<byte[]> Download(byte value)
+        {
+            byte[] data = { value, 0 };
+            if (block)
+            {
+                await Exchange(SdoBlockFrames.BuildBlockDownloadInit(0x6040, 0, false, true, 2));
+                await Exchange(SdoBlockFrames.BuildSegment(1, true, data));
+                return await Exchange(SdoBlockFrames.BuildEnd(SdoBlockFrames.CcsBlockDownloadEndBase, 5, 0));
+            }
+
+            await Exchange(new byte[] { 0x21, 0x40, 0x60, 0, 2, 0, 0, 0 });
+            return await Exchange(SdoFrames.BuildSegment(SdoFrames.CcsDownloadSegmentBase, false, true, data));
+        }
+
+        AbortCode(await Download(9)).Should().Be((uint)SdoAbortCode.ValueRangeExceeded);
+        (await Download(3))[0].Should().Be(block ? (byte)0xA1 : (byte)0x20);
+        Settle(rig.Node);
+        CommandCalls(app).Should().Equal(Command(3));
+        sources.Should().Equal(new CanOpenWriteSource(CanOpenWriteKind.Sdo));
     }
 
     [Fact]
@@ -221,7 +266,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         bool thrown = false;
-        app.WhenCommand = (_, _) =>
+        app.WhenCommand = (_, _, _) =>
         {
             if (thrown) return;
             thrown = true;
@@ -449,7 +494,7 @@ public partial class CanOpenApplicationSeamTests
         app.OnAttach = host =>
         {
             declare(host);
-            host.ObjectDictionary.EntryStored += (index, subindex) =>
+            host.ObjectDictionary.EntryStored += (index, subindex, _) =>
             {
                 if (!armed || index != 0x6040) return;
                 armed = false;
@@ -647,7 +692,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         using var rig = new EntryRig(With(app));
-        app.WhenCommand = (_, _) => rig.Node.Dispose();
+        app.WhenCommand = (_, _, _) => rig.Node.Dispose();
         Task? after = null;
 
         await WhileActorHeldAsync(rig.Node, () =>

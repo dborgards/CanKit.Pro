@@ -71,11 +71,11 @@ public sealed class ObjectDictionary
     /// subscriber of <see cref="EntryWritten"/> can nest another write inside this one, whose
     /// validation would otherwise take the reservation's place.
     /// </summary>
-    internal event Action<ushort, byte>? EntryStored;
+    internal event Action<ushort, byte, CanOpenWriteSource>? EntryStored;
 
-    private void RaiseEntryWritten(ushort index, byte subindex)
+    private void RaiseEntryWritten(ushort index, byte subindex, CanOpenWriteSource source = default)
     {
-        EntryStored?.Invoke(index, subindex);
+        EntryStored?.Invoke(index, subindex, source);
         EntryWritten?.Invoke(index, subindex);
     }
 
@@ -238,9 +238,12 @@ public sealed class ObjectDictionary
     /// communication object; the message carries the SDO abort code the same write would
     /// have produced on the bus.</exception>
     public void WriteRaw(ushort index, byte subindex, byte[] value)
+        => WriteRawFrom(index, subindex, value, default);
+
+    internal void WriteRawFrom(ushort index, byte subindex, byte[] value, CanOpenWriteSource source)
     {
         if (value is null) throw new ArgumentNullException(nameof(value));
-        if (!TryWriteRaw(index, subindex, value, out var abort, throwOnMissingOrSize: true))
+        if (!TryWriteRaw(index, subindex, value, out var abort, throwOnMissingOrSize: true, source))
         {
             throw new ArgumentException(
                 $"Write to OD entry 0x{index:X4}:{subindex:X2} rejected: SDO abort 0x{(uint)abort!.Value:X8} ({abort.Value}).",
@@ -253,8 +256,8 @@ public sealed class ObjectDictionary
     /// the abort code to put on the wire instead of throwing. Returns <see langword="true"/> when
     /// the value was accepted (stored, or consumed as a command by the validator).
     /// </summary>
-    internal bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort)
-        => TryWriteRaw(index, subindex, value, out abort, throwOnMissingOrSize: false);
+    internal bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort, CanOpenWriteSource source = default)
+        => TryWriteRaw(index, subindex, value, out abort, throwOnMissingOrSize: false, source);
 
     /// <summary>
     /// Runs <paramref name="writes"/> as one transaction: the write gate is held for the whole of
@@ -273,16 +276,16 @@ public sealed class ObjectDictionary
     }
 
     private bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
-        bool throwOnMissingOrSize)
+        bool throwOnMissingOrSize, CanOpenWriteSource source)
     {
         lock (_writeGate)
         {
-            return TryWriteRawLocked(index, subindex, value, out abort, throwOnMissingOrSize);
+            return TryWriteRawLocked(index, subindex, value, out abort, throwOnMissingOrSize, source);
         }
     }
 
     private bool TryWriteRawLocked(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
-        bool throwOnMissingOrSize)
+        bool throwOnMissingOrSize, CanOpenWriteSource source)
     {
         abort = null;
         OdEntry? entry;
@@ -343,7 +346,7 @@ public sealed class ObjectDictionary
             }
             entry.SetRawValue(copy);
         }
-        RaiseEntryWritten(index, subindex);
+        RaiseEntryWritten(index, subindex, source);
         return true;
     }
 

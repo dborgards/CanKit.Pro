@@ -437,7 +437,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     }
 
     /// <summary>Not called: the device has no command entries (<see cref="CommandEntries"/>).</summary>
-    public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+    public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value, CanOpenWriteSource source)
     {
     }
 

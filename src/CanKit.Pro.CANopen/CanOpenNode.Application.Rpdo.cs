@@ -22,6 +22,17 @@ internal sealed partial class CanOpenNode
     // application round after its writes (EvaluateApplicationEntriesOnActor).
     private List<(ApplicationSlot Slot, int PdoNumber)>? _queuedReceptions;
 
+    // Changed event-driven TPDOs awaiting their matching reception callback in this actor round.
+    private HashSet<int>? _deferredApplicationTpdos;
+
+    private void FlushDeferredApplicationTpdos()
+    {
+        var pending = _deferredApplicationTpdos;
+        if (pending is null) return;
+        _deferredApplicationTpdos = null;
+        foreach (int pdo in pending) RequestApplicationEventTpdo(pdo);
+    }
+
     /// <summary>The application whose logical device uses PDO number <paramref name="pdoNumber"/>, or
     /// <see langword="null"/>: logical device <c>n</c> uses <c>n·64 + 1</c> to <c>n·64 + 64</c>
     /// (CiA 301 v4.2.0 §7.2.2.1, Table 3).</summary>
@@ -88,6 +99,12 @@ internal sealed partial class CanOpenNode
                 "device it set the device type for: logical device n uses PDO numbers n·64 + 1 to n·64 + 64.",
                 nameof(pdoNumber));
         }
+        _deferredApplicationTpdos?.Remove(pdoNumber);
+        RequestApplicationEventTpdo(pdoNumber);
+    }
+
+    private void RequestApplicationEventTpdo(int pdoNumber)
+    {
         // Outside Operational RequestEventDrivenTransmission sends nothing, as for every event.
         if (_disposed != 0 || pdoNumber > _pdoCount) return;
         var rt = _tpdos[pdoNumber];

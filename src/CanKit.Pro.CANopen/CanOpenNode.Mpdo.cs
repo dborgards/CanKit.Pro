@@ -191,7 +191,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
         // or refused by a write validator, it is a target that is not available rather than an
         // exception out of the frame handler (#358, P-5). A DAM caller reports that as the latched
         // 8230h; a SAM caller skips the dispatcher entry, as it does a target that fails the check.
-        return _od.TryWriteRaw(index, subindex, value, out _);
+        return _od.TryWriteRaw(index, subindex, value, out _, new(CanOpenWriteKind.Mpdo));
     }
 
     private IEnumerable<ulong> MpdoListWords(ushort first, ushort last, int width)

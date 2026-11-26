@@ -979,7 +979,7 @@ internal sealed partial class CanOpenNode
             // Initiation arms this deadline before any segment/end request can be handled.
             session.Deadline!.Dispose();
         }
-        if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort))
+        if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort, new(CanOpenWriteKind.Sdo)))
         {
             _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
                 SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)(abort ?? SdoAbortCode.General)));

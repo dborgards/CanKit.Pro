@@ -193,7 +193,7 @@ internal sealed partial class SrdoEngine
         {
             var chunk = new byte[entry.ByteLength];
             Buffer.BlockCopy(payload, offset, chunk, 0, entry.ByteLength);
-            try { _od.WriteRaw(entry.Index, entry.Subindex, chunk); }
+            try { _od.WriteRawFrom(entry.Index, entry.Subindex, chunk, new(CanOpenWriteKind.Srdo)); }
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or System.Collections.Generic.KeyNotFoundException)
             {
                 _host.ReportBackgroundException(new InvalidOperationException(

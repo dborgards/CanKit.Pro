@@ -32,7 +32,10 @@ internal sealed partial class CanOpenNode
     // The committed command writes not yet delivered, oldest first, under _applicationGate. One job
     // delivers them and the dirty set together (EvaluateApplicationEntriesOnActor), so they share
     // _applicationEvaluationPosted. Each carries the restore generation it was committed in.
-    private List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)>? _queuedCommands;
+    private List<QueuedCommand>? _queuedCommands;
+
+    private readonly record struct QueuedCommand(ApplicationSlot Slot, CanOpenObjectAddress Entry,
+        byte[] Value, int Generation, CanOpenWriteSource Source);
 
     // Counts the restores of Reset Node (EndCommandWritesBeforeRestore). Changed under the
     // dictionary's write gate, on the actor loop; read under the gate where a write is queued and on
@@ -116,13 +119,13 @@ internal sealed partial class CanOpenNode
     /// which ends the round. A write committed before a Reset Node restored the dictionary is passed
     /// over (<see cref="EndCommandWritesBeforeRestore"/>).
     /// </summary>
-    private bool DeliverCommandWrites(List<(ApplicationSlot Slot, CanOpenObjectAddress Entry, byte[] Value, int Generation)> commands)
+    private bool DeliverCommandWrites(List<QueuedCommand> commands)
     {
-        foreach (var (slot, entry, value, generation) in commands)
+        foreach (var (slot, entry, value, generation, source) in commands)
         {
             if (Volatile.Read(ref _disposed) != 0) return false;
             if (generation != _commandWriteGeneration) continue;
-            InvokeApplication(slot, application => application.OnCommandWritten(entry, value));
+            InvokeApplication(slot, application => application.OnCommandWritten(entry, value, source));
         }
         return Volatile.Read(ref _disposed) == 0;
     }
@@ -164,6 +167,16 @@ internal sealed partial class CanOpenNode
         lock (_applicationGate)
         {
             if (!communicationOnly) _queuedCommands = null;
+            else if (_queuedCommands is { } commands)
+            {
+                // The values survive Reset Communication, but their reception callbacks are dropped.
+                for (int i = 0; i < commands.Count; i++)
+                {
+                    var command = commands[i];
+                    if (command.Source.AnsweringRpdo.HasValue)
+                        commands[i] = command with { Source = command.Source with { AnsweringRpdo = null } };
+                }
+            }
             _queuedReceptions = null;
         }
     }

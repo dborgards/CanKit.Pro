@@ -162,8 +162,10 @@ public class Cia408DeviceTests
     public async Task One_Control_Word_Over_Rpdo1_Walks_Init_To_Active_And_Tpdo1_Carries_The_Status()
     {
         using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Node.ConfigureTpdo(2, new PdoMapping().Add(StatusWord16, 0, 16));
         await rig.StartAsync();
         await rig.DrainAsync();
+        int otherBefore = rig.Count(CanOpenProfileRig.Tpdo2);
         int before = rig.Count(CanOpenProfileRig.Tpdo1);
 
         await rig.SendRpdo1Async(0x07, 0x00);
@@ -172,8 +174,10 @@ public class Cia408DeviceTests
 
         rig.Device.State.Should().Be(Cia408State.Active);
         rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Select(p => BitConverter.ToString(p)).Should().Equal(
-            new[] { "0F-00", "0F-00" },
-            "ACTIVE is RMHD 1111b (Table 4): the change sends one TPDO and the RPDO's answer (§8.4.1) another");
+            new[] { "0F-00" },
+            "ACTIVE is RMHD 1111b (Table 4): the RPDO answer (§8.4.1) carries the changed status once");
+        rig.Payloads(CanOpenProfileRig.Tpdo2).Skip(otherBefore).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x0F, 0x00 }, "TPDO 2 independently maps the changed status");
         Describe(rig.Changes.Last()).Should().Be("Init->Active [2,3,4]");
         rig.Od.ReadUnsigned(StatusWord32, 0).Should().Be(0x0000_000Fu);
 
@@ -657,8 +661,10 @@ public class Cia408DeviceTests
         seen.Should().Equal("Active:000F:0000000F", "FaultHold:0003:00000003");
     }
 
-    [Fact]
-    public async Task A_Fault_Reported_From_A_Handler_Asks_For_Its_Nmt_State_After_Every_Subscriber_Saw_It()
+    [Theory]
+    [InlineData((byte)0, NmtState.PreOperational)]
+    [InlineData((byte)2, NmtState.Stopped)]
+    public async Task A_Fault_Reported_From_A_Handler_Asks_For_Its_Nmt_State_After_Every_Subscriber_Saw_It(byte behavior, NmtState target)
     {
         var device = new Cia408Device(Cia408Rig.Valve);
         Cia408Rig? rigRef = null;
@@ -674,13 +680,17 @@ public class Cia408DeviceTests
         using var rig = new Cia408Rig(device);
         rig.Settle();
         rigRef = rig;
-        await rig.WriteU8Async(0x1029, 0x02, 0x00);
+        await rig.WriteU8Async(0x1029, 0x02, behavior);
         await rig.StartAsync();
 
-        await rig.SendRpdo1Async(0x07, 0x00);
-        await rig.WaitForStateAsync(NmtState.PreOperational);
-        rig.Settle();
+        await rig.DrainAsync();
+        int before = rig.Count(CanOpenProfileRig.Tpdo1);
+        rig.Transmit(CanOpenProfileRig.Rpdo1, new byte[] { 0x07, 0x00 });
+        await rig.WaitForStateAsync(target);
+        await rig.DrainAsync();
 
+        rig.Payloads(CanOpenProfileRig.Tpdo1).Skip(before).Should().ContainSingle()
+            .Which.Should().Equal(new byte[] { 0x03, 0x00 }, "the last allowed TPDO carries FAULT_HOLD");
         seen.Should().Equal("Active in Operational", "FaultHold in Operational");
     }
 

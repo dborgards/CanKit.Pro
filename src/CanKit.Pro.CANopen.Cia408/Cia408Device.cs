@@ -510,12 +510,9 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// changes (<see cref="Publish"/>).
     /// </para>
     /// <para>
-    /// An RPDO whose control word changes the state gets two TPDOs: the one every change asks for
-    /// (<see cref="Publish"/>), and this answer. The device cannot tell a command write that came in an
-    /// RPDO from one that came over SDO, so it cannot drop the first for the second, and the norm
-    /// forbids neither. Both frames carry the new status. With an inhibit time (CiA 301 v4.2.0
-    /// §7.5.2.37) the node sends the change-driven frame at once and holds the answer until the
-    /// inhibit time has elapsed; the answer is the one delayed, not merged away.
+    /// For an RPDO command, this answer also transmits the changed status on the corresponding
+    /// event-driven TPDO. Other mapped PDOs still follow their own triggers. If the inhibit time
+    /// is active, the answer waits for its expiry (CiA 301 v4.2.0 §7.5.2.37).
     /// </para>
     /// </remarks>
     public void OnRpdoReceived(int pdoNumber)

@@ -20,6 +20,10 @@ internal sealed partial class Cia408Device
     // (OnCommandWritten). Actor loop, and Attach.
     private bool _localSource;
 
+    // On the actor, all changes made while applying this command (including its process step)
+    // can use the subsequent reception callback to transmit the corresponding event-driven TPDO.
+    private int? _answeringRpdo;
+
     /// <summary>The control word the device applied last: every bit of it, those without behaviour
     /// in this slice included (bits 6 to 11 and 13 to 15, 13 to 23 in the 32-bit word; see
     /// <see cref="Cia408ControlWord"/>), which the device stores and hands on here. 0 until a word has
@@ -54,18 +58,26 @@ internal sealed partial class Cia408Device
     /// <remarks>The source is followed in the same order as the control words: a control word
     /// committed before a write of <c>604Fh</c> is judged under the source it was written under,
     /// however many writes the node tells in one round.</remarks>
-    public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value)
+    public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value, CanOpenWriteSource source)
     {
         var host = AttachedHost();
-        if (entry.Index == _local)
+        _answeringRpdo = source.AnsweringRpdo;
+        try
         {
-            _localSource = value[0] == 1;
-            Publish(host, errorCodeChanged: false);
-            return;
+            if (entry.Index == _local)
+            {
+                _localSource = value[0] == 1;
+                Publish(host, errorCodeChanged: false);
+            }
+            else if (!_localSource)
+            {
+                ApplyControlWord(host, ControlWordValue(entry.Index, value));
+            }
         }
-
-        if (_localSource) return;
-        ApplyControlWord(host, ControlWordValue(entry.Index, value));
+        finally
+        {
+            _answeringRpdo = null;
+        }
     }
 
     /// <summary>The control word from the device's local source, used while <c>604Fh</c> is 1
@@ -165,6 +177,6 @@ internal sealed partial class Cia408Device
 
         if (errorCodeChanged) send.Add(new CanOpenObjectAddress(_errorCode, 0x00));
         if (more is not null) send.AddRange(more);
-        host.RequestTransmission(send);
+        host.RequestTransmission(send, _answeringRpdo);
     }
 }
