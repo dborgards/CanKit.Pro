@@ -364,9 +364,8 @@ public partial class CanOpenPdoEngineTests
         Task? tail = null;
         await node.PostToActorAsync(() =>
         {
-            typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(node, new object[] { CanOpenCobId.NmtCommand,
-                    new byte[] { (byte)NmtCommand.ResetCommunication, Device }, false });
+            node.HandleIncoming(CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, isRtr: false);
             tail = node.PostToActorAsync(() => rig.NodeService.NextBusReadFailure.Should().BeSameAs(failure));
             node.Dispose();
         });
@@ -383,11 +382,10 @@ public partial class CanOpenPdoEngineTests
         await Inject(node, CanOpenCobId.LssMasterMessage, LssCommand.SwitchStateGlobal, 1, 0, 0, 0, 0, 0, 0);
         await node.PostToActorAsync(() =>
         {
-            var incoming = typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
-            incoming.Invoke(node, new object[] { CanOpenCobId.LssMasterMessage,
-                new byte[] { LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0 }, false });
-            incoming.Invoke(node, new object[] { CanOpenCobId.NmtCommand,
-                new byte[] { (byte)NmtCommand.ResetNode, Device }, false });
+            node.HandleIncoming(CanOpenCobId.LssMasterMessage,
+                new byte[] { LssCommand.ConfigureNodeId, Device, 0, 0, 0, 0, 0, 0 }, isRtr: false);
+            node.HandleIncoming(CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetNode, Device }, isRtr: false);
         });
         Settle(node);
         node.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
@@ -408,11 +406,10 @@ public partial class CanOpenPdoEngineTests
         int reads = Volatile.Read(ref rig.NodeService.BusReads);
         await node.PostToActorAsync(() =>
         {
-            var incoming = typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
-            incoming.Invoke(node, new object[] { CanOpenCobId.NmtCommand,
-                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, false });
-            incoming.Invoke(node, new object[] { CanOpenCobId.NmtCommand,
-                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, false });
+            node.HandleIncoming(CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, isRtr: false);
+            node.HandleIncoming(CanOpenCobId.NmtCommand,
+                new byte[] { (byte)NmtCommand.ResetCommunication, Device }, isRtr: false);
         });
         Settle(node);
         Volatile.Read(ref rig.NodeService.BusReads).Should().Be(reads + 1);

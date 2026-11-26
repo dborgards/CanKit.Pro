@@ -573,6 +573,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // raise to their clear, whatever the chain holds (ProfileErrorBits, #550). Actor loop only.
     private Task _emcySendChain = Task.CompletedTask;
 
+    // Snapshot on the node actor, which owns the chain.
+    internal Task EmcySendChainForTests => _emcySendChain;
+
     // Every frame of this node on 0x700 + id — boot-up, state change, producer tick, guarding
     // reply — goes out through one chain likewise, so a boot-up ordered by a reset is on the bus
     // before the tick that became due while the application's reset hook ran, and before the
@@ -1520,7 +1523,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     //   * 0x600 + id names the destination, so such a frame is ours to serve regardless of sender.
     //   * an RPDO's COB-ID is whatever the application configured, possibly on purpose our own
     //     TPDO; overriding that from here is the narrowing #93 had to take back out.
-    private void HandleIncoming(uint cobId, byte[] data, bool isRtr) => HandleIncomingFrame(cobId, data, isRtr, isFd: false);
+    internal void HandleIncoming(uint cobId, byte[] data, bool isRtr) => HandleIncomingFrame(cobId, data, isRtr, isFd: false);
 
     /// <summary><see cref="HandleIncoming"/> with the frame kind: <paramref name="isFd"/> is a CAN FD
     /// frame, which the SRDO engine refuses on an SRDO id (§8.1: classic CAN).</summary>

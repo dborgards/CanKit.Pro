@@ -1,5 +1,4 @@
 using System;
-using System.Reflection;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen;
 
@@ -57,10 +56,6 @@ internal static class CanOpenTransmitBarrier
         }
     }
 
-    private static readonly FieldInfo EmcySendChain =
-        typeof(CanOpenNode).GetField("_emcySendChain", BindingFlags.Instance | BindingFlags.NonPublic)
-        ?? throw new InvalidOperationException("CanOpenNode has no _emcySendChain field any more.");
-
     /// <summary>
     /// The barrier before asserting what EMCYs were <em>not</em> sent, or exactly how many were:
     /// <see cref="DrainAsync"/>, so that every job queued before the call has run and ordered its
@@ -87,7 +82,7 @@ internal static class CanOpenTransmitBarrier
         while (true)
         {
             Task? current = null;
-            await node.PostToActorAsync(() => current = (Task)EmcySendChain.GetValue(node)!);
+            await node.PostToActorAsync(() => current = node.EmcySendChainForTests);
             if (await Task.WhenAny(current!, Task.Delay(HangGuard)) != current)
                 throw new TimeoutException("Timed out waiting for the EMCY chain.");
             if (ReferenceEquals(current, last)) break;

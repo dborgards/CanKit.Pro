@@ -1,6 +1,5 @@
 using System;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -18,14 +17,11 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 // a single actor job, so that the step's next pass, which its wake posts, runs only after all of them.
 public partial class CanOpenPdoEngineTests
 {
-    private static readonly MethodInfo HandleIncomingMethod =
-        typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
-
     private static Task InjectInOneTurn(CanOpenNode node, params byte[] nmtCommands)
         => node.PostToActorAsync(() =>
         {
             foreach (byte command in nmtCommands)
-                HandleIncomingMethod.Invoke(node, new object[] { CanOpenCobId.NmtCommand, new[] { command, Device }, false });
+                node.HandleIncoming(CanOpenCobId.NmtCommand, new[] { command, Device }, isRtr: false);
         });
 
     /// <summary>A node EMCY (8130h of a heartbeat timeout) queued behind the held 1000h, then Stop:
@@ -179,7 +175,7 @@ public partial class CanOpenPdoEngineTests
 
         await rig.Node.PostToActorAsync(() =>
         {
-            HandleIncomingMethod.Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Device }, false });
+            rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Device }, isRtr: false);
             cancellation.Cancel();
         });
         await FluentActions.Awaiting(() => waiting.WaitAsync(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
@@ -199,7 +195,7 @@ public partial class CanOpenPdoEngineTests
 
         await rig.Node.PostToActorAsync(() =>
         {
-            HandleIncomingMethod.Invoke(rig.Node, new object[] { CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Device }, false });
+            rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Device }, isRtr: false);
             rig.Node.Dispose();
         });
         await second.WaitAsync(ShortTimeout);

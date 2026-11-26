@@ -244,8 +244,8 @@ public partial class CanOpenApplicationSeamTests
         rig.Node.ApplicationReset += (_, _) => applicationReset = true;
         Settle(rig.Node);
 
-        await RunPrivateOnActor(rig.Node, "HandleIncoming",
-            CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), false);
+        await rig.Node.ActorForTests.PostAsync(() =>
+            rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, ResetCommand(NmtCommand.ResetNode), isRtr: false));
 
         first.Log.Should().Contain("reset ResetNode");
         second.Log.Should().NotContain("reset ResetNode", "the node was gone before the second application's turn");
@@ -266,8 +266,8 @@ public partial class CanOpenApplicationSeamTests
         node = rig.Node;
         Settle(rig.Node);
 
-        await RunPrivateOnActor(rig.Node, "HandleIncoming",
-            CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Slave }, false);
+        await rig.Node.ActorForTests.PostAsync(() =>
+            rig.Node.HandleIncoming(CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.Start, Slave }, isRtr: false));
 
         first.Log.Should().Contain("nmt PreOperational>Operational");
         second.Log.Should().NotContain("nmt PreOperational>Operational", "the node was gone before the second application's turn");

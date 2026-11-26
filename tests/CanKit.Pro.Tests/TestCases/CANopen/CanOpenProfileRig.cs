@@ -228,12 +228,7 @@ internal abstract class CanOpenProfileRig : IDisposable
     }
 
     /// <summary>The number of jobs waiting in the node's actor mailbox.</summary>
-    internal static int MailboxDepth(CanOpenNode node)
-    {
-        var actor = typeof(CanOpenNode).GetField("_actor", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(node)!;
-        var mailbox = actor.GetType().GetField("_mailbox", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(actor)!;
-        return (int)mailbox.GetType().GetProperty("Count")!.GetValue(mailbox)!;
-    }
+    internal static int MailboxDepth(CanOpenNode node) => node.ActorForTests.MailboxDepthForTests;
 
     // ---- NMT ----------------------------------------------------------------------------------
 

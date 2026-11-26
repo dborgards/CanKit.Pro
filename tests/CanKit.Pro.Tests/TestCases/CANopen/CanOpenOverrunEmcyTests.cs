@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -213,8 +212,7 @@ public partial class CanOpenPdoEngineTests
         await node.PostToActorAsync(() =>
         {
             rig.Bus.RaiseErrorFrame(RxOverrun); // the queued callback still owns the old history
-            typeof(CanOpenNode).GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(node, new object[] { CanOpenCobId.NmtCommand, new byte[] { (byte)command, Device }, false });
+            node.HandleIncoming(CanOpenCobId.NmtCommand, new byte[] { (byte)command, Device }, isRtr: false);
         });
         Settle(node);
         await node.SendEmcyAsync(0x1000, 0);
@@ -256,9 +254,7 @@ public partial class CanOpenPdoEngineTests
         {
             await entered.Task.WaitAsync(ShortTimeout);
             for (int i = 0; i < 10_000; i++) rig.Bus.RaiseErrorFrame(RxOverrun);
-            var mailbox = (ICollection)typeof(ProtocolActor).GetField("_mailbox", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(node.ActorForTests)!;
-            mailbox.Count.Should().Be(1, "a notification storm must not flood the node actor");
+            node.ActorForTests.MailboxDepthForTests.Should().Be(1, "a notification storm must not flood the node actor");
         }
         finally
         {
