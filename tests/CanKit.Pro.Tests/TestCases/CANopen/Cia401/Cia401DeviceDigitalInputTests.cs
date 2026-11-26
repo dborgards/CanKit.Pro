@@ -144,7 +144,7 @@ public class Cia401DeviceDigitalInputTests
 
         options.PdoCount.Should().Be(65);
         options.EnableErrorBehavior.Should().BeTrue("the device monitors communication failures");
-        options.Applications.Should().Equal(device);
+        options.CreateApplications().Should().Equal(device);
     }
 
     [Fact]
@@ -212,7 +212,7 @@ public class Cia401DeviceDigitalInputTests
         var fresh = new CanOpenNodeOptions();
         var compared = 0;
         var kept = typeof(CanOpenNodeOptions).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-            .Where(property => property.Name is not (nameof(CanOpenNodeOptions.EnableErrorBehavior) or "Applications")
+            .Where(property => property.Name is not (nameof(CanOpenNodeOptions.EnableErrorBehavior) or nameof(CanOpenNodeOptions.ApplicationFactories))
                 && !except.Contains(property.Name));
         foreach (var property in kept)
         {
@@ -235,7 +235,7 @@ public class Cia401DeviceDigitalInputTests
 
         options.PdoCount.Should().Be(100, "a count the caller set higher is not lowered");
         options.EnableErrorBehavior.Should().BeTrue();
-        options.Applications.Should().Equal(other, device);
+        options.CreateApplications().Should().Equal(other, device);
         AssertEveryOtherOptionKept(original, options);
     }
 
@@ -249,7 +249,7 @@ public class Cia401DeviceDigitalInputTests
 
         options.PdoCount.Should().Be(65);
         options.EnableErrorBehavior.Should().BeTrue();
-        options.Applications.Should().Equal(device);
+        options.CreateApplications().Should().Equal(device);
         AssertEveryOtherOptionKept(original, options, nameof(CanOpenNodeOptions.PdoCount));
     }
 

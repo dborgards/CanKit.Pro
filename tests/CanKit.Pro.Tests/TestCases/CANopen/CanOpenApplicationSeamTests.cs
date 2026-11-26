@@ -18,7 +18,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 /// <summary>
 /// The application seam: a device profile handed to the node in
-/// <see cref="CanOpenNodeOptions.Applications"/> is attached when the node opens, its claims and
+/// <see cref="CanOpenNodeOptions.ApplicationFactories"/> is attached when the node opens, its claims and
 /// requirements are checked then, and what it declares in <c>Attach</c> is part of the node's
 /// power-on state.
 /// </summary>
@@ -241,11 +241,14 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         /// event the node raises, say) lands in the same order as the node's calls.</summary>
         public void Note(string entry) => Record(entry);
 
-        public void Attach(ICanOpenApplicationHost host)
+        public Func<IDisposable?>? AttachmentResource { get; set; }
+
+        public IDisposable? Attach(ICanOpenApplicationHost host)
         {
             Host = host;
             Record("attach");
             OnAttach?.Invoke(host);
+            return AttachmentResource?.Invoke();
         }
 
         public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
@@ -426,10 +429,9 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
     [Fact]
     public void A_Null_Application_Fails_The_Open()
     {
-        // WithApplication refuses null; the list itself can still hold one.
-        var options = new CanOpenNodeOptions { Applications = new ICanOpenApplication[] { new RecordingApplication("first"), null! } };
+        var options = With(new RecordingApplication("first")).WithApplicationFactory(() => null!);
 
-        OpenFails(options).Message.Should().Contain("Applications[1]");
+        OpenFails(options).Message.Should().Contain("factory at index 1");
     }
 
     [Fact]
@@ -510,14 +512,15 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         var one = original.WithApplication(first);
 
-        original.Applications.Should().BeEmpty("WithApplication returns a copy");
-        one.Applications.Should().Equal(first);
-        one.With(pdoCount: 8).Applications.Should().Equal(first);
-        one.WithLss(null).Applications.Should().Equal(first);
-        one.WithSrdoConfigurationCheckInterval(null).Applications.Should().Equal(first);
-        one.WithErrorHistoryCapacity(3).Applications.Should().Equal(first);
-        one.With(pdoCount: 8).WithLss(null).WithApplication(second).Applications.Should().Equal(first, second);
+        original.CreateApplications().Should().BeEmpty("WithApplication returns a copy");
+        one.CreateApplications().Should().Equal(first);
+        one.With(pdoCount: 8).CreateApplications().Should().Equal(first);
+        one.WithLss(null).CreateApplications().Should().Equal(first);
+        one.WithSrdoConfigurationCheckInterval(null).CreateApplications().Should().Equal(first);
+        one.WithErrorHistoryCapacity(3).CreateApplications().Should().Equal(first);
+        one.With(pdoCount: 8).WithLss(null).WithApplication(second).CreateApplications().Should().Equal(first, second);
         FluentActions.Invoking(() => original.WithApplication(null!)).Should().Throw<ArgumentNullException>();
+        FluentActions.Invoking(() => original.WithApplicationFactory(null!)).Should().Throw<ArgumentNullException>();
     }
 
     // -----------------------------------------------------------------------------------------
@@ -672,7 +675,7 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
     {
         // The open fails after the node subscribed to its dictionary and after its actor ended: the
         // service was disposed, so subscribing to it throws. An application that kept its host still
-        // holds the dictionary (ICanOpenApplication: it is told nothing when the open fails).
+        // holds the dictionary.
         using var bus = Open(NewSession(), 1);
         var service = new CanBusService(bus);
         service.Dispose();

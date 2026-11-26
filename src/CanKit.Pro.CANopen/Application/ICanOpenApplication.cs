@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CanKit.Pro.CANopen.Nmt;
 
@@ -58,7 +59,7 @@ internal sealed class CanOpenApplicationRequirements
 
 /// <summary>
 /// What a device profile gives the node: the object indices it owns, and the callbacks the node
-/// makes into it. Handed to the node in <see cref="CanOpenNodeOptions.Applications"/> and attached
+/// makes into it. Handed to the node in <see cref="CanOpenNodeOptions.ApplicationFactories"/> and attached
 /// when the node opens.
 /// </summary>
 /// <remarks>
@@ -71,12 +72,10 @@ internal sealed class CanOpenApplicationRequirements
 /// application.
 /// </para>
 /// <para>
-/// The end of an application's life is not part of the contract yet, and is an open question for
-/// the publication of this interface. As things stand the application is told nothing when the
-/// node is disposed, and nothing when the open fails after its <see cref="Attach"/> returned (a
-/// later application's <see cref="Attach"/> throws, or a check made after every application has
-/// attached refuses the options). The same instance handed to a second node is attached to that
-/// node too, with nothing refused or shared between the two.
+/// Options can register a factory to create an application for each node. Registering a specific
+/// instance passes that instance to every open. Profiles that bind to one node, including CiA 401
+/// and CiA 408 devices, require a fresh instance on each open.
+/// The node owns only the resource returned by a successful <see cref="Attach"/>.
 /// </para>
 /// </remarks>
 internal interface ICanOpenApplication
@@ -133,7 +132,12 @@ internal interface ICanOpenApplication
     /// (<see cref="ValidateWrite"/>, on this thread) but not reported through
     /// <see cref="OnEntriesWritten"/>. The host's actor-loop members, <see cref="ICanOpenApplicationHost.RaiseError"/>
     /// among them, cannot be called from here.</remarks>
-    void Attach(ICanOpenApplicationHost host);
+    /// <returns>An optional resource for this attachment. The node disposes resources once in reverse
+    /// attach order on shutdown or a later opening failure. A throwing Attach cleans up its own
+    /// partial work. Cleanup runs on the closing thread when no callback is active. Otherwise it runs on the thread pool
+    /// after the last callback returns, including one that disposed the node itself. No further callbacks from this node
+    /// enter the application after cleanup starts. NMT resets keep the attachment.</returns>
+    IDisposable? Attach(ICanOpenApplicationHost host);
 
     /// <summary>Decides a write to an entry the application claims.</summary>
     /// <remarks>
