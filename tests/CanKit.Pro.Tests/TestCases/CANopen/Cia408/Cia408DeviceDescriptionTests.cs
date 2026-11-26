@@ -41,6 +41,29 @@ public class Cia408DeviceDescriptionTests
     // ---- the device the file describes -------------------------------------------------------------
 
     [Fact]
+    public void An_Announced_PQ_Mode_Requires_The_Power_Limit_Factor()
+    {
+        var open = () => Open(Fixture.Remove(0x640D));
+        open.Should().Throw<ArgumentException>()
+            .Where(e => e.ParamName == "options" && e.Message.Contains("640Dh") && e.Message.Contains("§9.16.2"));
+    }
+
+    [Fact]
+    public async Task A_Described_Valve_Keeps_Its_Power_Limit_Factor()
+    {
+        var dcf = Fixture.Set("640D", "ParameterValue", "0x80020003").ParseDcf(Cia408Rig.DeviceId);
+        using var rig = new Cia408Rig(new[] { Cia408Device.FromDescription() }, dcf);
+        (await rig.ReadU32Async(0x640D, 0)).Should().Be(0x8002_0003u);
+    }
+
+    [Fact]
+    public void A_Typeless_File_Without_The_Power_Limit_Factor_Cannot_Select_PQ()
+    {
+        var open = () => Open(Fixture.Remove(0x1000).Remove(0x640D));
+        open.Should().Throw<ArgumentException>().Where(e => e.Message.Contains("6043h") && e.Message.Contains("control mode"));
+    }
+
+    [Fact]
     public async Task The_Fixture_Yields_The_Pq_Valve_It_Describes()
     {
         using var rig = Open(Fixture);
@@ -255,6 +278,7 @@ public class Cia408DeviceDescriptionTests
         var eds = Fixture.Remove(0x6300).Remove(0x6301).Remove(0x6380).Remove(0x6381).Remove(0x640E)
             .Set("1000", "DefaultValue", string.Format(CultureInfo.InvariantCulture, "0x{0:X8}", deviceType))
             .Set("6043", "DefaultValue", mode.ToString(CultureInfo.InvariantCulture));
+        if (mode != 5) eds.Remove(0x640D);
         var declared = records == "-" ? Array.Empty<string>() : records.Split(' ');
         foreach (var sections in declared.Select(record => record.Split(':'))
                      .Select(parts => RecordSections(ushort.Parse(parts[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture), "R" + parts[0], "0x000" + parts[1], parts[2])))
@@ -571,7 +595,7 @@ public class Cia408DeviceDescriptionTests
             .Set("1000", "DefaultValue", "0xFFFF0198")
             .Set("6043", "AccessType", "rw")
             .Add("[6FFF]\nParameterName=Device type\nObjectType=0x7\nDataType=0x0007\nAccessType=ro\nDefaultValue=0x22000198\nPDOMapping=0\n");
-        foreach (ushort index in new ushort[] { 0x6040, 0x6041, 0x6042, 0x6043, 0x6044, 0x6045, 0x604E, 0x604F, 0x6300, 0x6301, 0x6380, 0x6381, 0x640E })
+        foreach (ushort index in new ushort[] { 0x6040, 0x6041, 0x6042, 0x6043, 0x6044, 0x6045, 0x604E, 0x604F, 0x6300, 0x6301, 0x6380, 0x6381, 0x640D, 0x640E })
             eds.Move(index, (ushort)(index + 0x800));
         var configured = new Cia408Device(new Cia408Configuration
         {

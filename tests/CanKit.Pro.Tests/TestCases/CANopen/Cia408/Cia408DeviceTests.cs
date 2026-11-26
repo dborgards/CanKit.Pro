@@ -40,6 +40,31 @@ public class Cia408DeviceTests
 
     // ---- attach ---------------------------------------------------------------------------------
 
+    [Theory]
+    [InlineData((int)Cia408Resolution.Valve16)]
+    [InlineData((int)Cia408Resolution.Valve16Drive32)]
+    public async Task A_Supported_PQ_Mode_Provides_The_Power_Limit_Factor(int resolution)
+    {
+        using var rig = new Cia408Rig(new Cia408Configuration
+        {
+            Resolution = (Cia408Resolution)resolution,
+            ControlModes = new[] { Cia408ControlMode.SpoolPositionOpenLoop, Cia408ControlMode.PQControl },
+        });
+
+        (await rig.ReadU32Async(0x640D, 0)).Should().Be(0x0001_0001u);
+        await rig.WriteU32Async(0x640D, 0, 0x8002_0003u);
+        (await rig.ReadU32Async(0x640D, 0)).Should().Be(0x8002_0003u);
+        await rig.ResetAsync(NmtCommand.ResetNode);
+        (await rig.ReadU32Async(0x640D, 0)).Should().Be(0x0001_0001u);
+    }
+
+    [Fact]
+    public void A_Valve_Without_PQ_Does_Not_Declare_The_Power_Limit_Factor()
+    {
+        using var rig = new Cia408Rig(Cia408Rig.Valve);
+        rig.Od.ContainsIndex(0x640D).Should().BeFalse();
+    }
+
     [Fact]
     public void Attach_Declares_The_Eight_Objects_Of_Clause_9_3()
     {

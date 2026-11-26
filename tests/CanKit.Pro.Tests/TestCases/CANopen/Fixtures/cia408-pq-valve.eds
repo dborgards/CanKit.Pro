@@ -2,7 +2,7 @@
 ; a pQ valve with 16-bit parameters (control mode 5 only, CiA 408 v2.2.0 Table 82), as Cia408Device
 ; declares it for that configuration: the eight objects of clause 9.3 (both word pairs, 6043h
 ; read-only for one control mode), the setpoint and actual value records of control mode 5 (6300h,
-; 6301h, 6380h, 6381h; clause 8.7.1, unit and prefix read-only), the CiA 408 error behaviour record
+; 6301h, 6380h, 6381h, 640Eh; clause 8.7.1), the power limit factor (640Dh), the CiA 408 error behaviour record
 ; 1029h (clause 8.6.8) and the default PDOs (mapping 1 in PDO 1, mapping 4 in PDO 2). Cia408PeerTests
 ; checks every object in 6000h-67FFh against the catalogue and against the device's dictionary,
 ; with each entry's type, access and default value, and 1000h, 1029h and the PDO records against the
@@ -103,7 +103,7 @@ DefaultValue=0
 PDOMapping=0
 
 [OptionalObjects]
-SupportedObjects=22
+SupportedObjects=23
 1=0x1029
 2=0x1400
 3=0x1401
@@ -125,7 +125,8 @@ SupportedObjects=22
 19=0x6301
 20=0x6380
 21=0x6381
-22=0x640E
+22=0x640D
+23=0x640E
 
 [1029]
 ParameterName=Error behavior
@@ -871,6 +872,14 @@ DataType=0x0002
 AccessType=ro
 DefaultValue=0
 PDOMapping=0
+
+[640D]
+ParameterName=vpqc power limit factor
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=65537
+PDOMapping=1
 
 [640E]
 ParameterName=vpqc hydrostatic actual power
