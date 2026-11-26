@@ -38,6 +38,19 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public void A_Known_Descriptor_Returning_Null_Reports_Its_Failure()
+    {
+        var catalog = new CanOpenProfileCatalog(new FakeProfile(401, "Broken descriptor", returnNullPeer: true));
+        var result = ReadOne(0x000F0191u);
+        using var rig = new NodeRig();
+
+        FluentActions.Invoking(() => catalog.CreatePeer(rig.Node, PeerId, result.Devices[0]))
+            .Should().Throw<InvalidOperationException>().WithMessage("*Broken descriptor*401*");
+        FluentActions.Invoking(() => catalog.CreatePeers(rig.Node, PeerId, result))
+            .Should().Throw<InvalidOperationException>().WithMessage("*Broken descriptor*401*");
+    }
+
+    [Fact]
     public void An_Unknown_Profile_Yields_Null()
     {
         var catalog = new CanOpenProfileCatalog(new FakeProfile(401));
@@ -197,6 +210,27 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
         new CanOpenProfileCatalog().Profiles.Should().BeEmpty();
     }
 
+    [Fact]
+    public void The_Ordered_Profile_List_Is_A_Read_Only_Snapshot()
+    {
+        var first = new FakeProfile(408);
+        var second = new FakeProfile(401);
+        var source = new List<ICanOpenProfile> { first, second };
+        var catalog = new CanOpenProfileCatalog(source);
+        source.Clear();
+
+        if (catalog.Profiles is IList<ICanOpenProfile> list)
+            FluentActions.Invoking(() => { list[0] = second; }).Should().Throw<NotSupportedException>();
+        if (catalog.Profiles is ICollection<ICanOpenProfile> collection)
+            FluentActions.Invoking(collection.Clear).Should().Throw<NotSupportedException>();
+        if (catalog.Profiles is System.Collections.ICollection view && view.SyncRoot is IList<ICanOpenProfile> storage)
+            FluentActions.Invoking(() => { storage[0] = second; }).Should().Throw<NotSupportedException>();
+
+        catalog.Profiles.Should().Equal(first, second);
+        catalog.TryGetProfile(408, out var found).Should().BeTrue();
+        found.Should().BeSameAs(first);
+    }
+
     [Theory]
     [InlineData((byte)0)]
     [InlineData((byte)128)]
@@ -256,14 +290,14 @@ public class CanOpenProfileCatalogTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
-    private sealed class FakeProfile(ushort number, string? name = null) : ICanOpenProfile
+    private sealed class FakeProfile(ushort number, string? name = null, bool returnNullPeer = false) : ICanOpenProfile
     {
         public ushort ProfileNumber { get; } = number;
 
         public string Name { get; } = name ?? "CiA " + number;
 
         public ICanOpenProfilePeer CreatePeer(ICanOpenNode node, byte peerNodeId, CanOpenLogicalDevice logicalDevice)
-            => new FakePeer(this, node, peerNodeId, logicalDevice);
+            => returnNullPeer ? null! : new FakePeer(this, node, peerNodeId, logicalDevice);
     }
 
     private sealed class FakePeer(ICanOpenProfile profile, ICanOpenNode node, byte peerNodeId,
