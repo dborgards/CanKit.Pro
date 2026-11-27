@@ -341,7 +341,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// (<see cref="FromDescription"/>; for a device built from a configuration, the description
     /// declares an object of its logical device). The parameter is <c>options</c>, as for every
     /// application that fails the open.</exception>
-    public void Attach(ICanOpenApplicationHost host)
+    public IDisposable? Attach(ICanOpenApplicationHost host)
     {
         if (host is null) throw new ArgumentNullException(nameof(host));
         if (Interlocked.CompareExchange(ref _attaching, 1, 0) != 0)
@@ -377,6 +377,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
             StartProcess(host);
             FinishChanges(host, stepAnyway: true);
         });
+        return null;
     }
 
     /// <summary>The objects, device type and default PDOs of a device built from a configuration (see

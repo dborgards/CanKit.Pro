@@ -820,7 +820,7 @@ public class Cia401DeviceDescriptionTests
         var options = Cia401Device.AddTo(new CanOpenNodeOptions { PdoCount = 3 }, device);
         options.PdoCount.Should().Be(3, "AddTo neither raises nor lowers it for a description device");
         options.EnableErrorBehavior.Should().BeTrue();
-        options.Applications.Should().ContainSingle().Which.Should().BeSameAs(device);
+        options.CreateApplications().Should().ContainSingle().Which.Should().BeSameAs(device);
     }
 
     [Theory]

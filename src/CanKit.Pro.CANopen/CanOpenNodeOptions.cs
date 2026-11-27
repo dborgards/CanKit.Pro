@@ -434,8 +434,8 @@ public sealed class CanOpenNodeOptions
 
     /// <summary>The device-profile applications attached to the node when it opens, in the order
     /// their <c>Attach</c> runs. Not part of the public surface: a profile reaches the node through
-    /// <see cref="WithApplication"/>.</summary>
-    internal IReadOnlyList<ICanOpenApplication> Applications { get; init; } = Array.Empty<ICanOpenApplication>();
+    /// <see cref="WithApplication"/> or <see cref="WithApplicationFactory"/>.</summary>
+    internal IReadOnlyList<Func<ICanOpenApplication>> ApplicationFactories { get; private init; } = Array.Empty<Func<ICanOpenApplication>>();
 
     /// <summary>Returns a copy of this options record with the provided overrides. The 1.3.0
     /// signature, kept so that callers compiled against it still bind; source callers resolve
@@ -525,14 +525,33 @@ public sealed class CanOpenNodeOptions
         => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
             interval);
 
-    /// <summary>Returns a copy with <paramref name="application"/> appended to <see cref="Applications"/>.</summary>
+    /// <summary>Returns a copy with <paramref name="application"/> appended to <see cref="ApplicationFactories"/>.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="application"/> is <see langword="null"/>.</exception>
     internal CanOpenNodeOptions WithApplication(ICanOpenApplication application)
     {
         if (application is null) throw new ArgumentNullException(nameof(application));
-        var applications = new List<ICanOpenApplication>(Applications) { application };
+        return WithApplicationFactory(() => application);
+    }
+
+    /// <summary>Registers a factory evaluated once for each open, after copying options and before
+    /// reading profile requirements. Acquire per-node resources in Attach, after the factories
+    /// have succeeded. Return a fresh stateful profile for each node. An explicitly
+    /// registered instance is passed through on each open and retains its own reuse rules.</summary>
+    internal CanOpenNodeOptions WithApplicationFactory(Func<ICanOpenApplication> factory)
+    {
+        if (factory is null) throw new ArgumentNullException(nameof(factory));
+        var applications = new List<Func<ICanOpenApplication>>(ApplicationFactories) { factory };
         return Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
             SrdoConfigurationCheckInterval, applications: applications);
+    }
+
+    internal ICanOpenApplication[] CreateApplications()
+    {
+        if (ApplicationFactories.Count == 0) return Array.Empty<ICanOpenApplication>();
+        var applications = new ICanOpenApplication[ApplicationFactories.Count];
+        for (int i = 0; i < applications.Length; i++)
+            applications[i] = ApplicationFactories[i]() ?? throw new ArgumentException($"Application factory at index {i} returned null.", "options");
+        return applications;
     }
 
     /// <summary>Returns a copy with <see cref="EnableErrorBehavior"/> replaced and everything else
@@ -569,7 +588,7 @@ public sealed class CanOpenNodeOptions
         int? pdoCount,
         TimeSpan? srdoConfigurationCheckInterval,
         int? errorHistoryCapacity = null,
-        IReadOnlyList<ICanOpenApplication>? applications = null,
+        IReadOnlyList<Func<ICanOpenApplication>>? applications = null,
         bool? enableErrorBehavior = null)
     {
         var options = new CanOpenNodeOptions
@@ -610,7 +629,7 @@ public sealed class CanOpenNodeOptions
             Lss = lss,
             SrdoConfigurationCheckInterval = srdoConfigurationCheckInterval,
             ErrorHistoryCapacity = errorHistoryCapacity ?? ErrorHistoryCapacity,
-            Applications = applications ?? Applications,
+            ApplicationFactories = applications ?? ApplicationFactories,
         };
         options.Validate();
         return options;

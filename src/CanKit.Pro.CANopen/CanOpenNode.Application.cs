@@ -14,7 +14,7 @@ using CanKit.Pro.Reliability;
 namespace CanKit.Pro.CANopen;
 
 // The application seam: device profiles that attach to the node when it opens
-// (CanOpenNodeOptions.Applications). Attaching, the claims on object indices, and the host the
+// (CanOpenNodeOptions.ApplicationFactories). Attaching, the claims on object indices, and the host the
 // node gives each application live here.
 internal sealed partial class CanOpenNode
 {
@@ -82,7 +82,7 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// Validates the claims and requirements of <see cref="CanOpenNodeOptions.Applications"/>, then
+    /// Validates the claims and requirements of <see cref="CanOpenNodeOptions.ApplicationFactories"/>, then
     /// attaches each application in list order. Runs in the constructor, inside the guard that ends
     /// the actor on a throw, after the dictionary holds the communication profile and the device
     /// description, and before the node boots.
@@ -90,26 +90,25 @@ internal sealed partial class CanOpenNode
     /// <exception cref="ArgumentException">A claim or requirement cannot be met; the parameter is
     /// <c>options</c> and the message names the application.</exception>
     // The requirements of each listed application, read once, before the dictionary is built
-    // (ReadApplicationRequirements), index by index with CanOpenNodeOptions.Applications; null for a
+    // (ReadApplicationRequirements), index by index with CanOpenNodeOptions.ApplicationFactories; null for a
     // node without applications. Constructing thread only.
     private CanOpenApplicationRequirements?[]? _applicationRequirements;
 
     /// <summary>
-    /// Reads the requirements of <see cref="CanOpenNodeOptions.Applications"/>, once, before the
+    /// Reads the requirements of <see cref="CanOpenNodeOptions.ApplicationFactories"/>, once, before the
     /// communication profile is populated: the error behaviour layout one of them asks for shapes
     /// <c>1029h</c> as it is declared and as a device description is loaded against it
-    /// (<see cref="TakeErrorBehaviorLayout"/>). An entry that is null or listed a second time is
+    /// (<see cref="TakeErrorBehaviorLayout"/>). A repeated instance is
     /// skipped here and refused by <see cref="AttachApplications"/>, which takes the requirements
     /// read here. Nothing on a node without applications.
     /// </summary>
-    private void ReadApplicationRequirements()
+    private void ReadApplicationRequirements(IReadOnlyList<ICanOpenApplication> listed)
     {
-        var listed = _options.Applications;
         if (listed.Count == 0) return;
         var read = new CanOpenApplicationRequirements?[listed.Count];
         for (int i = 0; i < read.Length; i++)
         {
-            if (listed[i] is not { } application) continue;
+            var application = listed[i];
             bool listedBefore = false;
             for (int earlier = 0; earlier < i; earlier++) listedBefore |= ReferenceEquals(listed[earlier], application);
             if (listedBefore) continue;
@@ -120,19 +119,18 @@ internal sealed partial class CanOpenNode
         _applicationRequirements = read;
     }
 
-    private void AttachApplications()
+    private void AttachApplications(IReadOnlyList<ICanOpenApplication> listed)
     {
-        var listed = _options.Applications;
         if (listed.Count == 0) return;
 
         var slots = new ApplicationSlot[listed.Count];
         for (int i = 0; i < slots.Length; i++)
         {
-            var application = listed[i] ?? throw OptionsError($"CanOpenNodeOptions.Applications[{i}] is null.");
+            var application = listed[i];
             for (int earlier = 0; earlier < i; earlier++)
             {
                 if (ReferenceEquals(listed[earlier], application))
-                    throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.Applications.");
+                    throw OptionsError($"Application '{application.Name}' is listed twice in CanOpenNodeOptions.ApplicationFactories.");
             }
             var host = new ApplicationHost(this);
             // Read before the dictionary was built (ReadApplicationRequirements), not again here.
@@ -154,7 +152,8 @@ internal sealed partial class CanOpenNode
             _attachingSlot = slot;
             try
             {
-                slot.Application.Attach(slot.Host);
+                var resource = slot.Application.Attach(slot.Host);
+                if (resource is not null) (_attachmentResources ??= new()).Add(resource);
             }
             finally
             {
@@ -396,6 +395,7 @@ internal sealed partial class CanOpenNode
         // decides is made from inside one: the innermost callback is then this one, under the
         // write gate, and a Post made from it is queued, not run there (ICanOpenApplicationHost.Post).
         // Restored on the way out, before the write is stored and reported.
+        if (!EnterApplicationCall()) return OdWriteDecision.Accept;
         bool onActor = _actor.IsOnCurrentActor;
         var outer = onActor ? _applicationInCallback : null;
         if (onActor) _applicationInCallback = null;
@@ -418,6 +418,7 @@ internal sealed partial class CanOpenNode
         finally
         {
             if (onActor) _applicationInCallback = outer;
+            LeaveApplicationCall();
         }
         // The queue of command writes is checked once the application has accepted the write, so a
         // value it refuses is refused with its code whatever the queue holds. Whose write it is goes
@@ -438,6 +439,7 @@ internal sealed partial class CanOpenNode
     {
         // Restored rather than cleared: a callback that makes the node run another one (a state
         // request, say) leaves the outer one still in progress.
+        if (!EnterApplicationCall()) return;
         var outer = _applicationInCallback;
         _applicationInCallback = slot;
         try
@@ -454,6 +456,7 @@ internal sealed partial class CanOpenNode
         finally
         {
             _applicationInCallback = outer;
+            LeaveApplicationCall();
         }
     }
 
@@ -490,12 +493,8 @@ internal sealed partial class CanOpenNode
         }
         if (Volatile.Read(ref _disposed) != 0) return;
 
-        Action work = () =>
-        {
-            // Queued before the disposal and not started when it came: the node is gone.
-            if (Volatile.Read(ref _disposed) != 0) return;
-            InvokeApplication(slot, _ => action());
-        };
+        Action<ICanOpenApplication> callback = _ => action();
+        Action work = () => InvokeApplication(slot, callback);
         lock (_applicationPostGate)
         {
             if (_applicationPostsClosed) return;
@@ -552,11 +551,7 @@ internal sealed partial class CanOpenNode
         // Built once, outside work: nested in it, the lambda would get a lazily cached delegate whose
         // second use never comes, as each callback runs once.
         Action<ICanOpenApplication> callback = _ => onExpired();
-        Action work = () =>
-        {
-            if (Volatile.Read(ref _disposed) != 0) return;
-            InvokeApplication(slot, callback);
-        };
+        Action work = () => InvokeApplication(slot, callback);
         lock (_applicationPostGate)
         {
             if (_applicationPostsClosed) return;
@@ -591,7 +586,7 @@ internal sealed partial class CanOpenNode
         lock (_applicationPostGate)
         {
             _heldApplicationPosts = null;
-            _applicationPostsClosed = true;
+            Volatile.Write(ref _applicationPostsClosed, true);
         }
     }
 

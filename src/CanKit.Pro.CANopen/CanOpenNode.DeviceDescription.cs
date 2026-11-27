@@ -137,7 +137,7 @@ internal sealed partial class CanOpenNode
         // created and the managed ones it gave values to, as far as they still exist.
         foreach (var index in objects.Keys.Where(index => _od.ContainsIndex(index))) _describedObjects.Add(index);
 
-        if (_options.Applications.Count == 0) ReportDeviceTypeTopology(description, findings);
+        if (_options.ApplicationFactories.Count == 0) ReportDeviceTypeTopology(description, findings);
 
         _factoryDefaults = SnapshotRestorableValues();
         _powerOnValues = _factoryDefaults;

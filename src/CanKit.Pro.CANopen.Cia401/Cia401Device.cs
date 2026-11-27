@@ -335,7 +335,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// (<see cref="FromDescription"/>; for a device built from a configuration, the description
     /// declares an object of its logical device). The parameter is <c>options</c>, as for every
     /// application that fails the open.</exception>
-    public void Attach(ICanOpenApplicationHost host)
+    public IDisposable? Attach(ICanOpenApplicationHost host)
     {
         if (host is null) throw new ArgumentNullException(nameof(host));
         if (Interlocked.CompareExchange(ref _attaching, 1, 0) != 0) throw AttachedAlready();
@@ -381,6 +381,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
 
         Volatile.Write(ref _host, host);
         if (_process is not null) host.Post(() => RaiseOutputsChanged(callProcess: true));
+        return null;
     }
 
     private InvalidOperationException AttachedAlready()

@@ -254,7 +254,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             // What the applications require is read first: a layout of 1029h one of them asks for
             // shapes the communication profile below (CanOpenNode.Application.cs).
-            ReadApplicationRequirements();
+            var applications = _options.CreateApplications();
+            ReadApplicationRequirements(applications);
             // The communication-profile objects at their CiA 301 defaults, plus the OD hooks
             // that validate writes to them and carry accepted values into the runtime
             // (CanOpenNode.CommunicationProfile.cs).
@@ -264,16 +265,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             if (description is not null) ApplyDeviceDescription(description);
             // Applications come last: they see the description's objects, and what they declare
             // joins the power-on values (CanOpenNode.Application.cs).
-            AttachApplications();
+            AttachApplications(applications);
             InitializeControllerOverrunMonitor();
             InitializeControllerErrorMonitor();
         }
         catch
         {
-            CloseApplicationPosts();
-            DisposeControllerOverrunMonitor();
-            DisposeControllerErrorMonitor();
-            _actor.Dispose();
+            AbortOpen();
             throw;
         }
 
@@ -340,52 +338,65 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     _ => false,
                 };
             }, includeEcho: true);
+
+            ApplyNmtInhibit();
+
+            // Enter Pre-Operational immediately and announce a bootup on the wire. Bootup is a
+            // one-shot 1-byte frame with data[0] == 0 on COB-ID 0x700 + nodeId
+            // (CiA 301 §7.2.8.3.2). We do it here at construction so tests can observe it.
+            //
+            // Posted before the reader starts, which posts every received frame to the same
+            // mailbox: so the start-up runs before the first frame does. Started the other way round,
+            // an NMT Start that came in at once could be handled first, and the start-up then set
+            // Pre-Operational over it without leaving Operational (#357 C-10).
+            _actor.Post(() =>
+            {
+                _startUpBegun = true;
+                ApplyAllCommunicationObjects();
+                StartSrdoConfigurationCheck();
+                // An unconfigured LSS slave stays in NMT reset-communication waiting (§8.3.1):
+                // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
+                if (LayerSettingsBlockBoot()) return;
+                _state = NmtState.PreOperational;
+                // The deadlines and posts of an application from before the open are held behind this
+                // job (#561). What can still reach a profile ahead of it is an OnEntriesWritten for a
+                // write another thread made while the node was being opened; an error raised there, in
+                // Initialisation, follows the boot-up.
+                ReleaseProfileEmcysAfterBootUp(EmitHeartbeat(0x00));
+                StartControllerOverrunMonitoring();
+                StartControllerErrorMonitoring();
+                NotifyNmtStateChanged(NmtState.Initializing);
+                BeginSelfStart();
+            });
+
+            // What the applications posted while the node was being built runs behind the start-up,
+            // and before the first frame the reader hands the actor.
+            ReleaseApplicationPosts();
+
+            _readerTask = Task.Run(RunReaderAsync);
         }
         catch
         {
-            CloseApplicationPosts();
-            CompleteEventQueue();
-            DisposeControllerOverrunMonitor();
-            DisposeControllerErrorMonitor();
-            _actor.Dispose();
+            AbortOpen();
             throw;
         }
+    }
 
-        ApplyNmtInhibit();
-
-        // Enter Pre-Operational immediately and announce a bootup on the wire. Bootup is a
-        // one-shot 1-byte frame with data[0] == 0 on COB-ID 0x700 + nodeId
-        // (CiA 301 §7.2.8.3.2). We do it here at construction so tests can observe it.
-        //
-        // Posted before the reader starts, which posts every received frame to the same
-        // mailbox: so the start-up runs before the first frame does. Started the other way round,
-        // an NMT Start that came in at once could be handled first, and the start-up then set
-        // Pre-Operational over it without leaving Operational (#357 C-10).
-        _actor.Post(() =>
+    private void AbortOpen()
+    {
+        CloseApplicationPosts();
+        CompleteEventQueue();
+        try
         {
-            _startUpBegun = true;
-            ApplyAllCommunicationObjects();
-            StartSrdoConfigurationCheck();
-            // An unconfigured LSS slave stays in NMT reset-communication waiting (§8.3.1):
-            // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
-            if (LayerSettingsBlockBoot()) return;
-            _state = NmtState.PreOperational;
-            // The deadlines and posts of an application from before the open are held behind this
-            // job (#561). What can still reach a profile ahead of it is an OnEntriesWritten for a
-            // write another thread made while the node was being opened; an error raised there, in
-            // Initialisation, follows the boot-up.
-            ReleaseProfileEmcysAfterBootUp(EmitHeartbeat(0x00));
-            StartControllerOverrunMonitoring();
-            StartControllerErrorMonitoring();
-            NotifyNmtStateChanged(NmtState.Initializing);
-            BeginSelfStart();
-        });
-
-        // What the applications posted while the node was being built runs behind the start-up,
-        // and before the first frame the reader hands the actor.
-        ReleaseApplicationPosts();
-
-        _readerTask = Task.Run(RunReaderAsync);
+            try { DisposeReportingFailure(_subscription); }
+            finally
+            {
+                DisposeControllerOverrunMonitor();
+                DisposeControllerErrorMonitor();
+                _actor.Dispose();
+            }
+        }
+        finally { EndApplications(); }
     }
 
     /// <inheritdoc />
@@ -1070,6 +1081,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private static void Release(IDisposable? handle) => handle?.Dispose();
 
+    // A profile or adapter supplies this cleanup. Report ordinary failures so the remaining
+    // resources can be released, using the same fatal-exception policy as controller teardown.
+    private void DisposeReportingFailure(IDisposable? resource)
+    {
+        try { resource?.Dispose(); }
+        catch (Exception ex) when (ex is not OutOfMemoryException
+            and not StackOverflowException and not AccessViolationException)
+        {
+            DispatchBackgroundException(ex);
+        }
+    }
+
     private void FinishDispose()
     {
         Callbacks.Enter(CallbackKind.Finishing, this);
@@ -1083,9 +1106,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         finally
         {
-            Callbacks.Leave(CallbackKind.Finishing, this);
-            // Whatever a Dispose above threw, a caller waiting for this disposal is released.
-            _disposeDone.TrySetResult(true);
+            try { EndApplications(); }
+            finally
+            {
+                Callbacks.Leave(CallbackKind.Finishing, this);
+                // Whatever a Dispose above threw, a caller waiting for this disposal is released.
+                _disposeDone.TrySetResult(true);
+            }
         }
     }
 
@@ -3109,12 +3136,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // it would be blocking (#356, T-2); each subscriber on its own (#381).
     private void RaiseBackgroundException(Exception ex)
     {
+        // A subscriber or a timed-out send can outlive the node. Cleanup owned by the disposal
+        // itself uses the dispatcher directly, including a release deferred until a callback returns.
+        if (!_disposeDone.Task.IsCompleted) DispatchBackgroundException(ex);
+    }
+
+    private void DispatchBackgroundException(Exception ex)
+    {
         var handler = BackgroundExceptionOccurred;
         if (handler is null) return;
-        // Nothing is reported once the disposal has finished: a subscriber or a timed-out send that
-        // outlived it and fails late has nobody to tell. Decided here, where the failure happens,
-        // not where it is delivered: one that happened before the disposal finished is reported.
-        if (_disposeDone.Task.IsCompleted) return;
         _backgroundReports.Post(() =>
         {
             // One subscriber that disposes the node ends the round for the rest, as for the other
