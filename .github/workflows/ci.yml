@@ -108,7 +108,7 @@ jobs:
           dotnet-version: 11.0.100 # Exact version bypasses the broken aka.ms redirect (#456).
 
       - name: Restore
-        run: dotnet restore CanKit.Pro.sln
+        run: dotnet restore CanKit.Pro.sln --locked-mode -p:CanKitProTestNetFrameworkLeg=true
 
       - name: Build
         shell: bash
@@ -224,8 +224,11 @@ jobs:
 
       # Proves the packing the release workflow's `verify` job will do still works, on every pull
       # request rather than only when someone cuts a release.
+      - name: Restore
+        run: dotnet restore CanKit.Pro.sln --locked-mode -p:CanKitProTestNetFrameworkLeg=true
+
       - name: Pack
-        run: dotnet pack CanKit.Pro.sln --configuration Release "-p:Version=$SEMVER" --output artifacts/nuget
+        run: dotnet pack CanKit.Pro.sln --configuration Release --no-restore "-p:Version=$SEMVER" --output artifacts/nuget
 
       - name: List produced packages
         run: ls -l artifacts/nuget

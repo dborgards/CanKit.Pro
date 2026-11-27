@@ -117,7 +117,7 @@ jobs:
         run: node eng/verify-release-config.mjs "$VERSION"
 
       - name: Restore
-        run: dotnet restore CanKit.Pro.sln
+        run: dotnet restore CanKit.Pro.sln --locked-mode -p:CanKitProTestNetFrameworkLeg=true
 
       - name: Build
         env:

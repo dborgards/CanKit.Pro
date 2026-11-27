@@ -26,9 +26,15 @@
       -p:CanKitProTestNetFrameworkLeg=true` compile-checks the leg from Linux or macOS before the
       change reaches Windows CI. (Overriding TargetFrameworks itself would not work — as a global
       property it flows into the referenced shipping projects and retargets those too.)
+
+      Restore is different: packages.lock.json has to list every framework the Windows
+      CI job restores, or locked mode fails on Linux and macOS. MSBuildRestoreSessionId
+      is set only during restore, so the lock file always includes net48 while a plain
+      `dotnet test` on Linux or macOS still runs net10.0 alone.
+
     -->
     <TargetFrameworks>net10.0</TargetFrameworks>
-    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows')) OR '$(CanKitProTestNetFrameworkLeg)' == 'true'">net10.0;net48</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows')) OR '$(CanKitProTestNetFrameworkLeg)' == 'true' OR '$(MSBuildRestoreSessionId)' != ''">net10.0;net48</TargetFrameworks>
     <!--
       `dotnet test` runs a project's target frameworks in parallel by default. This suite measures
       protocol timing (see the comment in CanKit.Pro.Tests.csproj, which is why collection
@@ -42,6 +48,12 @@
     <IsTestProject>true</IsTestProject>
     <!-- xUnit.net v3 test projects are executables: the runner lives in the test assembly. -->
     <OutputType>Exe</OutputType>
+    <!--
+      Windows restore of net48 injects an implicit win-x86 RID, which NU1004s a lock file
+      written on Linux. Pin it during restore only so the lock file matches on every OS,
+      without changing the net48 build output path used by Windows CI tests.
+    -->
+    <RuntimeIdentifiers Condition="'$(TargetFramework)' == 'net48' AND '$(MSBuildRestoreSessionId)' != ''">win-x86</RuntimeIdentifiers>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!--
       Test doubles deliberately implement interfaces they do not fully support.
@@ -56,6 +68,10 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!-- Explicit so the net48 lock file does not depend on whether the host has the targeting pack. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Condition="'$(TargetFramework)' == 'net48'">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="xunit.v3.mtp-off" />
     <PackageReference Include="xunit.runner.visualstudio">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
