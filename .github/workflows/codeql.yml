@@ -40,8 +40,11 @@ jobs:
           languages: csharp
           queries: security-and-quality
 
+      - name: Restore
+        run: dotnet restore CanKit.Pro.sln --locked-mode -p:CanKitProTestNetFrameworkLeg=true
+
       - name: Build
-        run: dotnet build CanKit.Pro.sln --configuration Release
+        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
 
       - name: Analyze
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3

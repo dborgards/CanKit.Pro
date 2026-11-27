@@ -67,6 +67,8 @@
       at the PackageReference in tests/Directory.Build.props.
     -->
     <PackageVersion Include="PublicApiGenerator" Version="11.5.4" />
+    <!-- Targeting pack for the net48 test leg, declared explicitly so Linux and Windows restore the same graph (Windows images already have the pack; Linux does not). -->
+    <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
   </ItemGroup>
 
 </Project>
