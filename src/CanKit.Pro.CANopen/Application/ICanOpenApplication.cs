@@ -175,7 +175,10 @@ internal interface ICanOpenApplication
     /// command entry (<see cref="CommandEntries"/>), which goes to <see cref="OnCommandWritten"/>,
     /// one call per write, instead. A write that <see cref="ValidateWrite"/> refused, or answered with <see cref="OdWriteDecision.Handled"/>,
     /// stored nothing and is not reported. Coalesced: the entries written since the last call arrive
-    /// in one list, each once, sorted by index and then sub-index. The call comes one actor job after
+    /// in one list, each once, sorted by index and then sub-index. Each entry's origins include every
+    /// reported kind of write since the previous batch was taken: local dictionary changes, SDO,
+    /// RPDO, MPDO and SRDO. Repeated writes from one service add that kind once. The set describes
+    /// the batch and carries no write order, count or PDO number. The call comes one actor job after
     /// the write, so a change of NMT state that followed the write can have been reported first.
     /// </para>
     /// <para>
@@ -185,7 +188,7 @@ internal interface ICanOpenApplication
     /// the values an NMT reset restores do not generate notifications.
     /// </para>
     /// </remarks>
-    void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries);
+    void OnEntriesWritten(IReadOnlyList<CanOpenWrittenEntry> entries);
 
     /// <summary>A command entry (<see cref="CommandEntries"/>) was written: one call per committed
     /// write, in the order the writes were committed, with a copy of the value each stored.</summary>

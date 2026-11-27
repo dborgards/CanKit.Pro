@@ -322,6 +322,71 @@ public partial class CanOpenApplicationSeamTests
         callbackThread.Should().Be(actorThread);
     }
 
+    private static IEnumerable<CanOpenWriteKind> OriginsOf(CanOpenWrittenEntry entry)
+        => Enum.GetValues(typeof(CanOpenWriteKind)).Cast<CanOpenWriteKind>().Where(entry.Origins.Contains);
+
+    [Fact]
+    public async Task Coalesced_Entries_Keep_Every_Origin_Per_Address_And_Per_Batch()
+    {
+        var app = Entries();
+        var batches = new List<IReadOnlyList<CanOpenWrittenEntry>>();
+        app.WhenWritten = batches.Add;
+        using var rig = new EntryRig(With(app));
+        rig.Node.ConfigureRpdo(1, new PdoMapping().Add(0x6000, 1, 8));
+        await rig.StartAsync();
+
+        await WhileActorHeldAsync(rig.Node, async () =>
+        {
+            await QueueFramesAsync(rig,
+                (SdoRequest, new byte[] { 0x2F, 0x00, 0x60, 1, 7, 0, 0, 0 }),
+                (Rpdo1, new byte[] { 7 }), (Rpdo1, new byte[] { 7 }));
+            rig.Od.WriteUnsigned(0x6000, 2, 7);
+            rig.Od.WriteUnsigned(0x6000, 1, 7);
+        });
+        Settle(rig.Node);
+
+        // The claimant's subsequent own write adds no local origin to the next RPDO notification.
+        await WhileActorHeldAsync(rig.Node, async () =>
+        {
+            await QueueFramesAsync(rig, (Rpdo1, new byte[] { 8 }));
+            app.Host!.WriteOwn(0x6000, 1, new byte[] { 8 });
+        });
+        Settle(rig.Node);
+
+        batches.Should().HaveCount(2);
+        batches[0].Select(e => e.Address).Should().Equal(new CanOpenObjectAddress(0x6000, 1), new(0x6000, 2));
+        OriginsOf(batches[0][0]).Should().BeEquivalentTo(new[] { CanOpenWriteKind.Dictionary, CanOpenWriteKind.Sdo, CanOpenWriteKind.Rpdo });
+        OriginsOf(batches[0][1]).Should().Equal(CanOpenWriteKind.Dictionary);
+        batches[1].Should().ContainSingle().Which.Address.Should().Be(new CanOpenObjectAddress(0x6000, 1));
+        OriginsOf(batches[1][0]).Should().Equal(CanOpenWriteKind.Rpdo);
+    }
+
+    [Fact]
+    public async Task Multiplexed_And_Safety_Pdo_Origins_Reach_The_Claimant()
+    {
+        var app = Entries();
+        var batches = new List<IReadOnlyList<CanOpenWrittenEntry>>();
+        app.WhenWritten = batches.Add;
+        using var rig = new EntryRig(new CanOpenNodeOptions { SrdoCount = 1 }.WithApplication(app), new ManualTimeSource());
+        rig.Node.ConfigureMultiplexedRpdo(1, MpdoAddressMode.Destination, Rpdo1);
+        var safety = rig.Node.Safety();
+        safety.ConfigureSrdoConsumer(1, new SrdoMapping().Add(0x6000, 1, 8),
+            TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(20));
+        safety.CommitSafetyConfiguration();
+        await rig.StartAsync();
+
+        uint plain = CanOpenCobId.SrdoDefaultCobId1(Slave);
+        await WhileActorHeldAsync(rig.Node, () => QueueFramesAsync(rig,
+            (Rpdo1, new byte[] { 0x80 | Slave, 0, 0x60, 1, 0x21, 0, 0, 0 }),
+            (plain, new byte[] { 0x32 }), (plain + 1, new byte[] { 0xCD })));
+        Settle(rig.Node);
+
+        var change = batches.Should().ContainSingle().Which.Should().ContainSingle().Which;
+        change.Address.Should().Be(new CanOpenObjectAddress(0x6000, 1));
+        OriginsOf(change).Should().BeEquivalentTo(new[] { CanOpenWriteKind.Mpdo, CanOpenWriteKind.Srdo });
+        rig.Od.ReadUnsigned(0x6000, 1).Should().Be(0x32u);
+    }
+
     [Fact] // Review Focus 2
     public async Task Many_Writes_Are_Reported_Once()
     {
@@ -557,7 +622,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task The_Claimant_Requests_The_Transmission()
     {
         var app = Entries();
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(With(app));
         rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x6000, 0x01, 8));
         rig.ConfigureWitness();
@@ -574,7 +639,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Requested_Transmission_Ignores_The_Automatism_Switch()
     {
         var app = Entries();
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(new CanOpenNodeOptions { EnableChangeOfStateTpdo = false }.WithApplication(app));
         rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x6000, 0x01, 8));
         rig.ConfigureWitness();
@@ -591,7 +656,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Requested_Acyclic_Tpdo_Is_Sent_Once_On_The_Next_Sync()
     {
         var app = Entries();
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(new CanOpenNodeOptions { EnableChangeOfStateTpdo = false }.WithApplication(app));
         rig.Node.ConfigureTpdo(1, new PdoMapping().Add(0x6000, 1, 8), TpdoTransmission.SynchronousAcyclic);
         rig.Node.ConfigureTpdo(2, new PdoMapping().Add(0x2101, 0, 8), TpdoTransmission.Synchronous);
@@ -615,7 +680,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Requested_Transmit_Srdo_Sends_The_Mapped_Value_And_Its_Inverse()
     {
         var app = Entries();
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         var options = new CanOpenNodeOptions { SrdoCount = 1, EnableChangeOfStateSrdo = false };
         // Hold time before the first cyclic SRDO. Only the application request can send this pair.
         using var rig = new EntryRig(options.WithApplication(app), new ManualTimeSource());
@@ -636,7 +701,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Requested_Transmission_Outside_Operational_Is_Dropped()
     {
         var app = Entries();
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(With(app));
         // Pins the rule: nothing is sent for a request made outside Operational, neither at once
         // nor on the first SYNC after the node starts (TPDO 1 is the kind that latches for a SYNC).
