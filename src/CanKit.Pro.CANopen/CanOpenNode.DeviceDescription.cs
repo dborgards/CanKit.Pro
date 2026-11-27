@@ -190,7 +190,7 @@ internal sealed partial class CanOpenNode
 
     // -----------------------------------------------------------------------------------------
     // CiA DSP 304: the loader's SRDO steps are static over the dictionary they write, so that
-    // LoadDescribedSafetyObjects runs the very same code for PeerSafetyConfiguration.
+    // LoadPeerSafetyConfiguration runs the very same code for PeerSafetyConfiguration.
     // -----------------------------------------------------------------------------------------
 
     /// <summary>An SRDO whose communication record the description leaves out is provided "at its
@@ -234,9 +234,9 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// The safety objects a node with node-id <paramref name="nodeId"/> holds after loading
-    /// <paramref name="description"/>, in a dictionary of their own: 1300h and the SRDO records,
-    /// written by the loader's own steps in the loader's order — the §8.4.2.2 defaults, the
+    /// Builds the expected peer configuration for <paramref name="nodeId"/> from <paramref name="description"/>.
+    /// A temporary dictionary holds 1300h and the SRDO records. The loader applies them in the
+    /// same order as the node — the §8.4.2.2 defaults, the
     /// application objects a mapping can name, 1300h, the communication records with the SRDO
     /// deleted, the mapping records, the deferred creates — through the node's own write
     /// validator (CiA DSP 304 §8.4.2.2), as in Pre-Operational — with the mapping rule of a peer,
@@ -246,23 +246,21 @@ internal sealed partial class CanOpenNode
     /// <see cref="Safety.PeerSafetyConfiguration.FromDeviceDescription"/> reads, so that step D
     /// against a slave's own DCF expects what the slave holds.
     /// </summary>
-    internal static ObjectDictionary LoadDescribedSafetyObjects(CanOpenDeviceDescription description, byte nodeId)
-    {
-        if (description is null) throw new ArgumentNullException(nameof(description));
-        return LoadDescribedSafetyObjects(DescribedObjects.Capture(description), nodeId);
-    }
+    internal static PeerSafetyConfiguration LoadPeerSafetyConfiguration(CanOpenDeviceDescription description, byte nodeId)
+        => LoadPeerSafetyConfiguration(DescribedObjects.Capture(description), nodeId);
 
     /// <summary>The same over a snapshot taken once (<see cref="DescribedObjects.Capture"/>): what a
     /// safety transaction derives its expectation from, next to its gate, from one reading.</summary>
-    private static ObjectDictionary LoadDescribedSafetyObjects(DescribedObjects objects, byte nodeId)
+    private static PeerSafetyConfiguration LoadPeerSafetyConfiguration(DescribedObjects objects, byte nodeId)
     {
         CanOpenCobId.ValidateNodeId(nodeId);
         var od = new ObjectDictionary();
         int srdoCount = objects.SrdoCount;
         PopulateSafetyObjects(od, nodeId, srdoCount);
-        od.WriteValidator = (index, subindex, value, _) => IsManagedSafetyObject(srdoCount, index)
-            ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value, peerMapping: true)
-            : OdWriteDecision.Accept;
+        // Application entries are declared below for mapping lookups. Only the managed safety
+        // records go through validated writes, and the dictionary stays local to this load.
+        od.WriteValidator = (index, subindex, value, _) =>
+            ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value, peerMapping: true);
         var findings = new List<DeviceDescriptionFinding>();
         var pendingSrdoCreates = new List<(int Srdo, byte Direction, string Raw)>();
         var failedMappings = new HashSet<ushort>();
@@ -284,7 +282,7 @@ internal sealed partial class CanOpenNode
         foreach (var (index, entries) in objects.Ordered(i => IsManagedSafetyObject(srdoCount, i) && SrdoRecords.IsMappingRecord(i)))
             ApplySrdoMappingRecord(od, nodeId, index, entries, findings, failedMappings);
         CreateDescribedSrdos(od, objects.Contains, pendingSrdoCreates, failedMappings, findings);
-        return od;
+        return PeerSafetyConfiguration.FromSafetyObjects(od);
     }
 
     /// <summary>A description's objects as read in one traversal, frozen: every index with its
@@ -1133,7 +1131,7 @@ internal sealed partial class CanOpenNode
             // constructor (ApplyDescribedObject → ApplyManagedVariable(index, …)): on the constructing
             // thread, before AttachApplications hands any application the host and before the node is
             // returned to anyone who could call ObjectDictionary.Remove. The static loader of a safety
-            // peer's objects (LoadDescribedSafetyObjects) applies no 1001h. Should that change, this
+            // peer's objects (LoadPeerSafetyConfiguration) applies no 1001h. Should that change, this
             // must become TryReadRaw.
             // Accepted with reserved bit 6 cleared, as every write of 1001h is (#566): the file said
             // something the node does not hold.
