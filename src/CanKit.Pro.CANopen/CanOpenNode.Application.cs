@@ -253,7 +253,7 @@ internal sealed partial class CanOpenNode
     private bool _applicationEvaluationPosted;
 
     // The application whose callback the actor loop is running right now, or null. Actor-confined:
-    // set and cleared by InvokeApplication, read only after IsOnCurrentActor has said so.
+    // used to decide whether Post may run inline. ValidateWrite masks it while the write gate is held.
     private ApplicationSlot? _applicationInCallback;
 
     /// <summary>
@@ -263,10 +263,11 @@ internal sealed partial class CanOpenNode
     /// an entry an application claims. Records the entry, or for a command entry whose write was
     /// validated (<see cref="ReserveCommandWrite"/>) queues a copy of the value it stored, and queues
     /// one evaluation, which tells the claimant on the actor loop
-    /// (<see cref="EvaluateApplicationEntriesOnActor"/>). Not for what the claimant writes from
-    /// inside its own callback, and not for a restore of values in a reset: neither is news to it.
+    /// (<see cref="EvaluateApplicationEntriesOnActor"/>). A write from the claimant's own host
+    /// and the values restored by a reset need no notification.
     /// </summary>
-    private void OnOdEntryWrittenForApplications(ushort index, byte subindex, CanOpenWriteSource source)
+    private void OnOdEntryWrittenForApplications(ushort index, byte subindex, CanOpenWriteSource source,
+        ICanOpenApplicationHost? writer)
     {
         if (_applications.Length == 0) return;
         // Taken by this write or by none: a reservation belongs to the write it was made for, which
@@ -278,9 +279,7 @@ internal sealed partial class CanOpenNode
         if (_restoringValues) return;
         var claimant = ClaimantOf(index);
         if (claimant is null) return;
-        // The claimant's own write from inside one of its callbacks. IsOnCurrentActor first: the
-        // field belongs to the actor loop, and a write from another thread is never that.
-        if (_actor.IsOnCurrentActor && ReferenceEquals(_applicationInCallback, claimant)) return;
+        if (ReferenceEquals(writer, claimant.Host)) return;
         if (Volatile.Read(ref _disposed) != 0) return;
 
         var key = CosKey(index, subindex);
@@ -421,19 +420,17 @@ internal sealed partial class CanOpenNode
             LeaveApplicationCall();
         }
         // The queue of command writes is checked once the application has accepted the write, so a
-        // value it refuses is refused with its code whatever the queue holds. Whose write it is goes
-        // by the callback that was running before the validation, as for OnEntriesWritten.
+        // value it refuses is refused with its code whatever the queue holds.
         if (!decision.Store || decision.Abort is not null) return decision;
-        return ReserveCommandWrite(index, subindex, own: onActor && ReferenceEquals(outer, slot));
+        return ReserveCommandWrite(index, subindex, own: isOwnWrite);
     }
 
     /// <summary>
     /// Runs <paramref name="callback"/> against the application of <paramref name="slot"/>: the one
     /// way the node calls into an application on the actor loop (every callback but
     /// <see cref="ICanOpenApplication.Attach"/> and <see cref="ICanOpenApplication.ValidateWrite"/>).
-    /// Marks the application as being in a callback, so that what it writes there is not reported
-    /// back to it, and reports anything it throws as a background exception: one application's
-    /// failure stops neither the node nor the application after it.
+    /// Marks the active callback for inline Post and reports exceptions from profile code through
+    /// the node's background exception event.
     /// </summary>
     private void InvokeApplication(ApplicationSlot slot, Action<ICanOpenApplication> callback)
     {
@@ -484,8 +481,7 @@ internal sealed partial class CanOpenNode
     private void PostApplicationWork(ApplicationSlot slot, Action action)
     {
         if (action is null) throw new ArgumentNullException(nameof(action));
-        // IsOnCurrentActor first: the field belongs to the actor loop, as in
-        // OnOdEntryWrittenForApplications.
+        // IsOnCurrentActor first: the field belongs to the actor loop.
         if (_actor.IsOnCurrentActor && ReferenceEquals(_applicationInCallback, slot))
         {
             action();
@@ -1027,7 +1023,7 @@ internal sealed partial class CanOpenNode
         public bool CommunicationFailureActive => _node.CommunicationFailure;
 
         // onExpired is the application's code on the actor loop: it goes through the dispatcher like
-        // every other callback, so its own writes are not reported back and its failure is reported
+        // every other callback, so it can post inline and its failure is reported
         // by the node.
         public IDeadline Arm(TimeSpan delay, Action onExpired)
         {

@@ -394,7 +394,7 @@ public partial class CanOpenApplicationSeamTests
         {
             if (wrote) return;
             wrote = true;
-            app.Host!.ObjectDictionary.WriteUnsigned(0x6000, 0x02, 9);
+            app.Host!.WriteOwn(0x6000, 0x02, new byte[] { 9 });
         };
         using var rig = new EntryRig(With(app));
 
@@ -414,7 +414,7 @@ public partial class CanOpenApplicationSeamTests
         {
             OnAttach = host => host.ObjectDictionary.AddU8(0x6800, 0x01, 0),
         };
-        first.WhenWritten = _ => first.Host!.ObjectDictionary.WriteUnsigned(0x6800, 0x01, 3);
+        first.WhenWritten = _ => first.Host!.WriteOwn(0x6800, 0x01, new byte[] { 3 });
         using var rig = new EntryRig(With(first, second));
 
         rig.Od.WriteUnsigned(0x6000, 0x01, 7);
@@ -752,7 +752,7 @@ public partial class CanOpenApplicationSeamTests
             declare(host);
             host.Arm(TimeSpan.FromMilliseconds(50), () =>
             {
-                host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 9);
+                host.WriteOwn(0x6000, 0x01, new byte[] { 9 });
                 ran.SetResult(true);
             });
         };

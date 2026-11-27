@@ -39,8 +39,7 @@ internal sealed partial class Cia401Device
     /// outside the error state, becomes the output's value. §8.5.2 has a value of less than 16 bits
     /// left adjusted, its unused low bits zero; that is the writer's business, and the device drives
     /// the 16-bit value it is given. Analog outputs have no polarity and no filter mask. A local
-    /// write from inside a callback of the device is the device's own write and is never applied,
-    /// as for the digital outputs (see <see cref="ReadDigitalOutputs"/>).</description></item>
+    /// dictionary write made by an event handler is applied in a subsequent notification round.</description></item>
     /// <item><description>In the error state (<see cref="OutputsInErrorState"/>) each output with
     /// <c>6443h</c> = 1h takes its error value and each with 0h keeps the value it has (§8.7.4);
     /// writes to <c>6411h</c> are stored and reach no terminal. <c>6443h</c> and <c>6444h</c> written

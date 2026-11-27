@@ -70,13 +70,15 @@ public sealed class ObjectDictionary
     /// <see cref="EntryWritten"/>, and before any of its subscribers. The node captures there what
     /// belongs to the write being reported — the reservation of a validated command write — before a
     /// subscriber of <see cref="EntryWritten"/> can nest another write inside this one, whose
-    /// validation would otherwise take the reservation's place.
+    /// validation would otherwise take the reservation's place. The writer identifies the host of
+    /// this particular WriteOwn call. All other changes have a null writer.
     /// </summary>
-    internal event Action<ushort, byte, CanOpenWriteSource>? EntryStored;
+    internal event Action<ushort, byte, CanOpenWriteSource, ICanOpenApplicationHost?>? EntryStored;
 
-    private void RaiseEntryWritten(ushort index, byte subindex, CanOpenWriteSource source = default)
+    private void RaiseEntryWritten(ushort index, byte subindex, CanOpenWriteSource source = default,
+        ICanOpenApplicationHost? writer = null)
     {
-        EntryStored?.Invoke(index, subindex, source);
+        EntryStored?.Invoke(index, subindex, source, writer);
         EntryWritten?.Invoke(index, subindex);
     }
 
@@ -349,7 +351,7 @@ public sealed class ObjectDictionary
             }
             entry.SetRawValue(copy);
         }
-        RaiseEntryWritten(index, subindex, source);
+        RaiseEntryWritten(index, subindex, source, writer);
         return true;
     }
 

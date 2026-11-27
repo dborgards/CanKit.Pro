@@ -663,8 +663,8 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         => Volatile.Read(ref _host) ?? throw new InvalidOperationException(
             $"{Name} is not attached to a node yet: open a node with Cia408Device.AddTo first.");
 
-    /// <summary>The device's own write of an entry's raw little-endian bytes. Actor loop, inside a
-    /// callback of the device, so it is not reported back
+    /// <summary>The device's own write of an entry's raw little-endian bytes. The host marks the device as its
+    /// writer, so it is not reported back
     /// (<see cref="ICanOpenApplication.OnEntriesWritten"/>).</summary>
     private static void WriteOwn(ICanOpenApplicationHost host, ushort index, byte[] value, byte subindex = 0x00)
         => host.WriteOwn(index, subindex, value);

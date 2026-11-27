@@ -179,20 +179,10 @@ internal interface ICanOpenApplication
     /// the write, so a change of NMT state that followed the write can have been reported first.
     /// </para>
     /// <para>
-    /// Not reported: what the application writes on the actor loop from inside one of its own
-    /// callbacks, deadline callbacks (<see cref="ICanOpenApplicationHost.Arm"/>) and the work it
-    /// posts (<see cref="ICanOpenApplicationHost.Post"/>) included; the values
-    /// an NMT reset restores; writes made during <see cref="Attach"/>. What another application
-    /// writes to these entries from its callbacks is reported.
-    /// </para>
-    /// <para>
-    /// The rule for its own writes goes by thread and moment, not by origin: every write on the actor
-    /// loop while one of this application's callbacks is the innermost callback running counts as its
-    /// own. A callback of another application that runs nested inside one of this application's (its
-    /// <see cref="OnNmtStateChanged"/>, run by a <see cref="ICanOpenApplicationHost.RequestNmtState"/>
-    /// this application made) is the innermost one then, and what it writes here is reported. A profile that raises a
-    /// .NET event synchronously from a callback, and whose subscriber sets a value through the
-    /// profile's API, has that write suppressed as well.
+    /// A write through the claimant's <see cref="ICanOpenApplicationHost.WriteOwn"/> is silent on
+    /// every thread. A direct dictionary write or another host's write is reported, even when
+    /// nested inside the claimant's callback on the actor. Writes during <see cref="Attach"/> and
+    /// the values an NMT reset restores do not generate notifications.
     /// </para>
     /// </remarks>
     void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries);
@@ -212,9 +202,10 @@ internal interface ICanOpenApplication
     /// write that was refused — by <see cref="ValidateWrite"/>, by the dictionary for its size, by
     /// the SDO server for the access — stored nothing and is not reported, and neither is one that
     /// <see cref="ValidateWrite"/> answered with <see cref="OdWriteDecision.Handled"/>. The rule for
-    /// the application's own writes is that of <see cref="OnEntriesWritten"/>: what it writes from
-    /// inside one of its callbacks is not reported to it, nor what it writes in <see cref="Attach"/>,
-    /// nor the values an NMT reset restores.
+    /// the application's own writes is that of <see cref="OnEntriesWritten"/>. A write through
+    /// the claimant's <see cref="ICanOpenApplicationHost.WriteOwn"/> takes no queue slot. A
+    /// nested dictionary write takes its own slot. Writes in <see cref="Attach"/> and the
+    /// values an NMT reset restores do not generate command notifications.
     /// </para>
     /// <para>
     /// The calls come on the actor loop, one actor job after the writes, so a change of NMT state that

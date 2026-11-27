@@ -17,7 +17,7 @@ internal interface ICanOpenApplicationHost
     /// <summary>Writes raw bytes through the normal dictionary validator. For this write alone,
     /// the claimant sees <c>isOwnWrite</c> when this host belongs to it. A write to another
     /// profile's entry goes through that profile's external-write rules. Any thread.</summary>
-    /// <remarks>Post-write notifications follow <see cref="ICanOpenApplication.OnEntriesWritten"/>.</remarks>
+    /// <remarks>A claimant receives no entry or command notification for its own WriteOwn call.</remarks>
     void WriteOwn(ushort index, byte subindex, byte[] value);
 
     /// <summary>Whether this thread is executing a callback on this node's actor. Any thread.
@@ -42,8 +42,7 @@ internal interface ICanOpenApplicationHost
     bool CommunicationFailureActive { get; }
 
     /// <summary>Arms a one-shot deadline on the node's clock (<see cref="Now"/>);
-    /// <paramref name="onExpired"/> runs on the actor loop as a callback of this application: what it
-    /// writes there counts as the application's own, and what it throws is reported. Any thread.</summary>
+    /// <paramref name="onExpired"/> runs on the actor loop as a callback of this application. Callback exceptions are reported. Any thread.</summary>
     /// <remarks>
     /// <para>
     /// The deadline is the application's: an NMT reset does not cancel it, and it fires in every NMT
@@ -69,14 +68,11 @@ internal interface ICanOpenApplicationHost
     IDeadline Arm(TimeSpan delay, Action onExpired);
 
     /// <summary>Runs <paramref name="action"/> on the actor loop as a callback of this application:
-    /// what it writes there counts as the application's own (see
-    /// <see cref="ICanOpenApplication.OnEntriesWritten"/>), and the actor-loop members of this host
-    /// can be called from it. Any thread.</summary>
+    /// the actor-loop members of this host can be called from it. Any thread.</summary>
     /// <remarks>
     /// <para>
     /// Called on the actor loop while one of this application's callbacks is the innermost callback
-    /// running (the rule of <see cref="ICanOpenApplication.OnEntriesWritten"/>), the action runs at
-    /// once, before this call returns, and what it throws reaches the caller as from any other call.
+    /// running, the action runs before this call returns, and what it throws reaches the caller.
     /// So an application's API that is called from inside its own callback applies in the order it
     /// is called, with nothing deferred behind work the actor holds.
     /// </para>
