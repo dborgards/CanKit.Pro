@@ -23,10 +23,8 @@ internal sealed partial class Cia408Device
     // The status bits the process model set (7 to 23). Actor loop.
     private uint _processStatusBits;
 
-    // The time of the last step, and when the next periodic one is due, on the node's clock; whether
-    // the model has been started (StartProcess). Actor loop.
+    // Time of the last step on the node's clock and whether StartProcess has run. Actor loop.
     private TimeSpan _lastStep;
-    private TimeSpan _nextDue;
     private bool _processStarted;
 
     // True while the model steps; the actual values it set, to transmit once it has returned. Actor
@@ -103,12 +101,10 @@ internal sealed partial class Cia408Device
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The deadline is the device's (<see cref="ICanOpenApplicationHost.Arm"/>): no NMT reset cancels
+    /// The deadline is the device's (<see cref="ICanOpenApplicationHost.ArmPeriodic"/>): no NMT reset cancels
     /// it, so the model keeps its period across Reset Node and Reset Communication, and a reset's
-    /// state change adds a step (<see cref="FinishChanges"/>). Each periodic step re-arms first, for the
-    /// next due time read from <see cref="ICanOpenApplicationHost.Now"/>, so the period does not drift
-    /// by the handling time; due times the clock has passed already are skipped rather than caught up
-    /// in a burst — the model is told the elapsed time.
+    /// state change adds a step (<see cref="FinishChanges"/>). The host coalesces missed periods,
+    /// and the model receives the time elapsed since its last step.
     /// </para>
     /// <para>
     /// The model does not run in NOT_READY. The device leaves NOT_READY in <see cref="Attach"/>,
@@ -135,20 +131,11 @@ internal sealed partial class Cia408Device
         if (_process is null) return;
         _processStarted = true;
         _lastStep = host.Now;
-        _nextDue = _lastStep + _interval;
-        host.Arm(_interval, () => OnProcessDue(host));
+        host.ArmPeriodic(_interval, () => OnProcessDue(host));
     }
 
     private void OnProcessDue(ICanOpenApplicationHost host)
     {
-        var now = host.Now;
-        do
-        {
-            _nextDue += _interval;
-        }
-        while (_nextDue <= now);
-
-        host.Arm(_nextDue - now, () => OnProcessDue(host));
         List<Exception>? failures = null;
         StepProcess(host, ref failures);
         ThrowIfAny(failures);

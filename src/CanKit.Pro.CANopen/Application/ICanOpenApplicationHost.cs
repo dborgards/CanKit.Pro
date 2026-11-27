@@ -46,8 +46,7 @@ internal interface ICanOpenApplicationHost
     /// <remarks>
     /// <para>
     /// The deadline is the application's: an NMT reset does not cancel it, and it fires in every NMT
-    /// state. For a period, arm again from <paramref name="onExpired"/> with the delay to the next due
-    /// time as read from <see cref="Now"/>, so the period does not drift by the handling time.
+    /// state. For a recurring callback use <see cref="ArmPeriodic"/>.
     /// </para>
     /// <para>
     /// Armed before the node has opened — from <see cref="ICanOpenApplication.Attach"/>, or from
@@ -66,6 +65,17 @@ internal interface ICanOpenApplicationHost
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="delay"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The node's actor has ended.</exception>
     IDeadline Arm(TimeSpan delay, Action onExpired);
+
+    /// <summary>Runs <paramref name="onTick"/> on the actor loop every <paramref name="period"/>,
+    /// starting one period from this call on the node's clock. Any thread.</summary>
+    /// <remarks>Each tick is an application callback with the startup, NMT reset and exception
+    /// handling of <see cref="Arm"/>. Missed periods produce a single callback. Later ticks keep
+    /// their original schedule even if a callback throws. Dispose the handle from any thread to
+    /// cancel future callbacks, including a tick held until startup. A callback already in progress
+    /// can finish. Disposing the node ends the timer.</remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="period"/> is zero or negative.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="onTick"/> is null.</exception>
+    IDisposable ArmPeriodic(TimeSpan period, Action onTick);
 
     /// <summary>Runs <paramref name="action"/> on the actor loop as a callback of this application:
     /// the actor-loop members of this host can be called from it. Any thread.</summary>
