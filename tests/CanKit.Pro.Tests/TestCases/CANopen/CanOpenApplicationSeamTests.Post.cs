@@ -34,7 +34,7 @@ public partial class CanOpenApplicationSeamTests
             {
                 ran.Add(n);
                 onActor.Add(app.Host.IsOnActor);
-                app.Host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, (uint)n);
+                app.Host.WriteOwn(0x6000, 0x01, new byte[] { (byte)n });
             });
         }
         Settle(node);
@@ -43,7 +43,7 @@ public partial class CanOpenApplicationSeamTests
         ran.Should().Equal(Enumerable.Range(0, 50), "the actions one thread queues run in the order it queued them");
         onActor.Should().AllSatisfy(b => b.Should().BeTrue("a posted action runs on the actor loop"));
         node.ObjectDictionary.ReadUnsigned(0x6000, 0x01).Should().Be(49u);
-        Written(app).Should().BeEmpty("a posted action is a callback of the application: its writes are its own");
+        Written(app).Should().BeEmpty("WriteOwn identifies the claimant in each posted action");
     }
 
     [Fact]
@@ -133,7 +133,7 @@ public partial class CanOpenApplicationSeamTests
         {
             order.Add("before");
             // The application's own write, validated on the actor under the write gate.
-            app.Host!.ObjectDictionary.WriteUnsigned(0x6000, 0x02, 1);
+            app.Host!.WriteOwn(0x6000, 0x02, new byte[] { 1 });
             order.Add("after");
         };
         using var node = OpenNode(bus, With(app), new ManualTimeSource());
@@ -163,7 +163,7 @@ public partial class CanOpenApplicationSeamTests
             {
                 order.Add("posted");
                 // The second application's own write: not reported back to it.
-                second.Host.ObjectDictionary.WriteUnsigned(0x6800, 0x01, 3);
+                second.Host.WriteOwn(0x6800, 0x01, new byte[] { 3 });
             });
             order.Add("after");
         };
@@ -176,7 +176,7 @@ public partial class CanOpenApplicationSeamTests
         order.Should().Equal(new[] { "before", "after", "posted" },
             "inside another application's callback the action is not this application's to run inline");
         node.ObjectDictionary.ReadUnsigned(0x6800, 0x01).Should().Be(3u);
-        Written(second).Should().BeEmpty("the queued action ran as a callback of the application that posted it");
+        Written(second).Should().BeEmpty("the action used the second claimant's host to write its entry");
     }
 
     [Fact]
@@ -211,7 +211,7 @@ public partial class CanOpenApplicationSeamTests
             host.Post(() =>
             {
                 seen = host.State;
-                host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 9);
+                host.WriteOwn(0x6000, 0x01, new byte[] { 9 });
             });
         };
 
@@ -220,7 +220,7 @@ public partial class CanOpenApplicationSeamTests
 
         seen.Should().Be(NmtState.PreOperational, "the action is held until the node has ordered its start-up");
         node.ObjectDictionary.ReadUnsigned(0x6000, 0x01).Should().Be(9u);
-        Written(app).Should().BeEmpty("the held action ran as a callback of the application");
+        Written(app).Should().BeEmpty("the held action used WriteOwn");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -266,7 +266,7 @@ public partial class CanOpenApplicationSeamTests
             host.Arm(TimeSpan.Zero, () =>
             {
                 seen = host.State;
-                host.ObjectDictionary.WriteUnsigned(0x6000, 0x01, 9);
+                host.WriteOwn(0x6000, 0x01, new byte[] { 9 });
                 Interlocked.Increment(ref ran);
             });
         };
@@ -279,7 +279,7 @@ public partial class CanOpenApplicationSeamTests
         Volatile.Read(ref ran).Should().Be(1, "it runs once the node has opened");
         seen.Should().Be(NmtState.PreOperational, "behind the start-up, as a post from Attach");
         node.ObjectDictionary.ReadUnsigned(0x6000, 0x01).Should().Be(9u);
-        Written(early).Should().BeEmpty("it ran as a callback of the application");
+        Written(early).Should().BeEmpty("the deadline used WriteOwn");
     }
 
     [Fact] // #561

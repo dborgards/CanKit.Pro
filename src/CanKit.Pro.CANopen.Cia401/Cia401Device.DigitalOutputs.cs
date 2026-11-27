@@ -39,12 +39,8 @@ internal sealed partial class Cia401Device
     /// <item><description>A write to <c>6200h</c>, by RPDO, SDO or locally, is stored there, and
     /// replaces the device's held logical value in the bits <c>6208h</c> has set; the others keep
     /// theirs (§8.3.5: the received value is neglected and the old output value kept). The mask is
-    /// read when the write is applied. A local write the application makes from inside a callback of
-    /// the device (an <see cref="OutputsChanged"/> handler, say) is the device's own write under the
-    /// node's rule, is not reported back to it (<see cref="ICanOpenApplication.OnEntriesWritten"/>)
-    /// and so is stored and never applied, to <c>6200h</c> and to <c>6202h</c>, <c>6206h</c> and
-    /// <c>6207h</c> alike; the device has no method that sets an output instead, the outputs being
-    /// the master's to write. Make such a write from outside the device's callbacks.</description></item>
+    /// read when the write is applied. Local dictionary writes made by an <see cref="OutputsChanged"/>
+    /// handler are applied in a subsequent notification round.</description></item>
     /// <item><description>In the error state (<see cref="OutputsInErrorState"/>) the held value is
     /// the error switch's: each bit with <c>6206h</c> = 1 takes the bit of <c>6207h</c>, each bit with
     /// <c>6206h</c> = 0 keeps the value it had (§8.3.3, §8.3.4). Writes to <c>6200h</c> are stored

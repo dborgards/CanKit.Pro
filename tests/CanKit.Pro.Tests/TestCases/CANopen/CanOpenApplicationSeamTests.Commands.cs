@@ -324,6 +324,24 @@ public partial class CanOpenApplicationSeamTests
         CommandCalls(app).Should().Equal(Command(0x0002));
     }
 
+    [Fact]
+    public void A_Command_Nested_In_A_Claimants_WriteOwn_Is_Delivered_Exactly_Once()
+    {
+        var app = Commands();
+        using var rig = new EntryRig(With(app));
+        rig.Od.EntryWritten += (index, subindex) =>
+        {
+            if (index == 0x6040 && rig.Od.ReadUnsigned(index, subindex) == 1)
+                rig.Od.WriteUnsigned(index, subindex, 2);
+        };
+
+        app.Host!.Post(() => app.Host.WriteOwn(0x6040, 0, new byte[] { 1, 0 }));
+        Settle(rig.Node);
+
+        CommandCalls(app).Should().Equal(Command(2));
+        Written(app).Should().BeEmpty();
+    }
+
     [Fact] // Review Focus 3 of the seam, for commands
     public async Task The_Applications_Own_Command_Writes_Are_Not_Delivered()
     {
@@ -336,8 +354,8 @@ public partial class CanOpenApplicationSeamTests
         };
         app.WhenWritten = _ =>
         {
-            app.Host!.ObjectDictionary.WriteUnsigned(0x6040, 0x00, 0x0006);
-            app.Host.Post(() => app.Host.ObjectDictionary.WriteUnsigned(0x6040, 0x00, 0x0007));
+            app.Host!.WriteOwn(0x6040, 0x00, new byte[] { 6, 0 });
+            app.Host.Post(() => app.Host.WriteOwn(0x6040, 0x00, new byte[] { 7, 0 }));
         };
         using var rig = new EntryRig(With(app));
 
@@ -359,7 +377,7 @@ public partial class CanOpenApplicationSeamTests
             OnAttach = host => host.ObjectDictionary.AddU16(0x6840, 0x00, 0),
             CommandEntries = new[] { new CanOpenObjectAddress(0x6840, 0x00) },
         };
-        first.WhenWritten = _ => first.Host!.ObjectDictionary.WriteUnsigned(0x6840, 0x00, 0x0003);
+        first.WhenWritten = _ => first.Host!.WriteOwn(0x6840, 0x00, new byte[] { 3, 0 });
         using var rig = new EntryRig(With(first, second));
 
         rig.Od.WriteUnsigned(0x6000, 0x01, 7);
@@ -385,6 +403,8 @@ public partial class CanOpenApplicationSeamTests
         {
             await QueueFramesAsync(rig, (SdoRequest, DownloadU16(0x6040, 0x00, 0xBEEF)));
             for (int i = 0; i < CommandQueueBound; i++) rig.Od.WriteUnsigned(0x6040, 0x00, (uint)i);
+            // This write runs off the actor. It needs no queue slot, even at capacity.
+            app.Host!.WriteOwn(0x6040, 0, new byte[] { 0x34, 0x12 });
             local = Record.Exception(() => rig.Od.WriteUnsigned(0x6040, 0x00, 0xCAFE));
         });
         await rig.Wire.WaitForCountAsync(SdoResponse, 1);
@@ -394,7 +414,8 @@ public partial class CanOpenApplicationSeamTests
         AbortCode(rig.Wire.Payloads(SdoResponse)[0]).Should().Be((uint)SdoAbortCode.DataCannotBeTransferredDeviceState);
         CommandCalls(app).Should().Equal(Enumerable.Range(0, CommandQueueBound).Select(i => Command((ushort)i)),
             "the queued writes are intact and nothing refused was delivered");
-        rig.Od.ReadUnsigned(0x6040, 0x00).Should().Be(CommandQueueBound - 1u, "a refused write is not stored");
+        rig.Od.ReadUnsigned(0x6040, 0x00).Should().Be(0x1234u, "the claimant's value survives the refused writes");
+        Written(app).Should().BeEmpty("the claimant's write also produces no entry notification");
 
         rig.Od.WriteUnsigned(0x6040, 0x00, 0x0001);
         Settle(rig.Node);
@@ -494,7 +515,7 @@ public partial class CanOpenApplicationSeamTests
         app.OnAttach = host =>
         {
             declare(host);
-            host.ObjectDictionary.EntryStored += (index, subindex, _) =>
+            host.ObjectDictionary.EntryStored += (index, subindex, _, _) =>
             {
                 if (!armed || index != 0x6040) return;
                 armed = false;

@@ -735,7 +735,7 @@ internal sealed partial class Cia401Device : ICanOpenApplication
             $"{Name} has no {function}: the node's device description declares none.");
     }
 
-    /// <summary>The device's own write of one byte. Actor loop, inside a callback of the device, so
+    /// <summary>The device's own write of one byte. The host marks the device as its writer, so
     /// it is not reported back (<see cref="ICanOpenApplication.OnEntriesWritten"/>).</summary>
     private static void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte value)
         => WriteOwn(host, index, subindex, new[] { value });

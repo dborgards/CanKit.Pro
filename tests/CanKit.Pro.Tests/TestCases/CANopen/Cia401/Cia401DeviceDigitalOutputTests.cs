@@ -226,6 +226,25 @@ public class Cia401DeviceDigitalOutputTests
         recorder.Events.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task A_Dictionary_Write_From_An_Output_Subscriber_Reaches_The_Terminal()
+    {
+        using var rig = new Cia401Rig(Outputs(8));
+        await rig.StartAsync();
+        var levels = new List<byte>();
+        rig.Device.OutputsChanged += (_, e) =>
+        {
+            levels.Add(e.Levels[0]);
+            if (e.Levels[0] == 1) rig.Od.WriteRaw(0x6200, 1, new byte[] { 2 });
+        };
+
+        await rig.SendRpdo1Async(1);
+        rig.Settle();
+
+        levels.Should().Equal(1, 2);
+        rig.Device.ReadDigitalOutputs(1).Should().Be(2);
+    }
+
     [Fact] // review: a handler that changes the outputs inline
     public async Task Every_Subscriber_Sees_The_Changes_In_Order_When_A_Handler_Changes_The_Outputs()
     {
