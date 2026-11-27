@@ -325,13 +325,21 @@ third-party code. Restore, build, test and pack run in `verify`, which has neith
 nor `id-token: write`. The release job's own `GITHUB_TOKEN` is restricted to `contents: read`
 plus `id-token: write`.
 
+Both secrets live in the `release` environment, not at repository level. The environment's
+deployment branch policy allows `main` only, so a workflow run on any other branch, including
+a pull request, cannot read them. `release` and `attest` are the only jobs that use the
+environment, and the only ones with `id-token: write`.
+
 A PAT expires. When a release run fails at the push or the Release step with a 403, check that
 first.
 
 ### Setup, once
 
-- **`NUGET_USER`** and **`RELEASE_TOKEN`** as repository secrets.
-- **Trusted Publishing** configured on nuget.org for this repository and `release.yml`.
+- **The `release` environment** (Settings → Environments), deployment branches limited to
+  `main`, with **`NUGET_USER`** and **`RELEASE_TOKEN`** as environment secrets.
+- **Trusted Publishing** configured on nuget.org for this repository and `release.yml`. The
+  policy's optional *Environment* field can be set to `release`; set it only after the workflow
+  uses the environment, never before.
 - **The ruleset on `main`** must let the `RELEASE_TOKEN` identity push. The exported ruleset
   uses the Maintain-role bypass (`RepositoryRole` id `2`); this is not an owner-specific or
   `github-actions[bot]` bypass. The PAT identity is what pushes.
