@@ -53,8 +53,10 @@ echo "==> restoring dotnet tools"
 dotnet tool restore
 
 if [ "$no_build" -eq 0 ]; then
+  echo "==> restoring packages"
+  dotnet restore CanKit.Pro.sln --locked-mode -p:CanKitProTestNetFrameworkLeg=true
   echo "==> building CanKit.Pro.sln (Release)"
-  dotnet build CanKit.Pro.sln -c Release --nologo -v minimal
+  dotnet build CanKit.Pro.sln -c Release --no-restore --nologo -v minimal
 fi
 
 work="$(mktemp -d)"
