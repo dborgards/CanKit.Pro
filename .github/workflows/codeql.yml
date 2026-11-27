@@ -35,7 +35,7 @@ jobs:
           dotnet-version: 11.0.100 # Exact version bypasses the broken aka.ms redirect (#456).
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           languages: csharp
           queries: security-and-quality
@@ -47,6 +47,6 @@ jobs:
         run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
 
       - name: Analyze
-        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           category: "/language:csharp"
