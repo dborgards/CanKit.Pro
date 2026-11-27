@@ -197,6 +197,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The `release` environment only deploys from main, and it holds RELEASE_TOKEN and
+    # NUGET_USER, so a workflow run on any other branch cannot read them. It also puts the
+    # `environment` claim into the OIDC token, which the nuget.org policy can be bound to.
+    environment: release
     # The only job holding the OIDC grant. It installs the release tooling, exchanges the token
     # for a one-hour NuGet key, and runs semantic-release against packages `verify` already packed.
     #
@@ -317,6 +321,8 @@ jobs:
     if: ${{ !inputs.dry_run && needs.verify.outputs.version != '' && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Holds `id-token: write` as well, so it runs behind the same environment as `release`.
+    environment: release
     permissions:
       contents: read
       id-token: write          # the OIDC identity the attestation is signed with
