@@ -1,5 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate updates NuGet packages and the global.json SDK pin (both via the nuget manager). npm, GitHub Actions, and pip stay with Dependabot.",
+  "enabledManagers": [
+    "nuget"
+  ],
   "packageRules": [
     {
       "description": "Keep the preset compatible with writer 8 until release plugins and hidden/effect configuration migrate together (#14).",
