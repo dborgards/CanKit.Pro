@@ -199,7 +199,7 @@ public partial class CanOpenApplicationSeamTests
         using var bus = Open(NewSession(), 1);
         using var node = OpenNode(bus, With(app));
         Settle(node);
-        app.Validate = (_, _, _) =>
+        app.Validate = (_, _, _, _) =>
         {
             validating.Set();
             resume.Wait(ShortTimeout).Should().BeTrue();
@@ -215,7 +215,7 @@ public partial class CanOpenApplicationSeamTests
         finally { resume.Set(); }
         await write;
         await released.Task.WithTimeoutAsync(ShortTimeout);
-        app.Validate = (_, _, _) => throw new InvalidOperationException("detached validator");
+        app.Validate = (_, _, _, _) => throw new InvalidOperationException("detached validator");
         node.ObjectDictionary.WriteUnsigned(0x6000, 1, 43);
         releases.Should().Be(1);
     }

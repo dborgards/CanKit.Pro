@@ -203,7 +203,7 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public Action<ICanOpenApplicationHost>? OnAttach { get; set; }
 
-        public Func<ushort, byte, byte[], OdWriteDecision>? Validate { get; set; }
+        public Func<ushort, byte, byte[], bool, OdWriteDecision>? Validate { get; set; }
 
         public Action<IReadOnlyList<CanOpenObjectAddress>>? WhenWritten { get; set; }
 
@@ -251,8 +251,8 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
             return AttachmentResource?.Invoke();
         }
 
-        public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
-            => Validate?.Invoke(index, subindex, value) ?? OdWriteDecision.Accept;
+        public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value, bool isOwnWrite)
+            => Validate?.Invoke(index, subindex, value, isOwnWrite) ?? OdWriteDecision.Accept;
 
         public void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries)
         {

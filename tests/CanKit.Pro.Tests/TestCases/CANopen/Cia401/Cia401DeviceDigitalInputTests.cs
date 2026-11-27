@@ -730,6 +730,26 @@ public class Cia401DeviceDigitalInputTests
         lock (failures) failures.Should().BeEmpty("entering Operational and the change raised nothing");
     }
 
+    [Fact]
+    public async Task A_Dictionary_Subscriber_Cannot_Write_A_ReadOnly_Input_During_A_Device_Update()
+    {
+        using var rig = new Cia401Rig(Inputs(8));
+        Exception? nestedFailure = null;
+        void OnWritten(ushort index, byte subindex)
+        {
+            if (index != 0x6000 || subindex != 1) return;
+            rig.Od.EntryWritten -= OnWritten;
+            nestedFailure = Record.Exception(() => rig.Od.WriteRaw(index, subindex, new byte[] { 0xFF }));
+        }
+        rig.Od.EntryWritten += OnWritten;
+
+        rig.Device.SetDigitalInputs(1, 0x42);
+        await rig.DrainAsync();
+
+        nestedFailure.Should().BeOfType<ArgumentException>().Which.Message.Should().Contain("0x06010002");
+        rig.Od.ReadRaw(0x6000, 1).Should().Equal(0x42);
+    }
+
     // ---- BOOLEAN --------------------------------------------------------------------------------------
 
     [Fact]

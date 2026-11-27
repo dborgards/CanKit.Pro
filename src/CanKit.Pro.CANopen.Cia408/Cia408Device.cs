@@ -163,10 +163,6 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     // 1 from the moment an Attach begins until it fails; an Attach that succeeds keeps it.
     private int _attaching;
 
-    // The managed thread id of the device's own write while it runs, else 0: the device writes the
-    // read-only status words and 604Eh, which no other writer may (ValidateWrite).
-    private int _ownWriteThread;
-
     // The state changes not yet raised, and whether StateChanged is being raised. Actor loop.
     private readonly Queue<Cia408StateChangedEventArgs> _pendingChanges = new();
     private bool _raising;
@@ -445,11 +441,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// 127 and leaves −128 to −1 to the manufacturer; the device implements no manufacturer-specific
     /// source, so it refuses those too.</para>
     /// </remarks>
-    public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
+    public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value, bool isOwnWrite)
     {
         // Nobody writes a claimed entry before Attach has declared it.
         var host = Volatile.Read(ref _host);
-        if (host is null || IsOwnWrite) return OdWriteDecision.Accept;
+        if (host is null || isOwnWrite) return OdWriteDecision.Accept;
         if (!host.ObjectDictionary.TryGet(index, subindex, out var entry)) return OdWriteDecision.Accept;
         if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
         if (subindex != 0x00) return OdWriteDecision.Accept;
@@ -667,23 +663,11 @@ internal sealed partial class Cia408Device : ICanOpenApplication
         => Volatile.Read(ref _host) ?? throw new InvalidOperationException(
             $"{Name} is not attached to a node yet: open a node with Cia408Device.AddTo first.");
 
-    private bool IsOwnWrite => Volatile.Read(ref _ownWriteThread) == Environment.CurrentManagedThreadId;
-
     /// <summary>The device's own write of an entry's raw little-endian bytes. Actor loop, inside a
     /// callback of the device, so it is not reported back
     /// (<see cref="ICanOpenApplication.OnEntriesWritten"/>).</summary>
-    private void WriteOwn(ICanOpenApplicationHost host, ushort index, byte[] value, byte subindex = 0x00)
-    {
-        Volatile.Write(ref _ownWriteThread, Environment.CurrentManagedThreadId);
-        try
-        {
-            host.ObjectDictionary.WriteRaw(index, subindex, value);
-        }
-        finally
-        {
-            Volatile.Write(ref _ownWriteThread, 0);
-        }
-    }
+    private static void WriteOwn(ICanOpenApplicationHost host, ushort index, byte[] value, byte subindex = 0x00)
+        => host.WriteOwn(index, subindex, value);
 
     /// <summary>Declares a catalogue variable at sub-index 00h with the data type, access and PDO
     /// mappability the catalogue gives it. Constructing thread, in Attach.</summary>

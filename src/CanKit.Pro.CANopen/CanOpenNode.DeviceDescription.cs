@@ -260,7 +260,7 @@ internal sealed partial class CanOpenNode
         var od = new ObjectDictionary();
         int srdoCount = objects.SrdoCount;
         PopulateSafetyObjects(od, nodeId, srdoCount);
-        od.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
+        od.WriteValidator = (index, subindex, value, _) => IsManagedSafetyObject(srdoCount, index)
             ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value, peerMapping: true)
             : OdWriteDecision.Accept;
         var findings = new List<DeviceDescriptionFinding>();

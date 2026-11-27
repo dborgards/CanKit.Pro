@@ -390,7 +390,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                 copy.Declare(index, subindex, entry.DataType, entry.Access, entry.GetRawValue(), entry.PdoMappable);
         }
         int srdoCount = _srdoCount;
-        copy.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
+        copy.WriteValidator = (index, subindex, value, _) => IsManagedSafetyObject(srdoCount, index)
             ? ValidateSafetyWrite(copy, srdoCount, operational: false, index, subindex, value)
             : OdWriteDecision.Accept;
         return copy;

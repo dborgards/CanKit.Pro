@@ -14,6 +14,12 @@ internal interface ICanOpenApplicationHost
     /// <summary>The node's object dictionary. Any thread.</summary>
     ObjectDictionary ObjectDictionary { get; }
 
+    /// <summary>Writes raw bytes through the normal dictionary validator. For this write alone,
+    /// the claimant sees <c>isOwnWrite</c> when this host belongs to it. A write to another
+    /// profile's entry goes through that profile's external-write rules. Any thread.</summary>
+    /// <remarks>Post-write notifications follow <see cref="ICanOpenApplication.OnEntriesWritten"/>.</remarks>
+    void WriteOwn(ushort index, byte subindex, byte[] value);
+
     /// <summary>Whether this thread is executing a callback on this node's actor. Any thread.
     /// Work handed to another thread must query the host again there.</summary>
     bool IsOnActor { get; }

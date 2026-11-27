@@ -433,7 +433,7 @@ public class SrdoEngineConsumerTests : IDisposable
     }
 
     private void RefuseWritesTo(ushort index)
-        => _od.WriteValidator = (i, _, _) => i == index ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
+        => _od.WriteValidator = (i, _, _, _) => i == index ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
 
     /// <summary>Data the consumer cannot use counts as not received, as §8.1.3.1 leaves a short
     /// pair unprocessed. A pair whose second mapped object refuses its bytes makes the SRDO

@@ -228,7 +228,7 @@ public partial class CanOpenApplicationSeamTests
         var app = Commands();
         var sources = new List<CanOpenWriteSource>();
         app.WhenCommand = (_, _, source) => sources.Add(source);
-        app.Validate = (_, _, value) => value[0] == 9
+        app.Validate = (_, _, value, _) => value[0] == 9
             ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
         using var rig = new EntryRig(With(app));
 
@@ -296,7 +296,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Commands();
         int asked = 0;
-        app.Validate = (index, _, value) =>
+        app.Validate = (index, _, value, _) =>
         {
             if (index != 0x6040) return OdWriteDecision.Accept;
             Interlocked.Increment(ref asked);
@@ -432,7 +432,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Refused_Write_Takes_No_Room_In_The_Queue()
     {
         var app = Commands();
-        app.Validate = (index, subindex, value) =>
+        app.Validate = (index, subindex, value, _) =>
         {
             if (index != 0x6040) return OdWriteDecision.Accept;
             switch (value[1])

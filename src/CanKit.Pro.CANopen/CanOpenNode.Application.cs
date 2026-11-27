@@ -389,7 +389,7 @@ internal sealed partial class CanOpenNode
     /// dictionary into the SDO server or the PDO engine. It is reported as a background exception,
     /// and the write is refused with a general error.
     /// </summary>
-    private OdWriteDecision ValidateApplicationWrite(ApplicationSlot slot, ushort index, byte subindex, byte[] value)
+    private OdWriteDecision ValidateApplicationWrite(ApplicationSlot slot, ushort index, byte subindex, byte[] value, bool isOwnWrite)
     {
         // ValidateWrite is not an actor-loop callback of the application, even when the write it
         // decides is made from inside one: the innermost callback is then this one, under the
@@ -405,7 +405,7 @@ internal sealed partial class CanOpenNode
         OdWriteDecision decision;
         try
         {
-            decision = slot.Application.ValidateWrite(index, subindex, value);
+            decision = slot.Application.ValidateWrite(index, subindex, value, isOwnWrite);
         }
         // Everything, deliberately: this is the application's code, and whatever it throws must not
         // reach the dictionary's writer, which on an SDO download or a PDO is the node's own actor
@@ -1007,6 +1007,9 @@ internal sealed partial class CanOpenNode
         internal ApplicationSlot Slot { get; set; } = null!;
 
         public ObjectDictionary ObjectDictionary => _node._od;
+
+        public void WriteOwn(ushort index, byte subindex, byte[] value)
+            => ObjectDictionary.WriteRawFrom(index, subindex, value, default, this);
 
         public bool IsOnActor => _node._actor.IsOnCurrentActor;
 

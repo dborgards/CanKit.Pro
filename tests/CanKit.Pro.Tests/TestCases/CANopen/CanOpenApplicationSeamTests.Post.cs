@@ -120,7 +120,7 @@ public partial class CanOpenApplicationSeamTests
         using var bus = Open(NewSession(), 1);
         var app = Entries();
         var order = new List<string>();
-        app.Validate = (index, subindex, _) =>
+        app.Validate = (index, subindex, _, _) =>
         {
             if (index == 0x6000 && subindex == 0x02)
             {

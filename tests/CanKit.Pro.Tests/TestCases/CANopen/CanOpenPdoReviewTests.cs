@@ -344,9 +344,9 @@ public partial class CanOpenPdoEngineTests
 
         var inner = od.WriteValidator!;
         bool refuse = true;
-        od.WriteValidator = (index, subindex, value) => refuse && index == 0x2000
+        od.WriteValidator = (index, subindex, value, writer) => refuse && index == 0x2000
             ? OdWriteDecision.Reject(CanKit.Pro.CANopen.Sdo.SdoAbortCode.General)
-            : inner(index, subindex, value);
+            : inner(index, subindex, value, writer);
         uint emcy = CanOpenCobId.Emcy(Device);
         wire.Transmit(Rpdo1, new byte[] { 0x80, 0x00, 0x20, 0x00, 42, 0, 0, 0 });
         await wire.WaitForCountAsync(emcy, 1);

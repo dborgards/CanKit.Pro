@@ -453,14 +453,14 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
 
         var inner = od.WriteValidator!;
         Task? redeclare = null;
-        od.WriteValidator = (index, subindex, value) =>
+        od.WriteValidator = (index, subindex, value, writer) =>
         {
             if (index == 0x2000 && redeclare is null)
             {
                 redeclare = Task.Run(() => od.AddU8(0x2000, 0x00, 0x01));
                 SpinUntilAtTheWriteGate(od); // the re-declaration is genuinely blocked on this gate
             }
-            return inner(index, subindex, value);
+            return inner(index, subindex, value, writer);
         };
 
         var write = () => od.WriteUnsigned(0x2000, 0x00, 0x1122_3344);
@@ -512,7 +512,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         var inner = od.WriteValidator!;
         using var gateHeld = new ManualResetEventSlim(false);
         using var writeStarted = new ManualResetEventSlim(false);
-        od.WriteValidator = (index, subindex, value) =>
+        od.WriteValidator = (index, subindex, value, writer) =>
         {
             if (index == 0x2001 && !gateHeld.IsSet)
             {
@@ -521,7 +521,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
                 SpinUntilAtTheWriteGate(od); // the typed write is genuinely blocked on this gate
                 od.AddU32(0x2000, 0x00, 0);  // re-declared while the gate is held
             }
-            return inner(index, subindex, value);
+            return inner(index, subindex, value, writer);
         };
         var holder = Task.Run(() => od.WriteUnsigned(0x2001, 0x00, 1));
         gateHeld.Wait(ShortTimeout).Should().BeTrue();
@@ -655,7 +655,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         var validated = new List<ushort>();
         var inner = od.WriteValidator!;
         using var sequenceStarted = new ManualResetEventSlim(false);
-        od.WriteValidator = (index, subindex, value) =>
+        od.WriteValidator = (index, subindex, value, writer) =>
         {
             lock (validated) validated.Add(index);
             if (index == 0x1800 && subindex == 0x01 && !sequenceStarted.IsSet)
@@ -663,7 +663,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
                 sequenceStarted.Set();
                 SpinUntilAtTheWriteGate(od, count: 4); // all four hammers are genuinely blocked on this gate
             }
-            return inner(index, subindex, value);
+            return inner(index, subindex, value, writer);
         };
         using var stop = new CancellationTokenSource();
         var hammers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
