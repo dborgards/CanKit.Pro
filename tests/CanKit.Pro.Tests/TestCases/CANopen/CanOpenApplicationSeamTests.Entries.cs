@@ -345,13 +345,22 @@ public partial class CanOpenApplicationSeamTests
         });
         Settle(rig.Node);
 
-        // The claimant's subsequent own write adds no local origin to the next RPDO notification.
+        // Queue the claimant behind the RPDO. When the RPDO commits, its evaluation is
+        // appended behind the claimant, so WriteOwn runs while the RPDO origin is pending.
+        Task ownWrite = Task.CompletedTask;
         await WhileActorHeldAsync(rig.Node, async () =>
         {
             await QueueFramesAsync(rig, (Rpdo1, new byte[] { 8 }));
-            app.Host!.WriteOwn(0x6000, 1, new byte[] { 8 });
+            ownWrite = rig.Node.PostToActorAsync(() =>
+            {
+                rig.Od.ReadUnsigned(0x6000, 1).Should().Be(8u, "the RPDO has committed");
+                batches.Should().ContainSingle("the RPDO notification is still pending");
+                app.Host!.WriteOwn(0x6000, 1, new byte[] { 9 });
+            });
         });
+        await ownWrite;
         Settle(rig.Node);
+        rig.Od.ReadUnsigned(0x6000, 1).Should().Be(9u);
 
         batches.Should().HaveCount(2);
         batches[0].Select(e => e.Address).Should().Equal(new CanOpenObjectAddress(0x6000, 1), new(0x6000, 2));
