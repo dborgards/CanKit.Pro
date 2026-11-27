@@ -205,7 +205,7 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
 
         public Func<ushort, byte, byte[], bool, OdWriteDecision>? Validate { get; set; }
 
-        public Action<IReadOnlyList<CanOpenObjectAddress>>? WhenWritten { get; set; }
+        public Action<IReadOnlyList<CanOpenWrittenEntry>>? WhenWritten { get; set; }
 
         public Action<NmtState, NmtState>? WhenNmtChanged { get; set; }
 
@@ -254,11 +254,14 @@ public partial class CanOpenApplicationSeamTests : IClassFixture<VirtualAdapterF
         public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value, bool isOwnWrite)
             => Validate?.Invoke(index, subindex, value, isOwnWrite) ?? OdWriteDecision.Accept;
 
-        public void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries)
+        public void OnEntriesWritten(IReadOnlyList<CanOpenWrittenEntry> entries)
         {
-            Record("written " + string.Join(",", entries.Select(e => $"{e.Index:X4}:{e.Subindex:X2}")));
+            Record("written " + string.Join(",", entries.Select(e => $"{e.Address.Index:X4}:{e.Address.Subindex:X2}")));
             WhenWritten?.Invoke(entries);
         }
+
+        public void RequestTransmissionForEntries(IReadOnlyList<CanOpenWrittenEntry> entries)
+            => Host!.RequestTransmission(entries.Select(entry => entry.Address).ToArray());
 
         public void OnCommandWritten(CanOpenObjectAddress entry, byte[] value, CanOpenWriteSource source)
         {

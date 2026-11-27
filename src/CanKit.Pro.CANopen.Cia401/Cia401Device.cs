@@ -414,11 +414,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// <summary>Hands each written entry to the block that owns it, then asks for one transmission
     /// of whatever the blocks found worth sending, then tells the application of the outputs that
     /// changed. Actor loop.</summary>
-    public void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries)
+    public void OnEntriesWritten(IReadOnlyList<CanOpenWrittenEntry> entries)
     {
         var host = AttachedHost();
         var send = new List<CanOpenObjectAddress>();
-        foreach (var entry in entries)
+        foreach (var (entry, _) in entries)
         {
             DigitalInputsWritten(host, entry, send);
             DigitalOutputsWritten(host, entry);
