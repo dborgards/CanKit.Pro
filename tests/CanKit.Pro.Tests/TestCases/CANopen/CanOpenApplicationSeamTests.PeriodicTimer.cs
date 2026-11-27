@@ -17,12 +17,13 @@ public partial class CanOpenApplicationSeamTests
         var app = new RecordingApplication("timer");
         using var node = OpenNode(bus, With(app), clock);
         var ticks = new List<TimeSpan>();
-        IDisposable? timer = null;
-        timer = app.Host!.ArmPeriodic(TimeSpan.FromTicks(15000), () =>
+        Action stop = null!;
+        using var timer = app.Host!.ArmPeriodic(TimeSpan.FromTicks(15000), () =>
         {
             ticks.Add(app.Host.Now);
-            if (ticks.Count == 3) timer!.Dispose();
+            if (ticks.Count == 3) stop();
         });
+        stop = timer.Dispose;
 
         Advance(clock, node, TimeSpan.FromMilliseconds(1));
         ticks.Should().BeEmpty();
@@ -32,7 +33,6 @@ public partial class CanOpenApplicationSeamTests
         Advance(clock, node, TimeSpan.FromMilliseconds(100));
 
         ticks.Should().Equal(TimeSpan.FromMilliseconds(2), TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(11));
-        timer.Dispose();
     }
 
     [Theory]
@@ -43,18 +43,22 @@ public partial class CanOpenApplicationSeamTests
         using var bus = Open(NewSession(), 1);
         var clock = new ManualTimeSource();
         var states = new List<NmtState>();
-        var app = new RecordingApplication("timer")
+        IDisposable? timer = null;
+        var app = new RecordingApplication("timer");
+        app.AttachmentResource = () => timer = app.Host!.ArmPeriodic(
+            TimeSpan.FromMilliseconds(10), () => states.Add(app.Host.State));
+
+        var holder = new RecordingApplication("holder")
         {
             OnAttach = host =>
             {
-                var timer = host.ArmPeriodic(TimeSpan.FromMilliseconds(10), () => states.Add(host.State));
                 clock.Advance(TimeSpan.FromMilliseconds(35));
                 Settle(NodeOf(host));
                 states.Should().BeEmpty();
-                if (cancel) timer.Dispose();
+                if (cancel) timer!.Dispose();
             },
         };
-        using var node = OpenNode(bus, With(app), clock);
+        using var node = OpenNode(bus, With(app, holder), clock);
         Advance(clock, node, TimeSpan.FromMilliseconds(4));
         states.Count.Should().Be(cancel ? 0 : 1);
         Advance(clock, node, TimeSpan.FromMilliseconds(1));
