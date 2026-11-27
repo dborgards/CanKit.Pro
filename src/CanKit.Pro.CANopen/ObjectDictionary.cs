@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
@@ -84,9 +85,10 @@ public sealed class ObjectDictionary
     /// the decision for the write — store, store a normalised value in its place (the reserved bit
     /// of <c>1001h</c>, #566), reject with an SDO abort code, or "handled, do not store" (used by
     /// the <c>1010h</c>/<c>1011h</c> signature objects, whose write is a command rather than a
-    /// value). Runs on the writing thread, outside the lock.
+    /// value). Its last argument identifies the profile host that issued this write, if any.
+    /// Runs on the writing thread under the write gate, outside the entry lock.
     /// </summary>
-    internal Func<ushort, byte, byte[], OdWriteDecision>? WriteValidator { get; set; }
+    internal Func<ushort, byte, byte[], ICanOpenApplicationHost?, OdWriteDecision>? WriteValidator { get; set; }
 
     /// <summary>
     /// Internal hook for <see cref="CanOpenNode"/>: consulted for every <c>Add*</c> call, whether
@@ -240,10 +242,11 @@ public sealed class ObjectDictionary
     public void WriteRaw(ushort index, byte subindex, byte[] value)
         => WriteRawFrom(index, subindex, value, default);
 
-    internal void WriteRawFrom(ushort index, byte subindex, byte[] value, CanOpenWriteSource source)
+    internal void WriteRawFrom(ushort index, byte subindex, byte[] value, CanOpenWriteSource source,
+        ICanOpenApplicationHost? writer = null)
     {
         if (value is null) throw new ArgumentNullException(nameof(value));
-        if (!TryWriteRaw(index, subindex, value, out var abort, throwOnMissingOrSize: true, source))
+        if (!TryWriteRaw(index, subindex, value, out var abort, throwOnMissingOrSize: true, source, writer))
         {
             throw new ArgumentException(
                 $"Write to OD entry 0x{index:X4}:{subindex:X2} rejected: SDO abort 0x{(uint)abort!.Value:X8} ({abort.Value}).",
@@ -257,7 +260,7 @@ public sealed class ObjectDictionary
     /// the value was accepted (stored, or consumed as a command by the validator).
     /// </summary>
     internal bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort, CanOpenWriteSource source = default)
-        => TryWriteRaw(index, subindex, value, out abort, throwOnMissingOrSize: false, source);
+        => TryWriteRaw(index, subindex, value, out abort, throwOnMissingOrSize: false, source, writer: null);
 
     /// <summary>
     /// Runs <paramref name="writes"/> as one transaction: the write gate is held for the whole of
@@ -276,16 +279,16 @@ public sealed class ObjectDictionary
     }
 
     private bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
-        bool throwOnMissingOrSize, CanOpenWriteSource source)
+        bool throwOnMissingOrSize, CanOpenWriteSource source, ICanOpenApplicationHost? writer)
     {
         lock (_writeGate)
         {
-            return TryWriteRawLocked(index, subindex, value, out abort, throwOnMissingOrSize, source);
+            return TryWriteRawLocked(index, subindex, value, out abort, throwOnMissingOrSize, source, writer);
         }
     }
 
     private bool TryWriteRawLocked(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
-        bool throwOnMissingOrSize, CanOpenWriteSource source)
+        bool throwOnMissingOrSize, CanOpenWriteSource source, ICanOpenApplicationHost? writer)
     {
         abort = null;
         OdEntry? entry;
@@ -313,7 +316,7 @@ public sealed class ObjectDictionary
         var validator = WriteValidator;
         if (validator is not null)
         {
-            var decision = validator(index, subindex, value);
+            var decision = validator(index, subindex, value, writer);
             if (decision.Abort is { } code)
             {
                 abort = code;

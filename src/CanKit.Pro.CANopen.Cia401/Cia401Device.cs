@@ -229,12 +229,6 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     // one node: a second Attach, concurrent or later, is refused before it touches the blocks.
     private int _attaching;
 
-    // The managed thread id of the device's own validated write while it runs, else 0: the write
-    // the device makes to an entry it declared read-only (6000h) passes its own ValidateWrite, and
-    // no other writer's does. A thread id rather than a flag, since a local write on another thread
-    // can be validated while the actor makes the device's write.
-    private int _ownWriteThread;
-
     // True while RaiseOutputsChanged runs: a change made then (by a subscriber or the plant model)
     // is left pending, and the running call reports it. Actor loop.
     private bool _raisingOutputsChanged;
@@ -403,11 +397,11 @@ internal sealed partial class Cia401Device : ICanOpenApplication
     /// the device does not have, both of which only a description can declare, are stored as their
     /// access allows, without the reserved-value rules. The device's own writes pass. Every other
     /// write is accepted.</summary>
-    public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value)
+    public OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value, bool isOwnWrite)
     {
         // Nobody writes a claimed entry before Attach has declared it.
         var host = Volatile.Read(ref _host);
-        if (host is null || IsOwnWrite) return OdWriteDecision.Accept;
+        if (host is null || isOwnWrite) return OdWriteDecision.Accept;
         if (!host.ObjectDictionary.TryGet(index, subindex, out var entry)) return OdWriteDecision.Accept;
         if ((entry.Access & OdAccess.WriteOnly) == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
         if (entry.DataType == OdDataType.Boolean && value.Length == 1 && value[0] > 1)
@@ -741,27 +735,15 @@ internal sealed partial class Cia401Device : ICanOpenApplication
             $"{Name} has no {function}: the node's device description declares none.");
     }
 
-    private bool IsOwnWrite => Volatile.Read(ref _ownWriteThread) == Environment.CurrentManagedThreadId;
-
     /// <summary>The device's own write of one byte. Actor loop, inside a callback of the device, so
     /// it is not reported back (<see cref="ICanOpenApplication.OnEntriesWritten"/>).</summary>
-    private void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte value)
+    private static void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte value)
         => WriteOwn(host, index, subindex, new[] { value });
 
     /// <summary>The device's own write of an entry's raw little-endian bytes, as
     /// <see cref="WriteOwn(ICanOpenApplicationHost, ushort, byte, byte)"/>.</summary>
-    private void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte[] value)
-    {
-        Volatile.Write(ref _ownWriteThread, Environment.CurrentManagedThreadId);
-        try
-        {
-            host.ObjectDictionary.WriteRaw(index, subindex, value);
-        }
-        finally
-        {
-            Volatile.Write(ref _ownWriteThread, 0);
-        }
-    }
+    private static void WriteOwn(ICanOpenApplicationHost host, ushort index, byte subindex, byte[] value)
+        => host.WriteOwn(index, subindex, value);
 
     private static byte ReadByte(ICanOpenApplicationHost host, ushort index, byte subindex)
         => host.ObjectDictionary.ReadRaw(index, subindex)[0];

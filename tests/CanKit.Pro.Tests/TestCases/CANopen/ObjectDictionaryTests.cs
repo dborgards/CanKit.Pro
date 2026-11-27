@@ -90,7 +90,7 @@ public class ObjectDictionaryTests
         var od = new ObjectDictionary();
         od.AddU32(0x1016, 0x01, 0);
         od.AddU32(0x1016, 0x02, 0);
-        od.WriteValidator = (index, subindex, value) =>
+        od.WriteValidator = (index, subindex, value, _) =>
         {
             uint entry = ObjectDictionary.DecodeU32(value);
             byte nodeId = (byte)((entry >> 16) & 0xFF);
@@ -140,7 +140,7 @@ public class ObjectDictionaryTests
     {
         var od = new ObjectDictionary();
         od.AddU8(0x2000, 0x00, 0);
-        od.WriteValidator = (_, _, value) => OdWriteDecision.AcceptAs(new[] { (byte)(value[0] & 0x0F) });
+        od.WriteValidator = (_, _, value, _) => OdWriteDecision.AcceptAs(new[] { (byte)(value[0] & 0x0F) });
         var written = new byte[] { 0xAB };
         od.WriteRaw(0x2000, 0x00, written);
         od.ReadUnsigned(0x2000, 0x00).Should().Be(0x0Bu);
@@ -157,7 +157,7 @@ public class ObjectDictionaryTests
     {
         var od = new ObjectDictionary();
         od.AddDomain(0x2000, 0x00, new byte[] { 0x07, 0x07 });
-        od.WriteValidator = (_, _, _) => OdWriteDecision.AcceptAs(new byte[length]);
+        od.WriteValidator = (_, _, _, _) => OdWriteDecision.AcceptAs(new byte[length]);
         Action write = () => od.WriteRaw(0x2000, 0x00, new byte[] { 0x01, 0x02 });
         write.Should().Throw<InvalidOperationException>().WithMessage("*validator*");
         od.ReadRaw(0x2000, 0x00).Should().Equal(new byte[] { 0x07, 0x07 }, "nothing was stored");

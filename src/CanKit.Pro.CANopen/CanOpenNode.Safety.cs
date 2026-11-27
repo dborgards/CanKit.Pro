@@ -64,7 +64,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         => direction == SrdoDirection.Receive ? SrdoRecords.DefaultSafeguardCycleTimeMs : SrdoRecords.DefaultRefreshTimeMs;
 
     /// <summary>Static, as every rule of this file down to the mapping entry, so that
-    /// <see cref="LoadDescribedSafetyObjects(CanOpenDeviceDescription, byte)"/> runs the same code over a dictionary of its own.</summary>
+    /// <see cref="LoadPeerSafetyConfiguration(CanOpenDeviceDescription, byte)"/> runs the same code over a dictionary of its own.</summary>
     private static void PopulateSafetyObjects(ObjectDictionary od, byte nodeId, int srdoCount)
     {
         const OdAccess acc = OdAccess.ReadWrite;
@@ -390,9 +390,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                 copy.Declare(index, subindex, entry.DataType, entry.Access, entry.GetRawValue(), entry.PdoMappable);
         }
         int srdoCount = _srdoCount;
-        copy.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
-            ? ValidateSafetyWrite(copy, srdoCount, operational: false, index, subindex, value)
-            : OdWriteDecision.Accept;
+        // ConfigureSrdo writes only its communication and mapping records. The other entries
+        // in the copy supply the mapping targets that the validator reads.
+        copy.WriteValidator = (index, subindex, value, _) =>
+            ValidateSafetyWrite(copy, srdoCount, operational: false, index, subindex, value);
         return copy;
     }
 

@@ -205,7 +205,7 @@ public partial class CanOpenApplicationSeamTests
     {
         var app = Entries();
         var asked = new List<string>();
-        app.Validate = (index, subindex, value) =>
+        app.Validate = (index, subindex, value, _) =>
         {
             lock (asked) asked.Add($"{index:X4}:{subindex:X2}={value[0]}");
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
@@ -220,11 +220,27 @@ public partial class CanOpenApplicationSeamTests
     }
 
     [Fact]
+    public async Task Only_The_Claimants_Host_Identifies_A_Write_As_Its_Own()
+    {
+        var claimant = Entries();
+        var other = new RecordingApplication("other");
+        claimant.Validate = (_, _, _, isOwnWrite) => isOwnWrite
+            ? OdWriteDecision.Accept : OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
+        using var rig = new EntryRig(With(claimant, other));
+
+        claimant.Host!.WriteOwn(0x6000, 1, new byte[] { 7 });
+        FluentActions.Invoking(() => other.Host!.WriteOwn(0x6000, 1, new byte[] { 8 }))
+            .Should().Throw<ArgumentException>().WithMessage("*0x06010002*");
+        AbortCode(await rig.Wire.DownloadU8Async(0x6000, 1, 9)).Should().Be(0x06010002u);
+        rig.Od.ReadUnsigned(0x6000, 1).Should().Be(7u);
+    }
+
+    [Fact]
     public async Task An_Unclaimed_Entry_Is_Not_The_Applications_Business()
     {
         var app = Entries();
         int asked = 0;
-        app.Validate = (_, _, _) =>
+        app.Validate = (_, _, _, _) =>
         {
             Interlocked.Increment(ref asked);
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
@@ -244,7 +260,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Handled_Write_Is_Not_Stored()
     {
         var app = Entries();
-        app.Validate = (_, _, _) => OdWriteDecision.Handled;
+        app.Validate = (_, _, _, _) => OdWriteDecision.Handled;
         using var rig = new EntryRig(With(app));
 
         var response = await rig.Wire.DownloadU8Async(0x6000, 0x01, 7);
@@ -702,7 +718,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Throwing_Validation_Aborts_The_Write_And_Is_A_Background_Exception()
     {
         var app = Entries();
-        app.Validate = (_, _, _) => throw new InvalidOperationException("validation failed");
+        app.Validate = (_, _, _, _) => throw new InvalidOperationException("validation failed");
         using var rig = new EntryRig(With(app));
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         rig.Node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);

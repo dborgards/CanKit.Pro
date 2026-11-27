@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using CanKit.Pro.CANopen.Application;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
@@ -360,7 +361,7 @@ internal sealed partial class CanOpenNode
     // Validation — runs on the writing thread, before the value is stored.
     // =========================================================================================
 
-    private OdWriteDecision ValidateCommunicationWrite(ushort index, byte subindex, byte[] value)
+    private OdWriteDecision ValidateCommunicationWrite(ushort index, byte subindex, byte[] value, ICanOpenApplicationHost? writer)
     {
         if (IsManagedSafetyObject(index)) return ValidateSafetyWrite(index, subindex, value);
         if (IsManagedErrorHistory(index)) return ValidateErrorHistoryWrite(subindex, value);
@@ -410,7 +411,7 @@ internal sealed partial class CanOpenNode
             return ValidatePdoMappingWrite(index, subindex, value, isTpdo: true);
         // Last, so that every object the node manages keeps its own rules: an application claims
         // indices from 2000h up, and nothing the node validates above lies there.
-        if (ClaimantOf(index) is { } slot) return ValidateApplicationWrite(slot, index, subindex, value);
+        if (ClaimantOf(index) is { } slot) return ValidateApplicationWrite(slot, index, subindex, value, ReferenceEquals(writer, slot.Host));
         return OdWriteDecision.Accept;
     }
 

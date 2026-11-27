@@ -92,6 +92,8 @@ public class Cia408DeviceAttachTests
 
         public ObjectDictionary ObjectDictionary { get; } = new();
 
+        public void WriteOwn(ushort index, byte subindex, byte[] value) => ObjectDictionary.WriteRaw(index, subindex, value);
+
         public bool IsOnActor { get; private set; }
 
         internal void RunPosted(int index)

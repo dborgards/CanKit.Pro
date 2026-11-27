@@ -145,7 +145,10 @@ internal interface ICanOpenApplication
     /// <para>
     /// Asked for every validated write to a claimed entry, whoever makes it — an SDO download, an
     /// RPDO, MPDO or SRDO, the local user through <see cref="ObjectDictionary"/>, and the
-    /// application itself — and told nothing about where it came from. Not asked for a write through
+    /// application itself. <paramref name="isOwnWrite"/> identifies an explicit call to this application's
+    /// <see cref="ICanOpenApplicationHost.WriteOwn"/>. A direct dictionary write, including one
+    /// nested in the same callback or made by an event subscriber, is validated as external.
+    /// Not asked for a write through
     /// <see cref="ObjectDictionary.WriteRawUnchecked"/>, nor for the values an NMT reset restores.
     /// </para>
     /// <para>
@@ -163,7 +166,7 @@ internal interface ICanOpenApplication
     /// back; decide from what is in the dictionary, not from what was accepted here.
     /// </para>
     /// </remarks>
-    OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value);
+    OdWriteDecision ValidateWrite(ushort index, byte subindex, byte[] value, bool isOwnWrite);
 
     /// <summary>Entries the application claims were written and stored.</summary>
     /// <remarks>

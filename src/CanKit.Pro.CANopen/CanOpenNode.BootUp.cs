@@ -410,7 +410,7 @@ internal sealed partial class CanOpenNode
     private static PeerSafetyConfiguration? SafetyExpectationOf(DescribedObjects? description, byte nodeId)
     {
         if (description is null || !description.IsConfigurationFile) return null;
-        var expected = PeerSafetyConfiguration.FromSafetyObjects(LoadDescribedSafetyObjects(description, nodeId));
+        var expected = LoadPeerSafetyConfiguration(description, nodeId);
         return expected.DeclaresAnySrdo ? expected : null;
     }
 
