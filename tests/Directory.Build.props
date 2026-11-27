@@ -26,9 +26,15 @@
       -p:CanKitProTestNetFrameworkLeg=true` compile-checks the leg from Linux or macOS before the
       change reaches Windows CI. (Overriding TargetFrameworks itself would not work — as a global
       property it flows into the referenced shipping projects and retargets those too.)
+
+      Restore is different: packages.lock.json has to list every framework the Windows
+      CI job restores, or locked mode fails on Linux and macOS. MSBuildRestoreSessionId
+      is set only during restore, so the lock file always includes net48 while a plain
+      `dotnet test` on Linux or macOS still runs net10.0 alone.
+
     -->
     <TargetFrameworks>net10.0</TargetFrameworks>
-    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows')) OR '$(CanKitProTestNetFrameworkLeg)' == 'true'">net10.0;net48</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows')) OR '$(CanKitProTestNetFrameworkLeg)' == 'true' OR '$(MSBuildRestoreSessionId)' != ''">net10.0;net48</TargetFrameworks>
     <!--
       `dotnet test` runs a project's target frameworks in parallel by default. This suite measures
       protocol timing (see the comment in CanKit.Pro.Tests.csproj, which is why collection
