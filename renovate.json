@@ -3,8 +3,16 @@
   "packageRules": [
     {
       "description": "Keep the preset compatible with writer 8 until release plugins and hidden/effect configuration migrate together (#14).",
-      "matchPackageNames": ["conventional-changelog-conventionalcommits"],
+      "matchPackageNames": [
+        "conventional-changelog-conventionalcommits"
+      ],
       "allowedVersions": "<10"
     }
-  ]
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 6am on monday"
+    ]
+  }
 }
