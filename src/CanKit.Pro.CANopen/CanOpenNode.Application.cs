@@ -244,12 +244,12 @@ internal sealed partial class CanOpenNode
     // Written entries: what the claimant is told, and when.
     // =========================================================================================
 
-    // The entries written since the claimant was last told, as CosKey values, under
+    // The write origins accumulated per entry (CosKey) since the previous batch, under
     // _applicationGate; and whether an evaluation of them is already queued. Same mechanism as
     // the change-of-state filter (_cosDirty): the actor's mailbox is unbounded, so a writer that
     // writes in a loop must not post per write.
     private readonly object _applicationGate = new();
-    private HashSet<uint>? _applicationDirty;
+    private Dictionary<uint, CanOpenWriteOrigins>? _applicationDirty;
     private bool _applicationEvaluationPosted;
 
     // The application whose callback the actor loop is running right now, or null. Actor-confined:
@@ -296,7 +296,12 @@ internal sealed partial class CanOpenNode
                     source = source with { AnsweringRpdo = null };
                 (_queuedCommands ??= new()).Add(new(claimant, new(index, subindex), command, _commandWriteGeneration, source));
             }
-            else (_applicationDirty ??= new HashSet<uint>()).Add(key);
+            else
+            {
+                var dirty = _applicationDirty ??= new Dictionary<uint, CanOpenWriteOrigins>();
+                dirty.TryGetValue(key, out var origins);
+                dirty[key] = origins.Including(source.Kind);
+            }
             post = !_applicationEvaluationPosted;
             _applicationEvaluationPosted = true;
         }
@@ -330,7 +335,7 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void EvaluateApplicationEntriesOnActor()
     {
-        HashSet<uint>? dirty;
+        Dictionary<uint, CanOpenWriteOrigins>? dirty;
         List<QueuedCommand>? commands;
         List<(ApplicationSlot Slot, int PdoNumber)>? receptions;
         lock (_applicationGate)
@@ -353,10 +358,10 @@ internal sealed partial class CanOpenNode
 
     /// <summary>Tells each claimant its entries of <paramref name="dirty"/>, sorted and each once.
     /// Returns <see langword="false"/> when a callback disposed the node, which ends the round.</summary>
-    private bool DeliverWrittenEntries(HashSet<uint> dirty)
+    private bool DeliverWrittenEntries(Dictionary<uint, CanOpenWriteOrigins> dirty)
     {
         var keys = new uint[dirty.Count];
-        dirty.CopyTo(keys);
+        dirty.Keys.CopyTo(keys, 0);
         Array.Sort(keys); // CosKey is index << 8 | sub-index: its order is index, then sub-index
 
         foreach (var slot in _applications)
@@ -364,12 +369,13 @@ internal sealed partial class CanOpenNode
             // One that disposed the node ends the round: the rest are not called on a node that is
             // gone, as in the other rounds (NotifyNmtStateChanged, PublishCommunicationFailure).
             if (Volatile.Read(ref _disposed) != 0) return false;
-            List<CanOpenObjectAddress>? entries = null;
+            List<CanOpenWrittenEntry>? entries = null;
             foreach (var key in keys)
             {
                 var index = (ushort)(key >> 8);
                 if (!ReferenceEquals(ClaimantOf(index), slot)) continue;
-                (entries ??= new List<CanOpenObjectAddress>()).Add(new CanOpenObjectAddress(index, (byte)(key & 0xFF)));
+                var address = new CanOpenObjectAddress(index, (byte)(key & 0xFF));
+                (entries ??= new List<CanOpenWrittenEntry>()).Add(new CanOpenWrittenEntry(address, dirty[key]));
             }
             if (entries is null) continue;
             var written = entries.ToArray();

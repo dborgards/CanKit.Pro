@@ -50,7 +50,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Default_Tpdo_Holds_The_Profile_Values_And_Goes_Out_On_Request()
     {
         var app = Defaults(host => host.SetDefaultTpdo(1, Map(0x6000, 0x01)));
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(With(app), nodeId: Node22);
 
         rig.Od.ReadUnsigned(0x1800, 0x01).Should().Be(0x000001A2u, "the pre-defined COB-ID of TPDO 1, the PDO valid");
@@ -71,7 +71,7 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Disabled_Default_Tpdo_Is_Not_Sent()
     {
         var app = Defaults(host => host.SetDefaultTpdo(1, Map(0x6000, 0x01), enabled: false));
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(With(app), nodeId: Node22);
 
         rig.Od.ReadUnsigned(0x1800, 0x01).Should().Be(0x800001A2u, "bit 31 set, the CAN-ID the pre-defined one");
@@ -406,7 +406,7 @@ public partial class CanOpenApplicationSeamTests
             host.SetDefaultRpdo(4, Map(0x6000, 0x02));
             host.SetDefaultTpdo(1, Map(0x6000, 0x01));
         }, pdoCount: 4);
-        app.WhenWritten = entries => app.Host!.RequestTransmission(entries);
+        app.WhenWritten = app.RequestTransmissionForEntries;
         using var rig = new EntryRig(With(app).WithLss(new LssSlaveOptions()), nodeId: CanOpenCobId.UnconfiguredNodeId);
         Settle(rig.Node);
 

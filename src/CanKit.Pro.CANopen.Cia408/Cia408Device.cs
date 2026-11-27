@@ -484,7 +484,7 @@ internal sealed partial class Cia408Device : ICanOpenApplication
     /// the write gate of <see cref="ValidateWrite"/> and by the process model's step
     /// (<see cref="Cia408ProcessContext"/>). The command entries, <c>604Fh</c> among them, come
     /// through <see cref="OnCommandWritten"/>. Actor loop.</summary>
-    public void OnEntriesWritten(IReadOnlyList<CanOpenObjectAddress> entries)
+    public void OnEntriesWritten(IReadOnlyList<CanOpenWrittenEntry> entries)
     {
     }
 
