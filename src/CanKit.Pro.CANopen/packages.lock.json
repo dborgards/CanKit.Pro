@@ -15,9 +15,9 @@
       },
       "EdsDcfNet": {
         "type": "Direct",
-        "requested": "[1.16.0, )",
-        "resolved": "1.16.0",
-        "contentHash": "E3piAac8fOrAX8zyaCzKgabwKQtQ1QhaNUtQe2LPypjUgL1yepNKj6evogYyaErUfxQ3OskgQiBRH3KutdGWTg=="
+        "requested": "[1.17.0, )",
+        "resolved": "1.17.0",
+        "contentHash": "YJ1/M7mgrx9dmFgzntZ7sEk8+coGgzPjqOq1MzQy04iWsouaOeZ3eQQgjhMmExwww8Vuy7/3saP1gaO0vMIXeA=="
       },
       "Microsoft.Bcl.AsyncInterfaces": {
         "type": "Direct",
@@ -116,9 +116,9 @@
       },
       "EdsDcfNet": {
         "type": "Direct",
-        "requested": "[1.16.0, )",
-        "resolved": "1.16.0",
-        "contentHash": "E3piAac8fOrAX8zyaCzKgabwKQtQ1QhaNUtQe2LPypjUgL1yepNKj6evogYyaErUfxQ3OskgQiBRH3KutdGWTg=="
+        "requested": "[1.17.0, )",
+        "resolved": "1.17.0",
+        "contentHash": "YJ1/M7mgrx9dmFgzntZ7sEk8+coGgzPjqOq1MzQy04iWsouaOeZ3eQQgjhMmExwww8Vuy7/3saP1gaO0vMIXeA=="
       },
       "cankit.pro.actor": {
         "type": "Project"
