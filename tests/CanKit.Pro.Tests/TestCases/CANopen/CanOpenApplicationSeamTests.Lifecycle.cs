@@ -166,7 +166,11 @@ public partial class CanOpenApplicationSeamTests
     public async Task A_Profile_Can_Take_Its_Node_Out_Of_Operational()
     {
         var app = Entries();
-        app.WhenWritten = _ => app.Host!.RequestNmtState(NmtState.PreOperational);
+        app.WhenWritten = _ =>
+        {
+            app.Host!.RequestNmtState(NmtState.PreOperational);
+            app.Note($"request returned in {app.Host.State}");
+        };
         using var rig = new EntryRig(With(app), new ManualTimeSource());
         rig.Node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(100));
         await rig.StartAsync();
@@ -176,10 +180,11 @@ public partial class CanOpenApplicationSeamTests
 
         await rig.Wire.DownloadU8Async(0x6000, 0x01, 7);
         await rig.Wire.WaitForCountAsync(SlaveHeartbeat, heartbeats + 1);
+        Settle(rig.Node);
 
         rig.Wire.Payloads(SlaveHeartbeat).Last().Should().Equal(new byte[] { 0x7F });
         rig.Node.State.Should().Be(NmtState.PreOperational);
-        app.Log.Should().Contain("nmt Operational>PreOperational");
+        app.Log.Should().ContainInOrder("nmt Operational>PreOperational", "request returned in PreOperational");
     }
 
     [Fact]
@@ -268,7 +273,15 @@ public partial class CanOpenApplicationSeamTests
         var second = new RecordingApplication("second");
         first.WhenNmtChanged = (_, current) =>
         {
-            if (current == NmtState.Operational) first.Host!.RequestNmtState(NmtState.Stopped);
+            if (current == NmtState.Operational)
+            {
+                first.Host!.RequestNmtState(NmtState.Stopped);
+                first.Note($"request returned in {first.Host.State}");
+            }
+        };
+        second.WhenNmtChanged = (_, current) =>
+        {
+            if (current == NmtState.Operational) second.Note($"reporting Operational in {second.Host!.State}");
         };
         using var rig = new EntryRig(With(first, second));
 
@@ -281,6 +294,8 @@ public partial class CanOpenApplicationSeamTests
         {
             "nmt Initializing>PreOperational", "nmt PreOperational>Operational", "nmt Operational>Stopped",
         };
+        first.Log.Should().ContainInOrder("nmt PreOperational>Operational", "request returned in Stopped", "nmt Operational>Stopped");
+        second.Log.Should().ContainInOrder("nmt PreOperational>Operational", "reporting Operational in Stopped", "nmt Operational>Stopped");
         first.Log.Where(e => e.StartsWith("nmt ", StringComparison.Ordinal)).Should().Equal(expected);
         second.Log.Where(e => e.StartsWith("nmt ", StringComparison.Ordinal)).Should().Equal(expected,
             "the second application is told of Operational before the change out of it, although the first asked for it");

@@ -303,11 +303,12 @@ internal interface ICanOpenApplication
     /// <paramref name="current"/>.</summary>
     /// <remarks>
     /// <para>
-    /// Every application is told every change, in the order the changes happened. A change made
-    /// while the applications are being told of an earlier one (a
-    /// <see cref="ICanOpenApplicationHost.RequestNmtState"/> from this callback, say) is queued and
-    /// told after this callback returns, so <paramref name="current"/> need not equal
-    /// <see cref="ICanOpenApplicationHost.State"/>.
+    /// Every application is told every change, in the order the changes happened. The arguments
+    /// describe the transition being reported. For example, if the first application requests
+    /// Stopped while being told of Operational, the next application still receives Operational as
+    /// <paramref name="current"/> and can already read Stopped from
+    /// <see cref="ICanOpenApplicationHost.State"/>. Both applications then receive the transition
+    /// to Stopped.
     /// </para>
     /// <para>
     /// At start-up the application is told Initializing to PreOperational once, after the boot-up has
