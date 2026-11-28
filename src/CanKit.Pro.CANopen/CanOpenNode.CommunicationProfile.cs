@@ -133,10 +133,6 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void PopulateCommunicationProfile()
     {
-        // Footnote * of the CiA 301 objects overview permits ro for "PDO communication parameter
-        // and PDO mapping object entries" — and for nothing else. The SYNC, EMCY, heartbeat and
-        // guarding objects are rw as their definitions prescribe.
-        var pdo = _options.WritableCommunicationParameters ? OdAccess.ReadWrite : OdAccess.ReadOnly;
         const OdAccess ro = OdAccess.ReadOnly;
         const OdAccess rw = OdAccess.ReadWrite;
         const bool nm = false; // default for non-mappable communication entries (CiA 301 §7.5.2)
@@ -240,6 +236,28 @@ internal sealed partial class CanOpenNode
         _od.AddU32(Co.SdoServer, 0x01, CanOpenCobId.SdoRx(_nodeId), ro, pdoMappable: true);
         _od.AddU32(Co.SdoServer, 0x02, CanOpenCobId.SdoTx(_nodeId), ro, pdoMappable: true);
 
+        PopulatePdoObjects();
+
+        if (_srdoCount > 0) PopulateSafetyObjects();
+        if (_errorHistoryCapacity > 0) PopulateErrorHistory();
+
+        _od.DeclareGuard = DeclareRefusal;
+        _od.WriteValidator = ValidateCommunicationWrite;
+        _od.EntryWritten += OnOdEntryWrittenForCommunicationProfile;
+
+        _factoryDefaults = SnapshotRestorableValues();
+        _powerOnValues = _factoryDefaults;
+    }
+
+    private void PopulatePdoObjects()
+    {
+        // Footnote * of the CiA 301 objects overview permits ro for "PDO communication parameter
+        // and PDO mapping object entries" — and for nothing else. The SYNC, EMCY, heartbeat and
+        // guarding objects are rw as their definitions prescribe.
+        var pdo = _options.WritableCommunicationParameters ? OdAccess.ReadWrite : OdAccess.ReadOnly;
+        const OdAccess ro = OdAccess.ReadOnly;
+        const bool nm = false;
+
         // §7.5.2.35–§7.5.2.38: the configured number of PDOs; the first four use the
         // pre-defined connection set, higher records are disabled until assigned a CAN-ID. TPDO sub0 = 06h (inhibit time, event timer and SYNC start); RPDO sub0 = 05h. Sub-index 04h is reserved and deliberately absent, so an
         // access yields 0609 0011h as §7.5.2.37 prescribes.
@@ -271,16 +289,6 @@ internal sealed partial class CanOpenNode
                 _od.AddU32(tm, s, 0, pdo, nm);
             }
         }
-
-        if (_srdoCount > 0) PopulateSafetyObjects();
-        if (_errorHistoryCapacity > 0) PopulateErrorHistory();
-
-        _od.DeclareGuard = DeclareRefusal;
-        _od.WriteValidator = ValidateCommunicationWrite;
-        _od.EntryWritten += OnOdEntryWrittenForCommunicationProfile;
-
-        _factoryDefaults = SnapshotRestorableValues();
-        _powerOnValues = _factoryDefaults;
     }
 
     /// <summary>Why the application may not declare this entry, or null when it may: a managed
