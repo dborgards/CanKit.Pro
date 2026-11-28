@@ -1037,6 +1037,9 @@ internal sealed partial class CanOpenNode
             return _node._deadlines.Arm(delay, () => _node.RunApplicationDeadline(Slot, onExpired));
         }
 
+        public IDisposable ArmPeriodic(TimeSpan period, Action onTick)
+            => new ApplicationPeriodicTimer(_node, Slot, period, onTick);
+
         public void Post(Action action) => _node.PostApplicationWork(Slot, action);
 
         public void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType)

@@ -117,6 +117,8 @@ public class Cia408DeviceAttachTests
 
         public IDeadline Arm(TimeSpan delay, Action onExpired) => new NoDeadline();
 
+        public IDisposable ArmPeriodic(TimeSpan period, Action onTick) => new NoDeadline();
+
         public void Post(Action action) => Posted.Add(action);
 
         public void SetDeviceType(int logicalDevice, CanOpenDeviceType deviceType)
