@@ -45,8 +45,8 @@ internal sealed partial class CanOpenNode
         // A master seen during the additional node slot also suppresses the optional Start.
         // A delayed driver confirmation cannot shorten either wait.
         var timeout = _od.ReadUnsigned(Co.SelfStartTiming, 1);
-        var slot = _od.ReadUnsigned(Co.SelfStartTiming, 3);
-        var wait = TimeSpan.FromMilliseconds(timeout + _nodeId * slot);
+        double slotMilliseconds = _od.ReadUnsigned(Co.SelfStartTiming, 3);
+        var wait = TimeSpan.FromMilliseconds(timeout + _nodeId * slotMilliseconds);
         _selfStartDeadline = _deadlines.Arm(wait, StartNetworkIfUnmanaged);
     }
 

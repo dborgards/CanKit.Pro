@@ -49,6 +49,24 @@ public partial class CanOpenFlyingMasterTests
         rig.Node.State.Should().Be(broadcast || (enabled && startup == 8) ? NmtState.Operational : NmtState.PreOperational);
     }
 
+    [Fact]
+    public async Task SelfStart_Waits_The_Full_Timeout_And_Node_Slot_At_Maximum_Timing_Values()
+    {
+        using var rig = OpenMaster(new CanOpenNodeOptions { EnableSelfStartingNodes = true });
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(SelfStartTiming, 1, ushort.MaxValue);
+        od.WriteUnsigned(SelfStartTiming, 3, ushort.MaxValue);
+        await BootSelfStarter(rig, 2);
+        await StepSelfStart(rig, 500);
+        rig.Log.Snapshot().Should().ContainSingle(f => f.Id == 0x075);
+
+        const int waitMilliseconds = (1 + LeftId) * ushort.MaxValue;
+        await StepSelfStart(rig, waitMilliseconds - 1);
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0));
+        await StepSelfStart(rig, 1);
+        rig.Log.Snapshot().Should().ContainSingle(f => IsNmt(f, NmtCommand.Start, 0));
+    }
+
     [Theory]
     [InlineData("reply")]
     [InlineData("slot")]
