@@ -419,16 +419,12 @@ internal interface ICanOpenApplicationHost
     /// <remarks>
     /// <para>
     /// Does nothing in Initialisation (a reset or a start-up, which ends in Pre-Operational by
-    /// itself) and nothing when the node is in <paramref name="target"/> already. Otherwise every
-    /// application, this one included, is told through
-    /// <see cref="ICanOpenApplication.OnNmtStateChanged"/>. Asked from that callback, the change is
-    /// queued and told after the callback returns. Asked from any other callback while no round of
-    /// <see cref="ICanOpenApplication.OnNmtStateChanged"/> is in progress, it is told at once: this
-    /// application's <see cref="ICanOpenApplication.OnNmtStateChanged"/> runs before this call
-    /// returns. Asked from a callback that itself runs inside such a round (an
-    /// <see cref="ICanOpenApplication.OnCommunicationFailureChanged"/> reported inside a write made
-    /// from <see cref="ICanOpenApplication.OnNmtStateChanged"/>, say), it is queued like one asked
-    /// from that callback.
+    /// itself) and nothing when the node is in <paramref name="target"/> already. Otherwise the
+    /// node applies the transition during this call. If it is already delivering
+    /// <see cref="ICanOpenApplication.OnNmtStateChanged"/> to the applications, it finishes that
+    /// round before notifying them of the new transition. This also applies to a request made by
+    /// another callback nested inside that round. Outside a notification round, every application's
+    /// state-change callback runs before this call returns.
     /// </para>
     /// <para>
     /// The change being told is complete by then, its state-change heartbeat (with <c>1017h</c> ≠ 0)
